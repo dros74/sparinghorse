@@ -1,0 +1,5 @@
+Flask~=3.0
+waitress~=3.0
+requests~=2.31
+anthropic>=0.69    # LLM adjustment layer (§6c) — optional at runtime, app degrades gracefully without a key
+tzdata             # IANA tz database for zoneinfo (python:slim ships without it) — nightly job fires at Luxembourg time

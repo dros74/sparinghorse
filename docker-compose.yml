@@ -1,0 +1,56 @@
+services:
+  # ── Private — full read/write, behind Cloudflare Access (only the owner) ──────
+  sparinghorse:
+    build: .
+    image: sparinghorse:local
+    container_name: sparinghorse
+    restart: unless-stopped
+    environment:
+      # Runalyze Personal API token (Premium). Generate at
+      # https://runalyze.com/settings/personal-api  — sent as the `token` header.
+      - RUNALYZE_TOKEN=${RUNALYZE_TOKEN:-}
+      # The LLM adjustment layer (the plan engine's language/judgment).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - SH_DB=/data/sparinghorse.db
+    volumes:
+      # Locally-owned data copy lives on the NAS — back it up by copying this folder.
+      # This is the single writer of the DB.
+      - ./data:/data
+    networks:
+      - edge
+    # NO host-published port. This instance has the tokens + medical data and NO app-level auth —
+    # it trusts Cloudflare Access entirely, so it must be unreachable except through the tunnel.
+    # cloudflared reaches it by service name (http://sparinghorse:8770) over the shared `edge`
+    # network. For host-local debugging only, bind to loopback (never 0.0.0.0):
+    #   ports: ["127.0.0.1:8770:8770"]
+
+  # ── Public — always-open, read-only showcase (no Access) ─────────────────────
+  # Same image, same DB, but SH_READONLY blocks every mutation + the medical sections,
+  # the connection is query_only, and there are NO tokens — so it cannot sync, call the
+  # LLM, or write, even if something tried. It just renders the latest shape + plan.
+  sparinghorse-public:
+    image: sparinghorse:local
+    container_name: sparinghorse-public
+    restart: unless-stopped
+    depends_on:
+      - sparinghorse        # ensures the image is built and the DB exists first
+    environment:
+      - SH_READONLY=1
+      - SH_DB=/data/sparinghorse.db
+      # - SH_PRIVATE_URL=https://private.example.com   # optional "Log in" link → your private console
+      # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY here
+    volumes:
+      # Same DB. NOT mounted :ro — SQLite WAL readers need to touch -wal/-shm; the
+      # query_only PRAGMA + the request guard are the write barrier instead.
+      - ./data:/data
+    networks:
+      - edge
+    # Reached by the tunnel via service name (http://sparinghorse-public:8770) over `edge`.
+    # Host-local debug only: ports: ["127.0.0.1:8771:8770"]
+
+# Shared network for the Cloudflare tunnel to reach both instances by service name. cloudflared
+# (its own stack, currently on the default `bridge`) must join this same network — see the deploy
+# runbook. Naming it explicitly keeps the name stable regardless of the compose project/dir name.
+networks:
+  edge:
+    name: sparinghorse-edge

@@ -1,0 +1,33 @@
+# ── secrets / personal — NEVER commit ───────────────────────────────
+.env
+.claude/settings.local.json   # captured permission cmds can contain the API token
+
+# personal / medical data dropped into the folder (not part of the app)
+document*.pdf
+*blood*
+*.pdf
+
+# locally-owned data copy (your training history)
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+data/
+
+# ── python ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ── os ──────────────────────────────────────────────────────────────
+.DS_Store
+
+# local-only medical seed (never commit)
+seed_health_local.py
+
+# early design mockups — not part of the distributed app
+_appMockups/
+
+# private dev notes — never in the public mirror
+PROJECT_LOG.md
