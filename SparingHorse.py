@@ -3980,21 +3980,21 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
      stretched viewBox doesn't make the stroke uneven */
   .actbg .profline{fill:none;stroke-width:1;vector-effect:non-scaling-stroke;
     stroke-linejoin:round;stroke-linecap:round}
-  /* bottom row: hover hint on the left, profile label + HR-zone legend at the lower-right corner */
-  .profbar{display:flex;align-items:flex-end;gap:6px 16px;flex-wrap:wrap;margin-top:10px}
-  .profmeta{margin-left:auto;display:inline-flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:12px;
-    text-align:right;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  /* label + HR-zone legend pinned to the chart area's lower-right, OUT OF FLOW so the legend
+     appearing on HR hover doesn't change the tile height (.actfg reserves a bottom strip for it) */
+  .profmeta{position:absolute;right:0;bottom:2px;z-index:2;display:inline-flex;align-items:center;gap:12px;
+    white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
   .hrlegend{display:inline-flex;gap:9px}
   .hrlegend .hrz{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
   .hrlegend .hrz i{width:9px;height:9px;border-radius:2px}
-  .actfg{position:relative;z-index:1}
+  .actfg{position:relative;z-index:1;padding-bottom:24px}   /* bottom strip reserved for .profmeta */
   .metric.hovx{cursor:pointer;border-radius:7px;transition:background .15s,box-shadow .15s;padding:2px 6px;margin:-2px -6px}
   .metric.hovx:hover{background:color-mix(in oklab,var(--accent),transparent 90%)}
   .metric.hovx.locked{box-shadow:inset 0 -2px 0 var(--accent)}
   .metric.hovx.locked .ml::after{content:" 🔒";font-size:8px}
   .proflbl{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:none;
     letter-spacing:0;margin-left:8px}
-  .profhint{font-size:11px;opacity:.75}
+  .profhint{font-size:11px;margin-top:10px;opacity:.75}
   .profhint b{color:var(--accent)}
   /* workout route map (private only) — Leaflet renders into .actmap; needs an explicit height */
   .actmap{position:relative;z-index:1;height:240px;margin-top:14px;border-radius:10px;
@@ -4821,13 +4821,11 @@ async function loadActivity(aid){
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
       </div>
-      <div class="profbar">
-        <span class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</span>
-        <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
-      </div>
+      <div class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</div>
       ${SH_READONLY||!a.id?"":(a.ignored
         ? `<div class="dqact"><span class="muted">⊘ Ignored from your stats (duplicate / mis-tag).</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a></div>`
         : `<div class="dqact"><a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore this as a duplicate</a></div>`)}
+      <div class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></div>
     </div></div>
     ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}`;
   // load the profile once, show the default (locked) one, then wire hover-preview + click-lock
