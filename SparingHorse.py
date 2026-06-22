@@ -3978,9 +3978,13 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .actbg .avgline{stroke:var(--muted);stroke-width:1;stroke-dasharray:5 4;opacity:.4}
   /* hovered metric traced on top of the locked area — value-coloured, no fill; non-scaling so the
      stretched viewBox doesn't make the stroke uneven */
-  .actbg .profline{fill:none;stroke-width:1.5;vector-effect:non-scaling-stroke;
+  .actbg .profline{fill:none;stroke-width:1;vector-effect:non-scaling-stroke;
     stroke-linejoin:round;stroke-linecap:round}
-  .hrlegend{display:inline-flex;gap:9px;margin-left:10px;vertical-align:middle}
+  /* bottom row: hover hint on the left, profile label + HR-zone legend at the lower-right corner */
+  .profbar{display:flex;align-items:flex-end;gap:6px 16px;flex-wrap:wrap;margin-top:10px}
+  .profmeta{margin-left:auto;display:inline-flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:12px;
+    text-align:right;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .hrlegend{display:inline-flex;gap:9px}
   .hrlegend .hrz{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
   .hrlegend .hrz i{width:9px;height:9px;border-radius:2px}
   .actfg{position:relative;z-index:1}
@@ -3990,7 +3994,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .metric.hovx.locked .ml::after{content:" 🔒";font-size:8px}
   .proflbl{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:none;
     letter-spacing:0;margin-left:8px}
-  .profhint{font-size:11px;margin-top:10px;opacity:.75}
+  .profhint{font-size:11px;opacity:.75}
   .profhint b{color:var(--accent)}
   /* workout route map (private only) — Leaflet renders into .actmap; needs an explicit height */
   .actmap{position:relative;z-index:1;height:240px;margin-top:14px;border-radius:10px;
@@ -4804,7 +4808,7 @@ async function loadActivity(aid){
     : "Latest activity";
   host.innerHTML=`<div class="actwrap"><div class="actbg" id="actbg"></div>
     <div class="actfg">
-      <div class="rkick">${kick} <span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></div>
+      <div class="rkick">${kick}</div>
       <div class="mrow">
         <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}</span>
         ${m("When", when, "")}
@@ -4817,7 +4821,10 @@ async function loadActivity(aid){
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
       </div>
-      <div class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</div>
+      <div class="profbar">
+        <span class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</span>
+        <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
+      </div>
       ${SH_READONLY||!a.id?"":(a.ignored
         ? `<div class="dqact"><span class="muted">⊘ Ignored from your stats (duplicate / mis-tag).</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a></div>`
         : `<div class="dqact"><a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore this as a duplicate</a></div>`)}
