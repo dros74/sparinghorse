@@ -705,6 +705,71 @@ def _robust_hrmax(db):
     return hrs[min(len(hrs) - 1, round(0.95 * (len(hrs) - 1)))]
 
 
+def derive_hr_zones(db, sample=12):
+    """Reconstruct the user's 5 HR zones as %HRmax. Runalyze exposes the per-activity time-in-zone
+    DISTRIBUTION (get_activity_details.zone_distribution_hr) but NOT the boundaries (the `sport`
+    config is 403 for the personal token). So for each recent HR-rich run we find the 4 HR values
+    that split its time-weighted samples to match the distribution, express them as %HRmax, and
+    pool the medians. Pure read — derives nothing into the DB; the chart wiring decides what to do
+    with the result. Returns cutoffs (4 ascending %HRmax) + per-run detail for eyeballing the spread."""
+    rmax = _robust_hrmax(db)
+    if not rmax:
+        return {"ok": False, "error": "no robust HRmax yet"}
+    rows = db.execute(
+        "SELECT id, date FROM activities WHERE sport=? AND hr_max IS NOT NULL AND hr_max>=? "
+        "ORDER BY date DESC LIMIT ?", (RUNNING_SPORT, int(rmax * 0.8), sample)).fetchall()
+    cols = [[], [], [], []]   # one list of %HRmax estimates per boundary
+    per = []
+    for r in rows:
+        try:
+            det = mcp_call("get_activity_details", {"activity_id": int(r["id"])})
+        except (RunalyzeError, requests.RequestException, KeyError, ValueError):
+            continue
+        act = det.get("activity", det)
+        strm = act.get("streams") or {}
+        hr, tim = strm.get("heart_rate") or [], strm.get("time") or []
+        dist = act.get("zone_distribution_hr")
+        if not dist or not hr or sum(dist) == 0:
+            continue
+        pairs = []   # (hr, time-weight) so a paused/variable-rate stream isn't mis-counted
+        for i, h in enumerate(hr):
+            if h is None:
+                continue
+            dt = (tim[i + 1] - tim[i]) if i + 1 < len(tim) else 1
+            pairs.append((h, dt if dt and dt > 0 else 1))
+        pairs.sort()
+        tot = sum(w for _, w in pairs) or 1
+        cuts, cc = [], 0
+        for z in dist[:-1]:
+            cc += z
+            cuts.append(cc / 100.0)
+        acc, ci, b = 0, 0, [None] * 4
+        for h, w in pairs:
+            acc += w
+            while ci < len(cuts) and acc / tot >= cuts[ci]:
+                b[ci] = h
+                ci += 1
+            if ci >= len(cuts):
+                break
+        row_pct = []
+        for k in range(4):
+            if b[k] and dist[k] > 0:
+                pct = round(100 * b[k] / rmax)
+                cols[k].append(pct)
+                row_pct.append(pct)
+            else:
+                row_pct.append(None)
+        per.append({"id": r["id"], "date": r["date"], "dist": dist, "pct": row_pct})
+
+    def med(xs):
+        xs = sorted(x for x in xs if x is not None)
+        return xs[len(xs) // 2] if xs else None
+    return {"ok": True, "hrmax": rmax, "labels": ["Z1/Z2", "Z2/Z3", "Z3/Z4", "Z4/Z5"],
+            "cutoffs_pct": [med(c) for c in cols],
+            "spread": [{"n": len(c), "min": min(c), "max": max(c)} if c else None for c in cols],
+            "activities": per}
+
+
 def _effort_verdict(kind, hrf, te):
     """Pure per-run verdict — HR-LED, TE corroborates (returns (verdict, confidence)). `hrf` =
     hr_avg / HRmax. For an aerobic (easy/long) session: on / hot / too_hard by HR fraction, with
@@ -940,30 +1005,33 @@ REBASE_SHAPE = [
     {"wk": 5, "km": 18, "runs": 4, "long": 7, "strides": 2, "intent": "Extend easy aerobic volume"},
     {"wk": 6, "km": 19, "runs": 5, "long": 7, "strides": 2, "intent": "End-of-block check → optional relaxed 5k probe, ready for base-build"},
 ]
-WEEK_DAYS = [1, 3, 5, 6, 2, 4, 0]  # session day priority within a week (Tue,Thu,Sat,Sun,…)
-# Run-day layouts per weekly frequency (0=Mon … 6=Sun), chosen so no 3 run days fall
-# consecutively — the long run stays on the latest/weekend slot (where _distribute_week
-# assigns is_long). 6 runs/wk can't avoid a single 3-streak with only one rest day.
+# Run-day layouts per weekly frequency (0=Mon … 6=Sun). The block is Monday-anchored
+# (_rebase_start), so these are REAL weekdays. Every layout ENDS on Sunday (offset 6): the long run
+# lands on the calendar weekend (where _distribute_week assigns is_long), AND because a week never
+# ends on a rest, two consecutive weeks can't strand a double rest at the boundary — fixes the
+# 2026-06-22 cross-week seam (a 3-run week ending Sat + the next week resting Mon). Within a week no
+# 3 run days fall consecutively; 6 runs/wk is the unavoidable exception (only one rest day).
 RUN_DAY_LAYOUTS = {
-    1: [5],
-    2: [1, 5],
-    3: [1, 3, 5],
-    4: [1, 3, 5, 6],
-    5: [0, 1, 3, 5, 6],
-    6: [0, 1, 2, 4, 5, 6],
+    1: [6],                    # Sun
+    2: [2, 6],                 # Wed, Sun
+    3: [1, 3, 6],              # Tue, Thu, Sun
+    4: [1, 3, 5, 6],           # Tue, Thu, Sat, Sun
+    5: [0, 1, 3, 5, 6],        # Mon, Tue, Thu, Sat, Sun
+    6: [0, 1, 2, 4, 5, 6],     # Mon–Wed, Fri–Sun (one rest, Thu)
     7: [0, 1, 2, 3, 4, 5, 6],
 }
 
 
 def _run_days(n):
-    """Day-of-week slots for n weekly runs, spread to avoid 3 consecutive run days
-    (the long run lands on the last/weekend slot). Falls back to an even spread."""
+    """Day-of-week slots for n weekly runs, spread to avoid 3 consecutive run days, with the long run
+    on the last slot — always Sunday (offset 6), so a week never ends on a rest. Falls back to an
+    even spread (which also spans 0..6, hence ends on Sunday)."""
     if n <= 0:
         return []
     if n in RUN_DAY_LAYOUTS:
         return RUN_DAY_LAYOUTS[n]
     if n == 1:
-        return [5]
+        return [6]
     return sorted({round(i * 6 / (n - 1)) for i in range(n)})
 
 
@@ -1204,16 +1272,19 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
     return _session_from_reps(date, "long_mp", zone, zpace, reps, note)
 
 
-def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None):
+def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None):
     """Lay `week_trimp` across the week's runs and converting each session's TRIMP back to
     minutes/km. The POLARIZED split (§6f Step C): a `quality` spec carves a small HARD slice of the
     governed weekly TRIMP for structured work (at zone pace), the rest stays easy/long — so total
     weekly TRIMP is unchanged (the ACWR governor still bounds it), intensity is just concentrated.
     Quality needs zone paces, so with `zones=None` (the re-base path) the week stays PURE EASY,
-    byte-identical to before. Returns (sessions, day_trimps)."""
+    byte-identical to before. `days_override` lets the caller place runs on an explicit set of
+    week-offsets (e.g. only today-onward days for a partially-elapsed week, §6o) instead of the
+    frequency's default layout; the last offset is still the long-run slot. Returns (sessions,
+    day_trimps)."""
     from datetime import timedelta
-    n = wk["runs"]
-    days = _run_days(n)                                  # last slot = the long run
+    days = list(days_override) if days_override is not None else _run_days(wk["runs"])
+    n = len(days)                                        # last slot = the long run
     quality = (wk.get("quality") or []) if zones else []
     mid_q = [q for q in quality if q.get("attach") != "long"]
     long_q = next((q for q in quality if q.get("attach") == "long"), None)
@@ -1273,15 +1344,19 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None):
     return sessions, day_trimps
 
 
-def _project_week(ctl, atl, week_start, day_trimps):
+def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
     """Roll the projector across one full week (Mon–Sun). Returns
     (end_ctl, end_atl, eow_acwr, peak_acwr). We bound on END-OF-WEEK ACWR — the settled
     weekly state, the natural planning cadence — rather than the long-run-day daily transient.
-    project_forward only spans to the last planned day, so we extend rest days to Sunday."""
+    project_forward only spans to the last planned day, so we extend rest days to Sunday.
+    `roll_from` (default = week_start) is where the roll BEGINS: for a partially-elapsed week (§6o)
+    pass `today` and seed (ctl, atl) with today's snapshot — the elapsed days' load is already in
+    that seed, so we project only today-onward `day_trimps`, never double-counting them."""
     from datetime import timedelta
     end = _date(week_start) + timedelta(days=6)
-    curve = project_forward(day_trimps, ctl, atl, week_start) if day_trimps else []
-    last = max(_date(d) for d in day_trimps) if day_trimps else _date(week_start) - timedelta(days=1)
+    start_iso = roll_from or week_start                 # where the roll begins (today for a partial week)
+    curve = project_forward(day_trimps, ctl, atl, start_iso) if day_trimps else []
+    last = max(_date(d) for d in day_trimps) if day_trimps else _date(start_iso) - timedelta(days=1)
     cc, aa = (curve[-1]["ctl"], curve[-1]["atl"]) if curve else (ctl, atl)
     cur = last + timedelta(days=1)
     while cur <= end:  # carry rest days to week's end
@@ -1295,14 +1370,16 @@ def _project_week(ctl, atl, week_start, day_trimps):
     return curve[-1]["ctl"], curve[-1]["atl"], eow, peak
 
 
-def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None):
+def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None, days_override=None):
     """Binary-search the largest weekly TRIMP whose peak projected ACWR stays ≤ cap. Distributes
-    WITH the week's quality (via `zones`) so the bound is on the real, intensity-distributed week."""
+    WITH the week's quality (via `zones`) so the bound is on the real, intensity-distributed week.
+    `roll_from`/`days_override` thread through to project only today-onward days for a partially-
+    elapsed week (§6o), so the remaining allowance is bounded against load already done this week."""
     lo, hi = 0.0, 700.0
     for _ in range(34):
         mid = (lo + hi) / 2
-        _, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones)
-        _, _, eow, _peak = _project_week(ctl, atl, start, dt)
+        _, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones, days_override=days_override)
+        _, _, eow, _peak = _project_week(ctl, atl, start, dt, roll_from=roll_from)
         if eow and eow > cap:
             hi = mid
         else:
@@ -1519,7 +1596,7 @@ def _apply_ctl_floor(shape, seed_ctl):
     return [{**w, "km": round(w["km"] * scale), "long": round(w["long"] * scale)} for w in shape]
 
 
-def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None):
+def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -1532,15 +1609,52 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     ≤ 1), so it never breaches the ACWR ceiling. `shape` weeks need {wk, km, runs, long, strides};
     an optional `quality` list per week (§6f Step C) carves a polarized hard slice when `zones`
     (the pace-zone dict) is supplied — without it the block stays pure easy (the re-base path).
-    Any extra keys pass through onto each generated week."""
+    Any extra keys pass through onto each generated week.
+
+    `today` (§6o — within-week awareness) enables PARTIAL handling of the one week that straddles it:
+    the seed (ctl0/atl0 = today's snapshot) already embodies what was done earlier this week, so the
+    elapsed days are kept verbatim for matching/display while only TODAY-ONWARD days are governed and
+    projected from today (model A — no double-count). The remaining days are generated EASY (a
+    partially-done week's remainder is governed recovery volume; a missed quality day isn't crammed
+    into the back of the week). Load already done this week therefore shrinks the remaining allowance,
+    and the EOW ACWR ceiling still holds. Default None = full-week behaviour (every existing caller)."""
     from datetime import timedelta
     weeks = []
     ctl, atl = ctl0, atl0
     TRIMP_PER_KM = (easy_pace_sec / 60.0) * EASY_TRIMP_PER_MIN
     clipped_any = False
     for wk in shape:
-        wk_start = (block_start + timedelta(weeks=wk["wk"] - 1)).isoformat()
+        wk_start_d = block_start + timedelta(weeks=wk["wk"] - 1)
+        wk_start = wk_start_d.isoformat()
         intent_trimp = wk["km"] * TRIMP_PER_KM            # easy-equivalent volume intent, in TRIMP
+        # §6o — the week that STRADDLES today: keep elapsed days, govern only today-onward (easy).
+        if today and wk_start_d < today <= wk_start_d + timedelta(days=6):
+            offsets = _run_days(wk["runs"])
+            today_off = (today - wk_start_d).days
+            rem = [o for o in offsets if o >= today_off]
+            full, _ = _distribute_week(wk, wk_start_d, intent_trimp, easy_pace_sec, zones)
+            elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
+            if rem:
+                allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT,
+                                          zones=None, roll_from=today.isoformat(), days_override=rem)
+                chosen = min(intent_trimp * len(rem) / max(1, len(offsets)), allowed)
+                rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None, days_override=rem)
+            else:                                          # today is past this week's last run → only decay
+                chosen, rem_s, dt = 0.0, [], {}
+            adjusted = _apply_adjustment(rem_s, dt, adjust)
+            rem_s, dt = adjusted["sessions"], adjusted["dt"]
+            ctl, atl, eow, peak = _project_week(ctl, atl, wk_start, dt, roll_from=today.isoformat())
+            sessions = sorted(elapsed + rem_s, key=lambda s: s["date"])
+            # km + trimp_total cover the SAME set (elapsed-planned + governed remainder) so the week
+            # summary is internally consistent; proj_acwr/peak come from the remaining-only `dt` rolled
+            # from today's seed (the safety number — elapsed load is in the seed, never double-counted).
+            weeks.append({**wk, "start": wk_start, "sessions": sessions,
+                          "km": round(sum(s["km"] for s in sessions), 1),
+                          "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
+                          "proj_acwr": eow, "peak_acwr": peak,
+                          "intent_km": wk["km"], "adjusted": adjusted["touched"],
+                          "clipped": False, "partial": True})
+            continue
         allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT, zones)
         chosen = min(intent_trimp, allowed)
         if chosen < intent_trimp - 1:
@@ -1589,14 +1703,30 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
 def _rebase_start(db, today):
     """The re-base start day — stored once and reused across regenerations so changing an
     objective re-periodizes the road *ahead* without sliding the block's start (a simple
-    'freeze the past' approximation, §6b). Option (b): the block starts **today** (rolling
-    7-day weeks from today), not the next Monday — so regenerating today never shifts it a
-    week forward. If the stored start has fully elapsed, reset."""
+    'freeze the past' approximation, §6b). The block anchors to the **Monday** of the week it first
+    runs, so weeks are calendar Mon–Sun: run-day layouts map to real weekdays and the long run lands
+    on the actual weekend (offset 6 = Sunday). Storing it keeps the anchor stable across regenerations.
+
+    A legacy non-Monday anchor (the old 'starts today' scheme) is migrated to its **containing**
+    Monday — back-only, never forward. Back-only is the safe direction: it never pushes block_start
+    past `today` (so the runner is never shown a pre-start tile) and never *un*-elapses a week (so a
+    banked graduation streak can't be reset). The cost of this one-time re-grid: the already-elapsed
+    week(s) no longer start-date-match the prior saved plan, so they regenerate onto the calendar grid
+    (flagged elapsed-but-not-frozen) rather than being carried verbatim — an accepted, deliberate
+    trade for aligning the live block now; actual runs still match by their real date in the log, and
+    every week from here on freezes normally. If the stored start has fully elapsed, reset to this
+    week's Monday."""
     from datetime import timedelta
     stored = get_meta(db, "rebase_start")
-    if stored and _date(stored) + timedelta(weeks=len(REBASE_SHAPE)) > today:
-        return _date(stored)
-    start = today  # block anchors to today; freeze keeps it stable across regenerations
+    if stored:
+        s = _date(stored)
+        if s + timedelta(weeks=len(REBASE_SHAPE)) > today:
+            mon = _monday(s)                   # containing Monday — BACK-ONLY (never shifts forward)
+            if mon != s:                       # one-time re-grid of an in-flight block onto the calendar
+                set_meta(db, "rebase_start", mon.isoformat())
+                db.commit()
+            return mon
+    start = _monday(today)                      # fresh plan: anchor to this week's Monday; freeze holds it
     set_meta(db, "rebase_start", start.isoformat())
     db.commit()
     return start
@@ -1654,7 +1784,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
     fresh = []
     if future_sub:                                           # today-onward, seeded from live state
         fweeks, fbound = generate_block(future_sub, phase_start, end_ctl, end_atl,
-                                        easy_pace_sec, adjust, zones)
+                                        easy_pace_sec, adjust, zones, today=today)   # §6o partial week
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True
     weeks = sorted(frozen + backfilled + fresh, key=lambda w: w["start"])
@@ -2527,22 +2657,36 @@ def block_log(db):
     end = max(s["date"] for w in weeks for s in w["sessions"])
     today = datetime.now().strftime("%Y-%m-%d")
     drop = dropped_ids(db)
-    # running activities in the block window, summed per day (he's multi-sport; the plan is runs)
+    # running activities in the block window: SUMMED per day for plan-vs-actual + the projector
+    # (whole-body load is daily), but each run kept individually (time-ordered) so a DOUBLE shows both
+    # halves, not a silent merge (§ doubles v1). The day's load is session-count-agnostic; this is
+    # display only — daily_trimp_series/the governor are unchanged.
     acts = {}
     for r in db.execute(
         "SELECT id, date, distance, duration FROM activities "
-        "WHERE date>=? AND date<=? AND sport=?", (start, end, RUNNING_SPORT)
+        "WHERE date>=? AND date<=? AND sport=? ORDER BY date_time", (start, end, RUNNING_SPORT)
     ).fetchall():
         if r["id"] in drop or not r["distance"]:
             continue
-        a = acts.setdefault(r["date"], {"km": 0.0, "sec": 0.0, "id": None, "_maxkm": 0.0})
+        a = acts.setdefault(r["date"], {"km": 0.0, "sec": 0.0, "id": None, "_maxkm": 0.0, "runs": []})
         a["km"] += r["distance"]
         a["sec"] += (r["duration"] or 0.0)
+        a["runs"].append({"id": r["id"], "km": r["distance"], "sec": r["duration"] or 0.0})
         if r["distance"] > a["_maxkm"]:   # representative run for the day = its longest (for the map view)
             a["_maxkm"] = r["distance"]; a["id"] = r["id"]
+
+    def _pace_str(sec, km):
+        p = sec / (km * 60) if km else 0
+        return f"{int(p)}:{int((p * 60) % 60):02d}" if p else None
+
+    def _breakdown(a):   # per-run detail for a DOUBLE (≥2 runs that day); None for a single run
+        return ([{"km": round(rr["km"], 1), "pace": _pace_str(rr["sec"], rr["km"]),
+                  "activity_id": rr["id"]} for rr in a["runs"]] if a and len(a["runs"]) > 1 else None)
+
     notes = {r["date"]: r["note"] for r in db.execute("SELECT date, note FROM session_log").fetchall()}
     sched = done = 0
     out_weeks = []
+    from datetime import timedelta
     for w in weeks:
         sessions = []
         for s in w["sessions"]:
@@ -2558,8 +2702,25 @@ def block_log(db):
                 actual = {"km": round(act["km"], 1),
                           "pace": (f"{int(pace)}:{int((pace*60) % 60):02d}" if pace else None)}
             sessions.append({**s, "done": bool(actual), "missed": past and not actual and d < today,
-                             "actual": actual, "reflection": notes.get(d),
+                             "actual": actual, "reflection": notes.get(d), "runs": _breakdown(act),
                              "activity_id": (act["id"] if (act and act["km"] > 0) else None)})
+        # surface UNPLANNED runs (§ out-of-schedule): a run on a day this week with no planned
+        # session — bonus volume the runner chose to do. Counted as load by the projector/governor
+        # already; here we just make it VISIBLE on its day. It does NOT touch adherence (it was never
+        # scheduled, so neither sched nor done move) — only the planned-session loop above feeds those.
+        planned = {s["date"] for s in w["sessions"]}
+        we = (_date(w["start"]) + timedelta(days=6)).isoformat()
+        for d in sorted(acts):
+            a = acts[d]
+            if w["start"] <= d <= we and d not in planned and a["km"] > 0:
+                pace = a["sec"] / (a["km"] * 60) if a["km"] else 0
+                sessions.append({
+                    "date": d, "km": None, "kind": "unplanned", "unplanned": True,
+                    "done": True, "missed": False,
+                    "actual": {"km": round(a["km"], 1),
+                               "pace": (f"{int(pace)}:{int((pace*60) % 60):02d}" if pace else None)},
+                    "reflection": notes.get(d), "runs": _breakdown(a), "activity_id": a["id"]})
+        sessions.sort(key=lambda s: s["date"])              # unplanned runs slot into calendar order
         out_weeks.append({**w, "sessions": sessions})
     # What he actually ran across the block window (dups already excluded) — real recorded
     # distance + duration, so "ran so far" is owned data, not km×pace.
@@ -2570,6 +2731,18 @@ def block_log(db):
             "adherence": {"done": done, "scheduled": sched}, "ran": ran}
 
 
+BONUS_ACWR_MAX = 1.0   # ACWR below this = clear headroom under the 1.25 weekly cap → an easy add is "free"
+
+
+def _bonus_run_ok(verdict, session_kind, acwr):
+    """§6o — on a planned REST day, is an easy 'bonus' run clearly fine to OFFER? Yes iff readiness is
+    green, today is a rest day, and ACWR is low (clear headroom under the weekly cap). Pure; a NOTE
+    only — it changes NO prescription, the ACWR governor still caps the week (reduce-only philosophy:
+    we never auto-prescribe MORE, we just tell the runner when an opt-in easy add is safe headroom)."""
+    return (verdict == "green" and session_kind == "rest"
+            and acwr is not None and acwr < BONUS_ACWR_MAX)
+
+
 def today_readiness(db):
     """Today's check-in (if any) + the resulting assessment + today's planned session."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2578,10 +2751,21 @@ def today_readiness(db):
     assessment = assess_readiness(db, checkin)
     session = todays_session(db, today)
     # A green light on a planned rest day means "follow the plan — which today is rest", not
-    # "run your session". Reword so the action matches the day (engine or LLM source alike).
+    # "run your session". Reword so the action matches the day (engine or LLM source alike). And when
+    # ACWR is low (clear headroom), surface the §6o BONUS-RUN affordance: an easy run is safe extra
+    # aerobic base, not a breach — offered, never prescribed (the governor still caps the week).
     if assessment.get("verdict") == "green" and (session or {}).get("kind") == "rest":
-        assessment = {**assessment,
-                      "action": "Good to go — and today's a planned rest day. Take the recovery."}
+        snap = latest_snapshot(db)
+        acwr = (snap["fatigue"] / snap["fitness"]) if (snap and snap["fitness"]) else None
+        if _bonus_run_ok("green", "rest", acwr):
+            assessment = {**assessment, "bonus": True, "acwr": round(acwr, 2),
+                          "action": (f"Good to go — today's a planned rest day, but your load is light "
+                                     f"(ACWR {acwr:.2f}) and you're green, so an easy run here is BONUS "
+                                     f"aerobic base, not a breach — the weekly ACWR ceiling still caps you. "
+                                     f"Recovery is also fine.")}
+        else:
+            assessment = {**assessment,
+                          "action": "Good to go — and today's a planned rest day. Take the recovery."}
     # Already ran today's session? Acknowledge it instead of still nudging "run today's session".
     # Never overrides a red/halt — a logged run must not suppress a medical stop signal.
     if (session or {}).get("done") and assessment.get("verdict") != "red" and not assessment.get("halt"):
@@ -2739,6 +2923,16 @@ def api_shape():
         duplicate_count=len(dups),
         ignored=[dict(r) for r in ignored],
     )
+
+
+@app.get("/api/hr-zones/derive")
+def api_hr_zones_derive():
+    """Private diagnostic: reconstruct the HR zone cutoffs (%HRmax) from Runalyze's per-activity
+    zone distribution. Read-only, derives nothing into the DB — for eyeballing before the chart
+    colours by them. Needs the MCP token, so it's private-only."""
+    if READONLY:
+        return jsonify(ok=False, error="diagnostics are private"), 403
+    return jsonify(derive_hr_zones(get_db()))
 
 
 @app.get("/api/effort-discipline")
@@ -3382,7 +3576,9 @@ def api_activity_profile(aid):
     prof, err = _profile_cached(db, aid)
     if prof is None:
         return jsonify(error=str(err), dist=[], pace=[], hr=[]), 502
-    return jsonify(_strip_geo(prof))
+    out = _strip_geo(prof)
+    out["hrmax"] = _robust_hrmax(db)   # anchors the HR-line zone colouring on the frontend
+    return jsonify(out)
 
 
 @app.get("/api/activity/<int:aid>/map")
@@ -3472,16 +3668,21 @@ def db_weekly_running():
 # We cache the whole bundle in-process for WEATHER_TTL so a page load never hammers the API and
 # a transient outage falls back to the last good fetch.
 def _parse_weather_cities(spec):
-    """Parse SH_WEATHER_CITIES ('Name,lat,lon;Name,lat,lon') into the widget's city list. Empty/bad
-    spec → [] (the widget hides itself). Lets a self-hoster pick their own cities, or none."""
+    """Parse SH_WEATHER_CITIES ('Name,lat,lon[,CODE];…') into the widget's city list. The optional
+    4th field is the short display code (e.g. Tokyo→TYO); without it the code defaults to the name's
+    first 3 letters. Empty/bad spec → [] (the widget hides itself). Lets a self-hoster pick their own
+    cities, or none."""
     out = []
-    for i, part in enumerate(p for p in (spec or "").split(";") if p.strip()):
+    for part in (p for p in (spec or "").split(";") if p.strip()):
         bits = [b.strip() for b in part.split(",")]
-        if len(bits) == 3:
+        if len(bits) >= 3:
             try:
-                out.append({"key": f"c{i}", "name": bits[0], "lat": float(bits[1]), "lon": float(bits[2])})
+                lat, lon = float(bits[1]), float(bits[2])
             except ValueError:
-                pass
+                continue
+            name = bits[0]
+            code = (bits[3] if len(bits) >= 4 and bits[3] else name[:3]).upper()
+            out.append({"key": code, "name": name, "lat": lat, "lon": lon})
     return out
 
 
@@ -3564,7 +3765,7 @@ def get_weather():
 
 @app.get("/api/weather")
 def api_weather():
-    """Forecast icon for the three house cities (Luxembourg, Lisbon, Tokyo). Cached + public-safe."""
+    """Forecast icon for the configured cities (SH_WEATHER_CITIES). Cached + public-safe."""
     return jsonify(get_weather())
 
 
@@ -3631,29 +3832,35 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<script>try{document.documentElement.dataset.theme=localStorage.getItem("sh-theme")||"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
+<script>try{var t=localStorage.getItem("sh-theme");document.documentElement.dataset.theme=(t==="dark"||t==="aurora")?t:"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
 <style>
-  /* Light/daylight is the DEFAULT — it's the CSS base (:root), so a fresh load (or one before JS
-     runs / with JS off) is light, not just when the inline script sets data-theme. Dark + midnight
-     are explicit overrides. The inline <head> script still restores a saved preference per origin. */
-  :root{
-    --bg:#f4f1ea; --ink:#f4f1ea; --surface:#fbf9f4; --surface-2:#ece7db; --line:#ddd6c7;
-    --text:#2a2620; --muted:#6f6857; --terra:#b9542c; --accent:var(--terra);
-    --ok:#4f8c5f; --ok-bright:#3aa257; --warn:#a9781f; --danger:#b5563f;
+  /* House design system tokens (DESIGN.md §2.3) — apps reference TOKEN NAMES only, never raw hex,
+     so one data-theme switch re-skins the whole app. Light/Daylight is the CSS base (:root) so a
+     fresh load (JS off / pre-script) is light; Dark/Charcoal + Aurora/Electric are overrides. The
+     inline <head> script restores the saved preference per origin before first paint. Legacy aliases
+     (--surface-2/--terra/--ok-bright) map onto the canonical tokens so existing rules keep working. */
+  :root{   /* Daylight — warm paper, terracotta */
+    --bg:#f4f1ea; --surface:#fbf9f4; --surface2:#ece7db; --line:#ddd6c7;
+    --text:#2a2620; --muted:#6f6857; --accent:#b9542c;
+    --ok:#4f8c5f; --warn:#a9781f; --danger:#b5563f;
+    --readybg:#4d8a5c; --readybg2:#3c6a48; --onacc:#fff;
+    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);   /* legacy aliases */
     --serif:'Fraunces',Georgia,serif; --sans:'Inter',system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
   }
-  [data-theme="dark"]{
-    --ink:#141210; --bg:#141210; --surface:#1c1916; --surface-2:#221e1a; --line:#332d27;
-    --text:#ece6db; --muted:#9b9182; --terra:#d4744e; --accent:var(--terra);
-    --ok:#6fae6f; --ok-bright:#5ec46a; --warn:#d8a23c; --danger:#cf6b4e;
+  [data-theme="dark"]{   /* Charcoal — neutral graphite, brighter terracotta so it reads as a glow */
+    --bg:#191a1d; --surface:#222327; --surface2:#2a2b30; --line:#3a3c43;
+    --text:#edeef1; --muted:#9b9da5; --accent:#fa7d42;
+    --ok:#33d98a; --warn:#f7b32b; --danger:#fc6a55;
+    --readybg:#2f9760; --readybg2:#1d6240; --onacc:#fff;
+    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
-  /* Midnight — a modern data-dashboard skin: dark blue-gray ground, a vivid blue accent so the
-     red/green/yellow signal colours read clearly against it (Strava/Grafana-dark lineage). */
-  [data-theme="midnight"]{
-    --ink:#0e1621; --bg:#0e1621; --surface:#16212e; --surface-2:#1b2836; --line:#2a3a4d;
-    --text:#e8eef6; --muted:#8da2bb; --terra:#4d9fff; --accent:var(--terra);
-    --ok:#34d399; --ok-bright:#4ade80; --warn:#fbbf24; --danger:#fb6a6a;
+  [data-theme="aurora"]{   /* Electric — deep indigo, violet→cyan accents, neon signals */
+    --bg:#121226; --surface:#1c1d3e; --surface2:#262752; --line:#3a3c74;
+    --text:#eef0ff; --muted:#a2a6dc; --accent:#7b61ff; --accent2:#28d6ee;
+    --ok:#22e3a6; --warn:#ffc24d; --danger:#ff5d8a;
+    --readybg:#12b39a; --readybg2:#0a7d6e; --onacc:#fff;
+    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
   *{box-sizing:border-box}
   html,body{margin:0}
@@ -3698,7 +3905,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     transition:border-color .15s,transform .1s}
   button:hover{border-color:var(--accent)} button:active{transform:translateY(1px)}
   button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
-  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary{background:var(--accent);border-color:var(--accent);color:var(--onacc)}
   button.ghost{background:transparent;color:var(--muted);font-size:12px;padding:8px 12px}
   button.ghost:hover{color:var(--text)}
   /* shared house chrome: a fixed top-right control cluster (login + swatches) and a
@@ -3720,7 +3927,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   @media(max-width:520px){.grid{grid-template-columns:1fr}}
   .tile{background:linear-gradient(180deg,var(--surface),var(--surface-2));
     border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px;position:relative;overflow:hidden}
-  .tile::before{content:"";position:absolute;left:0;top:0;height:3px;width:100%;background:var(--accent);opacity:.8}
+  .tile::before{content:"";position:absolute;left:0;top:0;height:3px;width:100%;background:linear-gradient(90deg,var(--accent),var(--accent2,var(--accent)));opacity:.9}
   .tile .k{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
   .tile .v{font-family:var(--serif);font-weight:600;font-size:34px;line-height:1.05;margin-top:8px}
   .tile .v small{font-size:15px;color:var(--muted);font-family:var(--sans);font-weight:400}
@@ -3756,7 +3963,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .metric .mv small{font-size:11px;color:var(--muted);font-weight:400}
   .rkick{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
     color:var(--accent);margin-bottom:8px}
-  .planned{border-top:1px solid var(--line);margin-top:14px;padding-top:14px}
+  .planned{margin-top:16px}
   /* latest-activity hover profile background */
   #recent{position:relative;overflow:hidden}
   /* the chart wrapper bounds the profile background to the metrics area (height), while its negative
@@ -3769,6 +3976,13 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .actbg .proffill{fill:color-mix(in oklab,var(--accent),transparent 94%);
     stroke:color-mix(in oklab,var(--accent),transparent 78%);stroke-width:1}
   .actbg .avgline{stroke:var(--muted);stroke-width:1;stroke-dasharray:5 4;opacity:.4}
+  /* hovered metric traced on top of the locked area — value-coloured, no fill; non-scaling so the
+     stretched viewBox doesn't make the stroke uneven */
+  .actbg .profline{fill:none;stroke-width:1.5;vector-effect:non-scaling-stroke;
+    stroke-linejoin:round;stroke-linecap:round}
+  .hrlegend{display:inline-flex;gap:9px;margin-left:10px;vertical-align:middle}
+  .hrlegend .hrz{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
+  .hrlegend .hrz i{width:9px;height:9px;border-radius:2px}
   .actfg{position:relative;z-index:1}
   .metric.hovx{cursor:pointer;border-radius:7px;transition:background .15s,box-shadow .15s;padding:2px 6px;margin:-2px -6px}
   .metric.hovx:hover{background:color-mix(in oklab,var(--accent),transparent 90%)}
@@ -3806,7 +4020,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     background:var(--surface-2);margin-top:26px}
   .gauge .band{position:absolute;top:0;bottom:0;background:color-mix(in oklab,var(--ok),transparent 72%);
     border-radius:8px}
-  .gauge .mark{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--text);border-radius:2px;
+  .gauge .mark{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--accent);border-radius:2px;
     box-shadow:0 0 0 2px var(--bg)}
   .gyou{position:absolute;top:-24px;transform:translateX(-50%);white-space:nowrap}
   .gyou span{font-family:var(--mono);font-size:11px;font-weight:500;padding:2px 7px;border-radius:6px}
@@ -3842,6 +4056,58 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .ready .rwhy{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:6px}
   .ready .rhrv{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px}
   .ready .raisrc{font-family:var(--mono);font-size:10px;color:var(--accent);margin-top:5px;letter-spacing:.04em}
+  /* §3 status card — "lead with the verdict" (DESIGN.md Almanac). The bg swaps with the state. */
+  .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:#fff;
+    background:linear-gradient(155deg,var(--readybg),var(--readybg2));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--readybg),transparent 60%)}
+  .statuscard.amber{background:linear-gradient(155deg,var(--warn),color-mix(in oklab,var(--warn),#000 30%));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--warn),transparent 60%)}
+  .statuscard.red{background:linear-gradient(155deg,var(--danger),color-mix(in oklab,var(--danger),#000 32%));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--danger),transparent 55%)}
+  .statuscard .sc-orb{position:absolute;border-radius:50%;background:rgba(255,255,255,.09);pointer-events:none}
+  .statuscard .sc-top{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative}
+  .statuscard .sc-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.78)}
+  .statuscard .sc-pill{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.16);
+    border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:4px 11px;
+    font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#fff}
+  .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.9)}
+  .statuscard .sc-verdict{font-family:var(--serif);font-weight:600;font-size:23px;margin-top:14px;line-height:1.18;position:relative}
+  .statuscard .halt{font-weight:600;margin-top:10px;position:relative}
+  .statuscard .sc-foot{font-family:var(--mono);font-size:10.5px;color:rgba(255,255,255,.82);
+    margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.2);position:relative;line-height:1.6;
+    display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+  .statuscard .sc-wx{display:inline-flex;gap:12px;margin-left:auto}
+  .statuscard .sc-wx .wxc{display:inline-flex;align-items:center;gap:4px;color:rgba(255,255,255,.92)}
+  .statuscard .sc-wx .wxk{opacity:.6;font-size:9px;letter-spacing:.06em}
+  /* readiness ⨉ chronic-load, side by side (mockup Almanac) */
+  .rgrid{display:grid;grid-template-columns:1.45fr 1fr;gap:16px;align-items:stretch}
+  @media(max-width:760px){.rgrid{grid-template-columns:1fr}}
+  /* readiness + today's session share one surface tile (same bg as the load tile); the green
+     status card bleeds to the tile's top edges — top corners curved, bottom corners squared so
+     it reads as the tile's header, with the session in the body below. */
+  #readiness{background:linear-gradient(180deg,var(--surface),var(--surface-2));
+    border:1px solid var(--line);border-radius:14px;padding:20px;overflow:hidden}
+  #readiness .statuscard{margin:-20px -20px 0;border-radius:14px 14px 0 0;box-shadow:none}
+  .acwrcard{display:flex;flex-direction:column}
+  .acwrcard .acwr-title{font-family:var(--serif);font-weight:600;font-size:15px;margin-bottom:34px}
+  /* CTL ramp readout, pinned to the bottom of the (stretched) load tile */
+  .acwrcard .acwr-foot{position:relative;overflow:hidden;margin-top:auto;min-height:84px;
+    padding-top:16px;border-top:1px solid var(--line)}
+  .acwrcard .acwr-foot .acwr-foot-txt{position:relative;z-index:1}
+  .acwrcard .acwr-foot .k{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  .acwrcard .acwr-foot .v{display:block;font-family:var(--serif);font-weight:600;font-size:22px;line-height:1;margin-top:5px}
+  .acwrcard .acwr-foot .v small{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--muted)}
+  .acwrcard .acwr-foot .cap{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px}
+  /* A-race pill bar */
+  .objbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line);
+    border-radius:12px;padding:12px 16px;margin-bottom:22px;background:var(--surface)}
+  .objbar:empty{display:none}
+  .objbar .arace{font-family:var(--mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--onacc);background:linear-gradient(135deg,var(--accent),var(--accent2,var(--accent)));
+    padding:3px 8px;border-radius:5px;white-space:nowrap}
+  .objbar .oname{font-family:var(--serif);font-weight:600;font-size:19px}
+  .objbar .owhen{font-family:var(--mono);font-size:11px;color:var(--accent)}
+  .objbar .overdict{margin-left:auto;font-size:12px;color:var(--muted)}
   .checkin .cinote{flex:1;min-width:200px;font-family:var(--sans);font-size:13px;color:var(--text);
     background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
   .halt{border:1px solid var(--danger);background:color-mix(in oklab,var(--danger),transparent 90%);
@@ -3900,10 +4166,17 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     margin-left:4px;color:var(--accent)}
   .smk{width:1em;display:inline-block;text-align:center;color:var(--line)}
   .smk.done{color:var(--ok)} .smk.missed{color:var(--danger)} .smk.today{color:var(--accent)}
+  .smk.extra{color:var(--accent)}
+  .sline .splan.exu{font-style:italic;opacity:.8}
   .sline .splan{color:var(--muted)} .sline.stoday .splan{color:var(--text)}
   .sline .sact{color:var(--accent)}
+  .sline .sdate{color:var(--muted);opacity:.85;min-width:104px;display:inline-block}
   .srefl{flex-basis:100%;margin-left:1.4em;color:var(--muted);font-family:var(--sans);
     font-size:11px;font-style:italic}
+  /* a double's per-run breakdown (the combined actual split into AM/PM, each map-linkable) */
+  .srun{flex-basis:100%;margin-left:1.4em;color:var(--muted);font-size:9.5px}
+  .srun .brkrun[data-act-id]{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+  .srun .brkrun[data-act-id]:hover{color:var(--text)}
   .adjreply{margin-bottom:5px;color:var(--text);line-height:1.45}
   .acbadge{font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:20px;white-space:nowrap}
   .acbadge.lo{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 60%)}
@@ -3923,7 +4196,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border:1px solid var(--line);border-radius:9px;padding:8px 11px}
   .obj .pr{font-family:var(--mono);font-size:10px;font-weight:600;width:18px;height:18px;
     display:flex;align-items:center;justify-content:center;border-radius:5px;flex:none;
-    background:var(--accent);color:#fff}
+    background:var(--accent);color:var(--onacc)}
   .obj .pr.B,.obj .pr.C{background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
   .obj .od{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
   .obj .x{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:6px;
@@ -4092,15 +4365,15 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   __SH_HUBLINK__
   <div class="topctl">
     <span class="themes" id="themes">
-      <button class="swatch" data-theme="dark"  title="Dark"  style="--sw:linear-gradient(90deg,#1c1916 50%,#d4744e 50%)"></button>
-      <button class="swatch" data-theme="light" title="Light (daylight)" style="--sw:linear-gradient(90deg,#f4f1ea 50%,#b9542c 50%)"></button>
-      <button class="swatch" data-theme="midnight" title="Midnight (data)" style="--sw:linear-gradient(90deg,#16212e 50%,#4d9fff 50%)"></button>
+      <button class="swatch" data-theme="light" title="Daylight" style="--sw:linear-gradient(90deg,#f4f1ea 50%,#b9542c 50%)"></button>
+      <button class="swatch" data-theme="dark"  title="Charcoal" style="--sw:linear-gradient(90deg,#191a1d 50%,#fa7d42 50%)"></button>
+      <button class="swatch" data-theme="aurora" title="Aurora" style="--sw:linear-gradient(90deg,#121226 50%,#7b61ff 50%)"></button>
     </span>
   </div>
   <div class="wrap">
     <header>
       <div class="brand">
-        <span class="dotmark"><svg class="" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="46" fill="none" stroke="var(--text)" stroke-width="1.1" opacity=".22"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".45" transform="rotate(45 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".45" transform="rotate(135 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".45" transform="rotate(225 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".45" transform="rotate(315 50 50)"/><path d="M50.0,16.0 L51.2,16.1 L52.3,16.4 L53.5,16.9 L54.5,17.6 L55.5,18.5 L56.5,19.6 L57.3,20.9 L57.9,22.3 L58.5,23.8 L58.9,25.5 L59.2,27.3 L59.3,29.2 L59.2,31.2 L58.9,33.2 L58.5,35.3 L57.9,37.4 L57.1,39.4 L56.2,41.5 L55.1,43.5 L53.8,45.5 L52.4,47.4 L50.8,49.1 L49.1,50.8 L47.4,52.4 L45.5,53.8 L43.5,55.1 L41.5,56.2 L39.4,57.1 L37.4,57.9 L35.3,58.5 L33.2,58.9 L31.2,59.2 L29.2,59.3 L27.3,59.2 L25.5,58.9 L23.8,58.5 L22.3,57.9 L20.9,57.3 L19.6,56.5 L18.5,55.5 L17.6,54.5 L16.9,53.5 L16.4,52.3 L16.1,51.2 L16.0,50.0 L16.1,48.8 L16.4,47.7 L16.9,46.5 L17.6,45.5 L18.5,44.5 L19.6,43.5 L20.9,42.7 L22.3,42.1 L23.8,41.5 L25.5,41.1 L27.3,40.8 L29.2,40.7 L31.2,40.8 L33.2,41.1 L35.3,41.5 L37.4,42.1 L39.4,42.9 L41.5,43.8 L43.5,44.9 L45.5,46.2 L47.4,47.6 L49.1,49.2 L50.8,50.9 L52.4,52.6 L53.8,54.5 L55.1,56.5 L56.2,58.5 L57.1,60.6 L57.9,62.6 L58.5,64.7 L58.9,66.8 L59.2,68.8 L59.3,70.8 L59.2,72.7 L58.9,74.5 L58.5,76.2 L57.9,77.7 L57.3,79.1 L56.5,80.4 L55.5,81.5 L54.5,82.4 L53.5,83.1 L52.3,83.6 L51.2,83.9 L50.0,84.0 L48.8,83.9 L47.7,83.6 L46.5,83.1 L45.5,82.4 L44.5,81.5 L43.5,80.4 L42.7,79.1 L42.1,77.7 L41.5,76.2 L41.1,74.5 L40.8,72.7 L40.7,70.8 L40.8,68.8 L41.1,66.8 L41.5,64.7 L42.1,62.6 L42.9,60.6 L43.8,58.5 L44.9,56.5 L46.2,54.5 L47.6,52.6 L49.2,50.9 L50.9,49.2 L52.6,47.6 L54.5,46.2 L56.5,44.9 L58.5,43.8 L60.6,42.9 L62.6,42.1 L64.7,41.5 L66.8,41.1 L68.8,40.8 L70.8,40.7 L72.7,40.8 L74.5,41.1 L76.2,41.5 L77.7,42.1 L79.1,42.7 L80.4,43.5 L81.5,44.5 L82.4,45.5 L83.1,46.5 L83.6,47.7 L83.9,48.8 L84.0,50.0 L83.9,51.2 L83.6,52.3 L83.1,53.5 L82.4,54.5 L81.5,55.5 L80.4,56.5 L79.1,57.3 L77.7,57.9 L76.2,58.5 L74.5,58.9 L72.7,59.2 L70.8,59.3 L68.8,59.2 L66.8,58.9 L64.7,58.5 L62.6,57.9 L60.6,57.1 L58.5,56.2 L56.5,55.1 L54.5,53.8 L52.6,52.4 L50.9,50.8 L49.2,49.1 L47.6,47.4 L46.2,45.5 L44.9,43.5 L43.8,41.5 L42.9,39.4 L42.1,37.4 L41.5,35.3 L41.1,33.2 L40.8,31.2 L40.7,29.2 L40.8,27.3 L41.1,25.5 L41.5,23.8 L42.1,22.3 L42.7,20.9 L43.5,19.6 L44.5,18.5 L45.5,17.6 L46.5,16.9 L47.7,16.4 L48.8,16.1 L50.0,16.0 Z" fill="none" stroke="var(--text)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M50,4 L52.3,9.6 L50,7.7 L47.7,9.6 Z" fill="var(--accent)"/><circle cx="50" cy="50" r="3.2" fill="var(--accent)"/></svg></span>
+        <span class="dotmark"><svg class="" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="46" fill="none" stroke="var(--text)" stroke-width="1.1" opacity=".22"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(45 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(135 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(225 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(315 50 50)"/><path d="M50.0,16.0 L51.2,16.1 L52.3,16.4 L53.5,16.9 L54.5,17.6 L55.5,18.5 L56.5,19.6 L57.3,20.9 L57.9,22.3 L58.5,23.8 L58.9,25.5 L59.2,27.3 L59.3,29.2 L59.2,31.2 L58.9,33.2 L58.5,35.3 L57.9,37.4 L57.1,39.4 L56.2,41.5 L55.1,43.5 L53.8,45.5 L52.4,47.4 L50.8,49.1 L49.1,50.8 L47.4,52.4 L45.5,53.8 L43.5,55.1 L41.5,56.2 L39.4,57.1 L37.4,57.9 L35.3,58.5 L33.2,58.9 L31.2,59.2 L29.2,59.3 L27.3,59.2 L25.5,58.9 L23.8,58.5 L22.3,57.9 L20.9,57.3 L19.6,56.5 L18.5,55.5 L17.6,54.5 L16.9,53.5 L16.4,52.3 L16.1,51.2 L16.0,50.0 L16.1,48.8 L16.4,47.7 L16.9,46.5 L17.6,45.5 L18.5,44.5 L19.6,43.5 L20.9,42.7 L22.3,42.1 L23.8,41.5 L25.5,41.1 L27.3,40.8 L29.2,40.7 L31.2,40.8 L33.2,41.1 L35.3,41.5 L37.4,42.1 L39.4,42.9 L41.5,43.8 L43.5,44.9 L45.5,46.2 L47.4,47.6 L49.1,49.2 L50.8,50.9 L52.4,52.6 L53.8,54.5 L55.1,56.5 L56.2,58.5 L57.1,60.6 L57.9,62.6 L58.5,64.7 L58.9,66.8 L59.2,68.8 L59.3,70.8 L59.2,72.7 L58.9,74.5 L58.5,76.2 L57.9,77.7 L57.3,79.1 L56.5,80.4 L55.5,81.5 L54.5,82.4 L53.5,83.1 L52.3,83.6 L51.2,83.9 L50.0,84.0 L48.8,83.9 L47.7,83.6 L46.5,83.1 L45.5,82.4 L44.5,81.5 L43.5,80.4 L42.7,79.1 L42.1,77.7 L41.5,76.2 L41.1,74.5 L40.8,72.7 L40.7,70.8 L40.8,68.8 L41.1,66.8 L41.5,64.7 L42.1,62.6 L42.9,60.6 L43.8,58.5 L44.9,56.5 L46.2,54.5 L47.6,52.6 L49.2,50.9 L50.9,49.2 L52.6,47.6 L54.5,46.2 L56.5,44.9 L58.5,43.8 L60.6,42.9 L62.6,42.1 L64.7,41.5 L66.8,41.1 L68.8,40.8 L70.8,40.7 L72.7,40.8 L74.5,41.1 L76.2,41.5 L77.7,42.1 L79.1,42.7 L80.4,43.5 L81.5,44.5 L82.4,45.5 L83.1,46.5 L83.6,47.7 L83.9,48.8 L84.0,50.0 L83.9,51.2 L83.6,52.3 L83.1,53.5 L82.4,54.5 L81.5,55.5 L80.4,56.5 L79.1,57.3 L77.7,57.9 L76.2,58.5 L74.5,58.9 L72.7,59.2 L70.8,59.3 L68.8,59.2 L66.8,58.9 L64.7,58.5 L62.6,57.9 L60.6,57.1 L58.5,56.2 L56.5,55.1 L54.5,53.8 L52.6,52.4 L50.9,50.8 L49.2,49.1 L47.6,47.4 L46.2,45.5 L44.9,43.5 L43.8,41.5 L42.9,39.4 L42.1,37.4 L41.5,35.3 L41.1,33.2 L40.8,31.2 L40.7,29.2 L40.8,27.3 L41.1,25.5 L41.5,23.8 L42.1,22.3 L42.7,20.9 L43.5,19.6 L44.5,18.5 L45.5,17.6 L46.5,16.9 L47.7,16.4 L48.8,16.1 L50.0,16.0 Z" fill="color-mix(in oklab,var(--accent),transparent 86%)" stroke="color-mix(in oklab,var(--accent),transparent 50%)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M50,4 L52.3,9.6 L50,7.7 L47.7,9.6 Z" fill="var(--accent)"/><circle cx="50" cy="50" r="3.2" fill="var(--accent)"/></svg></span>
         <p class="eyebrow">Running</p>
         <div class="titlerow">
           <h1>Sparing Horse</h1>
@@ -4114,6 +4387,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     </header>
 
     <div id="dqbanner"></div>
+    <div id="objbar" class="objbar"></div>
     <div class="grid" id="tiles"><div class="empty">Loading current shape…</div></div>
 
     <div class="section">
@@ -4121,17 +4395,16 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     </div>
 
     <div class="section" id="sec-readiness">
-      <div class="weather" id="weather" title="Conditions out there — three house cities (your exact spot stays private)"></div>
       <h2>Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
-      <div class="panel" id="readiness"><div class="empty">Loading…</div></div>
-    </div>
-
-    <div class="section">
-      <h2>Acute : Chronic workload <span class="muted mono" style="font-size:12px">— stay in the green band (0.8–1.3)</span></h2>
-      <div class="panel">
-        <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
-        <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
-        <p class="muted" style="font-size:12px;margin:10px 0 0">ACWR (Acute:Chronic Workload Ratio) = Fatigue ÷ Fitness. The shaded band (0.8–1.3) is the sweet spot — below it you're detraining, above it injury/overtraining risk rises. The marker shows where you are now.</p>
+      <div class="rgrid">
+        <div id="readiness"><div class="empty">Loading…</div></div>
+        <div class="panel acwrcard">
+          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:10px;font-weight:400">— stay in the green band</span></div>
+          <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
+          <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
+          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Fatigue ÷ fitness. The shaded band (0.8–1.3) is the sweet spot — below it you're detraining, above it injury risk rises.</p>
+          <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
+        </div>
       </div>
     </div>
 
@@ -4187,6 +4460,9 @@ const SH_READONLY = __SH_READONLY__;   // public read-only mode (server-injected
 const SH_PRIVATE_URL = "__SH_PRIVATE_URL__";   // public→private console link (optional)
 const $ = s => document.querySelector(s);
 const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
+// Per-workout calendar date, e.g. "Jun 23 - Tue" — so the runner can schedule life around the plan.
+const sessDate = iso => { if(!iso) return ""; const d=new Date(iso+"T00:00:00");
+  return d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+" - "+d.toLocaleDateString("en-US",{weekday:"short"}); };
 const getJSON = (url, opts) => fetch(url, opts).then(r => r.json());   // fetch + parse; callers keep their own try/catch
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));  // HTML-escape before innerHTML
 
@@ -4235,6 +4511,23 @@ async function drawShapeTrends(){   // Fitness/Fatigue/Form from the reconstruct
     paintTrend("ctlbg", h.map(p=>p.ctl), dts, "Background: reconstructed Fitness (CTL) over the last 6 months.");
     paintTrend("atlbg", h.map(p=>p.atl), dts, "Background: reconstructed Fatigue (ATL) over the last 6 months.");
     paintTrend("tsbbg", h.map(p=>p.tsb), dts, "Background: reconstructed Form (TSB) over the last 6 months.");
+    // CTL ramp — weekly Δ fitness from the reconstructed daily curve (chronic-load tile footer).
+    // Build a daily ramp series (ctl[i] − ctl[i−7]) for a background sparkline, like the other tiles.
+    const af=document.getElementById("acwrFoot"), aft=document.getElementById("acwrFootTxt");
+    if(af && aft){
+      const c=h.filter(p=>p.ctl!=null);
+      const ramps=[], rdts=[];
+      for(let k=7;k<c.length;k++){ ramps.push(c[k].ctl - c[k-7].ctl); rdts.push(c[k].date); }
+      if(ramps.length){
+        const ramp=ramps[ramps.length-1];
+        const cap = ramp>1 ? "fitness building" : ramp<-1 ? "easing — recovering" : "holding steady";
+        aft.innerHTML = `<span class="k">CTL ramp · 7-day</span>`+
+          `<span class="v">${ramp>=0?"+":""}${ramp.toFixed(1)} <small>/ wk</small></span>`+
+          `<span class="cap">${cap}</span>`;
+        paintTrend("acwrRampBg", ramps, rdts, "Background: 7-day CTL ramp (weekly Δ fitness) over the last 6 months.");
+        af.style.display="";
+      } else af.style.display="none";
+    }
   }catch(e){}
 }
 
@@ -4376,24 +4669,8 @@ async function loadWeekly(){
 }
 
 async function loadWeather(){
-  const el=$("#weather"); if(!el) return;
-  try{
-    const d=await getJSON("/api/weather");
-    const cities=d.cities||[];
-    if(!cities.length){ el.innerHTML=""; return; }
-    el.classList.toggle("stale", !!d.stale);
-    el.innerHTML = cities.map(c=>{
-      const t = c.temp==null ? "–" : c.temp+"°";
-      const hl = (c.hi!=null&&c.lo!=null) ? ` · H${c.hi}° L${c.lo}°` : "";
-      // c.time is the city's LOCAL reading time (e.g. "2026-06-16T14:00") — show just HH:MM
-      const rt = c.time ? ` · as of ${c.time.slice(11,16)} local` : "";
-      const tip = `${c.name} — ${c.label}${hl}${rt}` + (d.stale?" (cached)":"");
-      return `<span class="wx" title="${tip}">`+
-             `<span class="c">${c.key.toUpperCase()}</span>`+
-             `<span class="ico">${c.icon}</span>`+
-             `<span class="t">${t}</span></span>`;
-    }).join("");
-  }catch(e){ el.innerHTML=""; }
+  try{ WX = await getJSON("/api/weather"); }catch(e){ WX=null; }
+  if(RDY) renderReadiness(RDY);   // fold the three-city forecast into the readiness card footer
 }
 
 $("#syncBtn").addEventListener("click", async ()=>{
@@ -4435,33 +4712,78 @@ function buildProfilePath(vals, {invert=false, W=1000, H=120}={}){
   const hi=Math.max(...ys), lo=Math.min(...ys);
   const x=i=>i/(vals.length-1)*W;
   const y=v=>{ let t=(v-lo)/((hi-lo)||1); if(invert) t=1-t; return H-6-t*(H-18); };
-  let d=`M0,${H} L${x(pts[0][0]).toFixed(1)},${y(pts[0][1]).toFixed(1)} `;
-  d+=pts.map(p=>`L${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(" ");
-  d+=` L${W},${H} Z`;
-  return {path:d, hi, lo, y};
+  const poly=pts.map(p=>`${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`);
+  const d=`M0,${H} L`+poly.join(" L")+` L${W},${H} Z`;   // filled area (baseline-closed)
+  const line="M"+poly.join(" L");                         // stroke-only polyline (no fill/baseline)
+  return {path:d, line, hi, lo, y, x, pts, W, H};
 }
 let LOCKED="pace";  // the profile shown by default / when not hovering
-function showProfile(kind){
-  const p=ACTPROFILE; if(!p) return;
-  const bg=$("#actbg"); const W=1000,H=120;
-  let vals, invert=false, avgLine="";
-  if(kind==="pace"){ if(!p.has_pace) return; vals=p.pace; invert=true; }   // faster = taller
-  else if(kind==="hr"){ if(!p.has_hr) return; vals=p.hr; }                  // higher HR = taller
-  else if(kind==="cadence"){ if(!p.has_cadence) return; vals=p.cadence; }
-  else if(kind==="elevation"){ if(!p.has_elevation) return; vals=p.elevation; }  // higher ground = taller
-  else return;
-  const built=buildProfilePath(vals,{W,H,invert}); if(!built) return;
-  if(kind==="hr" && p.hr_avg){ const yv=built.y(p.hr_avg);
-    avgLine=`<line x1="0" y1="${yv.toFixed(1)}" x2="${W}" y2="${yv.toFixed(1)}" class="avgline"/>`; }
-  bg.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <path d="${built.path}" class="proffill"/>${avgLine}</svg>`;
-  bg.classList.add("on");
-  const lockTxt = kind===LOCKED ? " · 🔒 locked" : " · click to lock";
-  $("#proflbl").textContent = (kind==="pace"?"pace profile (faster = higher)"
+// the channel + chart orientation for a metric (pace inverts: faster = taller)
+function profileVals(kind){
+  const p=ACTPROFILE; if(!p) return null;
+  if(kind==="pace" && p.has_pace) return {vals:p.pace, invert:true};
+  if(kind==="hr" && p.has_hr) return {vals:p.hr, invert:false};
+  if(kind==="cadence" && p.has_cadence) return {vals:p.cadence, invert:false};
+  if(kind==="elevation" && p.has_elevation) return {vals:p.elevation, invert:false};
+  return null;
+}
+function profileLabel(kind){
+  const p=ACTPROFILE||{};
+  return kind==="pace"?"pace profile (faster = higher)"
     : kind==="hr"?`heart-rate profile · avg ${p.hr_avg||"—"} bpm`
     : kind==="elevation"?"elevation profile (climb)"
-    : "cadence profile (higher = quicker)") + lockTxt;
-  // reflect which metric is locked
+    : "cadence profile (higher = quicker)";
+}
+// red→green by t (0=red, 1=green) for the hover line
+function rg(t){ t=t<0?0:t>1?1:t; return `hsl(${Math.round(120*t)} 60% 42%)`; }
+// 5 HR zones at 60/70/80/90 %HRmax — reconstructed from Runalyze's per-activity zone distribution
+// (see runalyze-hr-zones-api). [label, colour, upper %HRmax bound]; single source for line + legend.
+const HRZONES=[["Z1","#7c8597",0.60],["Z2","#3f7fd0",0.70],["Z3","var(--ok)",0.80],
+               ["Z4","var(--warn)",0.90],["Z5","var(--danger)",Infinity]];
+function hrLegendHtml(){
+  return `<span class="hrleg">`+HRZONES.map(z=>`<span class="hrz"><i style="background:${z[1]}"></i>${z[0]}</span>`).join("")+`</span>`;
+}
+// per-sample colour for the hover line — meaning differs by metric
+function metricColor(kind, v, ctx){
+  if(v==null) return "transparent";
+  if(kind==="hr"){ const hm=ctx.hrmax||ctx.hi||0, f=hm?v/hm:0;       // robust HRmax anchors the zones
+    return (HRZONES.find(z=>f<z[2])||HRZONES[4])[1]; }
+  if(kind==="pace")    return rg((ctx.hi-v)/((ctx.hi-ctx.lo)||1));   // faster (smaller sec/km) = green
+  if(kind==="cadence") return rg(1-Math.abs(v-180)/10);             // 180 spm ideal = green (±10 to red)
+  return "var(--accent)";                                            // elevation: neutral single hue
+}
+// draw the LOCKED metric as a shaded area; if hovering a DIFFERENT metric, trace it as a
+// value-coloured line on top (no fill). hoverKind=null → locked layer only.
+function renderProfile(hoverKind){
+  const p=ACTPROFILE; if(!p) return;
+  const bg=$("#actbg"); const W=1000,H=120;
+  let svg="";
+  const lb=profileVals(LOCKED);
+  if(lb){
+    const bl=buildProfilePath(lb.vals,{W,H,invert:lb.invert});
+    if(bl){
+      let avg="";
+      if(LOCKED==="hr" && p.hr_avg){ const yv=bl.y(p.hr_avg);
+        avg=`<line x1="0" y1="${yv.toFixed(1)}" x2="${W}" y2="${yv.toFixed(1)}" class="avgline"/>`; }
+      svg += `<path d="${bl.path}" class="proffill"/>${avg}`;
+    }
+  }
+  const showHover = hoverKind && hoverKind!==LOCKED;
+  const hb = showHover ? profileVals(hoverKind) : null;
+  if(hb){
+    const bh=buildProfilePath(hb.vals,{W,H,invert:hb.invert});
+    if(bh){
+      const ctx={hi:bh.hi, lo:bh.lo, hrmax:p.hrmax};
+      const stops=bh.pts.map(pt=>`<stop offset="${(bh.x(pt[0])/W*100).toFixed(2)}%" style="stop-color:${metricColor(hoverKind,pt[1],ctx)}"/>`).join("");
+      svg += `<defs><linearGradient id="aclg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${W}" y2="0">${stops}</linearGradient></defs>`+
+             `<path d="${bh.line}" class="profline" stroke="url(#aclg)"/>`;
+    }
+  }
+  bg.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svg}</svg>`;
+  bg.classList.toggle("on", !!svg);
+  const lblKind = (showHover && hb) ? hoverKind : LOCKED;
+  $("#proflbl").textContent = profileLabel(lblKind) + ((showHover && hb) ? " · click to lock" : " · 🔒 locked");
+  const leg=$("#hrlegend"); if(leg) leg.innerHTML = (showHover && hb && hoverKind==="hr") ? hrLegendHtml() : "";
   document.querySelectorAll("#recent .metric.hovx").forEach(el=>
     el.classList.toggle("locked", el.dataset.prof===LOCKED));
 }
@@ -4482,7 +4804,7 @@ async function loadActivity(aid){
     : "Latest activity";
   host.innerHTML=`<div class="actwrap"><div class="actbg" id="actbg"></div>
     <div class="actfg">
-      <div class="rkick">${kick} <span class="proflbl" id="proflbl"></span></div>
+      <div class="rkick">${kick} <span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></div>
       <div class="mrow">
         <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}</span>
         ${m("When", when, "")}
@@ -4495,7 +4817,7 @@ async function loadActivity(aid){
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
       </div>
-      <div class="profhint muted">Background shows the <b>pace</b> trace · hover <b>Pace/HR/Cadence/Climb</b> to preview, click to lock.</div>
+      <div class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</div>
       ${SH_READONLY||!a.id?"":(a.ignored
         ? `<div class="dqact"><span class="muted">⊘ Ignored from your stats (duplicate / mis-tag).</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a></div>`
         : `<div class="dqact"><a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore this as a duplicate</a></div>`)}
@@ -4514,11 +4836,11 @@ async function loadActivity(aid){
     const ok=(k==="pace"&&P.has_pace)||(k==="hr"&&P.has_hr)||(k==="cadence"&&P.has_cadence)||(k==="elevation"&&P.has_elevation);
     if(!ok){ el.classList.remove("hovx"); el.removeAttribute("data-prof"); }
   });
-  showProfile(LOCKED);
+  renderProfile(null);
   host.querySelectorAll(".hovx").forEach(el=>{
-    el.addEventListener("mouseenter", ()=>showProfile(el.dataset.prof));
-    el.addEventListener("mouseleave", ()=>showProfile(LOCKED));
-    el.addEventListener("click", ()=>{ LOCKED=el.dataset.prof; showProfile(LOCKED); });
+    el.addEventListener("mouseenter", ()=>renderProfile(el.dataset.prof));
+    el.addEventListener("mouseleave", ()=>renderProfile(null));
+    el.addEventListener("click", ()=>{ LOCKED=el.dataset.prof; renderProfile(null); });
   });
   const tog=$("#igntog");
   if(tog) tog.addEventListener("click", async ev=>{
@@ -4563,13 +4885,16 @@ async function showActivityMap(aid){
   }
   host.innerHTML="";
   try{ await ensureLeaflet(); }catch(e){ host.innerHTML=`<div class="mapempty">Map unavailable (offline?).</div>`; return; }
-  const accent=getComputedStyle(document.documentElement).getPropertyValue("--terra").trim()||"#d4744e";
+  const cs=getComputedStyle(document.documentElement);
+  const accent=cs.getPropertyValue("--accent").trim()||"#b9542c";   // route line follows the theme
+  const okc=cs.getPropertyValue("--ok").trim()||"#4f8c5f";          // start marker = good (semantic)
+  const dangerc=cs.getPropertyValue("--danger").trim()||"#b5563f";  // end marker = stop (semantic)
   ACTMAP=L.map(host,{zoomControl:true, scrollWheelZoom:false});
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(ACTMAP);
   L.polyline(d.path,{color:accent, weight:4, opacity:.9}).addTo(ACTMAP);
-  L.circleMarker(d.path[0],{radius:5, color:"#2e7d32", weight:2, fillColor:"#2e7d32", fillOpacity:1}).addTo(ACTMAP);
-  L.circleMarker(d.path[d.path.length-1],{radius:5, color:"#c0392b", weight:2, fillColor:"#c0392b", fillOpacity:1}).addTo(ACTMAP);
+  L.circleMarker(d.path[0],{radius:5, color:okc, weight:2, fillColor:okc, fillOpacity:1}).addTo(ACTMAP);
+  L.circleMarker(d.path[d.path.length-1],{radius:5, color:dangerc, weight:2, fillColor:dangerc, fillOpacity:1}).addTo(ACTMAP);
   ACTMAP.fitBounds(d.bounds,{padding:[18,18]});
 }
 
@@ -4614,24 +4939,39 @@ function plannedSession(s, easyPace){
     ${actLine}
     <div class="muted" style="font-size:12px;margin-top:6px">${esc(s.note)}</div></div>`;
 }
-function renderReadiness(d){
-  const a=d.assessment||{};
-  if(SH_READONLY || a.public){   // public view: verdict light + action + planned session only
-    $("#readiness").innerHTML=`
-    <div class="ready">
-      <div class="light ${a.verdict}"></div>
-      <div class="rbody">
-        <div class="rv">${a.verdict}</div>
-        <div class="raction">${a.action||""}</div>
+// the three house cities' forecast, folded into the readiness card footer (white on the gradient)
+function wxFootHtml(){
+  if(!WX||!WX.cities||!WX.cities.length) return "";
+  return `<span class="sc-wx" title="Conditions in three house cities (your exact spot stays private)">`+
+    WX.cities.map(c=>`<span class="wxc"><span class="wxk">${esc((c.key||"").toUpperCase())}</span> ${c.icon||""} ${c.temp==null?"–":c.temp+"°"}</span>`).join("")+
+    `</span>`;
+}
+// §3 status card — "lead with the verdict": gradient panel (state-coloured), glass pill, big verdict.
+function statusCard(a, foot, wx){
+  const v=a.verdict||"green";
+  const orbs=`<span class="sc-orb" style="top:-50px;right:-40px;width:180px;height:180px"></span>`+
+             `<span class="sc-orb" style="bottom:-60px;left:-30px;width:150px;height:150px;background:rgba(255,255,255,.05)"></span>`;
+  return `<div class="statuscard ${v}">${orbs}
+      <div class="sc-top">
+        <span class="sc-eyebrow">Today's readiness</span>
+        <span class="sc-pill"><span class="dot"></span>${v}${a.halt?" · halted":""}</span>
       </div>
-    </div>
-    ${plannedSession(d.session)}`;
+      <div class="sc-verdict">${esc(a.action||v)}</div>
+      ${a.halt?`<div class="halt">⚠ Plan halted — clear it with your doctor before resuming.</div>`:""}
+      ${(foot||wx)?`<div class="sc-foot">${foot?`<span>${esc(foot)}</span>`:""}${wx||""}</div>`:""}
+    </div>`;
+}
+function renderReadiness(d){
+  RDY=d;                                   // cache so loadWeather can re-render with the forecast folded in
+  const a=d.assessment||{};
+  if(SH_READONLY || a.public){   // public view: verdict card + planned session only
+    $("#readiness").innerHTML = statusCard(a, "", wxFootHtml()) + plannedSession(d.session);
     return;
   }
   const c=d.checkin||{};
   const hrv=a.hrv||{};
   const hrvTxt = hrv.state==null ? "HRV: no data"
-    : `HRV baseline ${hrv.baseline} vs band ${hrv.band[0]}–${hrv.band[1]} — ${hrv.state}`;
+    : `HRV ${hrv.baseline} vs ${hrv.band[0]}–${hrv.band[1]} — ${hrv.state}`;
   const sel=(name,val,opts)=>`<label>${name}</label><select id="ci_${name}">`+
     opts.map(([v,t])=>`<option value="${v}" ${v===val?"selected":""}>${t}</option>`).join("")+`</select>`;
   let aiLine="";
@@ -4641,20 +4981,11 @@ function renderReadiness(d){
     aiLine=`engine floor held — AI suggested ${a.ai_verdict}`;
   const notePh = LLM_OK ? "Anything else? e.g. “slight cold coming on”, “legs heavy but slept great” — the AI reads this"
                         : "Note (optional)";
-  $("#readiness").innerHTML=`
-    <div class="ready">
-      <div class="light ${a.verdict}"></div>
-      <div class="rbody">
-        <div class="rv">${a.verdict}${a.halt?" · plan halted":""}</div>
-        <div class="raction">${a.action}</div>
-        <div class="rwhy">${a.reasons.join(" · ")}</div>
-        <div class="rhrv">${hrvTxt}</div>
-        ${aiLine?`<div class="raisrc">${aiLine}</div>`:""}
-        ${a.halt?`<div class="halt">⚠ Plan halted — clear it with your doctor before resuming.</div>`:""}
-      </div>
-    </div>
-    ${plannedSession(d.session)}
-    <div class="checkin">
+  const foot=[(a.reasons||[]).join(" · "), hrvTxt, aiLine].filter(Boolean).join("  ·  ");
+  $("#readiness").innerHTML=
+    statusCard(a, foot, wxFootHtml()) +
+    plannedSession(d.session) +
+    `<div class="checkin">
       ${sel("energy", c.energy||"ok", [["good","Legs: fresh"],["ok","Legs: ok"],["heavy","Legs: heavy"]])}
       ${sel("sleep", c.sleep||"ok", [["good","Slept: well"],["ok","Slept: ok"],["poor","Slept: poorly"]])}
       <input id="ci_note" class="cinote" placeholder="${notePh}" value="${esc(c.note)}">
@@ -4687,7 +5018,7 @@ function acBadge(a){
   const cls = a<=1.18 ? "lo" : "mid";
   return `<span class="acbadge ${cls}">ACWR ${a.toFixed(2)}</span>`;
 }
-let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null;
+let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null;
 function objManager(p){
   const anchorId = p.objective ? null : null;  // anchor matched by label/date below
   const rows = OBJECTIVES.filter(o=>o.status==='upcoming').map(o=>{
@@ -4908,7 +5239,7 @@ function weekHtml(w,p,today){
   let cur=false;
   if(w.start){ const we=new Date(w.start); we.setDate(we.getDate()+6);
     cur=!w.frozen && w.start<=today && today<=we.toISOString().slice(0,10); }
-  const sess=w.sessions.map(s=>`<span class="wsi${(s.reps&&s.reps.length)?' qs':''}">${sessSummary(s)}</span>`).join(" · ");
+  const sess=w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="wsi${(s.reps&&s.reps.length)?' qs':''}">${sessSummary(s)}</span></div>`).join("");
   const flags=[w.clipped?'<span class="down">clipped to fit ACWR</span>':'',
                w.adjusted?'<span class="eased">eased</span>':'',
                w.frozen?'<span class="wfz">✓ done</span>':''].filter(Boolean).join(" · ");
@@ -4917,7 +5248,7 @@ function weekHtml(w,p,today){
       <div class="wbody">
         <div><span class="wkm">${w.km} km</span> · ${w.runs} runs${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
-        <div class="wsess">${sess}${w.strides?` · strides×${w.strides}`:''}</div>
+        <div class="wsesslog">${sess}${w.strides?`<div class="muted mono" style="margin-top:2px">strides×${w.strides}</div>`:''}</div>
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
     </div>`;
@@ -4954,6 +5285,13 @@ function renderPlan(p){
   const host=$("#plan");
   if(!p){ host.innerHTML=`<div class="empty">No plan yet — hit <b>Generate plan</b>.</div>`; return; }
   const o=p.objective, rb=p.rebase;
+  // A-race pill bar at the top of the page (mockup Almanac) — driven by the plan's objective
+  const ob=$("#objbar");
+  if(ob) ob.innerHTML = o ? `<span class="arace">${esc(o.priority||'A')}-race</span>`+
+      `<span class="oname">${esc(o.label)}</span>`+
+      `<span class="owhen">${esc(o.date)} · ${o.weeks_away} weeks out</span>`+
+      ((p.feasibility&&(p.feasibility.verdict||o.target))?`<span class="overdict">Verdict — <b style="color:var(--text)">${esc(p.feasibility.verdict||o.target)}</b></span>`:"")
+    : "";
   const totalw=p.phases.reduce((s,x)=>s+x.weeks,0);
   const zoneChips=Object.entries(p.pace_zones).map(([k,v])=>
     `<span class="zone ${k==='easy_top'?'hl':''}">${k.replace('_',' ')} <b>${v}</b></span>`).join("");
@@ -4991,18 +5329,27 @@ function renderPlan(p){
   const refreshed = p.generated_at
     ? `<div class="legend" style="margin-top:6px;opacity:.85">↻ Last refreshed ${new Date(p.generated_at).toLocaleString()}</div>` : "";
   const sessHtml=s=>{
-    const mark = s.done ? '<span class="smk done">✓</span>'
+    const mark = s.unplanned ? '<span class="smk extra" title="unplanned — bonus volume">+</span>'
+      : s.done ? '<span class="smk done">✓</span>'
       : s.missed ? '<span class="smk missed">✕</span>'
       : (s.date===today ? '<span class="smk today">•</span>' : '<span class="smk">○</span>');
     const act = s.actual ? `<span class="sact">${s.actual.km}k${s.actual.pace?` @ ${s.actual.pace}`:''}</span>` : "";
     const refl = s.reflection ? `<div class="srefl">📓 ${esc(s.reflection)}</div>` : "";
-    const clk = !SH_READONLY && s.done && s.activity_id;   // a completed session → view its run + map
-    return `<div class="sline ${s.date===today?'stoday':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" title="View this run on the map"`:""}>${mark}<span class="splan">${s.km}k</span>${act?' → '+act:''}${refl}</div>`;
+    const clk = !SH_READONLY && (s.done||s.unplanned) && s.activity_id;   // a completed/extra run → view its run + map
+    const plan = s.unplanned ? '<span class="splan exu">unplanned</span>' : `<span class="splan">${s.km}k</span>`;
+    // a DOUBLE (≥2 runs that day): break the combined actual into its per-run halves, each map-linkable
+    const brk = (s.runs && s.runs.length>1)
+      ? `<div class="srun" title="${s.runs.length} runs this day">↳ ${s.runs.map(r=>{
+            const rc = !SH_READONLY && r.activity_id;
+            return `<span class="brkrun"${rc?` data-act-id="${r.activity_id}" title="View this run on the map"`:''}>${r.km}k${r.pace?` @ ${r.pace}`:''}</span>`;
+          }).join(" · ")}</div>`
+      : "";
+    return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
   };
   const weeks=planWeeks.map(w=>{
     const hasLog = w.sessions.some(s=>'done' in s);
     const sess = hasLog ? `<div class="wsesslog">${w.sessions.map(sessHtml).join("")}</div>`
-      : `<div class="wsess">${w.sessions.map(s=>`${s.km}k`).join(" · ")}${w.strides?` · strides×${w.strides}`:''} @ easy ${p.pace_zones.easy_top}</div>`;
+      : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${s.km}k</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">${w.strides?`strides×${w.strides} · `:''}@ easy ${p.pace_zones.easy_top}</div></div>`;
     return `<div class="wk ${w.wk===4?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
@@ -5109,6 +5456,12 @@ function renderPlan(p){
   }));
   // a completed session → load that day's run into the activity tile + its route map
   host.querySelectorAll(".sline.sclick").forEach(el=>el.addEventListener("click",()=>{
+    loadActivity(+el.dataset.actId);
+    const r=document.getElementById("recent"); if(r) r.scrollIntoView({behavior:"smooth", block:"start"});
+  }));
+  // a double's per-run links → that specific run's map (stop bubbling so the line's own click doesn't fire)
+  host.querySelectorAll(".brkrun[data-act-id]").forEach(el=>el.addEventListener("click",ev=>{
+    ev.stopPropagation();
     loadActivity(+el.dataset.actId);
     const r=document.getElementById("recent"); if(r) r.scrollIntoView({behavior:"smooth", block:"start"});
   }));
@@ -5689,11 +6042,242 @@ def _stc_day_spacing():
         if long_dow is None or long_dow < 5:
             bad.append(f"{ph}6:long-off-weekend")
     detail.append({"six_run": six})
+    # cross-week BOUNDARY spacing (2026-06-22 fix): a week must never end AND the next begin on a
+    # rest — the double-rest seam the owner hit (a 3-run week ending Sat, the next week resting Mon).
+    # Every layout ends on the Sunday slot, so the gap from one week's last run to the next week's
+    # first run stays ≤2 calendar days (≤1 rest) for every frequency transition the plan uses. (The
+    # OLD 3→4 layout gapped 3 days = 2 rests — this guard would have caught it.)
+    seq = [w["runs"] for w in REBASE_SHAPE]
+    for a, b in zip(seq, seq[1:]):
+        da, db_ = _run_days(a), _run_days(b)
+        gap = (7 + db_[0]) - da[-1]
+        detail.append({"boundary": f"{a}->{b}", "gap_days": gap})
+        if gap > 2:
+            bad.append(f"boundary {a}->{b} gap {gap}d (double rest)")
+    # long run on the TRUE calendar weekend, asserted on REAL generated dates off a Monday anchor
+    # (production Monday-anchors via _rebase_start). Every "long" session must land Sat/Sun.
+    lw, _ = generate_block(base_shape(4, 30), mon, 30.0, 28.0, easy)
+    long_wkdays = sorted({_date(s["date"]).weekday()
+                          for w in lw for s in w["sessions"] if "long" in (s.get("kind") or "")})
+    if any(wd < 5 for wd in long_wkdays):
+        bad.append(f"long off weekend (weekdays {long_wkdays})")
+    detail.append({"long_run_weekdays": long_wkdays})
     return _st("det", "day-spacing",
-               "≤2 consecutive in a 3/4/5-run week; in a 6-run week no two hard sessions on consecutive "
-               "days + long on the weekend",
-               passed=not bad, expect="3/4/5: ≤2 consec · 6: no hard adjacent, long weekend",
+               "≤2 consecutive in a 3/4/5-run week; 6-run week no two hard sessions adjacent + long on "
+               "weekend; no double-rest at any week BOUNDARY; long run on the true calendar weekend",
+               passed=not bad, expect="≤2 consec · 6: no hard adjacent · boundary gap ≤2d · long Sat/Sun",
                got="ok" if not bad else f"fails: {bad}", output=detail)
+
+
+def _stc_rebase_anchor():
+    """§6d/§6f (2026-06-22) — the block anchors to a Monday so weeks are calendar Mon–Sun (weekend
+    long runs), and a legacy non-Monday anchor migrates to its CONTAINING Monday: back-only, never
+    forward (so the runner is never pushed to a pre-start tile and a banked week can't be un-elapsed).
+    Drives `_rebase_start` directly on a throwaway in-memory DB — the production path the day-spacing
+    test only assumes."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+
+    def db(seed=None):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
+        if seed:
+            m.execute("INSERT INTO meta VALUES('rebase_start', ?)", (seed,))
+        m.commit()
+        return m
+
+    today = _d(2026, 6, 24)                      # a Wednesday
+    if _rebase_start(db(), today) != _monday(today):
+        fails.append("fresh anchor not this week's Monday")
+    base = _monday(today) - _td(weeks=1)         # an in-flight start ~1 week ago
+    for wd in range(7):                          # every weekday a legacy anchor could carry
+        s = base + _td(days=wd)
+        out = _rebase_start(db(s.isoformat()), today)
+        if out.weekday() != 0:
+            fails.append(f"migrated anchor not Monday (wd={wd}): {out}")
+        if out > s:                              # BACK-ONLY — never forward into the future
+            fails.append(f"migration shifted forward (wd={wd}): {s}->{out}")
+        if (s - out).days != wd:                 # containing Monday is exactly `wd` days back
+            fails.append(f"not the containing Monday (wd={wd}): {s}->{out}")
+    monday = _monday(today)
+    if _rebase_start(db(monday.isoformat()), today) != monday:
+        fails.append("an already-Monday anchor was disturbed")
+    elapsed = _monday(today) - _td(weeks=len(REBASE_SHAPE) + 1)
+    if _rebase_start(db(elapsed.isoformat()), today) != _monday(today):
+        fails.append("fully-elapsed anchor did not reset to this Monday")
+    return _st("det", "rebase-anchor",
+               "block Monday-anchored (calendar weeks → weekend long run); legacy anchor migrates to "
+               "its containing Monday — back-only (never forward → no pre-start tile / un-bank)",
+               passed=not fails, expect="Monday-aligned · back-only migration · elapsed resets",
+               got={"violations": fails or "none"})
+
+
+def _stc_unplanned_log():
+    """§ out-of-schedule (2026-06-22) — block_log surfaces an UNPLANNED run (an activity on a day with
+    no planned session) as a flagged bonus entry on its own day, WITHOUT inflating adherence (it was
+    never scheduled). Throwaway in-memory DB; dates in the past so adherence counters engage."""
+    import sqlite3 as _sq
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+        " distance REAL, duration REAL);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE session_log(date TEXT PRIMARY KEY, note TEXT);"
+        "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+    plan = {"rebase": {"weeks": [
+        {"wk": 1, "start": "2026-06-08", "km": 16, "runs": 3, "intent": "x",
+         "sessions": [{"date": "2026-06-09", "km": 5, "kind": "easy"},   # Tue planned → done
+                      {"date": "2026-06-11", "km": 5, "kind": "easy"},   # Thu planned → missed
+                      {"date": "2026-06-14", "km": 6, "kind": "long"}]}]}}   # Sun planned → missed
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now','2026-06-08','{}',?)",
+              (json.dumps(plan),))
+    for i, (d, dist) in enumerate([("2026-06-09", 5.0), ("2026-06-10", 6.0)]):  # 06-10 = Wed rest day
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?)",
+                  (i + 1, d, d + "T18:00:00", RUNNING_SPORT, dist, 1800))
+    log = block_log(m)
+    sess = log["weeks"][0]["sessions"]
+    by = {s["date"]: s for s in sess}
+    fails = []
+    up = by.get("2026-06-10")
+    if not (up and up.get("unplanned") and up.get("done") and (up.get("actual") or {}).get("km") == 6.0):
+        fails.append(f"unplanned rest-day run not surfaced: {up}")
+    if by.get("2026-06-09", {}).get("unplanned") or not by.get("2026-06-09", {}).get("done"):
+        fails.append("planned-day run mis-tagged (should be done, not unplanned)")
+    if [s["date"] for s in sess] != sorted(s["date"] for s in sess):
+        fails.append(f"sessions not date-sorted: {[s['date'] for s in sess]}")
+    if log["adherence"] != {"done": 1, "scheduled": 3}:        # unplanned must NOT touch the ratio
+        fails.append(f"adherence polluted by unplanned run: {log['adherence']}")
+    m.close()
+    return _st("det", "unplanned-log",
+               "block_log surfaces an out-of-schedule run on its day (flagged unplanned) without "
+               "inflating adherence; sessions stay in calendar order",
+               passed=not fails, expect="unplanned shown · adherence {done:1,scheduled:3} unchanged",
+               got={"violations": fails or "none"})
+
+
+def _stc_within_week():
+    """§6o within-week awareness — for the week straddling `today`, generate_block keeps the elapsed
+    days and governs ONLY today-onward volume from today's seed (model A): EOW ACWR still holds ≤ cap,
+    load already done this week (a higher seed ATL) SHRINKS the remaining allowance, remaining sessions
+    fall only on today-onward days, and today=None stays the full week. Pure/deterministic."""
+    from datetime import date, timedelta
+    easy = 425
+    shape = [{"wk": 1, "km": 80, "runs": 5, "long": 20, "strides": 0, "intent": "x"}]  # big ⇒ governor binds
+    mon = date(2026, 8, 3)                    # Monday
+    today = mon + timedelta(days=3)           # Thursday — Mon/Tue already elapsed
+    fails = []
+    lo, _ = generate_block(shape, mon, 30.0, 28.0, easy, today=today)   # little done this week (ATL 28)
+    hi, _ = generate_block(shape, mon, 30.0, 40.0, easy, today=today)   # lots done this week (ATL 40)
+    for tag, wks in (("lo", lo), ("hi", hi)):
+        w = wks[0]
+        if not w.get("partial"):
+            fails.append(f"{tag}: straddle week not flagged partial")
+        if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
+            fails.append(f"{tag}: EOW ACWR {w.get('proj_acwr')} > cap")          # the safety invariant
+        elapsed = [x for x in w["sessions"] if x["date"] < today.isoformat()]
+        rem = [x for x in w["sessions"] if x["date"] >= today.isoformat()]
+        if not elapsed:
+            fails.append(f"{tag}: elapsed days not kept (block_log matching would break)")
+        if not rem:
+            fails.append(f"{tag}: no today-onward sessions generated")
+    if not (hi[0]["trimp_total"] < lo[0]["trimp_total"]):                          # absorption
+        fails.append(f"more done this week didn't shrink the remaining allowance: "
+                     f"lo={lo[0]['trimp_total']} hi={hi[0]['trimp_total']}")
+    full, _ = generate_block(shape, mon, 30.0, 28.0, easy)                          # today=None
+    if full[0].get("partial") or len(full[0]["sessions"]) != 5:
+        fails.append(f"today=None not the full week: partial={full[0].get('partial')} n={len(full[0]['sessions'])}")
+    # INDEPENDENT no-double-count check (model A): projecting the remaining days from TODAY's seed must
+    # equal a single full-week roll (elapsed actuals + remaining) from the week-start seed. A regression
+    # that rolled the remainder from week-start (double-counting elapsed) would diverge here.
+    c0, a0 = 25.0, 24.0                                  # week-start (Mon) seed
+    elapsed_t = {"2026-08-03": 60.0, "2026-08-04": 40.0}            # Mon/Tue actuals
+    remaining_t = {"2026-08-07": 50.0, "2026-08-09": 70.0}          # Fri/Sun remaining
+    to_today = roll(elapsed_t, mon, today - timedelta(days=1), c0, a0)   # roll Mon..Wed → today's seed
+    ct, at = to_today[-1]["ctl"], to_today[-1]["atl"]
+    _, _, eow_a, _ = _project_week(ct, at, mon.isoformat(), remaining_t, roll_from=today.isoformat())
+    truth = roll({**elapsed_t, **remaining_t}, mon, mon + timedelta(days=6), c0, a0)[-1]["acwr"]
+    if abs(eow_a - truth) > 0.02:
+        fails.append(f"model A double-counts: today-seed EOW {eow_a} != full-week roll {truth}")
+    return _st("det", "within-week",
+               "partial-week governor keeps elapsed days + governs only today-onward from today's seed; "
+               "EOW ACWR ≤ cap; load already done shrinks the remaining allowance; today=None = full week",
+               passed=not fails, expect="partial · EOW≤cap · absorption · full week when today=None",
+               got={"violations": fails or "none",
+                    "rem_trimp_lo": lo[0]["trimp_total"], "rem_trimp_hi": hi[0]["trimp_total"]})
+
+
+def _stc_doubles_log():
+    """§ doubles v1 — block_log keeps a day's runs INDIVIDUAL: a double surfaces both halves as a
+    per-run breakdown (each map-linkable) while plan-vs-actual + 'ran so far' use the daily SUM; a
+    single-run day has no breakdown; adherence counts the day once (not per run). In-memory DB."""
+    import sqlite3 as _sq
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+        " distance REAL, duration REAL);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE session_log(date TEXT PRIMARY KEY, note TEXT);"
+        "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+    plan = {"rebase": {"weeks": [
+        {"wk": 1, "start": "2026-06-08", "km": 16, "runs": 2, "intent": "x",
+         "sessions": [{"date": "2026-06-09", "km": 10, "kind": "long"},     # planned day → ran as a DOUBLE
+                      {"date": "2026-06-11", "km": 5, "kind": "easy"}]}]}}   # planned day → single run
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now','2026-06-08','{}',?)",
+              (json.dumps(plan),))
+    rows = [("2026-06-09", "2026-06-09T07:00:00", 6.0, 1800),   # AM
+            ("2026-06-09", "2026-06-09T18:00:00", 7.0, 2100),   # PM → 06-09 is a double (13k)
+            ("2026-06-11", "2026-06-11T07:00:00", 5.0, 1500),   # single
+            ("2026-06-10", "2026-06-10T07:00:00", 4.0, 1200),   # rest-day double…
+            ("2026-06-10", "2026-06-10T18:00:00", 3.0, 900)]    # …(unplanned, 7k)
+    for i, (d, dtm, dist, dur) in enumerate(rows):
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?)", (i + 1, d, dtm, RUNNING_SPORT, dist, dur))
+    log = block_log(m)
+    by = {s["date"]: s for s in log["weeks"][0]["sessions"]}
+    fails = []
+    d09 = by.get("2026-06-09")
+    if not (d09 and d09.get("runs") and len(d09["runs"]) == 2):
+        fails.append(f"planned double: missing 2-run breakdown: {d09 and d09.get('runs')}")
+    if not (d09 and (d09.get("actual") or {}).get("km") == 13.0):
+        fails.append(f"planned double: combined actual not summed: {d09 and d09.get('actual')}")
+    if {r["km"] for r in (d09.get("runs") or [])} != {6.0, 7.0}:
+        fails.append("breakdown km mismatch")
+    if (by.get("2026-06-11") or {}).get("runs"):
+        fails.append("single-run day should have NO breakdown")
+    d10 = by.get("2026-06-10")
+    if not (d10 and d10.get("unplanned") and d10.get("runs") and len(d10["runs"]) == 2):
+        fails.append(f"rest-day double not surfaced with breakdown: {d10}")
+    if log["ran"]["km"] != 25.0:
+        fails.append(f"'ran so far' must sum ALL runs (6+7+5+4+3): {log['ran']}")
+    if log["adherence"] != {"done": 2, "scheduled": 2}:
+        fails.append(f"adherence must count a double's day ONCE: {log['adherence']}")
+    m.close()
+    return _st("det", "doubles-log",
+               "a double surfaces both runs (per-run breakdown, each map-linkable); plan-vs-actual + "
+               "'ran so far' use the daily sum; single-run day has no breakdown; adherence counts day once",
+               passed=not fails, expect="2-run breakdown · combined actual · ran sums all · adherence/day",
+               got={"violations": fails or "none"})
+
+
+def _stc_bonus_affordance():
+    """§6o — the low-ACWR bonus-run note offers ONLY on a green + rest-day + clearly-low-ACWR day; never
+    on amber/red, a non-rest day, high ACWR, or missing ACWR. Pure (a note, not a prescription)."""
+    fails = []
+    if not _bonus_run_ok("green", "rest", 0.85):
+        fails.append("low-ACWR green rest day should offer the bonus note")
+    if _bonus_run_ok("green", "rest", 1.20):
+        fails.append("high ACWR must NOT offer (no headroom)")
+    if _bonus_run_ok("amber", "rest", 0.80) or _bonus_run_ok("red", "rest", 0.80):
+        fails.append("amber/red must NOT offer")
+    if _bonus_run_ok("green", "easy", 0.80):
+        fails.append("a non-rest (training) day must NOT offer")
+    if _bonus_run_ok("green", "rest", None):
+        fails.append("missing ACWR must NOT offer")
+    return _st("det", "bonus-run",
+               f"low-ACWR bonus-run note offers iff green + rest day + ACWR < {BONUS_ACWR_MAX} "
+               "(note only — the ACWR governor still caps the week)",
+               passed=not fails, expect=f"offer iff green·rest·ACWR<{BONUS_ACWR_MAX}",
+               got={"violations": fails or "none"})
 
 
 def _stc_dedup(db):
@@ -6448,7 +7032,10 @@ def _stc_plan_explain(db):
 
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_day_spacing(), lambda: _stc_dedup(db),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_day_spacing(),
+                 lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
+                 lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
+                 lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),

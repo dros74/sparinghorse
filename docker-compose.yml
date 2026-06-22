@@ -12,6 +12,16 @@ services:
       # The LLM adjustment layer (the plan engine's language/judgment).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - SH_DB=/data/sparinghorse.db
+      # Personalization — real values live in the git-ignored .env on the host, kept OUT of this
+      # tracked file so the public mirror + publish_mirror.sh leak gate stay clean.
+      # Header widgets (also set on the public container so they render there too):
+      - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
+      - SH_HOUSE_URL=${SH_HOUSE_URL:-}
+      - SH_HOUSE_NAME=${SH_HOUSE_NAME:-}
+      # Private-only: nightly-sync timezone, LLM athlete context, fresh-DB seed objective.
+      - SH_TZ=${SH_TZ:-}
+      - SH_ATHLETE_CONTEXT=${SH_ATHLETE_CONTEXT:-}
+      - SH_SEED_OBJECTIVE=${SH_SEED_OBJECTIVE:-}
     volumes:
       # Locally-owned data copy lives on the NAS — back it up by copying this folder.
       # This is the single writer of the DB.
@@ -39,6 +49,11 @@ services:
       - SH_DB=/data/sparinghorse.db
       # - SH_PRIVATE_URL=https://private.example.com   # optional "Log in" link → your private console
       # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY here
+      # Header widgets — public-visible by design (weather is 3 decoy capitals; real workout geo is
+      # GPS-map-only and private). Real values from the host .env; no personal data in this file.
+      - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
+      - SH_HOUSE_URL=${SH_HOUSE_URL:-}
+      - SH_HOUSE_NAME=${SH_HOUSE_NAME:-}
     volumes:
       # Same DB. NOT mounted :ro — SQLite WAL readers need to touch -wal/-shm; the
       # query_only PRAGMA + the request guard are the write barrier instead.
