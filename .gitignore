@@ -29,5 +29,8 @@ seed_health_local.py
 # early design mockups — not part of the distributed app
 _appMockups/
 
+# scratch space — throwaway probe scripts, screenshots, render harness output
+tmp/
+
 # private dev notes — never in the public mirror
 PROJECT_LOG.md

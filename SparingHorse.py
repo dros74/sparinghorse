@@ -2786,6 +2786,12 @@ FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" rol
 def favicon_svg():
     return FAVICON_SVG, 200, {"Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400"}
 
+# Runalyze wordmark for the footer attribution link. The brand icon keeps its green/teal palette;
+# the wordmark (.st19) is set to currentColor so it adapts to every theme (dark on Daylight, light on
+# Charcoal/Aurora) from a single inlined asset — no per-theme file. viewBox added (source had only a
+# fixed width/height) so CSS can scale it.
+RUNALYZE_LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 630 130" role="img" aria-label="Runalyze" xml:space="preserve"><style>.st1{fill:#3e9035}.st2{opacity:.9;fill:#2f9e37}.st3,.st4,.st5{opacity:.9;fill:#6bb54e}.st4,.st5{fill:#6fc4c8}.st5{fill:#479195}.st6,.st7,.st9{opacity:.9;fill:#2cb1ae}.st7,.st9{fill:#328492}.st9{fill:#1b646c}.st11,.st13{opacity:.9;fill:#147671}.st13{fill:#39b8c2}.st16,.st17{opacity:.9;fill:#59b044}.st17{fill:#3e9035}.st18{fill:#6bb54e}.st19{fill:currentColor}</style><path d="M97.2 54.7c-.5 2.5-2.9 4.2-5.4 3.7-2.5-.5-4.1-2.9-3.7-5.4.5-2.5 2.9-4.2 5.4-3.7 2.6.4 4.2 2.8 3.7 5.4z" fill="#59b044"/><path class="st1" d="M109.3 57.3c-.9 4.7-5.5 7.8-10.1 6.8-4.7-.9-7.7-5.5-6.8-10.2s5.5-7.8 10.1-6.8c4.7 1 7.7 5.5 6.8 10.2z"/><path class="st2" d="M117.4 44.7c-.8 3.9-4.5 6.4-8.3 5.6-3.8-.8-6.4-4.5-5.6-8.4s4.5-6.4 8.3-5.6c3.9.8 6.4 4.6 5.6 8.4z"/><circle transform="scale(.99997) rotate(-88.25 86.3 63.64)" class="st3" cx="86.3" cy="63.6" r="5.6"/><path class="st4" d="M296.2 54.7a6.5 6.5 0 0 1-8.4 3.6 6.6 6.6 0 0 1-3.6-8.5 6.5 6.5 0 1 1 12 4.9z"/><path class="st5" d="M244.6 48.1c-.9 4.8-5.5 7.9-10.3 7-4.8-.9-7.9-5.6-6.9-10.4s5.5-7.9 10.3-7c4.7 1 7.8 5.6 6.9 10.4z"/><path class="st6" d="M171 99.8c-.9 4.5-5.3 7.5-9.8 6.6-4.5-.9-7.5-5.3-6.6-9.8.9-4.5 5.3-7.5 9.8-6.6 4.5.9 7.5 5.2 6.6 9.8z"/><circle transform="rotate(-78.92 93.96 14.18)" class="st7" cx="94" cy="14.2" r="3.4"/><path class="st7" d="M106 43a8.97 8.97 0 0 1-17.6-3.4 9 9 0 0 1 10.5-7.1c4.8.9 8 5.7 7.1 10.5zM142.5 94.4a17.03 17.03 0 0 1-19.9 13.5c-9.2-1.8-15.2-10.7-13.4-20s10.7-15.3 19.9-13.5a17 17 0 0 1 13.4 20zM203.7 77c-.8 4.4-5.1 7.2-9.4 6.4-4.3-.9-7.2-5.1-6.3-9.4.8-4.4 5.1-7.2 9.4-6.4 4.3.8 7.2 5 6.3 9.4zM204.3 64.6c-1 2.4-3.7 3.5-6 2.6s-3.5-3.7-2.5-6.1c1-2.4 3.7-3.5 6-2.6 2.4 1 3.5 3.7 2.5 6.1z"/><path d="M153.7 89.3a7.4 7.4 0 0 1-9.6 4.1c-3.8-1.5-5.6-5.9-4.1-9.7s5.9-5.6 9.6-4.1 5.6 5.9 4.1 9.7z" opacity=".9" fill="#38b7be"/><path class="st7" d="M229.9 55.8c-1.5 3.6-5.6 5.4-9.2 3.9s-5.4-5.6-3.9-9.3c1.5-3.6 5.6-5.4 9.2-3.9 3.6 1.5 5.4 5.6 3.9 9.3zM290.6 45.7c-2.4 5.9-9 8.7-14.9 6.3a11.5 11.5 0 0 1-6.3-14.9c2.4-5.9 9-8.7 14.9-6.3s8.6 9.1 6.3 14.9z"/><path class="st9" d="M121.7 75.4c-1.4 7-8.2 11.6-15.2 10.3-7-1.4-11.6-8.2-10.2-15.3s8.2-11.6 15.2-10.3c7 1.5 11.5 8.3 10.2 15.3zM167.3 89.7c-.9 4.5-5.3 7.5-9.8 6.6-4.5-.9-7.5-5.3-6.6-9.8.9-4.5 5.3-7.5 9.8-6.6 4.5.9 7.5 5.3 6.6 9.8zM274.4 32.4c-.9 4.5-5.3 7.5-9.8 6.6-4.5-.9-7.5-5.3-6.6-9.8.9-4.5 5.3-7.5 9.8-6.6 4.5.9 7.5 5.3 6.6 9.8z"/><circle transform="rotate(-78.92 293.54 57.3)" class="st9" cx="293.5" cy="57.3" r="2.8"/><path class="st9" d="M215 64.6a8.06 8.06 0 1 1-4.4-10.5c4.1 1.7 6.1 6.4 4.4 10.5z"/><path class="st5" d="M155.2 100.3a8.97 8.97 0 1 1-7.1-10.5c4.9.9 8 5.6 7.1 10.5zM183.6 89.8a8.97 8.97 0 1 1-17.58-3.42 8.97 8.97 0 0 1 17.58 3.42zM108.9 63.5c-1.3 6.7-7.8 11.1-14.5 9.8-6.7-1.3-11.1-7.8-9.7-14.5C86 52 92.5 47.6 99.2 49c6.6 1.3 11 7.8 9.7 14.5zM250.1 42.1a5.56 5.56 0 0 1-7.2 3.1 5.73 5.73 0 0 1-3.1-7.3c1.2-2.9 4.4-4.2 7.2-3.1 2.9 1.2 4.2 4.5 3.1 7.3z"/><path class="st4" d="M210.6 67.6a5.56 5.56 0 0 1-10.9-2.1 5.56 5.56 0 0 1 10.9 2.1z"/><path d="M224.4 64.3c-.9 4.5-5.3 7.5-9.8 6.6-4.5-.9-7.5-5.3-6.6-9.8.9-4.5 5.3-7.5 9.8-6.6 4.6.9 7.5 5.3 6.6 9.8z" opacity=".9" fill="#44a2a3"/><path class="st4" d="M146.8 78.5c-.5 2.7-3.1 4.4-5.8 3.9-2.7-.5-4.4-3.1-3.9-5.8s3.1-4.4 5.8-3.9c2.7.5 4.5 3.1 3.9 5.8zM103.2 76.6c-.6 3.2-3.7 5.3-6.9 4.6-3.2-.6-5.3-3.7-4.6-6.9.6-3.2 3.7-5.3 6.9-4.6 3.2.6 5.2 3.7 4.6 6.9z"/><circle transform="rotate(-78.92 103.5 47.6)" class="st4" cx="103.5" cy="47.6" r="4"/><path class="st4" d="M237.2 58.6c-.8 3.9-4.5 6.4-8.3 5.6-3.8-.8-6.4-4.5-5.6-8.4.8-3.9 4.5-6.4 8.3-5.6s6.3 4.6 5.6 8.4z"/><path class="st6" d="M217.6 53.1c-1 2.5-3.9 3.8-6.4 2.7-2.5-1-3.7-3.9-2.7-6.5 1-2.5 3.9-3.8 6.4-2.7a5 5 0 0 1 2.7 6.5zM111.1 90a6.2 6.2 0 0 1-7.2 4.9c-3.3-.7-5.5-3.9-4.9-7.3a6.2 6.2 0 0 1 7.2-4.9c3.4.7 5.5 3.9 4.9 7.3zM193.3 81.9c-1.2 6.4-7.4 10.5-13.8 9.3s-10.5-7.4-9.3-13.8c1.2-6.4 7.4-10.5 13.8-9.3 6.4 1.3 10.6 7.4 9.3 13.8zM255.5 41.3c-1.3 3.1-4.8 4.7-8 3.4s-4.6-4.9-3.4-8a6.15 6.15 0 0 1 11.4 4.6z"/><path class="st6" d="M259.8 35.6a7.4 7.4 0 0 1-9.7 4.1c-3.8-1.6-5.6-5.9-4.1-9.7s5.9-5.7 9.7-4.1c3.9 1.5 5.7 5.8 4.1 9.7z"/><path class="st11" d="M100.9 26.9c-.6 3.2-3.7 5.3-6.9 4.6-3.2-.6-5.3-3.7-4.6-6.9s3.7-5.3 6.9-4.6c3.2.6 5.2 3.7 4.6 6.9z"/><circle transform="rotate(-78.92 107 95.15)" class="st11" cx="107" cy="95.2" r="3.4"/><path d="M301.6 68.6c-.7 1.7-2.7 2.6-4.4 1.9s-2.6-2.7-1.9-4.4c.7-1.7 2.7-2.6 4.4-1.9s2.6 2.7 1.9 4.4z" opacity=".9" fill="#32a29a"/><path class="st11" d="M232.1 45.6c-.5 2.6-3.1 4.4-5.7 3.9a4.8 4.8 0 0 1-3.8-5.7c.5-2.6 3.1-4.4 5.7-3.9 2.6.5 4.3 3.1 3.8 5.7zM246 33c-.5 1.3-2 2-3.4 1.4s-2-2-1.4-3.4c.5-1.3 2-2 3.4-1.4 1.3.6 2 2.1 1.4 3.4z"/><circle transform="rotate(-78.92 302.49 74.08)" class="st11" cx="302.5" cy="74.1" r="1.5"/><circle transform="rotate(-78.92 174.75 99.72)" class="st13" cx="174.8" cy="99.7" r="2.2"/><circle transform="rotate(-78.92 213.92 60.07)" cx="213.9" cy="60.1" opacity=".9" fill="#3ba7aa" r="1.9"/><path class="st13" d="M270.8 40.6c-.5 1.2-1.8 1.7-3 1.3s-1.7-1.8-1.3-3c.5-1.2 1.8-1.7 3-1.3 1.2.5 1.8 1.9 1.3 3z"/><path d="M243.1 39.8c-.5 1.3.1 2.8 1.4 3.4 1.3.5 2.8-.1 3.4-1.4.5-1.3-.1-2.8-1.4-3.4-1.3-.6-2.8.1-3.4 1.4z" opacity=".9" fill="#64c2d0"/><circle transform="rotate(-78.92 126 70.93)" class="st13" cx="126" cy="70.9" r="2.2"/><circle transform="rotate(-78.92 109.6 59.83)" class="st13" cx="109.6" cy="59.8" r="3.4"/><circle transform="rotate(-78.92 93.45 4.96)" class="st13" cx="93.5" cy="5" r="2"/><circle transform="rotate(-78.92 91.58 36.11)" class="st13" cx="91.6" cy="36.1" r="3.7"/><path class="st9" d="M197.6 69.5a6.83 6.83 0 1 1-5.4-8c3.8.7 6.2 4.3 5.4 8z"/><path class="st16" d="M124 52.6a6.2 6.2 0 0 1-7.2 4.9c-3.3-.7-5.5-3.9-4.9-7.3a6.2 6.2 0 0 1 7.2-4.9c3.4.7 5.6 4 4.9 7.3zM57.5 92.6c-.7 3.4-3.9 5.5-7.2 4.9s-5.5-3.9-4.9-7.3a6.2 6.2 0 0 1 7.2-4.9c3.4.7 5.5 4 4.9 7.3zM205.3 42.4a17.52 17.52 0 0 1-20.6 13.9c-9.5-1.9-15.8-11.1-13.9-20.7s11.1-15.8 20.6-13.9 15.7 11.1 13.9 20.7z"/><path class="st17" d="M223 54c-1.5 7.5-8.7 12.4-16.2 10.9s-12.3-8.7-10.9-16.2 8.7-12.4 16.2-10.9S224.5 46.5 223 54zM156.3 38.8c-1.6 8.1-9.3 13.3-17.4 11.7a14.81 14.81 0 1 1 5.7-29.1c8 1.5 13.3 9.3 11.7 17.4z"/><path class="st17" d="M136.2 46.7c-.8 3.9-4.5 6.4-8.3 5.6s-6.4-4.5-5.6-8.4c.8-3.9 4.5-6.4 8.3-5.6s6.4 4.5 5.6 8.4z"/><circle transform="rotate(-78.92 157.44 43.63)" class="st17" cx="157.4" cy="43.6" r="3.1"/><circle transform="rotate(-78.92 82.01 71.55)" class="st18" cx="82" cy="71.5" r="2.8"/><path class="st3" d="M133 38.9a8.97 8.97 0 1 1-7.1-10.5c4.9 1 8 5.7 7.1 10.5zM207.1 58.8c-.8 4.4-5.1 7.2-9.4 6.4-4.3-.9-7.2-5.1-6.3-9.4.8-4.4 5.1-7.2 9.4-6.4 4.3.8 7.1 5.1 6.3 9.4z"/><circle transform="rotate(-78.92 77.78 67.02)" class="st18" cx="77.8" cy="67" r="3.1"/><circle transform="scale(.99997) rotate(-88.25 303.1 78.2)" class="st2" cx="303.1" cy="78.2" r="1.6"/><path class="st2" d="M178.5 34.3c-1.4 7.4-8.6 12.2-15.9 10.8-7.4-1.4-12.2-8.6-10.7-16 1.4-7.4 8.6-12.2 15.9-10.8s12.2 8.7 10.7 16z"/><circle transform="rotate(-78.92 54.78 83.88)" class="st16" cx="54.8" cy="83.9" r="2.8"/><circle transform="rotate(-78.92 15.95 126.75)" class="st16" cx="16" cy="126.8" r="1.9"/><path class="st17" d="M79.9 76.2A5.56 5.56 0 0 1 69 74.1c.6-3 3.5-5 6.5-4.4 3 .5 4.9 3.5 4.4 6.5zM46.9 100a4.34 4.34 0 1 1-8.5-1.7 4.34 4.34 0 0 1 8.5 1.7z"/><circle transform="rotate(-78.92 214.86 38.25)" class="st3" cx="214.9" cy="38.3" r="3.7"/><circle transform="rotate(-78.92 33.41 108.09)" class="st3" cx="33.4" cy="108.1" r="3.7"/><circle transform="rotate(-78.92 64.04 84.75)" class="st2" cx="64" cy="84.7" r="3.4"/><circle transform="rotate(-78.92 24.38 117.36)" class="st2" cx="24.4" cy="117.4" r="2.8"/><circle transform="scale(.99997) rotate(-88.25 223.04 65.73)" class="st16" cx="223" cy="65.7" r="11.1"/><circle transform="scale(.99997) rotate(-88.25 216.19 75.4)" class="st3" cx="216.2" cy="75.4" r="5.6"/><path class="st3" d="M272.4 95.6a8.97 8.97 0 1 1-7.1-10.5c4.9 1 8.1 5.7 7.1 10.5z"/><circle transform="scale(.99997) rotate(-88.25 298.41 81.93)" class="st16" cx="298.4" cy="81.9" r="3.4"/><circle transform="rotate(-78.92 253 100.53)" class="st1" cx="253" cy="100.5" r="2.8"/><circle transform="scale(.99997) rotate(-88.25 249.5 86.63)" class="st17" cx="249.5" cy="86.6" r="10.5"/><circle transform="scale(.99997) rotate(-88.25 277.36 94)" class="st17" cx="277.4" cy="94" r="6.2"/><circle transform="scale(.99997) rotate(-88.25 259.4 85.7)" class="st3" cx="259.4" cy="85.7" r="3.4"/><circle transform="scale(.99997) rotate(-88.25 292.44 87)" class="st3" cx="292.4" cy="87" r="3.2"/><circle transform="scale(.99997) rotate(-88.25 285.8 90.84)" class="st3" cx="285.8" cy="90.8" r="4"/><circle transform="matrix(.03056 -.9995 .9995 .03056 142.8 339.5)" class="st3" cx="246.4" cy="96.1" r="5.6"/><circle transform="scale(.99997) rotate(-88.25 271.36 88.23)" class="st2" cx="271.4" cy="88.2" r="6.2"/><ellipse transform="matrix(.03056 -.9995 .9995 .03056 152.7 310.7)" class="st2" cx="236.5" cy="76.6" rx="12.4" ry="12.3"/><path class="st19" d="M328.1 75.7 325.9 94H315l6-48.9h14.8c3 0 5.5.3 7.6 1 2.1.6 3.8 1.5 5.2 2.6s2.3 2.4 2.9 4c.6 1.5.9 3.2.9 5a16.25 16.25 0 0 1-2.8 9.5c-.9 1.4-2 2.6-3.4 3.6-1.3 1-2.8 1.9-4.5 2.6.7.4 1.3.8 1.9 1.4.6.5 1.1 1.2 1.4 2l7.1 17.2h-9.8c-.9 0-1.7-.2-2.3-.5-.6-.4-1.1-.9-1.3-1.5l-5.3-14.5c-.2-.6-.6-1.1-1-1.3-.4-.3-1-.4-1.8-.4h-2.5zm2.7-22.5L329 68.1h4c1.6 0 2.9-.2 4-.7 1.1-.5 2-1.1 2.7-1.9.7-.8 1.2-1.7 1.5-2.8.3-1.1.5-2.2.5-3.4 0-.9-.1-1.8-.4-2.5-.3-.7-.7-1.4-1.3-1.9-.6-.5-1.3-.9-2.1-1.2-.9-.3-1.9-.4-3-.4h-4.1zM374 85.3c1.4 0 2.6-.3 3.7-.8s2.1-1.3 2.9-2.2c.8-1 1.5-2.2 2.1-3.5.6-1.4.9-2.9 1.1-4.7l3.5-29.1h10.9l-3.5 29.1c-.4 3-1.2 5.7-2.4 8.2a20.65 20.65 0 0 1-11.2 10.6c-2.5 1-5.3 1.5-8.3 1.5-2.7 0-5.1-.4-7.3-1.2-2.1-.8-3.9-2-5.4-3.5a13.6 13.6 0 0 1-3.3-5.4c-.8-2.1-1.1-4.4-1.1-6.9 0-1.1.1-2.1.2-3.3l3.5-29.1h10.9l-3.5 29.1c0 .4-.1.8-.1 1.2v1.2c0 2.8.6 4.9 1.9 6.5 1.2 1.5 3 2.3 5.4 2.3zM411.6 45.1c.3 0 .6.1.9.2.3.1.5.3.7.5.2.2.4.5.6.9l17.1 30.2c0-.8.1-1.5.2-2.2.1-.7.2-1.4.2-2l3.3-27.6h9.6l-6 48.9h-5.7c-.8 0-1.5-.1-2.1-.4-.6-.2-1-.7-1.4-1.4L412 62c0 .6-.1 1.2-.2 1.8-.1.6-.1 1.1-.2 1.6l-3.3 28.5h-9.6l6-48.9h5.8c.4 0 .8.1 1.1.1zM486.8 93.9h-8.4c-.9 0-1.7-.2-2.3-.7-.6-.4-.9-1-1-1.7l-1.5-8.8H457l-3.6 8.8c-.2.6-.7 1.2-1.4 1.7s-1.5.7-2.4.7H441L464.3 45h11.2l11.3 48.9zm-26.7-18.6h12.2l-2.4-14c-.2-1.2-.4-2.3-.7-3.5-.2-1.2-.4-2.3-.6-3.3-.2.5-.4 1.1-.7 1.8-.3.7-.6 1.3-.9 2-.3.6-.5 1.3-.8 1.8s-.4 1-.6 1.2l-5.5 14zM501.5 85.2h16.4l-1.1 8.7h-27.3l6-48.9h10.9l-4.9 40.2zM538.7 75.2l-2.3 18.7h-10.9l2.3-18.6L515.3 45h9.7c.9 0 1.7.2 2.2.7.5.4.9 1 1.2 1.7l4.7 14.8.9 2.9c.3.9.5 1.8.7 2.7.4-.9.9-1.7 1.4-2.6.5-.9 1.1-1.9 1.6-2.9l8.3-14.8c.3-.6.8-1.2 1.5-1.6.6-.5 1.4-.7 2.3-.7h9l-20.1 30zM594.5 45l-.5 3.3c-.1.4-.2.9-.4 1.3s-.5.8-.7 1.2l-24.6 34.7h20.6l-1.1 8.4H553l.4-3.2c.1-.4.2-.9.4-1.3s.5-.8.7-1.2l24.6-34.8h-19.5l1.1-8.4h33.8zM626.9 53.5h-18l-1.5 11.8h13.8l-1.1 8.1h-13.7l-1.5 12.1H623l-1.1 8.4h-29.1l6-48.9h29l-.9 8.5z"/></svg>'
+
 
 
 @app.teardown_appcontext
@@ -3816,6 +3822,7 @@ def index():
     html = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
             .replace("__SH_PRIVATE_URL__", PRIVATE_URL)
+            .replace("__RUNALYZE_LOGO__", RUNALYZE_LOGO_SVG)
             .replace("__SH_HUBLINK__", hublink))
     # The whole SPA — markup + inline JS — is this one document. Tell the browser to revalidate it
     # every load so a deploy takes effect on an ordinary reload (no hard-refresh needed): browsers
@@ -3975,6 +3982,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   /* low-contrast so the tile text stays readable */
   .actbg .proffill{fill:color-mix(in oklab,var(--accent),transparent 94%);
     stroke:color-mix(in oklab,var(--accent),transparent 78%);stroke-width:1}
+  /* Aurora's deep-indigo surface nearly swallows the faint accent area-fill — lift it toward white
+     so the shade under the trace reads a touch lighter than the background (not just more violet) */
+  [data-theme="aurora"] .actbg .proffill{fill:color-mix(in oklab,color-mix(in oklab,var(--accent),#fff 30%),transparent 86%)}
+  [data-theme="aurora"] .tilebg .proffill{fill:color-mix(in oklab,color-mix(in oklab,var(--accent),#fff 30%),transparent 84%)}
   .actbg .avgline{stroke:var(--muted);stroke-width:1;stroke-dasharray:5 4;opacity:.4}
   /* hovered metric traced on top of the locked area — value-coloured, no fill; non-scaling so the
      stretched viewBox doesn't make the stroke uneven */
@@ -3985,12 +3996,17 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .profmeta{position:absolute;right:0;bottom:2px;z-index:2;display:inline-flex;align-items:center;gap:12px;
     white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
   .hrlegend{display:inline-flex;gap:9px}
+  /* the between-zone gap (14px) must exceed the square↔its-own-label gap (4px), else each square
+     reads as belonging to the previous zone's label */
+  .hrlegend .hrleg{display:inline-flex;gap:14px}
   .hrlegend .hrz{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
   .hrlegend .hrz i{width:9px;height:9px;border-radius:2px}
   .actfg{position:relative;z-index:1;padding-bottom:24px}   /* bottom strip reserved for .profmeta */
   .metric.hovx{cursor:pointer;border-radius:7px;transition:background .15s,box-shadow .15s;padding:2px 6px;margin:-2px -6px}
   .metric.hovx:hover{background:color-mix(in oklab,var(--accent),transparent 90%)}
-  .metric.hovx.locked{box-shadow:inset 0 -2px 0 var(--accent)}
+  /* lock = the same shade as hover (an underline collided with the value-coloured trace line);
+     the 🔒 marker is what tells the persistent lock apart from a transient hover */
+  .metric.hovx.locked{background:color-mix(in oklab,var(--accent),transparent 90%)}
   .metric.hovx.locked .ml::after{content:" 🔒";font-size:8px}
   .proflbl{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:none;
     letter-spacing:0;margin-left:8px}
@@ -4006,16 +4022,17 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 
   .section{margin-top:30px}
   .section h2{font-family:var(--serif);font-weight:600;font-size:19px;margin:0 0 14px}
-  /* Plan drift loads collapsed — the runner deliberately opens it (§6j) */
-  details#sec-drift > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px}
-  details#sec-drift > summary::-webkit-details-marker{display:none}
-  details#sec-drift > summary h2{margin:0}
-  details#sec-drift > summary::before{content:"";flex:none;width:7px;height:7px;margin-top:-3px;
+  /* Collapsible sections (Plan drift, Fitness & fatigue, Weekly volume) load collapsed — the runner
+     deliberately opens them; the chevron rotates on [open] */
+  details.section > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px}
+  details.section > summary::-webkit-details-marker{display:none}
+  details.section > summary h2{margin:0}
+  details.section > summary::before{content:"";flex:none;width:7px;height:7px;margin-top:-3px;
     border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);
     transform:rotate(-45deg);transition:transform .15s}
-  details#sec-drift[open] > summary::before{transform:rotate(45deg)}
-  details#sec-drift > summary:hover::before{border-color:var(--accent)}
-  details#sec-drift > .panel{margin-top:14px}
+  details.section[open] > summary::before{transform:rotate(45deg)}
+  details.section > summary:hover::before{border-color:var(--accent)}
+  details.section > .panel{margin-top:14px}
   .panel{background:linear-gradient(180deg,var(--surface),var(--surface-2));
     border:1px solid var(--line);border-radius:14px;padding:20px}
 
@@ -4094,9 +4111,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   #readiness .statuscard{margin:-20px -20px 0;border-radius:14px 14px 0 0;box-shadow:none}
   .acwrcard{display:flex;flex-direction:column}
   .acwrcard .acwr-title{font-family:var(--serif);font-weight:600;font-size:15px;margin-bottom:34px}
-  /* CTL ramp readout, pinned to the bottom of the (stretched) load tile */
-  .acwrcard .acwr-foot{position:relative;overflow:hidden;margin-top:auto;min-height:84px;
-    padding-top:16px;border-top:1px solid var(--line)}
+  /* CTL ramp readout — the divider sits just under the ACWR explanation, then the ramp FILLS the
+     rest of the tile (flex:1) and vertically centres its readout in that lower half (so it isn't
+     crammed against the divider on a stretched tile) */
+  .acwrcard .acwr-foot{position:relative;overflow:hidden;margin-top:16px;flex:1;display:flex;
+    flex-direction:column;justify-content:center;min-height:84px;padding-top:16px;border-top:1px solid var(--line)}
   .acwrcard .acwr-foot .acwr-foot-txt{position:relative;z-index:1}
   .acwrcard .acwr-foot .k{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
   .acwrcard .acwr-foot .v{display:block;font-family:var(--serif);font-weight:600;font-size:22px;line-height:1;margin-top:5px}
@@ -4143,6 +4162,19 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   /* only the active phase's weeks are shown; the rest live behind their bar segment */
   .phasepanel{display:none}
   .phasepanel.active{display:block}
+  /* week strip — a second-level selector INSIDE a phase (echoes the phase bar): one segment per
+     week, only the selected week's detail is shown below, keeping the tile glanceable on load */
+  .weekstrip{display:flex;gap:3px;margin:10px 0 8px;border-radius:8px;overflow:hidden}
+  .weekseg{flex:1;display:flex;align-items:center;justify-content:center;gap:3px;min-width:30px;
+    font-family:var(--mono);font-size:10px;line-height:1;padding:6px 3px;cursor:pointer;
+    color:var(--text);background:color-mix(in oklab,var(--accent),var(--surface-2) 30%);
+    opacity:.5;transition:opacity .15s,box-shadow .15s}
+  .weekseg:hover{opacity:.8}
+  .weekseg.active{opacity:1;box-shadow:inset 0 0 0 2px var(--accent)}
+  .weekseg.wsdown{background:color-mix(in oklab,var(--muted),var(--surface-2) 35%)}  /* recovery (down) week */
+  .weekseg .wlock{font-size:8px;opacity:.8}
+  .weekdetail{display:none}
+  .weekdetail.active{display:block}
   .zones{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
   .zone{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:8px;
     padding:5px 10px;color:var(--muted)}
@@ -4363,7 +4395,14 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
   footer{margin-top:48px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
-    text-transform:uppercase;color:var(--muted);text-align:center}
+    text-transform:uppercase;color:var(--muted);text-align:center;
+    display:flex;flex-direction:column;align-items:center;gap:13px}
+  /* Runalyze attribution — the wordmark inherits currentColor (var(--text)) so it adapts per theme;
+     the brand icon keeps its colours. Subtle by default, full-strength on hover. */
+  .ralink{display:inline-flex;align-items:center;gap:8px;color:var(--text);text-decoration:none;
+    opacity:.65;transition:opacity .15s}
+  .ralink:hover{opacity:1}
+  .ralink svg{height:15px;width:auto;display:block}
 </style></head>
 <body>
   __SH_HUBLINK__
@@ -4428,8 +4467,8 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       <div class="panel" id="drift"><div class="empty">Loading…</div></div>
     </details>
 
-    <div class="section">
-      <h2>Fitness &amp; fatigue <span class="muted mono" style="font-size:12px">— reconstructed from your training load (CTL/ATL model)</span></h2>
+    <details class="section" id="sec-ff">
+      <summary><h2>Fitness &amp; fatigue <span class="muted mono" style="font-size:12px">— reconstructed from your training load (CTL/ATL model)</span></h2></summary>
       <div class="panel">
         <div class="legend">
           <span class="ctl"><i></i>Fitness (CTL)</span>
@@ -4438,12 +4477,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
         <div id="ffchart"><div class="empty">No activities synced yet.</div></div>
         <div class="valid" id="ffvalid"></div>
       </div>
-    </div>
+    </details>
 
-    <div class="section">
-      <h2>Weekly running volume <span class="muted mono" id="wkrange" style="font-size:12px">— last 26 weeks</span></h2>
+    <details class="section" id="sec-vol">
+      <summary><h2>Weekly running volume <span class="muted mono" id="wkrange" style="font-size:12px">— last 26 weeks</span></h2></summary>
       <div class="panel"><div class="chart" id="chart"><div class="empty">No activities synced yet.</div></div></div>
-    </div>
+    </details>
 
     <div class="section" id="sec-health">
       <h2>Health markers <span class="muted mono" style="font-size:12px">— metabolism &amp; the body behind the engine</span></h2>
@@ -4456,7 +4495,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       </form>
     </div>
 
-    <footer id="foot">Spares the horse by being the horse · not synced yet</footer>
+    <footer>
+      <span id="foot">Spares the horse by being the horse · not synced yet</span>
+      <a class="ralink" href="https://runalyze.com" target="_blank" rel="noopener noreferrer"
+         title="Sparing Horse runs on your Runalyze training data">powered by __RUNALYZE_LOGO__</a>
+    </footer>
   </div>
 
 <script>
@@ -4753,7 +4796,8 @@ function metricColor(kind, v, ctx){
   if(kind==="hr"){ const hm=ctx.hrmax||ctx.hi||0, f=hm?v/hm:0;       // robust HRmax anchors the zones
     return (HRZONES.find(z=>f<z[2])||HRZONES[4])[1]; }
   if(kind==="pace")    return rg((ctx.hi-v)/((ctx.hi-ctx.lo)||1));   // faster (smaller sec/km) = green
-  if(kind==="cadence") return rg(1-Math.abs(v-180)/10);             // 180 spm ideal = green (±10 to red)
+  if(kind==="cadence"){ const d=Math.abs(v-180);                    // 170–190 stays green, then ramps
+    return rg(d<=10 ? 1 : 1-(d-10)/15); }                           // to red by ±25 (155 / 205)
   return "var(--accent)";                                            // elevation: neutral single hue
 }
 // draw the LOCKED metric as a shaded area; if hovering a DIFFERENT metric, trace it as a
@@ -5273,18 +5317,36 @@ function weekHoldsToday(w,today){
   const we=new Date(w.start); we.setDate(we.getDate()+6);
   return w.start<=today && today<=we.toISOString().slice(0,10);
 }
+// Which week is open by default in a phase's strip: the one holding `today`, else the first.
+function defaultWeek(weeks,today){ return ((weeks.find(w=>weekHoldsToday(w,today))||weeks[0]||{}).wk); }
+// A second-level selector that echoes the phase bar: one segment per week, the selected one active.
+// Shared by every phase (re-base + future) — only the *detail* below it differs per phase, so the
+// LOG-enriched vs plain week renderers stay untouched (we wrap their output, never merge them).
+function weekStrip(weeks,pk,sel){
+  return `<div class="weekstrip" data-pk="${pk}">`+weeks.map(w=>{
+    const down=/down/i.test(w.intent||'')||w.wk===4;
+    return `<div class="weekseg${w.wk===sel?' active':''}${down?' wsdown':''}" data-pk="${pk}" data-wk="${w.wk}"
+       title="Week ${w.wk} · ${w.km} km · ${w.runs} runs${w.frozen?' · done':''}">W${w.wk}${w.frozen?'<span class="wlock">🔒</span>':''}</div>`;
+  }).join("")+`</div>`;
+}
+// Wrap a week's already-rendered detail so the strip can show/hide it (scoped by phase key + week).
+function weekDetail(inner,pk,wk,sel){ return `<div class="weekdetail${wk===sel?' active':''}" data-pk="${pk}" data-wk="${wk}">${inner}</div>`; }
 // A collapsible-free phase section: header (weeks, calendar, projected end CTL/ATL, Σ km, frozen
-// count) + its weeks. Renders nothing if the phase wasn't generated (short runways drop late phases).
+// count) + a week strip; only the selected week's detail shows. Renders nothing if the phase
+// wasn't generated (short runways drop late phases).
 function phaseSection(title,block,p,today){
   if(!block||!block.weeks||!block.weeks.length) return "";
+  const pk=phaseKey(title);
   const km=block.weeks.reduce((s,w)=>s+(w.km||0),0);
   const froz=block.weeks.filter(w=>w.frozen).length;
   const fz=froz?` · <span class="wfz">${froz} done</span>`:"";
+  const sel=defaultWeek(block.weeks,today);
   return `<h3 class="phasehdr">
       <span>${title} <span class="muted mono" style="font-size:11px">(${block.weeks.length}w · start ${block.start} · ends CTL ${block.end_ctl}/ATL ${block.end_atl})${fz}</span></span>
       <span class="muted mono" style="font-size:12px;font-weight:600;white-space:nowrap" title="Total planned distance across the phase">Σ ${km.toFixed(0)} km</span>
     </h3>
-    ${block.weeks.map(w=>weekHtml(w,p,today)).join("")}`;
+    ${weekStrip(block.weeks,pk,sel)}
+    <div class="weekdetails">${block.weeks.map(w=>weekDetail(weekHtml(w,p,today),pk,w.wk,sel)).join("")}</div>`;
 }
 function renderPlan(p){
   const host=$("#plan");
@@ -5351,11 +5413,14 @@ function renderPlan(p){
       : "";
     return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
   };
-  const weeks=planWeeks.map(w=>{
+  // Re-base weeks are LOG-enriched (done/missed/unplanned/doubles via sessHtml) — kept as their own
+  // renderer; we only wrap each in a week-detail and front it with the shared strip (selector below).
+  const rbSel=defaultWeek(planWeeks,today);
+  const weeks=weekStrip(planWeeks,'rebase',rbSel)+`<div class="weekdetails">`+planWeeks.map(w=>{
     const hasLog = w.sessions.some(s=>'done' in s);
     const sess = hasLog ? `<div class="wsesslog">${w.sessions.map(sessHtml).join("")}</div>`
       : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${s.km}k</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">${w.strides?`strides×${w.strides} · `:''}@ easy ${p.pace_zones.easy_top}</div></div>`;
-    return `<div class="wk ${w.wk===4?'wdown':''}">
+    const inner = `<div class="wk ${w.wk===4?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
         <div><span class="wkm">${w.km} km</span> · ${w.runs} runs${w.clipped?' · <span class="down">clipped to fit ACWR</span>':''}${w.adjusted?' · <span class="eased">eased</span>':''}</div>
@@ -5363,7 +5428,8 @@ function renderPlan(p){
         ${sess}
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
-    </div>`;}).join("");
+    </div>`;
+    return weekDetail(inner,'rebase',w.wk,rbSel);}).join("")+`</div>`;
   const adh = (LOG&&LOG.adherence&&LOG.adherence.scheduled)
     ? `<span class="muted mono" style="font-size:11px"> · done ${LOG.adherence.done}/${LOG.adherence.scheduled} so far</span>` : "";
   // §6e — earned faster exit: the block can graduate a week early when recent weeks are banked.
@@ -5458,6 +5524,13 @@ function renderPlan(p){
     if(!host.querySelector(`.phasepanel[data-pk="${pk}"]`)) return;  // no weeks for this phase
     host.querySelectorAll(".phaseseg").forEach(s=>s.classList.toggle("active",s===seg));
     host.querySelectorAll(".phasepanel").forEach(pn=>pn.classList.toggle("active",pn.dataset.pk===pk));
+  }));
+  // The week strip is the second-level selector: clicking a week shows only its detail, scoped to
+  // its own phase (data-pk + data-wk) so e.g. W1 of Base doesn't toggle W1 of Build.
+  host.querySelectorAll(".weekseg").forEach(seg=>seg.addEventListener("click",()=>{
+    const pk=seg.dataset.pk, wk=seg.dataset.wk;
+    host.querySelectorAll(`.weekstrip[data-pk="${pk}"] .weekseg`).forEach(s=>s.classList.toggle("active",s===seg));
+    host.querySelectorAll(`.weekdetail[data-pk="${pk}"]`).forEach(d=>d.classList.toggle("active",d.dataset.wk===wk));
   }));
   // a completed session → load that day's run into the activity tile + its route map
   host.querySelectorAll(".sline.sclick").forEach(el=>el.addEventListener("click",()=>{
