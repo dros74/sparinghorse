@@ -3995,10 +3995,8 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .dqwarn b{color:var(--warn)}
   .dqnote{border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin-bottom:16px;
     font-size:12px;color:var(--muted);line-height:1.5}
-  .dqnote a, .dqact a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
-  .dqnote a:hover, .dqact a:hover{opacity:.8}
-  .dqact{margin-top:8px;font-size:12px;color:var(--muted)}
-  .dqact a.delact{color:var(--danger);border-bottom-color:var(--danger)}  /* destructive: hard local delete */
+  .dqnote a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
+  .dqnote a:hover{opacity:.8}
   /* recent activity + planned session metric rows */
   .mrow{display:flex;flex-wrap:wrap;gap:8px 26px;align-items:baseline}
   .mrow .ttl{font-family:var(--serif);font-weight:600;font-size:17px;margin-right:6px}
@@ -4029,9 +4027,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
      stretched viewBox doesn't make the stroke uneven */
   .actbg .profline{fill:none;stroke-width:1;vector-effect:non-scaling-stroke;
     stroke-linejoin:round;stroke-linecap:round}
-  /* label + HR-zone legend pinned to the chart area's lower-right, OUT OF FLOW so the legend
-     appearing on HR hover doesn't change the tile height (.actfg reserves a bottom strip for it) */
-  .profmeta{position:absolute;right:0;bottom:2px;z-index:2;display:inline-flex;align-items:center;gap:12px;
+  /* the chart hint (left) and the locked-variable label + HR-zone legend (right) share ONE baseline
+     row. profmeta is in-flow + nowrap + flex-shrink:0, so the legend appearing on HR hover grows it
+     sideways without changing the row height; profhint takes the remaining width. */
+  .profbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-top:12px}
+  .profmeta{flex-shrink:0;display:inline-flex;align-items:center;gap:12px;
     white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
   .hrlegend{display:inline-flex;gap:9px}
   /* the between-zone gap (14px) must exceed the square↔its-own-label gap (4px), else each square
@@ -4039,7 +4039,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .hrlegend .hrleg{display:inline-flex;gap:14px}
   .hrlegend .hrz{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
   .hrlegend .hrz i{width:9px;height:9px;border-radius:2px}
-  .actfg{position:relative;z-index:1;padding-bottom:24px}   /* bottom strip reserved for .profmeta */
+  .actfg{position:relative;z-index:1}   /* profmeta now lives in-flow in .profbar — no reserved strip (was the public tile's empty gap) */
   .metric.hovx{cursor:pointer;border-radius:7px;transition:background .15s,box-shadow .15s;padding:2px 6px;margin:-2px -6px}
   .metric.hovx:hover{background:color-mix(in oklab,var(--accent),transparent 90%)}
   /* lock = the same shade as hover (an underline collided with the value-coloured trace line);
@@ -4048,8 +4048,20 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .metric.hovx.locked .ml::after{content:" 🔒";font-size:8px}
   .proflbl{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:none;
     letter-spacing:0;margin-left:8px}
-  .profhint{font-size:11px;margin-top:10px;opacity:.75}
+  .profhint{font-size:11px;opacity:.75;flex:1;min-width:0}
   .profhint b{color:var(--accent)}
+  /* data-quality utilities (ignore / hard-delete) tucked behind a quiet disclosure so they don't
+     clutter the tile; both muted at rest, hover reveals intent (ignore→accent, delete→danger) */
+  .dqtools{margin-top:12px;font-size:11px}
+  .dqtools>summary{cursor:pointer;color:var(--muted);opacity:.7;list-style:none;display:inline-flex;align-items:center}
+  .dqtools>summary::-webkit-details-marker{display:none}
+  .dqtools>summary::after{content:"⌄";margin-left:5px;font-size:10px}
+  .dqtools[open]>summary::after{content:"⌃"}
+  .dqtools>summary:hover{opacity:1}
+  .dqtools-body{margin-top:7px;display:flex;flex-wrap:wrap;gap:18px;font-size:12px;color:var(--muted)}
+  .dqtools-body a{color:var(--muted);text-decoration:none;border-bottom:1px dotted color-mix(in oklab,var(--muted),transparent 40%)}
+  .dqtools-body a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+  .dqtools-body a.delact:hover{color:var(--danger);border-bottom-color:var(--danger)}
   /* workout route map (private only) — Leaflet renders into .actmap; needs an explicit height */
   .actmap{position:relative;z-index:1;height:240px;margin-top:14px;border-radius:10px;
     overflow:hidden;border:1px solid var(--line)}
@@ -4915,12 +4927,15 @@ async function loadActivity(aid){
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
       </div>
-      <div class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</div>
-      ${SH_READONLY||!a.id?"":(a.ignored
-        ? `<div class="dqact"><span class="muted">⊘ Ignored from your stats (duplicate / mis-tag).</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a></div>`
-        : `<div class="dqact"><a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore this as a duplicate</a></div>`)}
-      ${SH_READONLY||!a.id?"":`<div class="dqact"><a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind, so it keeps inflating the duplicate count). Still on Runalyze? It returns next sync — use ⊘ Ignore instead.">🗑 Delete from local copy</a></div>`}
-      <div class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></div>
+      <div class="profbar">
+        <span class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</span>
+        <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
+      </div>
+      ${SH_READONLY||!a.id?"":`<details class="dqtools"><summary>data quality</summary><div class="dqtools-body">`+
+        (a.ignored
+          ? `<span class="muted">⊘ Ignored from your stats.</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a>`
+          : `<a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore as duplicate</a>`)+
+        `<a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ Ignore instead.">🗑 Delete from local copy</a></div></details>`}
     </div></div>
     ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}`;
   // load the profile once, show the default (locked) one, then wire hover-preview + click-lock
