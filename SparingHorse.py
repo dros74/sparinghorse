@@ -4012,6 +4012,9 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   /* the chart wrapper bounds the profile background to the metrics area (height), while its negative
      margins let the chart still bleed to the tile edges — so the route map below it isn't overlapped */
   .actwrap{position:relative;margin:-20px -20px 0;padding:20px 20px 0}
+  /* public tile: no route map follows, so the chart would otherwise leave a bare strip of panel
+     padding below it. When .actwrap is the panel's last child, bleed to the bottom edge too. */
+  .actwrap:last-child{margin-bottom:-20px;padding-bottom:20px}
   .actbg{position:absolute;inset:0;z-index:0;opacity:0;transition:opacity .4s ease;pointer-events:none}
   .actbg.on{opacity:1}
   .actbg svg{position:absolute;inset:0;width:100%;height:100%}
