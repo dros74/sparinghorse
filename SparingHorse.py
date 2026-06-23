@@ -4028,10 +4028,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .actbg .profline{fill:none;stroke-width:1;vector-effect:non-scaling-stroke;
     stroke-linejoin:round;stroke-linecap:round}
   /* the chart hint (left) and the locked-variable label + HR-zone legend (right) share ONE baseline
-     row. profmeta is in-flow + nowrap + flex-shrink:0, so the legend appearing on HR hover grows it
-     sideways without changing the row height; profhint takes the remaining width. */
-  .profbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-top:12px}
-  .profmeta{flex-shrink:0;display:inline-flex;align-items:center;gap:12px;
+     row. profmeta is ABSOLUTE inside the relative .profbar (anchored bottom-right), so the legend
+     appearing on HR hover grows it sideways WITHOUT reflowing the row → the tile height never jumps.
+     The row's height is set by .profhint alone (constant); padding-right keeps the hint clear of it. */
+  .profbar{position:relative;margin-top:12px;min-height:15px}
+  .profmeta{position:absolute;right:0;bottom:0;display:inline-flex;align-items:center;gap:12px;
     white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
   .hrlegend{display:inline-flex;gap:9px}
   /* the between-zone gap (14px) must exceed the square↔its-own-label gap (4px), else each square
@@ -4048,20 +4049,15 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .metric.hovx.locked .ml::after{content:" 🔒";font-size:8px}
   .proflbl{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:none;
     letter-spacing:0;margin-left:8px}
-  .profhint{font-size:11px;opacity:.75;flex:1;min-width:0}
+  .profhint{font-size:11px;opacity:.75;padding-right:320px}
   .profhint b{color:var(--accent)}
-  /* data-quality utilities (ignore / hard-delete) tucked behind a quiet disclosure so they don't
-     clutter the tile; both muted at rest, hover reveals intent (ignore→accent, delete→danger) */
-  .dqtools{margin-top:12px;font-size:11px}
-  .dqtools>summary{cursor:pointer;color:var(--muted);opacity:.7;list-style:none;display:inline-flex;align-items:center}
-  .dqtools>summary::-webkit-details-marker{display:none}
-  .dqtools>summary::after{content:"⌄";margin-left:5px;font-size:10px}
-  .dqtools[open]>summary::after{content:"⌃"}
-  .dqtools>summary:hover{opacity:1}
-  .dqtools-body{margin-top:7px;display:flex;flex-wrap:wrap;gap:18px;font-size:12px;color:var(--muted)}
-  .dqtools-body a{color:var(--muted);text-decoration:none;border-bottom:1px dotted color-mix(in oklab,var(--muted),transparent 40%)}
-  .dqtools-body a:hover{color:var(--accent);border-bottom-color:var(--accent)}
-  .dqtools-body a.delact:hover{color:var(--danger);border-bottom-color:var(--danger)}
+  /* top row: the LATEST ACTIVITY kicker (left) + data-quality utilities (right corner). The two
+     actions are muted at rest, hover reveals intent (ignore→accent, delete→danger). */
+  .rtop{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+  .dqtools{display:inline-flex;gap:14px;flex-shrink:0;font-size:11px;color:var(--muted);white-space:nowrap}
+  .dqtools a{color:var(--muted);text-decoration:none;border-bottom:1px dotted color-mix(in oklab,var(--muted),transparent 40%)}
+  .dqtools a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+  .dqtools a.delact:hover{color:var(--danger);border-bottom-color:var(--danger)}
   /* workout route map (private only) — Leaflet renders into .actmap; needs an explicit height */
   .actmap{position:relative;z-index:1;height:240px;margin-top:14px;border-radius:10px;
     overflow:hidden;border:1px solid var(--line)}
@@ -4893,7 +4889,10 @@ function renderProfile(hoverKind){
   bg.classList.toggle("on", !!svg);
   const lblKind = (showHover && hb) ? hoverKind : LOCKED;
   $("#proflbl").textContent = profileLabel(lblKind) + ((showHover && hb) ? " · click to lock" : " · 🔒 locked");
-  const leg=$("#hrlegend"); if(leg) leg.innerHTML = (showHover && hb && hoverKind==="hr") ? hrLegendHtml() : "";
+  const wideHR = showHover && hb && hoverKind==="hr";   // only the 5-zone HR legend is wide enough to reach the hint
+  const leg=$("#hrlegend"); if(leg) leg.innerHTML = wideHR ? hrLegendHtml() : "";
+  // yield the hint to the wide HR legend (visibility, not display, so the row height never shifts)
+  const hint=document.querySelector("#recent .profhint"); if(hint) hint.style.visibility = wideHR ? "hidden" : "visible";
   document.querySelectorAll("#recent .metric.hovx").forEach(el=>
     el.classList.toggle("locked", el.dataset.prof===LOCKED));
 }
@@ -4914,7 +4913,14 @@ async function loadActivity(aid){
     : "Latest activity";
   host.innerHTML=`<div class="actwrap"><div class="actbg" id="actbg"></div>
     <div class="actfg">
-      <div class="rkick">${kick}</div>
+      <div class="rtop">
+        <div class="rkick">${kick}</div>
+        ${SH_READONLY||!a.id?"":`<div class="dqtools">`+
+          (a.ignored
+            ? `<span class="muted">⊘ ignored</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">undo</a>`
+            : `<a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ ignore</a>`)+
+          `<a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ ignore instead.">🗑 delete</a></div>`}
+      </div>
       <div class="mrow">
         <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}</span>
         ${m("When", when, "")}
@@ -4931,11 +4937,6 @@ async function loadActivity(aid){
         <span class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</span>
         <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
       </div>
-      ${SH_READONLY||!a.id?"":`<details class="dqtools"><summary>data quality</summary><div class="dqtools-body">`+
-        (a.ignored
-          ? `<span class="muted">⊘ Ignored from your stats.</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a>`
-          : `<a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore as duplicate</a>`)+
-        `<a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ Ignore instead.">🗑 Delete from local copy</a></div></details>`}
     </div></div>
     ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}`;
   // load the profile once, show the default (locked) one, then wire hover-preview + click-lock
