@@ -605,6 +605,22 @@ def dropped_ids(db):
     return set(find_duplicates(db)) | manual_ignores(db)
 
 
+def delete_activity_local(db, aid):
+    """Hard-remove an activity from the OWNED local copy + its derived rows (ignore-list entry,
+    cached profile). `sync_activities` is insert-only, so a Runalyze deletion never propagates —
+    this is the only way to drop a row Runalyze no longer holds. Returns True if a row was removed,
+    False if no such id. CAVEAT: if the activity STILL exists on Runalyze, the next incremental sync
+    re-inserts it (page 1 is always re-fetched) — this is for activities already removed upstream;
+    an accidental delete of a live activity self-heals on re-sync (or a full backfill)."""
+    if not db.execute("SELECT 1 FROM activities WHERE id=?", (aid,)).fetchone():
+        return False
+    db.execute("DELETE FROM activities WHERE id=?", (aid,))
+    db.execute("DELETE FROM ignored_activities WHERE id=?", (aid,))
+    db.execute("DELETE FROM trackcache WHERE activity_id=?", (aid,))
+    db.commit()
+    return True
+
+
 def daily_trimp_series(db):
     """{YYYY-MM-DD: summed TRIMP} across ALL sports (Runalyze's CTL/ATL are whole-body).
     Skips likely-duplicate activities so our reconstruction isn't double-counted."""
@@ -2919,6 +2935,14 @@ def api_shape():
         "FROM shape_snapshots ORDER BY snapshot_date ASC"
     ).fetchall()
     dups = find_duplicates(db)
+    # the dup ROWS (id + date), not just the count — so the banner can offer a direct 🗑 delete on
+    # each leftover row (an OLD dup isn't reachable via the latest-activity tile otherwise).
+    dup_rows = []
+    if dups:
+        qs = ",".join("?" * len(dups))
+        dup_rows = [dict(r) for r in db.execute(
+            f"SELECT id, date, distance FROM activities WHERE id IN ({qs}) ORDER BY date DESC",
+            dups).fetchall()]
     ignored = db.execute(
         "SELECT i.id, a.date, a.distance, i.reason FROM ignored_activities i "
         "LEFT JOIN activities a ON a.id = i.id ORDER BY a.date DESC").fetchall()
@@ -2927,6 +2951,7 @@ def api_shape():
         history=[dict(r) for r in history],
         last_sync=get_meta(db, "last_sync"),
         duplicate_count=len(dups),
+        duplicates=dup_rows,
         ignored=[dict(r) for r in ignored],
     )
 
@@ -3516,6 +3541,18 @@ def api_activity_unignore(aid):
     return jsonify(ok=True, unignored=aid)
 
 
+@app.post("/api/activity/<int:aid>/delete")
+def api_activity_delete(aid):
+    """Hard-delete an activity from the owned local copy (see `delete_activity_local`) — for one
+    already removed on Runalyze that insert-only sync left behind, so the leftover row stops
+    inflating the structural duplicate count + banner. Writable only — the public read-only
+    container 403s this via the before_request guard."""
+    db = get_db()
+    if not delete_activity_local(db, aid):
+        return jsonify(ok=False, error="no such activity"), 404
+    return jsonify(ok=True, deleted=aid)
+
+
 @app.post("/api/earned")
 def api_earned_toggle():
     """§6e/§6f — owner opt-in for earned upward responsiveness (the bounded volume lift on the
@@ -3961,6 +3998,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .dqnote a, .dqact a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
   .dqnote a:hover, .dqact a:hover{opacity:.8}
   .dqact{margin-top:8px;font-size:12px;color:var(--muted)}
+  .dqact a.delact{color:var(--danger);border-bottom-color:var(--danger)}  /* destructive: hard local delete */
   /* recent activity + planned session metric rows */
   .mrow{display:flex;flex-wrap:wrap;gap:8px 26px;align-items:baseline}
   .mrow .ttl{font-family:var(--serif);font-weight:600;font-size:17px;margin-right:6px}
@@ -4611,10 +4649,15 @@ async function loadShape(){
   const dq=$("#dqbanner");
   let dqhtml="";
   if(d.duplicate_count>0){
+    const dl=d.duplicates||[];
+    // direct 🗑 per leftover row, so an OLD dup (not the latest activity) is still reachable
+    const del=(SH_READONLY||!dl.length)?"":` Already deleted on Runalyze but this persists? `+
+      `Sync never removes the local copy — drop the leftover row: `+
+      dl.map(r=>`<a href="#" class="dupdel delact" data-id="${r.id}">🗑 ${r.date||("#"+r.id)}</a>`).join(", ")+`.`;
     dqhtml+=`<div class="dqwarn">⚠ ${d.duplicate_count} likely-duplicate ${d.duplicate_count>1?"activities":"activity"} detected `+
       `(same time, distance &amp; sport — e.g. a watch/Strava double-upload). These inflate Fitness/Fatigue/ACWR `+
-      `<b>on Runalyze too</b> — delete the duplicate in Runalyze and re-sync to correct the numbers above. `+
-      `(The fitness/fatigue chart already ignores them.)</div>`;
+      `<b>on Runalyze too</b> — delete the duplicate in Runalyze and re-sync to correct the tiles above. `+
+      `(The fitness/fatigue chart already ignores them.)${del}</div>`;
   }
   const ign=d.ignored||[];
   if(ign.length){
@@ -4623,6 +4666,13 @@ async function loadShape(){
       (undo?` — restore: ${undo}`:"")+`.</div>`;
   }
   dq.innerHTML=dqhtml;
+  dq.querySelectorAll(".dupdel").forEach(el=>el.addEventListener("click", async ev=>{
+    ev.preventDefault();
+    if(!confirm("Delete this leftover duplicate from your LOCAL copy?\n\nFor a dup you already removed on Runalyze that insert-only sync left behind. If it still exists on Runalyze it returns on the next sync.")) return;
+    await fetch(`/api/activity/${el.dataset.id}/delete`,
+      {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    await Promise.all([loadShape(), loadActivity(CURACT), loadProjector()]);
+  }));
   dq.querySelectorAll(".ignundo").forEach(el=>el.addEventListener("click", async ev=>{
     ev.preventDefault(); await toggleIgnore(el.dataset.id, false);
   }));
@@ -4869,6 +4919,7 @@ async function loadActivity(aid){
       ${SH_READONLY||!a.id?"":(a.ignored
         ? `<div class="dqact"><span class="muted">⊘ Ignored from your stats (duplicate / mis-tag).</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">Undo</a></div>`
         : `<div class="dqact"><a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ Ignore this as a duplicate</a></div>`)}
+      ${SH_READONLY||!a.id?"":`<div class="dqact"><a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind, so it keeps inflating the duplicate count). Still on Runalyze? It returns next sync — use ⊘ Ignore instead.">🗑 Delete from local copy</a></div>`}
       <div class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></div>
     </div></div>
     ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}`;
@@ -4895,6 +4946,15 @@ async function loadActivity(aid){
   if(tog) tog.addEventListener("click", async ev=>{
     ev.preventDefault();
     await toggleIgnore(tog.dataset.id, tog.dataset.on==="1");
+  });
+  const del=$("#delact");
+  if(del) del.addEventListener("click", async ev=>{
+    ev.preventDefault();
+    if(!confirm("Delete this activity from your LOCAL copy?\n\nUse this only for an activity you already deleted on Runalyze — insert-only sync left the row behind. If it still exists on Runalyze it will return on the next sync (use ⊘ Ignore instead). An accidental delete recovers with a full backfill.")) return;
+    await fetch(`/api/activity/${del.dataset.id}/delete`,
+      {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    CURACT=null;   // the row is gone → fall back to the latest activity
+    await Promise.all([loadShape(), loadActivity(), loadProjector()]);
   });
   const bl=$("#backlatest");
   if(bl) bl.addEventListener("click", ev=>{ ev.preventDefault(); loadActivity(); });
@@ -5619,7 +5679,8 @@ async function loadProjector(){
         `<b style="color:var(--warn)">Heads-up:</b> your training history models to CTL <b>${v.modeled.ctl}</b> / `+
         `ATL <b>${v.modeled.atl}</b>, but Runalyze currently reports ${v.runalyze.ctl}/${v.runalyze.atl}. `+
         `That gap lines up with ${d.duplicate_count} detected duplicate(s) — Runalyze's figure looks inflated by them. `+
-        `This chart uses the de-duplicated, history-consistent values; fix the duplicate on Runalyze to reconcile.`;
+        `This chart uses the de-duplicated, history-consistent values; fix the duplicate on Runalyze to reconcile `+
+        `(or 🗑 Delete from local copy if you already removed it on Runalyze).`;
     } else {
       $("#ffvalid").innerHTML =
         `Model validated against Runalyze — today: CTL <b>${v.modeled.ctl}</b> vs ${v.runalyze.ctl}, `+
@@ -5803,7 +5864,7 @@ async function loadDrift(){
     (a.is_current?` — just sealed (the first complete road); drift accrues from here`:"")+
     ` · ${a.versions} version${a.versions>1?"s":""} on record`+
     (r.label?` · ${esc(r.label)}${r.weeks_away!=null?` (${r.weeks_away}w out)`:""}`:"");
-  if(d.duplicate_count>0) cap+=`<br><span class="warn">⚠ ${d.duplicate_count} duplicate activity is inflating the snapshot the plan seeds from — fix it in Runalyze to clean the projection (actuals here already ignore it).</span>`;
+  if(d.duplicate_count>0) cap+=`<br><span class="warn">⚠ ${d.duplicate_count} duplicate activity is inflating the snapshot the plan seeds from — fix it in Runalyze to clean the projection (actuals here already ignore it; if you already removed it on Runalyze, use 🗑 Delete from local copy to drop the leftover row).</span>`;
   host.innerHTML=`${scorecardHTML(d.scorecard, r)}<div class="driftcap">${cap}</div>
     <div class="driftblock"><h3>Cumulative distance</h3>
       <p class="note">The founding road versus what you've actually run plus the current plan's projection forward. The widening gap is volume drift — ahead of, or behind, the original plan.</p>
@@ -6066,10 +6127,13 @@ def _stc_map_privacy(db):
         try:                              # the guard reads the module global at request time
             READONLY = True
             code = client.get("/api/activity/-1/map").status_code
+            del_code = client.post("/api/activity/-1/delete").status_code  # destructive POST must 403 on public
         finally:
             READONLY = saved
         if code != 403:
             fail.append(f"read-only /map returned {code}, expected 403")
+        if del_code != 403:
+            fail.append(f"read-only POST /delete returned {del_code}, expected 403")
         body = client.get("/api/activity/-1/profile").get_data(as_text=True)
         if any(tok in body for tok in ("latitude", "longitude", '"path"')):
             fail.append("/profile leaks route geo")
@@ -6083,8 +6147,8 @@ def _stc_map_privacy(db):
         db.execute("DELETE FROM trackcache WHERE activity_id=?", (-1,))
         db.commit()
     return _st("det", "map-privacy",
-               "read-only /map 403s; /profile + by-id payload carry no route geo (wiring, via test client)",
-               passed=not fail, expect="/map 403 on read-only · /profile & /activity geo-free",
+               "read-only /map + destructive POST /delete 403; /profile + by-id payload carry no route geo (wiring, via test client)",
+               passed=not fail, expect="/map + /delete 403 on read-only · /profile & /activity geo-free",
                got={"violations": fail or "none"})
 
 
@@ -6366,6 +6430,49 @@ def _stc_dedup(db):
                passed=ok, expect="union holds",
                got={"auto": len(auto), "manual": len(manual), "dropped": len(dropped)},
                output={"manual_ids": sorted(manual)[:10]})
+
+
+def _stc_local_delete():
+    """Hard local-delete — the sync-no-delete gap fix. Insert-only sync never removes a row a
+    Runalyze deletion left behind, so it keeps inflating the structural duplicate count + banner;
+    `delete_activity_local` is the only way to drop it. Verifies the row + its derived rows
+    (ignore-list, trackcache) are removed, the structural dup clears, the keeper survives, and a
+    missing id no-ops. In-memory so it never touches the real DB."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, distance REAL, sport TEXT, raw TEXT);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);"
+        "CREATE TABLE trackcache(activity_id INTEGER PRIMARY KEY, profile TEXT, cached_at TEXT);")
+    for i in (1, 2):   # two exact-dups → find_duplicates keeps id 1, flags id 2
+        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?)",
+                    (i, "2026-06-14T19:00:00", 5.02, RUNNING_SPORT, "{}"))
+    mem.execute("INSERT INTO ignored_activities VALUES(2,'manual','now')")
+    mem.execute("INSERT INTO trackcache VALUES(2,'{}','now')")
+    mem.commit()
+    fails = []
+    if find_duplicates(mem) != [2]:
+        fails.append(f"setup: find_duplicates={find_duplicates(mem)} (expected [2])")
+    if not delete_activity_local(mem, 2):
+        fails.append("delete returned False for an existing id")
+    if mem.execute("SELECT 1 FROM activities WHERE id=2").fetchone():
+        fails.append("activity row survived delete")
+    if mem.execute("SELECT 1 FROM ignored_activities WHERE id=2").fetchone():
+        fails.append("ignore-list row not cleaned")
+    if mem.execute("SELECT 1 FROM trackcache WHERE activity_id=2").fetchone():
+        fails.append("trackcache row not cleaned")
+    if find_duplicates(mem) != [] or dropped_ids(mem) != set():
+        fails.append(f"dup not cleared: find_dups={find_duplicates(mem)} dropped={dropped_ids(mem)}")
+    if mem.execute("SELECT COUNT(*) c FROM activities").fetchone()["c"] != 1:
+        fails.append("kept activity (id 1) not preserved")
+    if delete_activity_local(mem, 999):
+        fails.append("delete returned True for a missing id")
+    mem.close()
+    return _st("det", "local-delete",
+               "hard local-delete drops the row + its ignore/trackcache rows and clears the structural "
+               "duplicate (closes the insert-only sync no-delete gap); no-ops on a missing id",
+               passed=not fails, expect="row gone · derived rows cleaned · dup count→0 · keeper survives",
+               got={"violations": fails or "none"})
 
 
 def _stc_projector(db):
@@ -7114,6 +7221,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
+                 lambda: _stc_local_delete(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),
