@@ -2216,9 +2216,11 @@ def diff_plans(old, new):
     if oo.get("weeks_away") != no.get("weeks_away"):
         wa = lambda v: f"{v}w" if v is not None else "no race"
         changes.append(f"Runway: {wa(oo.get('weeks_away'))} → {wa(no.get('weeks_away'))}")
-    return {"first": False, "changes": changes or ["No structural change"],
+    # No-op re-plan (the plan already matched the request — e.g. a priority set to what it already was,
+    # or a re-generate with nothing new): say so plainly, so it doesn't read as "your action failed".
+    return {"first": False, "changes": changes or ["The plan already matched — your objectives and priorities are unchanged."],
             "summary": (f"{len(changes)} change(s) to the road ahead"
-                        if changes else "Plan structure unchanged")}
+                        if changes else "No change — the plan was already up to date")}
 
 
 def plan_baseline(db):
@@ -4578,6 +4580,14 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     display:flex;align-items:center;justify-content:center;border-radius:5px;flex:none;
     background:var(--accent);color:var(--onacc)}
   .obj .pr.B,.obj .pr.C{background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
+  /* inline A|B|C priority selector (private console) — the selected letter is accented, the rest dim */
+  .prsel{display:inline-flex;flex:none;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .prseg{font-family:var(--mono);font-size:10px;font-weight:600;width:18px;height:18px;line-height:1;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;
+    border-left:1px solid var(--line);background:var(--surface-2);color:var(--muted)}
+  .prseg:first-child{border-left:none}
+  .prseg:hover:not(.on){background:var(--surface);color:var(--text)}
+  .prseg.on{background:var(--accent);color:var(--onacc);cursor:default}
   .obj .od{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
   .obj .x{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:6px;
     padding:2px 8px;font-size:11px;background:none}
@@ -5493,11 +5503,16 @@ function acBadge(a){
 }
 let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null;
 function objManager(p){
-  const anchorId = p.objective ? null : null;  // anchor matched by label/date below
+  // Priority chip: static on the public view; an inline A|B|C selector on the private console
+  // (clicking a letter POSTs /priority and re-periodizes — same path as the adjudication "Set B").
+  const priBadge = o => SH_READONLY
+    ? `<span class="pr ${o.priority}">${o.priority}</span>`
+    : `<span class="prsel" role="group" aria-label="priority for ${esc(o.label)}">${['A','B','C'].map(x=>
+        `<button type="button" class="prseg ${x===o.priority?'on':''}" data-oid="${o.id}" data-pri="${x}" title="Set priority ${x}">${x}</button>`).join("")}</span>`;
   const rows = OBJECTIVES.filter(o=>o.status==='upcoming').map(o=>{
     const isAnchor = p.objective && o.label===p.objective.label && o.date===p.objective.date;
     return `<div class="obj ${isAnchor?'anchor':''}">
-      <span class="pr ${o.priority}">${o.priority}</span>
+      ${priBadge(o)}
       <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:10px">· anchor</span>':''}</span>
       <span class="od">${o.date} · ${o.type} · ${o.target}</span>
       <button class="x" data-oid="${o.id}">remove</button>
@@ -5592,6 +5607,15 @@ function wireObjActions(){
   document.querySelectorAll(".obj .x").forEach(btn=>btn.addEventListener("click", async ()=>{
     const r=await fetch(`/api/objectives/${btn.dataset.oid}/remove`,{method:"POST"});
     const p=await r.json(); LASTDIFF=p.diff; await refreshPlan(p);
+  }));
+  // inline A|B|C priority selector — set a priority and re-periodize (no-op if already that letter)
+  document.querySelectorAll(".obj .prseg").forEach(b=>b.addEventListener("click", async ()=>{
+    if(b.classList.contains("on")) return;
+    const r=await fetch(`/api/objectives/${b.dataset.oid}/priority`,{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:b.dataset.pri})});
+    const p=await r.json();
+    if(!p.ok){ alert("Could not set priority: "+(p.error||"unknown")); return; }
+    LASTDIFF=p.diff; await refreshPlan(p);
   }));
 }
 // ── Qualitative adjustment (§6c) — LLM proposes, engine clamps ───────────────
