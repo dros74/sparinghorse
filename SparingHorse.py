@@ -1120,6 +1120,68 @@ def periodize(today, race_date, rebase_weeks=6):
     return [{"phase": n, "weeks": w} for n, w in phases if w > 0], total
 
 
+FULL_PEAK_ROLES = ("goal", "coequal")   # roles that earn a full peak + full taper (vs subordinate)
+
+
+def _full_peak(role):
+    return role in FULL_PEAK_ROLES
+
+
+def _seg_taper(total, full):
+    """Taper weeks for one segment: a full taper (3 wk on a long runway, else 2) for a goal/co-equal
+    peak; a 1-week sharpen for a subordinate race (it doesn't get a full peak it can't recover from).
+    Never longer than the segment itself (so a short gap can't overrun the race date)."""
+    return min((3 if total >= 16 else 2) if full else 1, max(0, total))
+
+
+def periodize_chain(today, chain, rebase_weeks=6):
+    """§6q — reverse-periodize the whole A-race CHAIN into a flat phase list. Each phase carries a
+    unique `key` (what generate_plan stores its block under + the UI selects), a `kind` (which shaper
+    builds it), and the `race`/`role` it serves. Segment 0 is the full Re-base→Base→Build→Peak→Taper
+    toward the first race; each later race adds a re-build BRIDGE→Peak→Taper off the prior race. A
+    subordinate race gets peak=0 + a 1-week sharpen instead of a full peak. Returns (phases,
+    total_weeks). For a single goal race this REDUCES to periodize() (same kinds + same week counts;
+    the Peak/Taper names just gain the race label). `chain` is select_chain()'s first return."""
+    def seg0_split(total, full):
+        taper = _seg_taper(total, full)
+        rem = max(0, total - rebase_weeks - taper)
+        base = round(rem * 0.45)
+        if full:
+            build = round(rem * 0.40)
+            peak = max(0, rem - base - build)
+        else:                                  # subordinate: no peak, the build runs longer
+            build = max(0, rem - base)
+            peak = 0
+        return base, build, peak, taper
+
+    r0 = chain[0]
+    lbl0, role0 = r0.get("label", "race"), r0["role"]
+    total0 = weeks_until(r0["date"], today)
+    base, build, peak0, taper0 = seg0_split(total0, _full_peak(role0))
+    phases = [
+        {"phase": "Re-base (Phase 0)", "weeks": rebase_weeks, "kind": "rebase", "key": "rebase", "race": None, "role": None},
+        {"phase": "Base — aerobic", "weeks": base, "kind": "base", "key": "base", "race": lbl0, "role": role0},
+        {"phase": "Build — specific", "weeks": build, "kind": "build", "key": "build", "race": lbl0, "role": role0},
+        {"phase": f"Peak → {lbl0}", "weeks": peak0, "kind": "peak", "key": "peak", "race": lbl0, "role": role0},
+        {"phase": f"Taper → {lbl0}", "weeks": taper0, "kind": "taper", "key": "taper", "race": lbl0, "role": role0},
+    ]
+    for k in range(1, len(chain)):
+        rk, prev = chain[k], chain[k - 1]
+        lblk, rolek = rk.get("label", "race"), rk["role"]
+        fullk = _full_peak(rolek)
+        totalk = weeks_until(rk["date"], _date(prev["date"]))
+        taperk = _seg_taper(totalk, fullk)        # clamped ≤ totalk → segment never overruns the race
+        remk = max(0, totalk - taperk)
+        peakk = min(2, remk) if fullk else 0      # short inter-race sharpen; fitness is held, no new base
+        bridgek = max(0, remk - peakk)            # taperk + peakk + bridgek == totalk (no calendar drift)
+        phases += [
+            {"phase": f"Bridge → {lblk}", "weeks": bridgek, "kind": "bridge", "key": f"bridge{k}", "race": lblk, "role": rolek},
+            {"phase": f"Peak → {lblk}", "weeks": peakk, "kind": "peak", "key": f"peak{k}", "race": lblk, "role": rolek},
+            {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek},
+        ]
+    return [p for p in phases if p["weeks"] > 0], weeks_until(chain[-1]["date"], today)
+
+
 # Re-base block targets (§6d, a conservative masters/returning-runner default): a GENTLE
 # build — the re-base maintains/lightly builds and re-establishes the easy-aerobic habit; real
 # CTL-building is the Base phase. Volumes chosen so end-of-week ACWR sits ~1.0–1.18 and only the
@@ -1875,19 +1937,51 @@ def _rebase_start(db, today):
     return start
 
 
-def select_anchor(objs, today):
-    """The peak the plan periodizes toward: the nearest upcoming A-race (or, if none is
-    flagged A, the nearest upcoming race). Returns (anchor, tune_ups) — tune_ups are the
-    other upcoming races before the anchor (B/C checkpoints)."""
-    future = [o for o in objs if _date(o["date"]) > today]
+# §6q — Combined multi-A periodization. When several A-races are upcoming, periodize the whole CHAIN
+# toward the FINAL one (the ultimate peak), with intermediate peaks/tapers, instead of only toward the
+# nearest. Each earlier A-race's ROLE is set by the gap to the NEXT A vs. how long THIS race's type
+# needs to recover before another peak: gap ≥ recovery → CO-EQUAL peak (its own full taper + a re-build
+# bridge into the next); gap < recovery → SUBORDINATE (a short sharpen/mini-taper, not a full peak it
+# can't recover from). The threshold scales with the EARLIER race's distance — a marathon needs far
+# longer than a 10k before a second peak, and the ACWR governor can't see connective-tissue recovery.
+# Adjudication stays HUMAN: this reads the priorities the owner set; it does not auto-rank A vs B.
+RACE_RECOVERY_WEEKS = {"5k": 3, "10k": 3, "half": 4, "marathon": 6, "custom": 4}
+RACE_RECOVERY_DEFAULT = 4
+
+
+def _recovery_weeks(race_type):
+    """Weeks the given race type needs before a second peak can be co-equal (else the earlier race
+    is subordinated to a mini-taper). Keyed on the EARLIER race's distance."""
+    return RACE_RECOVERY_WEEKS.get((race_type or "").lower(), RACE_RECOVERY_DEFAULT)
+
+
+def select_chain(objs, today):
+    """§6q — order the upcoming A-races into a periodization CHAIN toward the FINAL A (the ultimate
+    peak), tagging each earlier A's role by separation. Returns (chain, tune_ups):
+      chain    — ordered list of {**objective, "role": ...} with role ∈ {goal, coequal, subordinate};
+                 the LAST entry is always 'goal'. With no A flagged, falls back to [nearest race].
+      tune_ups — upcoming NON-chain races (B/C) on or before the final anchor's date.
+    Pure function of (objectives, today) — adjudication stays human (reads set priorities)."""
+    future = sorted((o for o in objs if _date(o["date"]) > today), key=lambda o: _date(o["date"]))
     a_races = [o for o in future if o.get("priority") == "A"]
-    pool = a_races or future
-    if not pool:
-        return None, []
-    anchor = min(pool, key=lambda o: o["date"])
+    if not a_races:                                   # no A → nearest race is the lone peak (legacy)
+        if not future:
+            return [], []
+        peak = future[0]
+        return ([{**peak, "role": "goal"}],
+                [o for o in future if o["id"] != peak["id"] and _date(o["date"]) <= _date(peak["date"])])
+    chain = []
+    for i, a in enumerate(a_races):
+        if i == len(a_races) - 1:
+            role = "goal"
+        else:
+            gap = weeks_until(a_races[i + 1]["date"], _date(a["date"]))
+            role = "coequal" if gap >= _recovery_weeks(a.get("type")) else "subordinate"
+        chain.append({**a, "role": role})
+    final = a_races[-1]
     tune_ups = [o for o in future
-                if o["id"] != anchor["id"] and o["date"] <= anchor["date"]]
-    return anchor, tune_ups
+                if o.get("priority") != "A" and _date(o["date"]) <= _date(final["date"])]
+    return chain, tune_ups
 
 
 def _prior_weeks_by_start(prior_plan, key):
@@ -1984,7 +2078,8 @@ def generate_plan(db):
 
     objs = [dict(r) for r in db.execute(
         "SELECT * FROM objectives WHERE status='upcoming' ORDER BY date").fetchall()]
-    anchor, tune_ups = select_anchor(objs, today)
+    chain, tune_ups = select_chain(objs, today)   # §6q — full A-race chain toward the FINAL peak
+    anchor = chain[-1] if chain else None
 
     plan = {
         "ok": True,
@@ -2008,57 +2103,64 @@ def generate_plan(db):
 
     if anchor:
         from datetime import timedelta
-        phases, total_weeks = periodize(today, anchor["date"], rebase_weeks=rebase_weeks_n)
+        # §6q — periodize the whole A-race CHAIN toward the FINAL peak (single race ≡ the old single-A
+        # path: same base/build/peak/taper keys + week counts). Each later race adds a bridge/peak/taper
+        # segment; generate_plan WALKS the resulting phase list, chaining the live CTL seed segment-to-
+        # segment with the past frozen (§6f E), so the multi-peak road is one continuous, diff-able plan.
+        phases, total_weeks = periodize_chain(today, chain, rebase_weeks=rebase_weeks_n)
         plan["mode"] = "race"
         plan["objective"] = {"label": anchor["label"], "date": anchor["date"],
                              "target": anchor.get("target"), "priority": anchor.get("priority"),
                              "weeks_away": total_weeks}
         plan["phases"] = phases
+        plan["chain"] = [{"label": c["label"], "date": c["date"], "type": c.get("type"),
+                          "role": c["role"]} for c in chain]   # §6q multi-A surface (1 entry = single-A)
 
-        # §6f Step B/C/D/E — generate Base → Build → Peak → Taper, each on the phase calendar, with
-        # the past frozen and today-onward chained off the live seed. A §6e-graduated re-base (fewer
-        # weeks) makes Base start earlier AND run longer (periodize gives it the freed weeks), and the
-        # graduation flows straight into the first live Base week. `zones` activates the polarized
-        # quality model (§6f C/D). Each block holds the ACWR ceiling regardless of intensity.
+        # §6f Step B/C/D/E — generate each phase on the calendar, past frozen, today-onward chained off
+        # the live seed. `zones` activates the polarized quality model (§6f C/D); each block holds the
+        # ACWR ceiling regardless of intensity. A bridge (post-race re-build) reuses the Build shaper.
+        SHAPERS = {"base": base_shape, "build": build_shape, "bridge": build_shape,
+                   "peak": peak_shape, "taper": taper_shape}
         cur_start = block_start + timedelta(weeks=rebase_weeks_n)
         cur_km = (rb["weeks"][-1]["intent_km"] if rb["weeks"] else REBASE_SHAPE[-1]["km"])
         proj_end_ctl = rb["end_ctl"]
         earned_applied = False
         ctl_floor_active, ctl_floor_anchor = False, live["ctl"]   # §6h — floor state for the surfaces
-        for key, name, shaper in (("base", "Base", base_shape), ("build", "Build", build_shape),
-                                  ("peak", "Peak", peak_shape), ("taper", "Taper", taper_shape)):
-            n_wk = next((p["weeks"] for p in phases if p["phase"].startswith(name)), 0)
-            if n_wk <= 0:
-                continue
-            sh = shaper(n_wk, cur_km)
-            # §6h — CTL-responsive volume FLOOR (Base/Build): lift non-down weeks to match this phase's
-            # measured/projected CTL (live["ctl"] is its seed), so the plan tracks fitness, not just the
-            # fixed ramp. Dormant at low CTL (pure no-op). Applied BEFORE the earned lift so the two
-            # compose predictably — the floor sets the fitness-matched baseline, the earned lift adds the
-            # banked boost on top; both skip down weeks and the ACWR governor still caps every week.
-            if key in ("base", "build"):
-                if key == "base":
+        race_proj = {}   # §6q — projected end-CTL at each race (end of its taper), for the surfaces
+        for ph in phases:
+            kind, key, n_wk = ph["kind"], ph["key"], ph["weeks"]
+            if kind == "rebase" or n_wk <= 0:
+                continue   # the re-base block is already generated above as `rb`
+            building = kind in ("base", "build", "bridge")   # the volume-building phases
+            sh = SHAPERS[kind](n_wk, cur_km)
+            # §6h — CTL-responsive volume FLOOR (building phases): lift non-down weeks to match this
+            # phase's measured/projected CTL (live["ctl"] is its seed), so the plan tracks fitness, not
+            # just the fixed ramp. Dormant at low CTL (pure no-op). Applied BEFORE the earned lift so the
+            # two compose predictably; both skip down weeks and the ACWR governor still caps every week.
+            if building:
+                if kind == "base":
                     ctl_floor_anchor = live["ctl"]
                 floored = _apply_ctl_floor(sh, live["ctl"])
                 ctl_floor_active = ctl_floor_active or (floored is not sh)
                 sh = floored
-            # §6e/§6f — earned volume lift: apply ONCE, to the FIRST building phase that runs (Base,
-            # or Build if there's no Base on a short runway). Build/Peak then inherit the lifted level
-            # through `cur_km` (they ramp off the lifted end) — a single ~F level-lift, never F² that
-            # would compound phase-over-phase and quietly drive the building weeks to the ACWR ceiling.
-            if key in ("base", "build") and not earned_applied and earned["factor"] > 1.0:
+            # §6e/§6f — earned volume lift: apply ONCE, to the FIRST Base/Build phase (the initial
+            # build), NOT to a post-race bridge — so a short first-race runway can't land the banked
+            # boost on a recovery re-build. Build/Peak inherit the lifted level through `cur_km`.
+            if kind in ("base", "build") and not earned_applied and earned["factor"] > 1.0:
                 sh = _apply_earned_lift(sh, earned["factor"])   # non-down weeks; governor still caps
                 earned_applied = True
-            # §6e — earned FREQUENCY advance: the 6th run on non-down Base/Build weeks (not Peak/Taper).
-            # Orthogonal to the volume lifts above (it changes `runs`, not km), and applied per phase
-            # (not once) since `runs` isn't carried through `cur_km`. Constant volume; governor caps.
-            if key in ("base", "build"):
+            # §6e — earned FREQUENCY advance: the 6th run on non-down building weeks (not Peak/Taper).
+            # Orthogonal to the volume lifts (changes `runs`, not km), applied per phase since `runs`
+            # isn't carried through `cur_km`. Constant volume; governor caps.
+            if building:
                 sh = _apply_freq_advance(sh, freq["active"])
             block, end_ctl = _gen_phase(key, cur_start, sh, zones)
             plan[key] = block
             cur_start = cur_start + timedelta(weeks=n_wk)
             cur_km = block["weeks"][-1]["intent_km"] if block["weeks"] else cur_km
             proj_end_ctl = end_ctl
+            if kind == "taper":
+                race_proj[key] = end_ctl   # keyed by the unique taper key (labels can duplicate)
 
         # §6h — CTL-responsive volume floor state for the surfaces (dormant until measured CTL
         # outruns the conservative ramp ~CTL 35–45; it's the mechanism that lets a faster-than-
@@ -2067,9 +2169,16 @@ def generate_plan(db):
                              "floor_km": round(K_CTL_VOLUME * (ctl_floor_anchor or 0)),
                              "active": ctl_floor_active}
 
-        # §6f Step E — feasibility re-reads the engine's REAL end-of-taper CTL (chained through the
-        # blocks under the ceiling), not just the generic growth estimate.
+        # §6f Step E — feasibility re-reads the engine's REAL end-of-taper CTL for the FINAL race
+        # (chained through every segment under the ceiling), not just the generic growth estimate.
         plan["feasibility"] = feasibility(anchor, ctl0, vo2, total_weeks, projected_ctl=proj_end_ctl)
+        # §6q — annotate each chain race with its own projected end-of-taper CTL (for the surfaces).
+        # Map by the segment's taper KEY (chain index i → "taper"/"taper{i}"), not the human label,
+        # since two races can share a label.
+        for i, c in enumerate(plan["chain"]):
+            tk = "taper" if i == 0 else f"taper{i}"
+            if tk in race_proj:
+                c["proj_ctl"] = round(race_proj[tk], 1)
     else:  # §6b maintenance fallback — no objective: hold fitness, ACWR centred, no taper
         plan["mode"] = "maintenance"
         plan["objective"] = None
@@ -2094,11 +2203,16 @@ def diff_plans(old, new):
         a = f"{oo.get('label')} ({oo.get('date')})" if oo else "maintenance"
         b = f"{no.get('label')} ({no.get('date')})" if no else "maintenance"
         changes.append(f"Anchor: {a} → {b}")
-    op = {p["phase"]: p["weeks"] for p in old.get("phases", [])}
-    npz = {p["phase"]: p["weeks"] for p in new.get("phases", [])}
-    for ph in sorted(set(op) | set(npz)):
-        if op.get(ph, 0) != npz.get(ph, 0):
-            changes.append(f"{ph}: {op.get(ph, 0)}w → {npz.get(ph, 0)}w")
+    # §6q — key phases by their stable `key` (unique per chain segment), not the display name, so a
+    # re-labelled race or two same-label races don't read as phantom structural changes. (Pre-§6q
+    # saved plans have no key → fall back to the name; one transitional diff, then stable.)
+    op = {(p.get("key") or p["phase"]): p for p in old.get("phases", [])}
+    npz = {(p.get("key") or p["phase"]): p for p in new.get("phases", [])}
+    for k in sorted(set(op) | set(npz)):
+        ow, nw = (op.get(k) or {}).get("weeks", 0), (npz.get(k) or {}).get("weeks", 0)
+        if ow != nw:
+            name = (npz.get(k) or op.get(k))["phase"]
+            changes.append(f"{name}: {ow}w → {nw}w")
     if oo.get("weeks_away") != no.get("weeks_away"):
         wa = lambda v: f"{v}w" if v is not None else "no race"
         changes.append(f"Runway: {wa(oo.get('weeks_away'))} → {wa(no.get('weeks_away'))}")
@@ -5644,9 +5758,9 @@ function weekDetail(inner,pk,wk,sel){ return `<div class="weekdetail${wk===sel?'
 // A collapsible-free phase section: header (weeks, calendar, projected end CTL/ATL, Σ km, frozen
 // count) + a week strip; only the selected week's detail shows. Renders nothing if the phase
 // wasn't generated (short runways drop late phases).
-function phaseSection(title,block,p,today){
+function phaseSection(title,block,p,today,pk){
   if(!block||!block.weeks||!block.weeks.length) return "";
-  const pk=phaseKey(title);
+  pk = pk || phaseKey(title);   // §6q — explicit key (chain segments share base/peak/taper names)
   const km=block.weeks.reduce((s,w)=>s+(w.km||0),0);
   const froz=block.weeks.filter(w=>w.frozen).length;
   const fz=froz?` · <span class="wfz">${froz} done</span>`:"";
@@ -5679,9 +5793,13 @@ function renderPlan(p){
   // Which phase owns "today" — the one whose weeks bracket it. Default selection for the Plan tile:
   // the bar shows the whole road, but only the live phase's weeks are open underneath. Fallbacks:
   // before the plan starts → the first phase; after it ends → the last.
-  const phaseGroups=[["rebase",planWeeks],["base",p.base&&p.base.weeks],["build",p.build&&p.build.weeks],
-                     ["peak",p.peak&&p.peak.weeks],["taper",p.taper&&p.taper.weeks]]
-                    .map(([k,w])=>({key:k,weeks:w||[]})).filter(g=>g.weeks.length);
+  // §6q — phase groups drive "which phase owns today". Re-base weeks come from the LOG-enriched
+  // planWeeks; every other segment (base/build/peak/taper + any chain bridge/peak/taper) comes from
+  // its own block keyed by p.phases[].key, so a multi-A chain opens the right segment under the bar.
+  const phaseGroups=[{key:"rebase",weeks:planWeeks}]
+    .concat((p.phases||[]).filter(x=>x.key&&x.key!=="rebase")
+            .map(x=>({key:x.key,weeks:(p[x.key]&&p[x.key].weeks)||[]})))
+    .filter(g=>g.weeks.length);
   let curPhase=(phaseGroups.find(g=>g.weeks.some(w=>weekHoldsToday(w,today)))||{}).key;
   if(!curPhase && phaseGroups.length){
     const first=phaseGroups[0];
@@ -5690,8 +5808,8 @@ function renderPlan(p){
   }
   curPhase=curPhase||"rebase";
   const phaseBar=p.phases.filter(x=>x.weeks>0).map((x,i)=>{
-    const mix=20+i*16, k=phaseKey(x.phase);
-    return `<div class="phaseseg${k===curPhase?' active':''}" data-pk="${k}" style="flex:${x.weeks};--mix:${mix}%">
+    const mix=20+i*16, k=x.key||phaseKey(x.phase);   // §6q — explicit per-segment key
+    return `<div class="phaseseg${k===curPhase?' active':''}" data-pk="${k}" title="${esc(x.phase)}" style="flex:${x.weeks};--mix:${mix}%">
       <b>${x.phase.split(" ")[0]}</b>${x.weeks}w</div>`;}).join("");
   // Glanceable block total — Phase 0 is all easy running, so planned time = distance × easy pace.
   const phaseKm = planWeeks.reduce((s,w)=>s+(w.km||0),0);
@@ -5790,11 +5908,11 @@ function renderPlan(p){
         <span class="away" style="color:var(--muted)">no objective — holding fitness</span></div>`;
   // Per-phase week lists, each behind its bar segment. Only the active phase's panel is shown;
   // clicking a segment swaps which one is open (wired below). Empty phases render no panel.
-  const baseHtml  = o?phaseSection('Base — aerobic',   p.base,  p, today):'';
-  const buildHtml = o?phaseSection('Build — specific', p.build, p, today):'';
-  const peakHtml  = o?phaseSection('Peak / sharpen',   p.peak,  p, today):'';
-  const taperHtml = o?phaseSection('Taper',            p.taper, p, today):'';
+  // §6q — one panel per non-rebase phase in p.phases (single-A = base/build/peak/taper; a chain adds
+  // its bridge/peak/taper segments), keyed by the phase's own key so segments never collide.
   const panel=(k,inner)=>inner?`<div class="phasepanel${k===curPhase?' active':''}" data-pk="${k}">${inner}</div>`:'';
+  const phasePanels = o ? (p.phases||[]).filter(x=>x.key&&x.key!=="rebase")
+      .map(x=>panel(x.key, phaseSection(x.phase, p[x.key], p, today, x.key))).join("") : '';
   const rebaseInner=`
     <h3 style="font-family:var(--serif);font-weight:600;font-size:16px;margin:18px 0 2px;display:flex;justify-content:space-between;align-items:baseline;gap:12px">
       <span>Phase 0 — the re-base block <span class="muted mono" style="font-size:11px">(start ${rb.start}, ends CTL ${rb.end_ctl}/ATL ${rb.end_atl})${adh}</span></span>
@@ -5823,10 +5941,7 @@ function renderPlan(p){
     ${grad}${earnedNote}${ctlFloorNote}${freqNote}
     <div class="phasepanels">
       ${panel('rebase',rebaseInner)}
-      ${panel('base',baseHtml)}
-      ${panel('build',buildHtml)}
-      ${panel('peak',peakHtml)}
-      ${panel('taper',taperHtml)}
+      ${phasePanels}
     </div>`;
   // The phase bar acts as a selector: clicking a segment opens that phase's weeks and closes the rest.
   host.querySelectorAll(".phaseseg").forEach(seg=>seg.addEventListener("click",()=>{
@@ -6891,6 +7006,126 @@ def _stc_settings():
                got={"violations": fails or "none"})
 
 
+def _stc_multi_a_chain():
+    """§6q select_chain — role assignment by race-type-scaled separation + the no-A fallback + B→tune-ups.
+    Pure function of (objectives, today)."""
+    today = _date("2026-06-01")
+    def race(i, wks, typ, prio):
+        return {"id": i, "date": (today + timedelta(weeks=wks)).isoformat(), "type": typ, "priority": prio}
+    roles = lambda objs: [c["role"] for c in select_chain(objs, today)[0]]
+    fails = []
+    cases = [
+        ("marathon +4wk → earlier subordinate (4<6)", [race(1,12,"marathon","A"), race(2,16,"marathon","A")], ["subordinate","goal"]),
+        ("marathon +8wk → earlier co-equal (8≥6)",     [race(1,8,"marathon","A"),  race(2,16,"marathon","A")], ["coequal","goal"]),
+        ("10k +3wk → earlier co-equal (3≥3)",          [race(1,9,"10k","A"),       race(2,12,"10k","A")],      ["coequal","goal"]),
+        ("marathon→10k +5wk → subordinate (earlier=marathon, 5<6)", [race(1,10,"marathon","A"), race(2,15,"10k","A")], ["subordinate","goal"]),
+        ("single A → goal",                            [race(1,14,"marathon","A")], ["goal"]),
+    ]
+    for label, objs, want in cases:
+        got = roles(objs)
+        if got != want:
+            fails.append(f"{label}: {got} (want {want})")
+    # no A flagged → nearest race is the lone goal, no chain past it
+    chain, tune = select_chain([race(1,6,"10k","B"), race(2,10,"half","C")], today)
+    if [c["id"] for c in chain] != [1] or chain[0]["role"] != "goal" or tune != []:
+        fails.append(f"no-A fallback: chain={[(c['id'],c['role']) for c in chain]} tune={[t['id'] for t in tune]}")
+    # a B race before the final A → tune-up, NOT in the chain
+    chain, tune = select_chain([race(1,5,"10k","B"), race(2,14,"marathon","A")], today)
+    if [c["id"] for c in chain] != [2] or [t["id"] for t in tune] != [1]:
+        fails.append(f"B-before-A: chain={[c['id'] for c in chain]} tune={[t['id'] for t in tune]}")
+    return _st("det", "multi-a-chain",
+               "select_chain: role by race-type-scaled separation (marathon 6wk vs 10k 3wk), no-A fallback, B→tune-ups",
+               passed=not fails, expect="roles + chain/tune split correct",
+               got={"violations": fails or "none"})
+
+
+def _stc_periodize_chain():
+    """§6q periodize_chain — REDUCES to periodize() for a single goal race; multi-A adds a bridge/peak/
+    taper segment per later race; a subordinate race gets a 1-wk sharpen + no full peak. Pure."""
+    today = _date("2026-06-01")
+    def race(i, wks, typ, label):
+        return {"id": i, "date": (today + timedelta(weeks=wks)).isoformat(), "type": typ, "label": label}
+    fails = []
+    # (a) single goal race ≡ periodize() — same leading-word + weeks per phase, same total
+    goal = {**race(1, 24, "marathon", "Goal Marathon"), "role": "goal"}
+    ch, tw = periodize_chain(today, [goal], rebase_weeks=6)
+    pz, _ = periodize(today, goal["date"], rebase_weeks=6)
+    red = lambda ps: [(p["phase"].split()[0], p["weeks"]) for p in ps]
+    if red(ch) != red(pz):
+        fails.append(f"single-A not reducing to periodize: {red(ch)} vs {red(pz)}")
+    if tw != weeks_until(goal["date"], today):
+        fails.append("single-A total-weeks mismatch")
+    # (b) two co-equal A's → a Bridge→Peak→Taper segment for the 2nd race; rebase first, goal-taper last
+    co = [{**race(1, 12, "10k", "Spring 10k"), "role": "coequal"},
+          {**race(2, 24, "marathon", "Goal Marathon"), "role": "goal"}]
+    ch2, _ = periodize_chain(today, co, rebase_weeks=6)
+    keys2, kinds2 = [p["key"] for p in ch2], [p["kind"] for p in ch2]
+    if "bridge1" not in keys2 or "bridge" not in kinds2:
+        fails.append(f"co-equal chain missing bridge: {keys2}")
+    if kinds2[0] != "rebase" or ch2[-1]["kind"] != "taper" or ch2[-1]["race"] != "Goal Marathon":
+        fails.append(f"chain endpoints wrong: first={kinds2[0]} last={ch2[-1].get('key')}/{ch2[-1].get('race')}")
+    # (c) subordinate first race → taper=1 (mini), no peak phase (peak weeks 0 → filtered)
+    sub = [{**race(1, 12, "marathon", "Tune-up Mara"), "role": "subordinate"},
+           {**race(2, 16, "marathon", "Goal Mara"), "role": "goal"}]
+    ch3, _ = periodize_chain(today, sub, rebase_weeks=6)
+    seg0_taper = next((p for p in ch3 if p["key"] == "taper"), None)
+    if not seg0_taper or seg0_taper["weeks"] != 1:
+        fails.append(f"subordinate taper not 1wk: {seg0_taper}")
+    if next((p for p in ch3 if p["key"] == "peak"), None) is not None:
+        fails.append("subordinate race should have no full peak phase")
+    # (d) a SHORT inter-race gap (1 wk) must be clamped — phase weeks can't overrun the final race date
+    tight = [{**race(1, 11, "10k", "R1"), "role": "coequal"},
+             {**race(2, 12, "marathon", "R2"), "role": "goal"}]
+    ch4, tw4 = periodize_chain(today, tight, rebase_weeks=6)
+    seg_sum = sum(ph["weeks"] for ph in ch4)
+    if seg_sum > tw4:
+        fails.append(f"short-gap overrun: phase weeks {seg_sum} > runway {tw4}")
+    return _st("det", "periodize-chain",
+               "periodize_chain ≡ periodize for single-A; multi-A adds bridge/peak/taper per race; subordinate → 1wk sharpen, no peak",
+               passed=not fails, expect="reduction + chain structure + subordinate sizing",
+               got={"violations": fails or "none"})
+
+
+def _stc_multi_a_plan():
+    """§6q INTEGRATION — generate_plan over a real 2-A chain (in-memory DB): produces the chain + a
+    bridge segment, and the ACWR ceiling holds on EVERY week across ALL segments (the safety invariant
+    that must survive the multi-segment rewrite). Self-contained: never touches the real DB."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = datetime.now().date()
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (today.isoformat(), 50.0, 30.0, 28.0))
+    def add(label, wks, typ):
+        mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (typ, label, (today + timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming", _now_iso()))
+    add("Tune 10k", 12, "10k")          # co-equal (gap to marathon 12wk ≫ 10k recovery 3wk)
+    add("Goal Marathon", 24, "marathon")
+    mem.commit()
+    p = generate_plan(mem)
+    fails = []
+    if not p.get("ok") or p.get("mode") != "race":
+        fails.append(f"plan not ok/race: ok={p.get('ok')} mode={p.get('mode')} err={p.get('error')}")
+    chain = p.get("chain", [])
+    if [c.get("role") for c in chain] != ["coequal", "goal"]:
+        fails.append(f"chain roles: {[(c.get('label'), c.get('role')) for c in chain]}")
+    if not any(ph["kind"] == "bridge" for ph in p.get("phases", [])):
+        fails.append("no bridge segment in multi-A phases")
+    overs = []
+    for ph in p.get("phases", []):
+        for w in (p.get(ph.get("key")) or {}).get("weeks", []):
+            a = w.get("proj_acwr")
+            if a is not None and a > 1.25 + 1e-6:
+                overs.append((ph["key"], w.get("wk"), round(a, 3)))
+    if overs:
+        fails.append(f"ACWR ceiling breached: {overs[:5]}")
+    mem.close()
+    return _st("det", "multi-a-plan",
+               "generate_plan over a 2-A chain: chain roles + bridge segment + ACWR ≤1.25 on every week of every segment",
+               passed=not fails, expect="chain + bridge + ceiling held across all segments",
+               got={"violations": fails or "none"})
+
+
 def _stc_projector(db):
     # Validate the reconstruction only where it's LIKE-FOR-LIKE with Runalyze's snapshot. A
     # snapshot is comparable only when both hold:
@@ -6952,13 +7187,14 @@ def _stc_acwr_ceiling(db):
     if not (p.get("rebase") or {}).get("weeks"):
         return _st("det", "plan-acwr-ceiling", "every planned week's projected ACWR ≤ soft cap",
                    skipped=True, note="no rebase weeks (maintenance mode / no plan inputs)")
-    # §6f Step D — across ALL phases: re-base → Base → Build → Peak → Taper
-    tagged = [(ph, w) for ph in ("rebase", "base", "build", "peak", "taper")
-              for w in (p.get(ph) or {}).get("weeks", [])]
-    over = [{"phase": ph, "wk": w["wk"], "acwr": w.get("proj_acwr")} for ph, w in tagged
+    # §6f Step D / §6q — across EVERY phase block the plan actually generated, keyed off p["phases"]
+    # so chain segments (bridge/peak1/taper1…) are covered, not just the single-A base/build/peak/taper.
+    keys = ["rebase"] + [ph["key"] for ph in (p.get("phases") or [])
+                         if ph.get("key") and ph["key"] != "rebase"]
+    tagged = [(k, w) for k in keys for w in (p.get(k) or {}).get("weeks", [])]
+    over = [{"phase": k, "wk": w["wk"], "acwr": w.get("proj_acwr")} for k, w in tagged
             if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02]
-    counts = {ph: len((p.get(ph) or {}).get("weeks", []))
-              for ph in ("rebase", "base", "build", "peak", "taper")}
+    counts = {k: len((p.get(k) or {}).get("weeks", [])) for k in keys}
     return _st("det", "plan-acwr-ceiling",
                f"every week's projected end-ACWR ≤ soft cap {ACWR_SOFT} across ALL phases",
                passed=not over, expect=f"≤{ACWR_SOFT}", got="all within" if not over else over,
@@ -7637,7 +7873,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
-                 lambda: _stc_local_delete(), lambda: _stc_settings(),
+                 lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_multi_a_chain(),
+                 lambda: _stc_periodize_chain(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),
