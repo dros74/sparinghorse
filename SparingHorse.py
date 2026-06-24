@@ -469,9 +469,15 @@ SETTINGS_SPEC = [
     {"key": "house_name", "env": "SH_HOUSE_NAME", "label": "House link — label", "kind": "line",
      "help": "Text shown for the header back-link (defaults to the URL)."},
     {"key": "weather_cities", "env": "SH_WEATHER_CITIES", "label": "Weather widget cities", "kind": "line",
-     "help": "Format: Name,lat,lon[,CODE];… e.g. 'Lisbon,38.72,-9.14,LIS'. Empty hides the widget."},
+     # The Settings panel renders a search-and-pick city widget for this; the stored value is the
+     # `Name,lat,lon,CODE;…` string this help describes (still the env/API contract).
+     "help": "Header weather-widget cities, stored as Name,lat,lon[,CODE];… No cities = widget hidden."},
     {"key": "tz", "env": "SH_TZ", "label": "Sync timezone", "kind": "line", "default": "UTC",
      "help": "IANA zone (e.g. Europe/Luxembourg) for the nightly-sync wall clock. Applies on the next sync."},
+    {"key": "private_url", "env": "SH_PRIVATE_URL", "label": "Private console URL", "kind": "url",
+     "help": "The 'Log in' link shown on the PUBLIC page, pointing back to this private console. "
+             "Stored here (read from the shared DB) so it survives redeploys; the public container "
+             "picks up a change on its next restart."},
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
 
@@ -506,9 +512,9 @@ def validate_setting(key, value):
     scheme check); the rest get a format/parse check so a bad value can't silently disable the widget
     or the nightly sync."""
     value = value if isinstance(value, str) else ""
-    if key in ("house_url", "house_name") and any(c in value for c in '"<>'):
+    if key in ("house_url", "house_name", "private_url") and any(c in value for c in '"<>'):
         return False, "cannot contain quotes or angle brackets"
-    if key == "house_url" and value and not re.match(r"^https?://", value):
+    if key in ("house_url", "private_url") and value and not re.match(r"^https?://", value):
         return False, "must start with http:// or https://"
     if key == "weather_cities" and value.strip() and not _parse_weather_cities(value):
         return False, "could not parse — use Name,lat,lon;Name,lat,lon"
@@ -526,10 +532,11 @@ def apply_settings_overrides(db):
     threads sharing these globals), so a save is visible to every request thread at once. The scheduler
     thread reads SYNC_TZ live, but only re-arms its sleep on the NEXT cycle — so a tz change lands on
     the next scheduled sync (as the help text says), not the one already counting down."""
-    global ATHLETE_CONTEXT, HOUSE_URL, HOUSE_NAME, WEATHER_CITIES, SYNC_TZ
+    global ATHLETE_CONTEXT, HOUSE_URL, HOUSE_NAME, WEATHER_CITIES, SYNC_TZ, PRIVATE_URL
     ATHLETE_CONTEXT = _resolve_setting(db, SETTINGS_BY_KEY["athlete_context"])[0].strip()
     HOUSE_URL = _resolve_setting(db, SETTINGS_BY_KEY["house_url"])[0].strip()
     HOUSE_NAME = _resolve_setting(db, SETTINGS_BY_KEY["house_name"])[0].strip()
+    PRIVATE_URL = _resolve_setting(db, SETTINGS_BY_KEY["private_url"])[0].strip()
     WEATHER_CITIES = _parse_weather_cities(_resolve_setting(db, SETTINGS_BY_KEY["weather_cities"])[0])
     with _weather_lock:            # cities may have changed → drop the cached bundle so the next
         _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
@@ -2939,7 +2946,7 @@ def _private_only_path(p):
     `/api/effort-discipline` (§6m — per-run HR + a personal effort critique, more granular than the
     public 'training shape + plan only' posture), and `/api/settings` (athlete context is personal,
     and the panel is an owner-only control surface)."""
-    return (p in ("/api/health", "/api/effort-discipline", "/api/settings")
+    return (p in ("/api/health", "/api/effort-discipline", "/api/settings", "/api/geocode")
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -3973,6 +3980,36 @@ def api_settings():
     return jsonify(ok=True, settings=current_settings(get_db()))
 
 
+@app.get("/api/geocode")
+def api_geocode():
+    """Resolve a city name → candidates with lat/lon, via Open-Meteo's keyless geocoding API (same
+    provider as the weather widget). Server-side proxy so the browser never calls a third party
+    directly (keeps CSP `connect-src 'self'` + the user's typing private). Private-only via
+    `_private_only_path`. Returns a trimmed list the Settings city-picker turns into the stored
+    `Name,lat,lon,CODE` format."""
+    q = (request.args.get("q") or "").strip()[:80]
+    if len(q) < 2:
+        return jsonify(ok=True, results=[])
+    try:
+        r = requests.get("https://geocoding-api.open-meteo.com/v1/search",
+                         params={"name": q, "count": 6, "language": "en", "format": "json"},
+                         timeout=8)
+        r.raise_for_status()
+        rows = r.json().get("results") or []
+        results = [{
+            "name": c.get("name"),
+            "admin1": c.get("admin1") or "",
+            "country": c.get("country") or "",
+            "country_code": (c.get("country_code") or "").upper(),
+            "lat": round(c["latitude"], 4), "lon": round(c["longitude"], 4),
+        } for c in rows if isinstance(c.get("latitude"), (int, float))
+                        and isinstance(c.get("longitude"), (int, float))]
+    except Exception as e:
+        print(f"[geocode] {q!r} failed: {e}")   # detail to logs, generic message to the client
+        return jsonify(ok=False, error="geocoding unavailable"), 502
+    return jsonify(ok=True, results=results)
+
+
 @app.post("/api/settings")
 def api_settings_save():
     """Persist edited settings (meta-override of the SH_* env) and re-apply live. The _readonly_guard
@@ -3994,7 +4031,10 @@ def index():
                if HOUSE_URL else "")
     page = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
-            .replace("__SH_PRIVATE_URL__", PRIVATE_URL)
+            # json.dumps escapes quotes/backslashes but NOT "/", so neutralise "</" → a value with
+            # "</script>" (e.g. a raw env SH_PRIVATE_URL that bypassed validate_setting) can't close
+            # the inline <script> and inject markup into the (public) page.
+            .replace("__SH_PRIVATE_URL__", json.dumps(PRIVATE_URL).replace("</", "<\\/"))
             .replace("__RUNALYZE_LOGO__", RUNALYZE_LOGO_SVG)
             .replace("__SH_HUBLINK__", hublink))
     # The whole SPA — markup + inline JS — is this one document. Tell the browser to revalidate it
@@ -4590,6 +4630,34 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .setrow .err{color:#c0392b;font-size:11px;margin-top:4px}
   .setbar{display:flex;align-items:center;gap:12px;margin-top:4px}
   .setbar .ok{color:var(--accent);font-size:12px}
+  /* Settings modal — native <dialog>, centered, backdrop-dimmed */
+  dialog.modal{border:none;border-radius:16px;padding:0;width:min(560px,92vw);max-height:86vh;
+    background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
+  dialog.modal::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+  .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:18px 22px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface)}
+  .modal-head h2{margin:0}
+  .modal-x{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;
+    line-height:1;padding:4px 8px;border-radius:8px}
+  .modal-x:hover{color:var(--text);background:var(--surface-2)}
+  #settings{padding:20px 22px;overflow:auto;max-height:calc(86vh - 64px)}
+  /* Weather city picker — chips + typeahead, replaces the raw lat/lon string */
+  .wxchips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}
+  .wxchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;font-size:13px}
+  .wxchip b{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--muted)}
+  .wxchip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;
+    line-height:1;padding:0 2px;border-radius:6px}
+  .wxchip button:hover{color:#c0392b}
+  .wxsearchrow{display:flex;gap:8px}
+  .wxsearchrow input{flex:1}
+  .wxresults{list-style:none;margin:6px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;
+    overflow:hidden}
+  .wxresults:empty{display:none}
+  .wxresults li{padding:8px 11px;cursor:pointer;font-size:13px;border-top:1px solid var(--line)}
+  .wxresults li:first-child{border-top:none}
+  .wxresults li:hover{background:var(--surface-2)}
+  .wxresults .sub{color:var(--muted);font-size:11px}
   .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
   footer{margin-top:48px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
@@ -4623,6 +4691,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       </div>
       <div class="bar">
         <button class="primary" id="syncBtn">Sync now</button>
+        <button class="primary" id="settingsBtn" title="Personalization — athlete context, weather cities, links, sync timezone">⚙ Settings</button>
         <button class="ghost" id="backfillBtn" title="One-time full-history pull — walks every page back to your first activity. Use on a fresh machine or if old history is missing.">Backfill all</button>
       </div>
     </header>
@@ -4693,10 +4762,13 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       </form>
     </div>
 
-    <details class="section" id="sec-settings">
-      <summary><h2>Settings <span class="muted mono" style="font-size:12px">— personalization, stored in your database (overrides env)</span></h2></summary>
-      <div class="panel" id="settings"><div class="empty">Loading…</div></div>
-    </details>
+    <dialog id="settingsDialog" class="modal">
+      <div class="modal-head">
+        <h2>Settings <span class="muted mono" style="font-size:12px">— personalization, stored in your database (overrides env)</span></h2>
+        <button class="modal-x" id="settingsClose" aria-label="Close settings">✕</button>
+      </div>
+      <div id="settings"><div class="empty">Loading…</div></div>
+    </dialog>
 
     <footer>
       <span id="foot">Spares the horse by being the horse · not synced yet</span>
@@ -4707,7 +4779,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 <script>
 const SH_READONLY = __SH_READONLY__;   // public read-only mode (server-injected)
-const SH_PRIVATE_URL = "__SH_PRIVATE_URL__";   // public→private console link (optional)
+const SH_PRIVATE_URL = __SH_PRIVATE_URL__;   // public→private console link (optional, JSON-injected)
 const $ = s => document.querySelector(s);
 const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
 // Per-workout calendar date, e.g. "Jun 23 - Tue" — so the runner can schedule life around the plan.
@@ -6124,16 +6196,38 @@ if(_hform) _hform.addEventListener("submit", async e=>{
   $("#hvalue").value=""; await loadHealth();
 });
 
-// ── Settings panel (private-only) — edit the non-secret personalization that otherwise comes from
-// SH_* env. Values are stored in the DB (meta) and override env; secrets are never shown or settable.
+// ── Settings (private-only, in a modal) — edit the non-secret personalization that otherwise comes
+// from SH_* env. Values are stored in the DB (meta) and override env; secrets are never shown/settable.
+// "Name,lat,lon[,CODE];…" ⇄ [{name,lat,lon,code}] for the weather city picker (backend format unchanged).
+function parseCities(str){
+  return (str||"").split(";").map(s=>s.trim()).filter(Boolean).map(p=>{
+    const b=p.split(",").map(x=>x.trim());
+    return {name:b[0], lat:b[1], lon:b[2], code:((b[3]||(b[0]||"").slice(0,3))||"").toUpperCase()};
+  }).filter(c=>c.name && c.lat && c.lon);
+}
+function serializeCities(arr){ return arr.map(c=>`${c.name},${c.lat},${c.lon},${c.code}`).join(";"); }
+
 async function loadSettings(){
   const host=$("#settings"); if(!host) return;
   let d; try{ d=await getJSON("/api/settings"); }catch(e){ host.innerHTML=`<div class="empty">Could not load settings.</div>`; return; }
   if(!d.ok){ host.innerHTML=`<div class="empty">${esc(d.error||"unavailable")}</div>`; return; }
+  // data-orig = the value as loaded, so saveSettings posts ONLY the fields the user changed —
+  // posting an untouched env/default-sourced value would persist it to meta and shadow the env.
+  const cityField=s=>`<div class="setrow">
+      <label>${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
+      <input type="hidden" id="set_weather_cities" data-key="weather_cities" data-orig="${esc(s.value||"")}" value="${esc(s.value||"")}">
+      <div class="wxchips" id="wxchips"></div>
+      <div class="wxsearchrow">
+        <input id="wxsearch" type="text" placeholder="Search a city — e.g. Lisbon" autocomplete="off">
+        <button type="button" class="ghost" id="wxsearchbtn">Search</button>
+      </div>
+      <ul class="wxresults" id="wxresults"></ul>
+      <div class="help">Type a city and pick it — the coordinates are resolved for you. No cities = the widget is hidden.</div>
+      <div class="err" id="err_weather_cities"></div>
+    </div>`;
   const field=s=>{
+    if(s.key==="weather_cities") return cityField(s);
     const id="set_"+s.key;
-    // data-orig = the value as loaded, so saveSettings can post ONLY the fields the user changed —
-    // posting an untouched env/default-sourced value would persist it to meta and shadow the env.
     const ctl = s.kind==="text"
       ? `<textarea id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}">${esc(s.value||"")}</textarea>`
       : `<input id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}" type="text" value="${esc(s.value||"")}">`;
@@ -6150,6 +6244,41 @@ async function loadSettings(){
       <span class="ok" id="setok"></span></div>
   </form>`;
   $("#setform").addEventListener("submit", saveSettings);
+  wireCityPicker();
+}
+
+function wireCityPicker(){
+  const hidden=$("#set_weather_cities"); if(!hidden) return;
+  let cities=parseCities(hidden.value);
+  const chips=$("#wxchips"), results=$("#wxresults"), search=$("#wxsearch");
+  const sync=()=>{ hidden.value=serializeCities(cities); renderChips(); };
+  function renderChips(){
+    chips.innerHTML = cities.length
+      ? cities.map((c,i)=>`<span class="wxchip"><b>${esc(c.code)}</b> ${esc(c.name)} <button type="button" data-i="${i}" aria-label="Remove ${esc(c.name)}">✕</button></span>`).join("")
+      : `<span class="muted" style="font-size:12px">No cities — the widget is hidden.</span>`;
+    chips.querySelectorAll("button[data-i]").forEach(b=>b.addEventListener("click",()=>{ cities.splice(+b.dataset.i,1); sync(); }));
+  }
+  async function doSearch(){
+    const q=search.value.trim(); if(q.length<2){ results.innerHTML=""; return; }
+    results.innerHTML=`<li class="sub">searching…</li>`;
+    let out; try{ out=await getJSON("/api/geocode?q="+encodeURIComponent(q)); }catch(e){ results.innerHTML=`<li class="sub">search failed</li>`; return; }
+    if(!out.ok){ results.innerHTML=`<li class="sub">search unavailable</li>`; return; }
+    const rs=out.results||[];
+    results.innerHTML = rs.length
+      ? rs.map((r,i)=>`<li data-i="${i}">${esc(r.name)} <span class="sub">${esc([r.admin1,r.country].filter(Boolean).join(", "))}</span></li>`).join("")
+      : `<li class="sub">no matches</li>`;
+    results.querySelectorAll("li[data-i]").forEach(li=>li.addEventListener("click",()=>{
+      const r=rs[+li.dataset.i];
+      const name=(r.name||"").replace(/[,;]/g," ").trim();   // ',' and ';' are delimiters in the stored format
+      if(name && !cities.some(c=>c.lat==r.lat && c.lon==r.lon)){   // skip a city already in the list
+        cities.push({name, lat:r.lat, lon:r.lon, code:name.slice(0,3).toUpperCase()});
+      }
+      search.value=""; results.innerHTML=""; sync();
+    }));
+  }
+  $("#wxsearchbtn").addEventListener("click", doSearch);
+  search.addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); doSearch(); } });
+  renderChips();
 }
 async function saveSettings(e){
   e.preventDefault();
@@ -6175,16 +6304,23 @@ async function saveSettings(e){
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; loadPlan(); }).catch(()=>loadPlan());
 loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort();
+// Settings modal open/close (private only — the button is removed on the public view below).
+const _setBtn=$("#settingsBtn"), _setDlg=$("#settingsDialog");
+if(_setBtn && _setDlg){
+  _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); _setDlg.showModal(); });  // (re)load if the initial fetch failed
+  const _x=$("#settingsClose"); if(_x) _x.addEventListener("click", ()=>_setDlg.close());
+  _setDlg.addEventListener("click", e=>{ if(e.target===_setDlg) _setDlg.close(); });  // backdrop click
+}
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
-  ["sec-health","sec-settings"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
-  ["syncBtn","backfillBtn","planBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["sec-health","settingsDialog"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
   if(cluster){
     let extra='<span class="ro-badge" title="Read-only public view">read-only</span>';
-    if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${SH_PRIVATE_URL}" title="Owner console">🔒 Log in</a>`;
+    if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${esc(SH_PRIVATE_URL)}" title="Owner console">🔒 Log in</a>`;
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
 }else{
@@ -6723,13 +6859,21 @@ def _stc_settings():
               ("house_name", "My Site", True), ("weather_cities", "nonsense", False),
               ("weather_cities", "Lisbon,38.72,-9.14,LIS", True), ("weather_cities", "", True),
               ("tz", "Europe/Luxembourg", True), ("tz", "Not/AZone", False),
+              ("private_url", "https://pvt.example.com", True), ("private_url", "javascript:1", False),
+              ("private_url", 'https://x"y', False),
               ("athlete_context", "masters runner <returning>", True)]
     for key, val, want in checks:
         if validate_setting(key, val)[0] != want:
             fails.append(f"validate({key},{val!r}) ≠ {want}")
+    # Assert the WIRING (like _stc_map_privacy): the settings + geocode endpoints must stay private —
+    # the public read-only container relies on _private_only_path to 403 them. A refactor that drops
+    # one (typo / tuple reorder) must fail here, not leak the owner's settings + an open geocode proxy.
+    for p in ("/api/settings", "/api/geocode"):
+        if not _private_only_path(p):
+            fails.append(f"{p} not gated private")
     return _st("det", "settings",
-               "meta→env→default resolution (stored ''=clear) + save-time guard (markup/url-scheme/cities/tz)",
-               passed=not fails, expect="resolution + validation guards hold",
+               "meta→env→default resolution (stored ''=clear) + save-time guard + settings/geocode stay private",
+               passed=not fails, expect="resolution + validation + private-only wiring hold",
                got={"violations": fails or "none"})
 
 
