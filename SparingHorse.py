@@ -4799,8 +4799,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .setbar .ok{color:var(--accent);font-size:12px}
   /* Settings modal — native <dialog>, centered, backdrop-dimmed */
   dialog.modal{border:none;border-radius:16px;padding:0;width:min(560px,92vw);max-height:86vh;
-    background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden;
-    display:flex;flex-direction:column}
+    background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
+  /* flex ONLY when open — a bare display: on a dialog overrides the UA dialog:not([open]){display:none},
+     so a closed dialog would render in-flow (the panel-at-the-bottom bug). Scope it to [open]. */
+  dialog.modal[open]{display:flex;flex-direction:column}
   dialog.modal::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
   .modal-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;
     padding:18px 22px;border-bottom:1px solid var(--line);background:var(--surface)}
