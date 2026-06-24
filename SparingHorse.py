@@ -3472,15 +3472,20 @@ def api_plandrift():
         ("level", "behind"): "tracking the founding road on fitness, behind on volume",
         ("level", "level"):  "tracking the founding road on both fitness and volume",
     }
+    # The "settle the score" wager voice is a private in-joke (owner's bet); the public site gets
+    # neutral copy. READONLY = the public read-only container.
     if is_current:
-        headline = "Baseline just sealed — the score isn't open yet; week one is the only live signal."
+        headline = ("Baseline just sealed — the score isn't open yet; week one is the only live signal."
+                    if not READONLY else
+                    "Baseline just sealed — too early to call; week one is the only live signal.")
     elif fit_state == "unknown" or vol_state == "unknown":
-        headline = "Not enough reconstructed history yet to call the score."
+        headline = ("Not enough reconstructed history yet to call the score." if not READONLY else
+                    "Not enough reconstructed history yet to call it.")
     else:
         race_name = obj.get("label") or "Race-day"
         tail = "" if race_trend in ("unknown", "steady") else f" {race_name} projection {race_trend}."
-        headline = f"The rebuild is {PHRASE[(fit_state, vol_state)]}.{tail} " + \
-                   ("Settled." if settled else "Score open.")
+        verdict = "Settled." if settled else ("Score open." if not READONLY else "Too early to call.")
+        headline = f"The rebuild is {PHRASE[(fit_state, vol_state)]}.{tail} " + verdict
 
     scorecard = {
         "open": not is_current,
@@ -4587,6 +4592,15 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .acbadge{font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:20px;white-space:nowrap}
   .acbadge.lo{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 60%)}
   .acbadge.mid{color:var(--warn);border:1px solid color-mix(in oklab,var(--warn),transparent 55%)}
+  /* Reusable click-to-open help affordance — a small "?" that pops an explanation bubble */
+  .qhint{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;flex:none;
+    margin-left:6px;border:1px solid var(--line);border-radius:50%;font-family:var(--mono);font-size:9px;
+    font-weight:700;color:var(--muted);cursor:pointer;vertical-align:middle;user-select:none}
+  .qhint:hover,.qhint:focus,.qhint.open{color:var(--text);border-color:var(--muted);outline:none}
+  .qtip{display:none;position:fixed;z-index:200;padding:9px 11px;background:var(--surface);color:var(--text);
+    border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 34px rgba(0,0,0,.22);font-family:var(--sans);
+    font-size:11.5px;font-weight:400;line-height:1.45;letter-spacing:0;text-align:left;white-space:normal}
+  .qhint.open .qtip{display:block}
   .wk.wdown{opacity:.82}
   .wk.wfrozen{opacity:.5}
   .wk.wcur{border-top-color:var(--accent)}
@@ -4785,15 +4799,16 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .setbar .ok{color:var(--accent);font-size:12px}
   /* Settings modal — native <dialog>, centered, backdrop-dimmed */
   dialog.modal{border:none;border-radius:16px;padding:0;width:min(560px,92vw);max-height:86vh;
-    background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
+    background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden;
+    display:flex;flex-direction:column}
   dialog.modal::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
-  .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;
-    padding:18px 22px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface)}
+  .modal-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:18px 22px;border-bottom:1px solid var(--line);background:var(--surface)}
   .modal-head h2{margin:0}
   .modal-x{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;
     line-height:1;padding:4px 8px;border-radius:8px}
   .modal-x:hover{color:var(--text);background:var(--surface-2)}
-  #settings{padding:20px 22px;overflow:auto;max-height:calc(86vh - 64px)}
+  #settings{padding:20px 22px;overflow:auto;flex:1 1 auto;min-height:0}
   /* Weather city picker — chips + typeahead, replaces the raw lat/lon string */
   .wxchips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}
   .wxchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);
@@ -5534,8 +5549,32 @@ async function touchSync(){
 function acBadge(a){
   if(a==null) return "";
   const cls = a<=1.18 ? "lo" : "mid";
-  return `<span class="acbadge ${cls}">ACWR ${a.toFixed(2)}</span>`;
+  return `<span class="acbadge ${cls}">ACWR →${a.toFixed(2)}</span>`+
+    qhint("Projected acute:chronic load at this week's end — rolled forward from today's fitness if you run the plan. Stay in the green band (≤ ~1.3); the engine trims volume to keep it there.");
 }
+// Reusable click-to-open help bubble (Runalyze-style "?"). Delegated, so it works on dynamic content;
+// positioned as a fixed bubble so an overflow:hidden ancestor can't clip it.
+function qhint(text){
+  return `<span class="qhint" tabindex="0" role="button" aria-label="Explanation">?<span class="qtip" role="tooltip">${esc(text)}</span></span>`;
+}
+document.addEventListener("click", e=>{
+  if(e.target.closest(".qtip")) return;                       // clicks inside the bubble: leave it open
+  const h = e.target.closest(".qhint");
+  document.querySelectorAll(".qhint.open").forEach(n=>{ if(n!==h) n.classList.remove("open"); });
+  if(!h) return;
+  e.stopPropagation(); e.preventDefault();                    // don't let the week row's click fire
+  const opening = !h.classList.contains("open");
+  h.classList.toggle("open");
+  if(opening){
+    const t=h.querySelector(".qtip"), r=h.getBoundingClientRect(), w=Math.min(240, window.innerWidth-16);
+    t.style.width=w+"px"; t.style.top=(r.bottom+6)+"px";
+    t.style.left=Math.max(8, Math.min(r.right-w, window.innerWidth-w-8))+"px";
+  }
+});
+document.addEventListener("keydown", e=>{
+  if(e.key==="Escape"){ document.querySelectorAll(".qhint.open").forEach(n=>n.classList.remove("open")); return; }
+  if((e.key==="Enter"||e.key===" ") && e.target.classList && e.target.classList.contains("qhint")){ e.preventDefault(); e.target.click(); }
+});
 let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null;
 function objManager(p){
   // Priority chip: static on the public view; an inline A|B|C selector on the private console
@@ -5825,7 +5864,7 @@ function phaseSection(title,block,p,today,pk){
   const fz=froz?` · <span class="wfz">${froz} done</span>`:"";
   const sel=defaultWeek(block.weeks,today);
   return `<h3 class="phasehdr">
-      <span>${title} <span class="muted mono" style="font-size:11px">(${block.weeks.length}w · start ${block.start} · ends CTL ${block.end_ctl}/ATL ${block.end_atl})${fz}</span></span>
+      <span>${title} <span class="muted mono" style="font-size:11px">(${block.weeks.length}w · start ${block.start} · ends CTL ${block.end_ctl}/ATL ${block.end_atl})${fz}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}</span>
       <span class="muted mono" style="font-size:12px;font-weight:600;white-space:nowrap" title="Total planned distance across the phase">Σ ${km.toFixed(0)} km</span>
     </h3>
     ${weekStrip(block.weeks,pk,sel)}
@@ -5974,7 +6013,7 @@ function renderPlan(p){
       .map(x=>panel(x.key, phaseSection(x.phase, p[x.key], p, today, x.key))).join("") : '';
   const rebaseInner=`
     <h3 style="font-family:var(--serif);font-weight:600;font-size:16px;margin:18px 0 2px;display:flex;justify-content:space-between;align-items:baseline;gap:12px">
-      <span>Phase 0 — the re-base block <span class="muted mono" style="font-size:11px">(start ${rb.start}, ends CTL ${rb.end_ctl}/ATL ${rb.end_atl})${adh}</span></span>
+      <span>Phase 0 — the re-base block <span class="muted mono" style="font-size:11px">(start ${rb.start}, ends CTL ${rb.end_ctl}/ATL ${rb.end_atl})${adh}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}</span>
       <span style="text-align:right;line-height:1.4">
         <div class="mono" style="font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap" title="Total planned distance and easy-run time across the re-base block">${phaseTot}</div>
         ${ranTot?`<div class="mono" style="font-size:11px;font-weight:600;color:var(--ok);white-space:nowrap" title="Distance and time you've actually run during this block so far (duplicates excluded)">${ranTot}</div>`:""}
@@ -6253,7 +6292,12 @@ async function loadEffort(){
         <div class="muted" style="font-size:11px;margin-top:4px">Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Runs with no matching plan session (incl. before the plan existed) are judged against the easy default; one mismatch is an observation, not a verdict.</div>
       </div>
     </div>
-    <table class="efftbl"><thead><tr><th>date</th><th>session</th><th>dist</th><th>GAP</th><th>avg HR</th><th>TE</th><th>feel</th><th>verdict</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table class="efftbl"><thead><tr><th>date</th><th>session</th><th>dist</th>
+      <th>GAP ${qhint("Grade Adjusted Pace — your pace corrected for hills so efforts compare fairly across terrain (from Runalyze). Runs here are judged on heart rate, not this.")}</th>
+      <th>avg HR</th>
+      <th>TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>
+      <th>feel</th>
+      <th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
