@@ -3743,12 +3743,33 @@ def _activity_payload(db, a):
     }
 
 
+def latest_running_activity(db):
+    """For the 'latest running activity' tile: the most-recent RUNNING-FAMILY activity (any sport
+    whose name contains 'run' — Running, Trail Running, Treadmill Running, …), plus a note when the
+    OVERALL most-recent activity is a non-run (e.g. a tennis match). The non-run still reaches the
+    plan via Runalyze's all-sport CTL/ATL snapshot — it just isn't a run to show here. Returns
+    (run_row_or_None, cross_note_or_None)."""
+    run = db.execute("SELECT raw FROM activities WHERE LOWER(sport) LIKE '%run%' "
+                     "ORDER BY date_time DESC LIMIT 1").fetchone()
+    top = db.execute("SELECT sport, date FROM activities ORDER BY date_time DESC LIMIT 1").fetchone()
+    cross = ({"sport": top["sport"], "date": top["date"]}
+             if top and "run" not in (top["sport"] or "").lower() else None)
+    return run, cross
+
+
 @app.get("/api/activity/latest")
 def api_activity_latest():
-    """Most-recent activity, with derived pace — the default 'latest activity' tile."""
+    """Latest RUNNING activity for the tile, with derived pace. Running-family (so trail/treadmill
+    runs count); attaches a cross_training note when the most-recent activity isn't a run."""
     db = get_db()
-    row = db.execute("SELECT raw FROM activities ORDER BY date_time DESC LIMIT 1").fetchone()
-    return jsonify(_activity_payload(db, json.loads(row["raw"])) if row else None)
+    run, cross = latest_running_activity(db)
+    payload = (_activity_payload(db, json.loads(run["raw"])) if run
+               else ({"empty_run": True} if cross else None))
+    # the cross-training note (latest non-run sport + date) is personal — withhold it server-side on
+    # the public read-only container, not just in the UI, so the endpoint itself can't leak it.
+    if payload is not None and cross and not READONLY:
+        payload["cross_training"] = cross
+    return jsonify(payload)
 
 
 @app.get("/api/activity/<int:aid>")
@@ -4362,6 +4383,9 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .actmap{position:relative;z-index:1;height:240px;margin-top:14px;border-radius:10px;
     overflow:hidden;border:1px solid var(--line)}
   .actmap .leaflet-container{height:100%;background:var(--surface-2);font-family:var(--sans)}
+  /* cross-training note — shown when the most-recent activity isn't a run */
+  .crossnote{color:var(--muted);font-size:11.5px;line-height:1.5;margin-top:12px;
+    padding-top:9px;border-top:1px dashed var(--line)}
   .mapempty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted);
     font-size:13px;background:color-mix(in oklab,var(--accent),var(--surface-2) 82%)}
   .up{color:var(--ok)} .down{color:var(--danger)}
@@ -5260,7 +5284,18 @@ async function loadActivity(aid){
   CURACT = aid || null;
   const a = await getJSON(aid?`/api/activity/${aid}`:"/api/activity/latest");
   const host=$("#recent");
-  if(!a){ host.innerHTML=`<div class="empty">${aid?"Activity not found.":"No activities synced yet."}</div>`; return; }
+  // a non-run is the most-recent activity → note it (private view only). Its load still counts toward
+  // the plan via Runalyze's all-sport fitness/fatigue, so this just explains why an older run shows.
+  const cx = (!SH_READONLY && a && a.cross_training) ? a.cross_training : null;
+  const cxDate = cx && cx.date ? new Date(cx.date+"T00:00:00").toLocaleDateString(undefined,{day:"numeric",month:"short"}) : "";  // local midnight (no UTC off-by-one)
+  const crossNote = cx
+    ? `<div class="crossnote">Your latest activity was <b>${esc(cx.sport||"a non-run")}</b>${cxDate?` on ${cxDate}`:""} — not a run, so it isn't shown here. Its training load still counts toward your plan, reflected in your fitness &amp; fatigue markers (Runalyze tracks all sports).</div>`
+    : "";
+  if(!a || a.empty_run){
+    host.innerHTML = (a&&a.empty_run ? `<div class="empty">No running activity logged yet.</div>`
+      : `<div class="empty">${aid?"Activity not found.":"No activities synced yet."}</div>`) + crossNote;
+    return;
+  }
   const dt=new Date(a.date_time);
   const when=dt.toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"})+
     " · "+dt.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});
@@ -5268,7 +5303,7 @@ async function loadActivity(aid){
     <div class="ml">${label}</div><div class="mv">${val}${unit?`<small> ${unit}</small>`:""}</div></div>`;
   const kick = aid
     ? `Activity of ${dt.toLocaleDateString(undefined,{day:"numeric",month:"short",year:"2-digit"})} <a href="#" id="backlatest" class="backlatest">← latest</a>`
-    : "Latest activity";
+    : "Latest running activity";
   host.innerHTML=`<div class="actwrap"><div class="actbg" id="actbg"></div>
     <div class="actfg">
       <div class="rtop">
@@ -5296,7 +5331,7 @@ async function loadActivity(aid){
         <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
       </div>
     </div></div>
-    ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}`;
+    ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}` + crossNote;
   // load the profile once, show the default (locked) one, then wire hover-preview + click-lock
   if(a.id){
     try{ ACTPROFILE = await getJSON(`/api/activity/${a.id}/profile`); }
@@ -6651,8 +6686,22 @@ def _stc_map_privacy(db):
                                          "date_time": "2026-06-16T08:00:00"})
         if any(k in payload for k in ("latitude", "longitude", "lat", "lon", "path")):
             fail.append("/api/activity payload carries geo")
+        # /api/activity/latest must NOT leak the cross-training note (latest non-run sport + date) on
+        # the public container — withheld server-side, not just hidden in the UI. Seed a future-dated
+        # non-run so it's the global latest → a cross note would be produced if not gated.
+        db.execute("INSERT OR REPLACE INTO activities (id, date_time, date, sport, raw) VALUES (?,?,?,?,?)",
+                   (-2, "2099-01-01T12:00:00", "2099-01-01", "Tennis", json.dumps({"sport": "Tennis"})))
+        db.commit()
+        try:
+            READONLY = True
+            pub_latest = client.get("/api/activity/latest").get_data(as_text=True)
+        finally:
+            READONLY = saved
+        if "cross_training" in pub_latest:
+            fail.append("/api/activity/latest leaks the cross-training note on the public view")
     finally:
         db.execute("DELETE FROM trackcache WHERE activity_id=?", (-1,))
+        db.execute("DELETE FROM activities WHERE id=?", (-2,))
         db.commit()
     return _st("det", "map-privacy",
                "read-only /map + destructive POST /delete 403; /profile + by-id payload carry no route geo (wiring, via test client)",
@@ -7147,6 +7196,38 @@ def _stc_multi_a_plan():
     return _st("det", "multi-a-plan",
                "generate_plan over a 2-A chain: chain roles + bridge segment + ACWR ≤1.25 on every week of every segment",
                passed=not fails, expect="chain + bridge + ceiling held across all segments",
+               got={"violations": fails or "none"})
+
+
+def _stc_latest_running():
+    """latest_running_activity — the tile filters to RUNNING-family (trail/treadmill count) and notes a
+    non-run only when it's the most-recent activity. Pure/in-memory."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    def add(i, dt, sport):
+        mem.execute("INSERT INTO activities(id,date_time,date,sport,raw) VALUES(?,?,?,?,?)",
+                    (i, dt, dt[:10], sport, json.dumps({"sport": sport})))
+    fails = []
+    add(1, "2026-06-20T18:00:00", "Running")
+    add(2, "2026-06-22T18:00:00", "Tennis")    # a more-recent non-run
+    mem.commit()
+    run, cross = latest_running_activity(mem)
+    if not run or json.loads(run["raw"])["sport"] != "Running":
+        fails.append(f"should pick the Running activity (got {run and json.loads(run['raw'])['sport']})")
+    if not cross or cross["sport"] != "Tennis":
+        fails.append(f"should note the Tennis cross-train (got {cross})")
+    add(3, "2026-06-23T18:00:00", "Trail Running")   # newer, running-family
+    mem.commit()
+    run, cross = latest_running_activity(mem)
+    if not run or json.loads(run["raw"])["sport"] != "Trail Running":
+        fails.append(f"trail run should count as running (got {run and json.loads(run['raw'])['sport']})")
+    if cross is not None:
+        fails.append(f"latest is a run → no cross note (got {cross})")
+    mem.close()
+    return _st("det", "latest-running",
+               "latest tile filters to running-family (trail counts) + notes a non-run iff it's the most recent",
+               passed=not fails, expect="running picked · cross note only when latest is a non-run",
                got={"violations": fails or "none"})
 
 
@@ -7899,6 +7980,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_multi_a_chain(),
                  lambda: _stc_periodize_chain(), lambda: _stc_multi_a_plan(),
+                 lambda: _stc_latest_running(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),

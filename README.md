@@ -18,6 +18,50 @@ Named for Pheidippides, who *spares the horse by being the horse*.
 > your own data and applies sports-science heuristics; it does not diagnose. Its readiness gate flags
 > stop-the-run / cardiac-type symptoms and tells you to **see a doctor** — always do. Train at your own risk.
 
+## Features
+
+Everything below runs from one small Flask app. The optional public/private split (see *Run with Docker*)
+decides what a visitor sees versus what only you — behind your own auth — can see and do. The public
+showcase deliberately shows a slice; the real console has the full set.
+
+**The engine (deterministic, no AI required)**
+- **Current shape** — VO₂max, CTL/ATL (fitness/fatigue) and ACWR, read from your Runalyze data.
+- **Objective-driven plan** — reverse-periodized Re-base → Base → Build → Peak → Taper toward a goal
+  race, with a hard ACWR safety ceiling on every week.
+- **Two-direction replanning** — the road moves as results come in: eases toward an honest goal after a
+  rough patch, expands to exploit fitness you've earned. Diff-able week to week.
+- **Combined multi-A periodization** — chain several A-races into one continuous build (intermediate
+  peaks/tapers + re-build bridges), each race's role set by how far apart they are.
+- **CTL-responsive volume + earned levers** — volume tracks measured fitness; opt-in "earned" faster
+  build / 6th weekly run / faster Phase-0 exit, all ACWR-capped, recovery weeks protected.
+- **Plan drift** — distance / effort / CTL / race-outcome charts comparing your founding road to where
+  it stands now, plus a settle-the-score verdict.
+- **Effort discipline** — grades whether your easy days are actually easy (HR-led, Runalyze-native).
+- **Readiness gate** — a daily green/amber/red verdict that flags stop-the-run / cardiac-type symptoms.
+- **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation) and a route map.
+
+**AI layer** *(optional — set `ANTHROPIC_API_KEY`; blank = dormant, the engine is unaffected)*
+- Natural-language objectives ("sub-45 10k in October"), multi-A adjudication advice, plain-language
+  plan narration, and qualitative check-ins ("knee's a bit sore" → the engine eases, never pushes).
+
+**Public showcase vs. private console**
+
+| Capability | Public (read-only) | Private (owner) |
+|---|:---:|:---:|
+| Shape, plan & phases, weekly volume, fitness/fatigue, plan drift | ✅ | ✅ |
+| Latest **running** activity (stats + trace) | ✅ | ✅ |
+| Readiness | verdict only (inputs redacted) | full check-in |
+| Route map (GPS) | — *(location privacy)* | ✅ |
+| Health / blood markers | — | ✅ |
+| Effort discipline (per-run HR + critique) | — | ✅ |
+| Sync · Backfill · Settings | — | ✅ |
+| Add / remove / re-prioritize objectives | list only | ✅ |
+| AI features (parse · adjudicate · explain · check-in) | — | ✅ *(with key)* |
+
+The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB connection — it
+physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
+server-side (not just hidden in the UI).
+
 ## Requirements
 - **Runalyze Premium** + a **Personal API token** (generate at `runalyze.com/settings/personal-api`). The
   app reads your activities and Runalyze's computed shape/effort metrics — it does not replace them.
