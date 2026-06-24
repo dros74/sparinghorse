@@ -34,7 +34,7 @@ Named for Pheidippides, who *spares the horse by being the horse*.
 Hit **Sync now** in the UI (or `POST /api/sync`) to pull your activities + today's shape snapshot into a
 locally-owned `sparinghorse.db`, then **Backfill all** once for your full history. Add your goal race in the
 **Objectives** panel (or seed one with `SH_SEED_OBJECTIVE`); with no objective the engine runs in maintenance
-mode. A nightly auto-sync (default `22:30` in `SH_TZ`, override `SH_SYNC_AT`, disable `SH_SCHEDULE=0`) keeps
+mode. A nightly auto-sync (default `22:00` in `SH_TZ`, override `SH_SYNC_AT`, disable `SH_SCHEDULE=0`) keeps
 the data current.
 
 ## Run with Docker — optional public + private split

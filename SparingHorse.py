@@ -480,6 +480,7 @@ SETTINGS_SPEC = [
              "picks up a change on its next restart."},
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
+MAX_WEATHER_CITIES = 5   # header widget cap (mirrored client-side as MAX_CITIES in the picker JS)
 
 
 def _resolve_setting(db, spec):
@@ -516,8 +517,12 @@ def validate_setting(key, value):
         return False, "cannot contain quotes or angle brackets"
     if key in ("house_url", "private_url") and value and not re.match(r"^https?://", value):
         return False, "must start with http:// or https://"
-    if key == "weather_cities" and value.strip() and not _parse_weather_cities(value):
-        return False, "could not parse — use Name,lat,lon;Name,lat,lon"
+    if key == "weather_cities" and value.strip():
+        parsed = _parse_weather_cities(value)
+        if not parsed:
+            return False, "could not parse — use Name,lat,lon;Name,lat,lon"
+        if len(parsed) > MAX_WEATHER_CITIES:
+            return False, f"at most {MAX_WEATHER_CITIES} cities — remove one to add another"
     if key == "tz" and value.strip():
         try:
             ZoneInfo(value.strip())
@@ -3829,7 +3834,7 @@ def db_weekly_running():
 
 
 # ── Weather (house chrome widget) ────────────────────────────────────────────
-# A small forecast icon for the three house cities. Source is Open-Meteo: keyless, no token,
+# A small forecast icon for the configured cities. Source is Open-Meteo: keyless, no token,
 # CC-BY — fits the project's "no extra secrets" rule (so it works on the public container too).
 # We cache the whole bundle in-process for WEATHER_TTL so a page load never hammers the API and
 # a transient outage falls back to the last good fetch.
@@ -4103,8 +4108,8 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .motto{font-family:var(--mono);font-size:11px;color:var(--accent);opacity:.9}
   .motto small{color:var(--muted)}
   .bar{display:flex;align-items:center;gap:12px;margin-left:auto}
-  /* three-city forecast icon — pinned to the top-right of the readiness tile: "you're good to go
-     physiologically; here's roughly what's outside" (three cities keep the exact spot private) */
+  /* configured-cities forecast icon — pinned to the top-right of the readiness tile: "you're good to
+     go physiologically; here's roughly what's outside" (shows only the cities you've chosen) */
   #sec-readiness{position:relative}
   .weather{position:absolute;top:1px;right:0;z-index:2;display:inline-flex;align-items:center;gap:13px}
   .weather:empty{display:none}
@@ -5293,10 +5298,10 @@ function plannedSession(s, easyPace){
     ${actLine}
     <div class="muted" style="font-size:12px;margin-top:6px">${esc(s.note)}</div></div>`;
 }
-// the three house cities' forecast, folded into the readiness card footer (white on the gradient)
+// the configured cities' forecast, folded into the readiness card footer (white on the gradient)
 function wxFootHtml(){
   if(!WX||!WX.cities||!WX.cities.length) return "";
-  return `<span class="sc-wx" title="Conditions in three house cities (your exact spot stays private)">`+
+  return `<span class="sc-wx" title="Current conditions in the cities you've configured">`+
     WX.cities.map(c=>`<span class="wxc"><span class="wxk">${esc((c.key||"").toUpperCase())}</span> ${c.icon||""} ${c.temp==null?"–":c.temp+"°"}</span>`).join("")+
     `</span>`;
 }
@@ -6221,8 +6226,9 @@ async function loadSettings(){
         <input id="wxsearch" type="text" placeholder="Search a city — e.g. Lisbon" autocomplete="off">
         <button type="button" class="ghost" id="wxsearchbtn">Search</button>
       </div>
+      <div class="err" id="wxcap"></div>
       <ul class="wxresults" id="wxresults"></ul>
-      <div class="help">Type a city and pick it — the coordinates are resolved for you. No cities = the widget is hidden.</div>
+      <div class="help">Type a city and pick it — the coordinates are resolved for you. Up to 5; no cities = the widget is hidden.</div>
       <div class="err" id="err_weather_cities"></div>
     </div>`;
   const field=s=>{
@@ -6247,16 +6253,22 @@ async function loadSettings(){
   wireCityPicker();
 }
 
+const MAX_CITIES=5;   // mirrors the server's MAX_WEATHER_CITIES (validated there too)
 function wireCityPicker(){
   const hidden=$("#set_weather_cities"); if(!hidden) return;
   let cities=parseCities(hidden.value);
-  const chips=$("#wxchips"), results=$("#wxresults"), search=$("#wxsearch");
+  const chips=$("#wxchips"), results=$("#wxresults"), search=$("#wxsearch"),
+        searchBtn=$("#wxsearchbtn"), cap=$("#wxcap");
   const sync=()=>{ hidden.value=serializeCities(cities); renderChips(); };
   function renderChips(){
     chips.innerHTML = cities.length
       ? cities.map((c,i)=>`<span class="wxchip"><b>${esc(c.code)}</b> ${esc(c.name)} <button type="button" data-i="${i}" aria-label="Remove ${esc(c.name)}">✕</button></span>`).join("")
       : `<span class="muted" style="font-size:12px">No cities — the widget is hidden.</span>`;
     chips.querySelectorAll("button[data-i]").forEach(b=>b.addEventListener("click",()=>{ cities.splice(+b.dataset.i,1); sync(); }));
+    const full = cities.length>=MAX_CITIES;   // at the cap → block adding, prompt a removal
+    search.disabled=searchBtn.disabled=full;
+    cap.textContent = full ? `Maximum ${MAX_CITIES} cities — remove one to add another.` : "";
+    if(full) results.innerHTML="";
   }
   async function doSearch(){
     const q=search.value.trim(); if(q.length<2){ results.innerHTML=""; return; }
@@ -6270,7 +6282,7 @@ function wireCityPicker(){
     results.querySelectorAll("li[data-i]").forEach(li=>li.addEventListener("click",()=>{
       const r=rs[+li.dataset.i];
       const name=(r.name||"").replace(/[,;]/g," ").trim();   // ',' and ';' are delimiters in the stored format
-      if(name && !cities.some(c=>c.lat==r.lat && c.lon==r.lon)){   // skip a city already in the list
+      if(name && cities.length<MAX_CITIES && !cities.some(c=>c.lat==r.lat && c.lon==r.lon)){   // cap + skip dup
         cities.push({name, lat:r.lat, lon:r.lon, code:name.slice(0,3).toUpperCase()});
       }
       search.value=""; results.innerHTML=""; sync();
@@ -6320,7 +6332,7 @@ if(SH_READONLY){
   const cluster=document.querySelector(".topctl");
   if(cluster){
     let extra='<span class="ro-badge" title="Read-only public view">read-only</span>';
-    if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${esc(SH_PRIVATE_URL)}" title="Owner console">🔒 Log in</a>`;
+    if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${esc(SH_PRIVATE_URL)}" title="Private console">🔒 Log in</a>`;
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
 }else{
@@ -6858,6 +6870,8 @@ def _stc_settings():
               ("house_url", "javascript:alert(1)", False), ("house_name", 'a"b', False),
               ("house_name", "My Site", True), ("weather_cities", "nonsense", False),
               ("weather_cities", "Lisbon,38.72,-9.14,LIS", True), ("weather_cities", "", True),
+              ("weather_cities", "A,1,1;B,2,2;C,3,3;D,4,4;E,5,5", True),          # exactly 5 = ok
+              ("weather_cities", "A,1,1;B,2,2;C,3,3;D,4,4;E,5,5;F,6,6", False),   # 6 > cap
               ("tz", "Europe/Luxembourg", True), ("tz", "Not/AZone", False),
               ("private_url", "https://pvt.example.com", True), ("private_url", "javascript:1", False),
               ("private_url", 'https://x"y', False),
@@ -6872,7 +6886,7 @@ def _stc_settings():
         if not _private_only_path(p):
             fails.append(f"{p} not gated private")
     return _st("det", "settings",
-               "meta→env→default resolution (stored ''=clear) + save-time guard + settings/geocode stay private",
+               "meta→env→default resolution (stored ''=clear) + save-time guard (incl. 5-city cap) + settings/geocode private",
                passed=not fails, expect="resolution + validation + private-only wiring hold",
                got={"violations": fails or "none"})
 
