@@ -13,6 +13,7 @@ shell. The plan engine, objectives, and health-markers views come next.
 Run locally:   RUNALYZE_TOKEN=... python3 SparingHorse.py   # http://127.0.0.1:8770
 Production:    waitress-serve --listen=0.0.0.0:8770 SparingHorse:app
 """
+import html
 import json
 import math
 import os
@@ -446,6 +447,120 @@ def set_meta(db, key, value):
 def get_meta(db, key, default=None):
     row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+# ── Runtime settings (§ Settings panel) ───────────────────────────────────────
+# Non-secret personalization a self-hoster can edit live in the private console instead of
+# redeploying with new env vars. Stored in `meta` under a `set:` prefix; resolution is
+# meta → SH_* env → built-in default. None-vs-"" matters: an ABSENT meta row falls back to env,
+# but a row stored as "" is a deliberate clear (NOT a fallback). The effective value lives in the
+# same module global each read-site already uses (seeded from env at import, overlaid from meta at
+# startup, re-applied on save), so the read-sites stay simple. SECRETS (RUNALYZE_TOKEN,
+# ANTHROPIC_API_KEY) are deliberately NOT here — they stay env-only and are never written to the DB.
+# Writes are private-only: the public container's _readonly_guard rejects the mutating POST, so the
+# panel physically can't be used there.
+SETTINGS_SPEC = [
+    {"key": "athlete_context", "env": "SH_ATHLETE_CONTEXT", "label": "Athlete context", "kind": "text",
+     "help": "Injected into the LLM prompts (e.g. 'masters runner returning from injury'). "
+             "The cardiac/exertional-symptom safety net is always on regardless of this text."},
+    {"key": "house_url", "env": "SH_HOUSE_URL", "label": "House link — URL", "kind": "url",
+     "help": "Optional back-link in the header to your own site (must be http/https). "
+             "Empty = no link. Reload to see header changes."},
+    {"key": "house_name", "env": "SH_HOUSE_NAME", "label": "House link — label", "kind": "line",
+     "help": "Text shown for the header back-link (defaults to the URL)."},
+    {"key": "weather_cities", "env": "SH_WEATHER_CITIES", "label": "Weather widget cities", "kind": "line",
+     "help": "Format: Name,lat,lon[,CODE];… e.g. 'Lisbon,38.72,-9.14,LIS'. Empty hides the widget."},
+    {"key": "tz", "env": "SH_TZ", "label": "Sync timezone", "kind": "line", "default": "UTC",
+     "help": "IANA zone (e.g. Europe/Luxembourg) for the nightly-sync wall clock. Applies on the next sync."},
+]
+SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
+
+
+def _resolve_setting(db, spec):
+    """Effective (value, source) for one setting in ONE read, so value and provenance can never
+    disagree. Precedence: stored meta (`set:<key>`) wins, else the SH_* env var, else the built-in
+    default. An ABSENT meta row falls back to env; a stored '' does NOT (it's a deliberate clear).
+    An env var that is set-but-empty counts as 'env' (value ''), not 'default'."""
+    v = get_meta(db, "set:" + spec["key"])
+    if v is not None:
+        return v, "saved"
+    env = os.environ.get(spec["env"])
+    if env is not None:
+        return env, "env"
+    return spec.get("default", ""), "default"
+
+
+def current_settings(db):
+    """The settable set with effective value + provenance — the GET /api/settings payload."""
+    out = []
+    for s in SETTINGS_SPEC:
+        value, source = _resolve_setting(db, s)
+        out.append({"key": s["key"], "label": s["label"], "kind": s["kind"],
+                    "help": s["help"], "value": value, "source": source})
+    return out
+
+
+def validate_setting(key, value):
+    """(ok, error) for one setting's raw string, BEFORE persisting. house_* land in header HTML (now
+    escaped at the render site too — this is the friendlier first line of defence + a real http(s)
+    scheme check); the rest get a format/parse check so a bad value can't silently disable the widget
+    or the nightly sync."""
+    value = value if isinstance(value, str) else ""
+    if key in ("house_url", "house_name") and any(c in value for c in '"<>'):
+        return False, "cannot contain quotes or angle brackets"
+    if key == "house_url" and value and not re.match(r"^https?://", value):
+        return False, "must start with http:// or https://"
+    if key == "weather_cities" and value.strip() and not _parse_weather_cities(value):
+        return False, "could not parse — use Name,lat,lon;Name,lat,lon"
+    if key == "tz" and value.strip():
+        try:
+            ZoneInfo(value.strip())
+        except Exception:
+            return False, "not a valid IANA timezone (e.g. Europe/Luxembourg)"
+    return True, None
+
+
+def apply_settings_overrides(db):
+    """Overlay the effective (meta → env → default) values onto the module globals the read-sites use.
+    Called once at startup and after every save. Single-process deployment (one waitress process, many
+    threads sharing these globals), so a save is visible to every request thread at once. The scheduler
+    thread reads SYNC_TZ live, but only re-arms its sleep on the NEXT cycle — so a tz change lands on
+    the next scheduled sync (as the help text says), not the one already counting down."""
+    global ATHLETE_CONTEXT, HOUSE_URL, HOUSE_NAME, WEATHER_CITIES, SYNC_TZ
+    ATHLETE_CONTEXT = _resolve_setting(db, SETTINGS_BY_KEY["athlete_context"])[0].strip()
+    HOUSE_URL = _resolve_setting(db, SETTINGS_BY_KEY["house_url"])[0].strip()
+    HOUSE_NAME = _resolve_setting(db, SETTINGS_BY_KEY["house_name"])[0].strip()
+    WEATHER_CITIES = _parse_weather_cities(_resolve_setting(db, SETTINGS_BY_KEY["weather_cities"])[0])
+    with _weather_lock:            # cities may have changed → drop the cached bundle so the next
+        _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
+    tzname = _resolve_setting(db, SETTINGS_BY_KEY["tz"])[0].strip() or "UTC"
+    try:
+        SYNC_TZ = ZoneInfo(tzname)
+    except Exception:   # validated on save; a stored zone can still be absent from this host's tzdata
+        print(f"[settings] ignoring unresolvable tz {tzname!r}; keeping {SYNC_TZ.key}")
+
+
+def save_settings(db, updates):
+    """Validate + persist a {key: raw_string} map to meta, then re-apply the globals. Unknown keys
+    are ignored; secrets can't be set (they aren't in SETTINGS_SPEC). All-or-nothing: if ANY value
+    fails validation, nothing is written. Returns (ok, errors_by_key)."""
+    errors, valid = {}, {}
+    for key, val in (updates or {}).items():
+        if key not in SETTINGS_BY_KEY:
+            continue
+        val = "" if val is None else str(val)
+        ok, err = validate_setting(key, val)
+        if ok:
+            valid[key] = val
+        else:
+            errors[key] = err
+    if errors:
+        return False, errors
+    for key, val in valid.items():
+        set_meta(db, "set:" + key, val)
+    db.commit()
+    apply_settings_overrides(db)
+    return True, {}
 
 
 # ── ETL ─────────────────────────────────────────────────────────────────────
@@ -2818,12 +2933,13 @@ def _close_db(exc):
 
 
 def _private_only_path(p):
-    """Paths the public read-only container must never serve — location/medical privacy. Centralised
-    so the map-privacy self-test can assert this invariant can't silently regress:
-    `/api/health` (blood markers), the workout `/map` (route geo reveals where the owner lives), and
+    """Paths the public read-only container must never serve — location/medical/personal privacy.
+    Centralised so the map-privacy self-test can assert this invariant can't silently regress:
+    `/api/health` (blood markers), the workout `/map` (route geo reveals where the owner lives),
     `/api/effort-discipline` (§6m — per-run HR + a personal effort critique, more granular than the
-    public 'training shape + plan only' posture)."""
-    return (p in ("/api/health", "/api/effort-discipline")
+    public 'training shape + plan only' posture), and `/api/settings` (athlete context is personal,
+    and the panel is an owner-only control surface)."""
+    return (p in ("/api/health", "/api/effort-discipline", "/api/settings")
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -3850,13 +3966,33 @@ def api_health_add():
     return jsonify(ok=True)
 
 
+@app.get("/api/settings")
+def api_settings():
+    """The settable non-secret personalization + provenance. Private-only via `_private_only_path`
+    (the _readonly_guard 403s it on the public container, where the JS also drops the card)."""
+    return jsonify(ok=True, settings=current_settings(get_db()))
+
+
+@app.post("/api/settings")
+def api_settings_save():
+    """Persist edited settings (meta-override of the SH_* env) and re-apply live. The _readonly_guard
+    already rejects this on the public container; secrets are unsettable (not in SETTINGS_SPEC)."""
+    ok, result = save_settings(get_db(), body())
+    if not ok:
+        return jsonify(ok=False, errors=result), 400
+    return jsonify(ok=True, settings=current_settings(get_db()))
+
+
 @app.get("/")
 def index():
     # inject the mode flag + private-console URL synchronously so the UI gates with no round-trip
-    # HOUSE_URL/NAME are owner-set env (trusted, like PRIVATE_URL above), injected verbatim.
-    hublink = (f'<a class="hublink" href="{HOUSE_URL}">← {HOUSE_NAME or HOUSE_URL}</a>'
+    # HOUSE_URL/NAME can now be set via the Settings panel (validated) OR raw env (unvalidated), and
+    # are injected into header HTML — so escape at the render site regardless of source (defence in
+    # depth, not relying on the save-time char check alone).
+    hublink = (f'<a class="hublink" href="{html.escape(HOUSE_URL, quote=True)}">'
+               f'← {html.escape(HOUSE_NAME or HOUSE_URL)}</a>'
                if HOUSE_URL else "")
-    html = html_page(INDEX_HTML
+    page = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
             .replace("__SH_PRIVATE_URL__", PRIVATE_URL)
             .replace("__RUNALYZE_LOGO__", RUNALYZE_LOGO_SVG)
@@ -3864,7 +4000,7 @@ def index():
     # The whole SPA — markup + inline JS — is this one document. Tell the browser to revalidate it
     # every load so a deploy takes effect on an ordinary reload (no hard-refresh needed): browsers
     # otherwise heuristically cache an un-headered HTML doc and serve stale JS after a release.
-    return (html, 200, {"Cache-Control": "no-cache"})
+    return (page, 200, {"Cache-Control": "no-cache"})
 
 
 # ── The SPA (house terracotta theme + daylight light mode) ───────────────────
@@ -4441,6 +4577,19 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .hform select,.hform input{font-family:var(--sans);font-size:13px;color:var(--text);
     background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
   .hform input{width:110px}
+  /* Settings panel — one labelled row per setting, full-width inputs/textarea */
+  .setform{display:flex;flex-direction:column;gap:16px;margin-top:6px}
+  .setrow label{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
+  .setrow .src{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--muted);font-weight:400;margin-left:8px}
+  .setrow input,.setrow textarea{width:100%;box-sizing:border-box;font-family:var(--sans);
+    font-size:13px;color:var(--text);background:var(--surface-2);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px}
+  .setrow textarea{min-height:64px;resize:vertical;line-height:1.5}
+  .setrow .help{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5}
+  .setrow .err{color:#c0392b;font-size:11px;margin-top:4px}
+  .setbar{display:flex;align-items:center;gap:12px;margin-top:4px}
+  .setbar .ok{color:var(--accent);font-size:12px}
   .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
   footer{margin-top:48px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
@@ -4543,6 +4692,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
         <button class="primary" type="submit">Add reading</button>
       </form>
     </div>
+
+    <details class="section" id="sec-settings">
+      <summary><h2>Settings <span class="muted mono" style="font-size:12px">— personalization, stored in your database (overrides env)</span></h2></summary>
+      <div class="panel" id="settings"><div class="empty">Loading…</div></div>
+    </details>
 
     <footer>
       <span id="foot">Spares the horse by being the horse · not synced yet</span>
@@ -5970,13 +6124,61 @@ if(_hform) _hform.addEventListener("submit", async e=>{
   $("#hvalue").value=""; await loadHealth();
 });
 
+// ── Settings panel (private-only) — edit the non-secret personalization that otherwise comes from
+// SH_* env. Values are stored in the DB (meta) and override env; secrets are never shown or settable.
+async function loadSettings(){
+  const host=$("#settings"); if(!host) return;
+  let d; try{ d=await getJSON("/api/settings"); }catch(e){ host.innerHTML=`<div class="empty">Could not load settings.</div>`; return; }
+  if(!d.ok){ host.innerHTML=`<div class="empty">${esc(d.error||"unavailable")}</div>`; return; }
+  const field=s=>{
+    const id="set_"+s.key;
+    // data-orig = the value as loaded, so saveSettings can post ONLY the fields the user changed —
+    // posting an untouched env/default-sourced value would persist it to meta and shadow the env.
+    const ctl = s.kind==="text"
+      ? `<textarea id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}">${esc(s.value||"")}</textarea>`
+      : `<input id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}" type="text" value="${esc(s.value||"")}">`;
+    return `<div class="setrow">
+      <label for="${id}">${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
+      ${ctl}
+      <div class="help">${esc(s.help)}</div>
+      <div class="err" id="err_${s.key}"></div>
+    </div>`;
+  };
+  host.innerHTML=`<form class="setform" id="setform">
+    ${d.settings.map(field).join("")}
+    <div class="setbar"><button class="primary" type="submit">Save settings</button>
+      <span class="ok" id="setok"></span></div>
+  </form>`;
+  $("#setform").addEventListener("submit", saveSettings);
+}
+async function saveSettings(e){
+  e.preventDefault();
+  document.querySelectorAll("#setform .err").forEach(n=>n.textContent="");
+  $("#setok").textContent="";
+  const payload={};
+  document.querySelectorAll("#setform [data-key]").forEach(n=>{
+    if(n.value !== n.dataset.orig) payload[n.dataset.key]=n.value;   // changed fields only
+  });
+  if(Object.keys(payload).length===0){ $("#setok").textContent="No changes"; return; }
+  const r=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+  const d=await r.json();
+  if(!d.ok){
+    const errs=d.errors||{};
+    Object.keys(errs).forEach(k=>{ const n=$("#err_"+k); if(n) n.textContent="⚠ "+errs[k]; });
+    return;
+  }
+  $("#setok").textContent="Saved ✓";
+  loadSettings();          // refresh provenance badges (env → saved)
+  if(typeof loadWeather==="function") loadWeather();   // weather cities take effect live
+}
+
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; loadPlan(); }).catch(()=>loadPlan());
 loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort();
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
-  ["sec-health"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["sec-health","sec-settings"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
@@ -5986,7 +6188,7 @@ if(SH_READONLY){
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
 }else{
-  loadReadiness(); loadHealth();
+  loadReadiness(); loadHealth(); loadSettings();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 </script>
@@ -6491,6 +6693,43 @@ def _stc_local_delete():
                "hard local-delete drops the row + its ignore/trackcache rows and clears the structural "
                "duplicate (closes the insert-only sync no-delete gap); no-ops on a missing id",
                passed=not fails, expect="row gone · derived rows cleaned · dup count→0 · keeper survives",
+               got={"violations": fails or "none"})
+
+
+def _stc_settings():
+    """Settings panel — the meta→env→default resolution and the save-time validation guard. Pure:
+    uses an in-memory meta table + a SYNTHETIC env var, so it never touches a real SH_* var, the
+    real DB, or the live process globals (it does NOT call apply_settings_overrides)."""
+    import sqlite3 as _sq, os as _os
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.execute("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT)")
+    fails = []
+    T = {"key": "_t", "env": "SH__SELFTEST_ONLY_", "default": "D"}   # synthetic — safe to mutate
+    _os.environ.pop(T["env"], None)
+    if _resolve_setting(mem, T) != ("D", "default"):  fails.append("unset → built-in default")
+    _os.environ[T["env"]] = "E"
+    try:
+        if _resolve_setting(mem, T) != ("E", "env"):    fails.append("absent meta row → env fallback")
+        _os.environ[T["env"]] = ""                      # set-but-empty env still counts as 'env'
+        if _resolve_setting(mem, T) != ("", "env"):     fails.append("set-but-empty env → ('', 'env')")
+        mem.execute("INSERT INTO meta VALUES('set:_t','')"); mem.commit()
+        if _resolve_setting(mem, T) != ("", "saved"):   fails.append("stored '' is a clear, NOT env fallback")
+    finally:
+        _os.environ.pop(T["env"], None)
+    mem.close()
+    # validation guard: markup-break + url-scheme (XSS) + city-format + IANA-tz; athlete_context is free
+    checks = [("house_url", "https://ok.com", True), ("house_url", "ftp://x", False),
+              ("house_url", "javascript:alert(1)", False), ("house_name", 'a"b', False),
+              ("house_name", "My Site", True), ("weather_cities", "nonsense", False),
+              ("weather_cities", "Lisbon,38.72,-9.14,LIS", True), ("weather_cities", "", True),
+              ("tz", "Europe/Luxembourg", True), ("tz", "Not/AZone", False),
+              ("athlete_context", "masters runner <returning>", True)]
+    for key, val, want in checks:
+        if validate_setting(key, val)[0] != want:
+            fails.append(f"validate({key},{val!r}) ≠ {want}")
+    return _st("det", "settings",
+               "meta→env→default resolution (stored ''=clear) + save-time guard (markup/url-scheme/cities/tz)",
+               passed=not fails, expect="resolution + validation guards hold",
                got={"violations": fails or "none"})
 
 
@@ -7240,7 +7479,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
-                 lambda: _stc_local_delete(),
+                 lambda: _stc_local_delete(), lambda: _stc_settings(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),
@@ -7468,7 +7707,12 @@ runClient();
 
 # ── Main ────────────────────────────────────────────────────────────────────
 init_db()
-start_scheduler()   # runs under waitress (import) and the dev server alike
+try:
+    with app.app_context():
+        apply_settings_overrides(get_db())   # overlay any saved meta settings onto the env defaults
+except Exception as e:
+    print(f"[settings] startup overlay skipped: {e}")
+start_scheduler()   # runs under waitress (import) and the dev server alike (logs the effective TZ)
 
 if __name__ == "__main__":
     import sys
