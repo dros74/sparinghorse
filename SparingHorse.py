@@ -626,26 +626,39 @@ def sync_activities(db, max_pages=60, backfill=False):
     return {"added": added, "pages_fetched": pages}
 
 
+# Single source of the shape_snapshots column contract — shared by the live API capture
+# (snapshot_shape) and the synthetic seeder, so the column list never drifts between them.
+SHAPE_COLUMNS = ("snapshot_date", "captured_at", "effective_vo2max", "effective_vo2max_progress",
+                 "fitness", "fatigue", "performance", "fitness_pct", "acwr", "marathon_shape",
+                 "hrv_baseline", "monotony", "training_strain", "raw")
+
+
+def upsert_shape_snapshot(db, snapshot_date, *, effective_vo2max=None, effective_vo2max_progress=None,
+                          fitness=None, fatigue=None, performance=None, fitness_pct=None, acwr=None,
+                          marathon_shape=None, hrv_baseline=None, monotony=None, training_strain=None,
+                          raw="{}", captured_at=None):
+    """Write/replace one daily shape snapshot (one row per day). Keyword-only so callers can't
+    misorder the 14 columns; missing fields default to NULL."""
+    db.execute(
+        f"INSERT OR REPLACE INTO shape_snapshots ({', '.join(SHAPE_COLUMNS)}) "
+        f"VALUES ({', '.join('?' * len(SHAPE_COLUMNS))})",
+        (snapshot_date, captured_at or _now_iso(), effective_vo2max, effective_vo2max_progress,
+         fitness, fatigue, performance, fitness_pct, acwr, marathon_shape,
+         hrv_baseline, monotony, training_strain, raw))
+
+
 def snapshot_shape(db):
     """Append today's 'current shape' (one row per day; replace if re-run same day)."""
     s = fetch_statistics_current()
     today = datetime.now().strftime("%Y-%m-%d")
-    db.execute(
-        """INSERT OR REPLACE INTO shape_snapshots
-           (snapshot_date, captured_at, effective_vo2max, effective_vo2max_progress,
-            fitness, fatigue, performance, fitness_pct, acwr, marathon_shape,
-            hrv_baseline, monotony, training_strain, raw)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (
-            today, _now_iso(),
-            s.get("effectiveVO2max"), s.get("effectiveVO2maxProgress"),
-            s.get("fitness"), s.get("fatigue"), s.get("performance"),
-            s.get("fitnessInPercent"), s.get("acuteChronicWorkloadRatio"),
-            s.get("marathonShape"), s.get("hrvBaseline"),
-            s.get("monotonyValue"), s.get("trainingStrain"),
-            json.dumps(s, separators=(",", ":")),
-        ),
-    )
+    upsert_shape_snapshot(
+        db, today,
+        effective_vo2max=s.get("effectiveVO2max"), effective_vo2max_progress=s.get("effectiveVO2maxProgress"),
+        fitness=s.get("fitness"), fatigue=s.get("fatigue"), performance=s.get("performance"),
+        fitness_pct=s.get("fitnessInPercent"), acwr=s.get("acuteChronicWorkloadRatio"),
+        marathon_shape=s.get("marathonShape"), hrv_baseline=s.get("hrvBaseline"),
+        monotony=s.get("monotonyValue"), training_strain=s.get("trainingStrain"),
+        raw=json.dumps(s, separators=(",", ":")))
     return s
 
 
@@ -1948,6 +1961,66 @@ def _rebase_start(db, today):
 RACE_RECOVERY_WEEKS = {"5k": 3, "10k": 3, "half": 4, "marathon": 6, "custom": 4}
 RACE_RECOVERY_DEFAULT = 4
 
+# §6s — post-race reckoning. Standard race distances (km) for matching the race-day activity to the
+# objective, and a best-effort goal-time parser (the `target` field is free-form: 'finish', '3:45',
+# '42:00', 'sub-45'). H:MM vs MM:SS is disambiguated by race type (marathon/half = hours, 5k/10k =
+# minutes); unparseable goals (incl. 'finish') return None and the result is shown without a delta.
+RACE_KM = {"5k": 5.0, "10k": 10.0, "half": 21.0975, "marathon": 42.195}
+RECKON_WINDOW_WEEKS = 12   # §6s — how long after a race the scorecard keeps reckoning it
+
+
+def _parse_goal_seconds(target, race_type):
+    """Free-form goal string → seconds, or None if not a time ('finish', 'PB', unparseable)."""
+    if not target:
+        return None
+    t = re.sub(r"^(sub-?|under\s*)", "", target.strip().lower()).strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", t)
+    if not m:
+        if re.fullmatch(r"\d{1,3}", t) and race_type in ("5k", "10k"):
+            return int(t) * 60                            # bare minutes for a short race ('sub-45' → 45:00)
+        return None
+    h_or_m, mid, sec = int(m.group(1)), int(m.group(2)), m.group(3)
+    if sec is not None:                                   # H:MM:SS — unambiguous
+        return h_or_m * 3600 + mid * 60 + int(sec)
+    if race_type in ("marathon", "half"):                # H:MM for the long races
+        return h_or_m * 3600 + mid * 60
+    return h_or_m * 60 + mid                              # MM:SS for 5k/10k/custom
+
+
+def _fmt_hms(seconds):
+    """Seconds → 'H:MM:SS' (drop the hour when 0)."""
+    if seconds is None:
+        return None
+    s = int(round(seconds))
+    h, m, sec = s // 3600, (s % 3600) // 60, s % 60
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _race_day_activity(db, race_date_iso, race_type):
+    """The run that IS the race, with its status. Returns (row_or_None, status):
+      • "finished" — a run within ±2 days whose distance is within 15% of the race distance. A race is a
+        MAX effort, so when several near-distance runs qualify (a same-distance easy run can sit nearby
+        for a short race) we pick nearest-date then FASTEST pace, not just nearest date.
+      • "dnf" — no full-distance match, but a run ON race day that fell well short (≤75% of the distance):
+        a did-not-finish, distinct from a missing sync.
+      • (None, None) — DNS / not synced / a custom race with no standard distance to match on."""
+    target_km = RACE_KM.get(race_type)
+    if not target_km:
+        return None, None
+    rd = _date(race_date_iso)
+    rows = db.execute(
+        "SELECT id, date, distance, duration FROM activities "
+        "WHERE date BETWEEN ? AND ? AND LOWER(sport) LIKE '%run%' AND distance > 0 AND duration > 0",
+        ((rd - timedelta(days=2)).isoformat(), (rd + timedelta(days=2)).isoformat())).fetchall()
+    full = [r for r in rows if abs(r["distance"] - target_km) / target_km <= 0.15]
+    if full:
+        full.sort(key=lambda r: (abs((_date(r["date"]) - rd).days), r["duration"] / r["distance"]))
+        return full[0], "finished"
+    same_day_short = [r for r in rows if _date(r["date"]) == rd and r["distance"] <= target_km * 0.75]
+    if same_day_short:
+        return max(same_day_short, key=lambda r: r["distance"]), "dnf"   # how far they got
+    return None, None
+
 
 def _recovery_weeks(race_type):
     """Weeks the given race type needs before a second peak can be co-equal (else the earlier race
@@ -2110,6 +2183,7 @@ def generate_plan(db):
         phases, total_weeks = periodize_chain(today, chain, rebase_weeks=rebase_weeks_n)
         plan["mode"] = "race"
         plan["objective"] = {"label": anchor["label"], "date": anchor["date"],
+                             "type": anchor.get("type"),   # §6s — needed to match the race-day activity
                              "target": anchor.get("target"), "priority": anchor.get("priority"),
                              "weeks_away": total_weeks}
         plan["phases"] = phases
@@ -3336,6 +3410,21 @@ def api_plandrift():
     # persisted only the active block's weeks, so they can't anchor a cumulative road; the runway
     # span filters those out.) Race date bounds "full"; fall back to the current plan.
     obj = current.get("objective") or {}
+    today = datetime.now().date()
+    # §6s — the engine drops a race the day after it passes (select_chain is future-only), so a just-run
+    # race no longer rides the current plan. To keep RECKONING it (the honest endgame), re-anchor the
+    # whole scorecard to the most-recent A-race that has passed within the reckoning window — its
+    # founding plans (built while it was ahead) hold the projection we settle against. Only when the
+    # current plan carries NO objective at all: a live FUTURE goal must keep the open score (it wins),
+    # and a race the engine still carries is handled on its own path.
+    if not obj.get("date"):
+        past_a = db.execute(
+            "SELECT * FROM objectives WHERE status='upcoming' AND priority='A' AND date<=? AND date>=? "
+            "ORDER BY date DESC LIMIT 1",
+            (today.isoformat(), (today - timedelta(weeks=RECKON_WINDOW_WEEKS)).isoformat())).fetchone()
+        if past_a and any(((json.loads(r["plan"]).get("objective") or {}).get("date")) == past_a["date"]
+                          for r in rows):                 # only if a founding plan for it exists to anchor
+            obj = dict(past_a)
     race_date = _date(obj["date"]) if obj.get("date") else None
     cur_goal = obj.get("date")                       # tie the founding road to THIS goal (None = no race)
     anchor_row, anchor = rows[-1], current
@@ -3350,7 +3439,6 @@ def api_plandrift():
     aw = _plan_weeks(anchor)
     if not aw:
         return jsonify(ok=False, error="no saved plan spans the runway to anchor against")
-    today = datetime.now().date()
     today_mon = _monday(today)
     anchor_mon = _monday(_date(aw[0]["start"]))
 
@@ -3461,6 +3549,36 @@ def api_plandrift():
                   "gaining" if race_gap > 0.5 else "slipping" if race_gap < -0.5 else "steady")
 
     settled = race_date is not None and today >= race_date
+
+    # §6s — post-race reckoning: once the race date passes, stop PROJECTING and settle against what
+    # ACTUALLY happened — the fitness you arrived with vs what the founding road promised, and the
+    # finish vs the goal. The honest endgame §6j left open (its race axis was projection-vs-projection).
+    # The finish time + goal are the runner's personal result — a category beyond §6j's public-safe
+    # "shape + plan only" posture — so the reckoning is PRIVATE-only (withheld on the read-only mirror).
+    reckoning = None
+    if settled and not READONLY:
+        arrived = None                                    # actual CTL on race day, from the full reconstruction
+        for p in reconstruct_history(db):                 # (not the anchor-windowed series — the race may pre-date it)
+            if _date(p["date"]) <= race_date:
+                arrived = round(p["ctl"], 1)
+            else:
+                break
+        # same t0 seam as the fitness axis: projected_ctl is on the plan/snapshot scale, the arrived
+        # CTL is locally reconstructed — subtract the constant offset so the gap is real divergence.
+        fit_reck_gap = (None if (arrived is None or race_found is None)
+                        else round((arrived - race_found) - fit_seam, 1))
+        act, race_status = _race_day_activity(db, obj.get("date"), obj.get("type"))
+        goal_s = _parse_goal_seconds(obj.get("target"), obj.get("type"))
+        actual_s = act["duration"] if (act and race_status == "finished") else None
+        reckoning = {
+            "fitness": {"projected": race_found, "arrived": arrived, "gap": fit_reck_gap,
+                        "state": _state(fit_reck_gap, 2.0)},
+            "result": {"goal": obj.get("target"), "goal_seconds": goal_s, "status": race_status,
+                       "actual_seconds": actual_s, "actual": _fmt_hms(actual_s), "found": bool(act),
+                       "dnf_km": (round(act["distance"], 1) if race_status == "dnf" else None),
+                       "beat": (None if (goal_s is None or actual_s is None) else actual_s <= goal_s)},
+        }
+
     PHRASE = {                                            # completes "The rebuild is ___." — the two
         ("ahead", "ahead"):  "ahead of the founding road on both fitness and volume",   # thesis halves
         ("ahead", "behind"): "outrunning the founding road on fitness, trailing on volume",
@@ -3472,9 +3590,35 @@ def api_plandrift():
         ("level", "behind"): "tracking the founding road on fitness, behind on volume",
         ("level", "level"):  "tracking the founding road on both fitness and volume",
     }
-    # The "settle the score" wager voice is a private in-joke (owner's bet); the public site gets
-    # neutral copy. READONLY = the public read-only container.
-    if is_current:
+    if reckoning:                                         # §6s — the race is run; reckon, don't project
+        race_name = obj.get("label") or "The race"
+        fr, rr = reckoning["fitness"], reckoning["result"]
+        fg = fr["gap"]
+        # arrived is the REAL reconstructed CTL; the gap is the §6j seam-corrected divergence from the
+        # plan's projection, so we phrase the shortfall rather than print an inconsistent "X vs Y" pair.
+        if fg is None:
+            fit_clause = "your race-day fitness can't be reconstructed"
+        elif abs(fg) <= 2.0:
+            fit_clause = f"you arrived right on the plan's target (CTL {fr['arrived']:.0f})"
+        else:
+            fit_clause = (f"you arrived at CTL {fr['arrived']:.0f}, "
+                          f"{abs(fg):g} {'short of' if fg < 0 else 'above'} the plan's target")
+        if rr["status"] == "dnf":
+            res_clause = f"you stopped at {rr['dnf_km']:g} km (DNF)"
+        elif not rr["found"]:
+            res_clause = "the race result isn't synced yet"
+        elif rr["goal_seconds"] is None:
+            res_clause = f"you finished in {rr['actual']}"
+        else:
+            delta = rr["actual_seconds"] - rr["goal_seconds"]
+            res_clause = (f"goal {rr['goal']}, you ran {rr['actual']} "
+                          f"({'beat it by ' + _fmt_hms(-delta) if rr['beat'] else 'missed by ' + _fmt_hms(delta)})")
+        headline = f"{race_name} is run. On fitness, {fit_clause}; on the clock, {res_clause}."
+    elif settled:                                        # race passed, reckoning withheld (public view)
+        headline = f"{obj.get('label') or 'The race'} is complete."
+    elif is_current:
+        # The "settle the score" wager voice is a private in-joke (owner's bet); the public site gets
+        # neutral copy. READONLY = the public read-only container.
         headline = ("Baseline just sealed — the score isn't open yet; week one is the only live signal."
                     if not READONLY else
                     "Baseline just sealed — too early to call; week one is the only live signal.")
@@ -3484,7 +3628,8 @@ def api_plandrift():
     else:
         race_name = obj.get("label") or "Race-day"
         tail = "" if race_trend in ("unknown", "steady") else f" {race_name} projection {race_trend}."
-        verdict = "Settled." if settled else ("Score open." if not READONLY else "Too early to call.")
+        # settled is handled by the §6s reckoning/complete branches above, so this is the open score:
+        verdict = "Score open." if not READONLY else "Too early to call."
         headline = f"The rebuild is {PHRASE[(fit_state, vol_state)]}.{tail} " + verdict
 
     scorecard = {
@@ -3495,6 +3640,7 @@ def api_plandrift():
         "fitness": {"founding": fit_found, "now": fit_now, "gap": fit_gap, "state": fit_state},
         "race":    {"founding": race_found, "now": race_now, "gap": race_gap, "trend": race_trend,
                     "caveat": bool(dup_count), "verdict": (current.get("feasibility") or {}).get("verdict")},
+        "reckoning": reckoning,     # §6s — present only once the race is run (settled)
         "headline": headline,
     }
 
@@ -4320,6 +4466,24 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     font-size:12px;color:var(--muted);line-height:1.5}
   .dqnote a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
   .dqnote a:hover{opacity:.8}
+  /* First-run guided setup (private only; removed under SH_READONLY). Vanishes once the
+     instance is configured — token connected, history pulled, a race added. */
+  #firstrun:empty{display:none}
+  .firstrun{border:1px solid var(--accent);border-radius:12px;margin:14px 0;padding:14px 16px;
+    background:color-mix(in oklab,var(--accent),transparent 92%)}
+  .firstrun .fr-head{font-family:var(--serif);font-size:15px;margin-bottom:11px;color:var(--text)}
+  .fr-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+  .fr-step{display:flex;gap:11px;align-items:flex-start}
+  .fr-num{flex:0 0 22px;height:22px;border-radius:50%;display:grid;place-items:center;
+    font-family:var(--mono);font-size:11px;background:var(--surface2);color:var(--muted)}
+  .fr-step.done .fr-num{background:var(--ok);color:var(--onacc)}
+  .fr-step.active .fr-num{background:var(--accent);color:var(--onacc)}
+  .fr-label{font-weight:600;font-size:13px;color:var(--text)}
+  .fr-step.todo{opacity:.5}
+  .fr-desc{font-size:12px;color:var(--muted);line-height:1.5;margin:3px 0 7px}
+  .fr-desc code{font-family:var(--mono);font-size:11px;background:var(--surface2);
+    padding:1px 5px;border-radius:4px;color:var(--text)}
+  .fr-act{font-size:12px;padding:6px 12px}
   /* recent activity + planned session metric rows */
   .mrow{display:flex;flex-wrap:wrap;gap:8px 26px;align-items:baseline}
   .mrow .ttl{font-family:var(--serif);font-weight:600;font-size:17px;margin-right:6px}
@@ -4866,6 +5030,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       </div>
     </header>
 
+    <div id="firstrun"></div>
     <div id="dqbanner"></div>
     <div id="objbar" class="objbar"></div>
     <div class="grid" id="tiles"><div class="empty">Loading current shape…</div></div>
@@ -5026,6 +5191,7 @@ async function drawShapeTrends(){   // Fitness/Fatigue/Form from the reconstruct
 async function loadShape(){
   const r = await fetch("/api/shape"); const d = await r.json();
   const s = d.latest;
+  HAS_SHAPE = !!s; _frSeen.shape=true; refreshFirstRun();   // first-run: history present?
   const tiles = $("#tiles");
   if(!s){ tiles.innerHTML = `<div class="empty">No shape snapshot yet — hit <b>Sync now</b>.</div>`; return; }
   const prog = s.effective_vo2max_progress;
@@ -5578,6 +5744,53 @@ document.addEventListener("keydown", e=>{
   if((e.key==="Enter"||e.key===" ") && e.target.classList && e.target.classList.contains("qhint")){ e.preventDefault(); e.target.click(); }
 });
 let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null;
+let TOKEN_OK=false, HAS_SHAPE=false;   // first-run signals (from /healthz + /api/shape)
+const _frSeen={tok:false, shape:false, obj:false};   // gate the card until all 3 report once
+// First-run guided setup: walks a brand-new instance from nothing to a first plan. Three
+// signals decide the active step — token connected, history pulled, a race added — and the
+// card removes itself once all three are satisfied (so a configured instance never sees it).
+// Private only: the #firstrun host is stripped on the public read-only view.
+function refreshFirstRun(){
+  const host=$("#firstrun"); if(!host) return;
+  // Wait until token, shape AND objectives have each reported once — otherwise the card flashes a
+  // wrong/early step on a configured instance as the three async boot signals resolve out of order.
+  if(!(_frSeen.tok && _frSeen.shape && _frSeen.obj)) return;
+  const hasObj = OBJECTIVES.some(o=>o.status==='upcoming');
+  const steps=[
+    {label:"Connect Runalyze", done: TOKEN_OK || HAS_SHAPE,
+     // the token is a SECRET (env-only, needs a restart), so this step is instructional, not a form
+     desc:"Set <code>RUNALYZE_TOKEN</code> in your environment (or <code>.env</code>), then restart. "+
+          "It is a secret, so it cannot be set from this page.", act:null},
+    {label:"Pull your training history", done: HAS_SHAPE,
+     desc:"Fetch your activities from Runalyze to build your current shape.",
+     act:{id:"fr_sync", text:"Sync now"}},
+    {label:"Add your first race", done: hasObj,
+     desc:"Tell the engine what you are training for, and it builds the plan around it.",
+     act:{id:"fr_race", text:"Add a race"}},
+  ];
+  if(steps.every(s=>s.done)){ host.innerHTML=""; return; }   // configured → vanish
+  const active=steps.findIndex(s=>!s.done);
+  const li=steps.map((s,i)=>{
+    const state=s.done?"done":(i===active?"active":"todo");
+    const body=(i===active)
+      ? `<div class="fr-desc">${s.desc}</div>`+(s.act?`<button class="primary fr-act" id="${s.act.id}">${s.act.text}</button>`:"")
+      : "";
+    return `<li class="fr-step ${state}"><span class="fr-num" aria-hidden="true">${s.done?"✓":(i+1)}</span>`+
+      `<div><div class="fr-label">${s.label}</div>${body}</div></li>`;
+  }).join("");
+  host.innerHTML=`<div class="firstrun"><div class="fr-head"><b>Welcome to Sparing Horse.</b> `+
+    `Three steps to your first plan.</div><ol class="fr-steps">${li}</ol></div>`;
+  const sb=$("#fr_sync"); if(sb) sb.addEventListener("click", ()=>$("#syncBtn")&&$("#syncBtn").click());
+  const rb=$("#fr_race"); if(rb) rb.addEventListener("click", async ()=>{
+    const p=document.getElementById("plan"); if(p) p.scrollIntoView({behavior:"smooth", block:"start"});
+    // The race form lives inside #plan's objManager, which only renders once a plan exists. On a
+    // fresh instance (history pulled, no plan yet) generate one first so the form is there to focus.
+    let inp=$("#ao_label");
+    if(!inp){ const gen=$("#planBtn"); if(gen) gen.click();
+      for(let i=0; i<20 && !inp; i++){ await new Promise(r=>setTimeout(r,150)); inp=$("#ao_label"); } }
+    if(inp){ inp.scrollIntoView({behavior:"smooth", block:"center"}); inp.focus(); }
+  });
+}
 function objManager(p){
   // Priority chip: static on the public view; an inline A|B|C selector on the private console
   // (clicking a letter POSTs /priority and re-periodizes — same path as the adjudication "Set B").
@@ -6095,6 +6308,7 @@ function renderPlan(p){
 }
 async function refreshPlan(p){
   OBJECTIVES = await getJSON("/api/objectives");
+  _frSeen.obj=true; refreshFirstRun();   // first-run: an upcoming race added?
   try{ LOG = await getJSON("/api/log"); }catch(e){ LOG=null; }
   renderPlan(p || await getJSON("/api/plan"));
   loadDrift();   // the plan (or its history) may have moved — refresh the drift view
@@ -6243,6 +6457,25 @@ function scoreRow(k, main, sub, cls){
 function scorecardHTML(sc, r){
   if(!sc) return "";
   const sign=g=>(g>0?"+":"")+g;
+  // §6s — once the race is run (settled) the scorecard RECKONS instead of projecting: fitness
+  // arrived vs the plan's projection, and the finish vs the goal. The verdict headline carries the story.
+  if(sc.reckoning){
+    const rf=sc.reckoning.fitness, rr=sc.reckoning.result;
+    const fitMain = rf.gap==null ? "—"
+      : Math.abs(rf.gap)<=2 ? `CTL ${Math.round(rf.arrived)} · on target`
+      : `CTL ${Math.round(rf.arrived)} · ${Math.abs(rf.gap)} ${rf.gap<0?"short":"above"}`;
+    let resMain, resCls="level", resSub="";
+    if(rr.status==="dnf"){ resMain=`${rr.dnf_km} km`; resCls="behind"; resSub="DNF"; }
+    else if(!rr.found){ resMain="—"; resCls="unknown"; resSub="not synced yet"; }
+    else if(rr.goal_seconds==null){ resMain=esc(rr.actual||"finished"); resSub="finished"; }
+    else { resMain=`${esc(rr.goal)} → ${esc(rr.actual)}`; resCls=rr.beat?"ahead":"behind";
+           resSub=rr.beat?"beat the goal":"missed the goal"; }
+    return `<div class="scorecard"><div class="sc-head">How the race went</div>`+
+      `<div class="sc-rows">`+
+        scoreRow("Fitness arrived", fitMain, "vs the plan's projection", rf.state)+
+        scoreRow(r&&r.label?r.label:"Result", resMain, resSub, resCls)+
+      `</div><div class="sc-verdict">${esc(sc.headline)}</div></div>`;
+  }
   const v=sc.volume, f=sc.fitness, rc=sc.race;
   const volMain = v.state==="unknown"?"—" : v.state==="level"?"on the road" : `${sign(v.gap)} km ${v.state}`;
   const fitMain = f.state==="unknown"?"—" : f.state==="level"?"CTL on track" : `CTL ${sign(f.gap)} ${f.state}`;
@@ -6534,7 +6767,7 @@ async function saveSettings(e){
 }
 
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render
-fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; loadPlan(); }).catch(()=>loadPlan());
+fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
 loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort();
 // Settings modal open/close (private only — the button is removed on the public view below).
 const _setBtn=$("#settingsBtn"), _setDlg=$("#settingsDialog");
@@ -6546,7 +6779,7 @@ if(_setBtn && _setDlg){
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
-  ["sec-health","settingsDialog"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["sec-health","settingsDialog","firstrun"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
@@ -8018,6 +8251,51 @@ def _stc_plan_explain(db):
                        "change_note": r.get("change_note"), "projected_race_ctl": proj})
 
 
+def _stc_post_race_reckoning():
+    """§6s — the goal-time parser + finish formatter that drive the post-race verdict. Free-form
+    `target` strings must map to seconds (H:MM vs MM:SS disambiguated by race type) and unparseable
+    goals ('finish', 'PB', '') must degrade to None, not crash the reckoning."""
+    fail = []
+    for (tgt, typ), want in [(("3:45", "marathon"), 13500), (("3:45:30", "marathon"), 13530),
+                             (("1:45", "half"), 6300), (("42:00", "10k"), 2520),
+                             (("19:30", "5k"), 1170), (("sub-45", "10k"), 2700),
+                             (("under 1:30", "half"), 5400), (("finish", "marathon"), None),
+                             (("PB", "5k"), None), (("", "marathon"), None)]:
+        got = _parse_goal_seconds(tgt, typ)
+        if got != want:
+            fail.append(f"parse({tgt!r},{typ})={got}≠{want}")
+    for sec, want in [(13920, "3:52:00"), (2520, "42:00"), (5400, "1:30:00"), (None, None)]:
+        if _fmt_hms(sec) != want:
+            fail.append(f"fmt({sec})={_fmt_hms(sec)}≠{want}")
+    # _race_day_activity: pick the race over a near-distance training run; detect a DNF; None when absent
+    import sqlite3
+    mem = sqlite3.connect(":memory:"); mem.row_factory = sqlite3.Row
+    mem.executescript("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, sport TEXT, "
+                      "distance REAL, duration REAL);")
+    rd = "2026-06-20"
+    mem.executemany("INSERT INTO activities VALUES(?,?,?,?,?)", [
+        (1, "2026-06-19", "Running", 10.2, 3600),     # an easy 10k the day before (a decoy)
+        (2, "2026-06-20", "Running", 10.0, 2520),     # THE 10k race, on race day
+    ])
+    act, st = _race_day_activity(mem, rd, "10k")
+    if not (act and act["id"] == 2 and st == "finished"):
+        fail.append(f"race-match={act and act['id']}/{st} (want 2/finished, not the decoy)")
+    mem.execute("DELETE FROM activities")
+    mem.execute("INSERT INTO activities VALUES(3, '2026-06-20', 'Running', 28.0, 9000)")  # DNF a marathon at 28k
+    act, st = _race_day_activity(mem, rd, "marathon")
+    if not (act and st == "dnf" and round(act["distance"]) == 28):
+        fail.append(f"dnf-detect={act and act['distance']}/{st}")
+    mem.execute("DELETE FROM activities")
+    if _race_day_activity(mem, rd, "marathon") != (None, None):
+        fail.append("expected (None,None) with no race-day activity")
+    mem.close()
+    return _st("det", "post-race-reckoning",
+               "goal-time parser (H:MM vs MM:SS by type, 'finish'→None) + HMS fmt + race-day match "
+               "(race over a decoy training run, DNF detected, none→(None,None))",
+               passed=not fail, expect="goals parse; race matched not the decoy; DNF flagged",
+               got={"failures": fail or "none"})
+
+
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_day_spacing(),
@@ -8033,6 +8311,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_long_run(), lambda: _stc_ctl_floor(),
                  lambda: _stc_earned_lift(), lambda: _stc_earned_gate(db),
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
+                 lambda: _stc_post_race_reckoning(),
                  lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),
@@ -8252,6 +8531,155 @@ runClient();
 </script></body></html>"""
 
 
+# ── Synthetic seed (local test instance / demo mode) ─────────────────────────
+# A deterministic, TOKEN-FREE fixture: generate a believable ~24-week running history into
+# `activities`, then derive the daily shape series with the engine's OWN reconstruction
+# (reconstruct_history) so every downstream view — tiles, fitness/fatigue chart, projector,
+# drift, effort — agrees because they all read the same numbers. Lets a local PRIVATE instance
+# render fully populated with NO RUNALYZE_TOKEN, so real UI flows (open→close→reopen dialogs,
+# re-plan, drill-downs) can be exercised end-to-end — the gap an isolated CSS harness can't
+# cover. Doubles as an open-source demo: `python SparingHorse.py seed` then run with SH_DB
+# pointed at the seeded file. Synthetic data only — no personal/real numbers.
+def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past_race=False):
+    import random
+    rnd = random.Random(seed)
+    today = _date(end) if end else datetime.now().date()
+    # wipe the tables we own so re-seeding an existing file is idempotent
+    for t in ("activities", "shape_snapshots", "objectives", "health_markers", "plans",
+              "readiness", "session_log", "ignored_activities", "adjustments", "trackcache"):
+        db.execute(f"DELETE FROM {t}")
+    db.execute("DELETE FROM meta WHERE key IN ('last_sync', 'rebase_start')")
+
+    # last run lands yesterday, so 'today' is a fresh planning day
+    last_day = today - timedelta(days=1)
+    start_monday = (last_day - timedelta(days=last_day.weekday())
+                    - timedelta(weeks=weeks - 1))
+    # per-zone fixture knobs: pace (sec/km), avg HR, spread from avg→max HR, tile title
+    ZONES = {
+        "easy":      {"pace": 375, "hr": 136, "spread": 14, "title": "Easy run"},
+        "threshold": {"pace": 295, "hr": 166, "spread": 16, "title": "Threshold"},
+        "long":      {"pace": 390, "hr": 146, "spread": 18, "title": "Long run"},
+    }
+    base_km, aid = 32.0, 0
+    for w in range(weeks):
+        wk_monday = start_monday + timedelta(weeks=w)
+        ramp = 1.0 + 0.55 * (w / max(1, weeks - 1))     # ~+55% volume by the end
+        down = 0.7 if (w % 4 == 3) else 1.0             # cut-back every 4th week
+        week_km = base_km * ramp * down
+        long_km = week_km * 0.32
+        quality_km = week_km * 0.18
+        easy_km = (week_km - long_km - quality_km) / 3
+        # Tue easy, Wed quality, Thu easy, Sat easy, Sun long (production Monday-anchors too)
+        for dow, zone, km in [(1, "easy", easy_km), (2, "threshold", quality_km),
+                              (3, "easy", easy_km), (5, "easy", easy_km),
+                              (6, "long", long_km)]:
+            day = wk_monday + timedelta(days=dow)
+            if day > last_day:                          # don't seed past yesterday
+                continue
+            km = max(3.0, round(km + rnd.uniform(-0.6, 0.6), 1))
+            z = ZONES[zone]
+            dur = int(km * z["pace"])
+            hr_avg = z["hr"] + rnd.randint(-4, 4)
+            hr_max = hr_avg + z["spread"] + rnd.randint(0, 6)
+            aid += 1
+            upsert_activity(db, {
+                "id": aid, "date_time": f"{day.isoformat()}T18:30:00", "title": z["title"],
+                "sport": {"id": 1, "name": RUNNING_SPORT},
+                "distance": km, "duration": dur, "elapsed_time": dur + rnd.randint(20, 90),
+                "hr_avg": hr_avg, "hr_max": hr_max, "trimp": est_trimp(dur / 60.0, zone),
+                "cadence": rnd.randint(168, 176), "elevation_up": round(km * 6),
+                "source": "synthetic",
+            })
+    race_day = today - timedelta(days=5)
+    if past_race:   # §6s — the race itself (5 days ago), so the settled scorecard can reckon the result
+        aid += 1
+        upsert_activity(db, {
+            "id": aid, "date_time": f"{race_day.isoformat()}T09:00:00", "title": "Demo Marathon",
+            "sport": {"id": 1, "name": RUNNING_SPORT}, "distance": 42.2,
+            "duration": 13920, "elapsed_time": 13950,    # 3:52:00 finish (goal was 3:45)
+            "hr_avg": 168, "hr_max": 182, "trimp": est_trimp(13920 / 60.0, "marathon"),
+            "cadence": 172, "elevation_up": 120, "source": "synthetic",
+        })
+    db.commit()
+
+    # derive the shape time-series with the engine's OWN reconstruction (no token needed),
+    # plus a gentle effective-VO2max trend that tracks CTL growth (~46→~54)
+    hist = reconstruct_history(db, end=last_day.isoformat())
+    max_ctl = max((h["ctl"] for h in hist), default=1.0) or 1.0
+    prev_vo2 = None
+    for h in hist:
+        ctl = h["ctl"]
+        vo2 = round(46.0 + 8.0 * (ctl / max_ctl), 1)
+        prog = None if prev_vo2 is None else round(vo2 - prev_vo2, 2)
+        prev_vo2 = vo2
+        upsert_shape_snapshot(db, h["date"], effective_vo2max=vo2, effective_vo2max_progress=prog,
+                              fitness=ctl, fatigue=h["atl"], performance=h["tsb"],
+                              fitness_pct=round(100 * ctl / max_ctl, 1), acwr=h["acwr"])
+    db.commit()
+
+    # one upcoming A-race ~16 weeks out + a B tune-up — gives the periodizer a real runway.
+    # with_objective=False leaves the instance race-less AND plan-less (history only) — the genuine
+    # first-run "pulled data, not yet planned" state, used to exercise the first-run step-③ CTA.
+    if past_race:
+        # §6s — reproduce the POST-race state: a founding plan was built while the race was ahead (it
+        # recorded the projection), then the race ran and the engine dropped it. Build that founding plan
+        # with the race in the future, then move BOTH the objective and the plan's recorded race date
+        # back to 5 days ago — exactly the history the scorecard reckons from. The final regenerate below
+        # then adds today's race-less maintenance plan as `current`, like the real nightly replan would.
+        db.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                   "VALUES (?,?,?,?,?,?,?)",
+                   ("marathon", "Demo Marathon", (today + timedelta(weeks=10)).isoformat(),
+                    "3:45", "A", "upcoming", _now_iso()))
+        regenerate(db)                                    # founding plan: objective + projected_ctl on file
+        db.execute("UPDATE objectives SET date=? WHERE label='Demo Marathon'", (race_day.isoformat(),))
+        prow = db.execute("SELECT id, plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+        pj = json.loads(prow["plan"])
+        if pj.get("objective"):
+            pj["objective"]["date"] = race_day.isoformat()
+        # make the founding projection believable vs what was actually arrived (a small ~2-CTL shortfall),
+        # so the demo reckoning reads "landed just short" rather than off the engine's re-base artifact.
+        rd_ctl = None
+        for h in reconstruct_history(db, end=race_day.isoformat()):
+            rd_ctl = h["ctl"]
+        if pj.get("feasibility") and rd_ctl:
+            pj["feasibility"]["projected_ctl"] = round(rd_ctl + 2)
+        db.execute("UPDATE plans SET plan=? WHERE id=?", (json.dumps(pj), prow["id"]))
+        db.commit()
+    elif with_objective:
+        for typ, label, wks, target, pri in [("marathon", "Demo Marathon", 16, "3:45", "A"),
+                                             ("10k", "Tune-up 10k", 7, "42:00", "B")]:
+            db.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (typ, label, (today + timedelta(weeks=wks)).isoformat(),
+                        target, pri, "upcoming", _now_iso()))
+
+    # a few synthetic health markers across the build (improving metabolic trend)
+    for wago, tg, hdl, wt in [(20, 150, 48, 74.0), (12, 132, 52, 73.2), (4, 116, 56, 72.5)]:
+        d = (today - timedelta(weeks=wago)).isoformat()
+        for marker, val in (("triglycerides", tg), ("hdl", hdl), ("weight", wt)):
+            db.execute("INSERT OR REPLACE INTO health_markers (marker,date,value,source,note) "
+                       "VALUES (?,?,?,?,?)", (marker, d, val, "manual", None))
+
+    # a couple of recent readiness check-ins + a session reflection (so those panels aren't bare)
+    for dago, en, sl in [(1, "good", "good"), (2, "ok", "ok")]:
+        db.execute("INSERT OR REPLACE INTO readiness (date,energy,sleep,stop_symptom,note,created_at) "
+                   "VALUES (?,?,?,?,?,?)",
+                   ((today - timedelta(days=dago)).isoformat(), en, sl, 0, None, _now_iso()))
+    db.execute("INSERT OR REPLACE INTO session_log (date,note,created_at) VALUES (?,?,?)",
+               (last_day.isoformat(), "Felt strong, legs came around after 3k.", _now_iso()))
+
+    set_meta(db, "last_sync", _now_iso())
+    set_meta(db, "synthetic_seed", "1")   # marks this DB as a throwaway seed → the `seed` guard
+    db.commit()                           # may re-wipe it, but refuses any DB without this marker
+
+    # generate + persist an initial plan so the instance opens fully populated (a configured
+    # instance has a stored plan from the nightly replan; the dashboard's GET /api/plan reads it).
+    # With no objective there is deliberately no plan — that's the state being reproduced.
+    plan = regenerate(db) if (with_objective or past_race) else None
+    return {"activities": aid, "snapshots": len(hist), "plan_ok": bool(plan and plan.get("ok")),
+            "from": start_monday.isoformat(), "to": last_day.isoformat()}
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 init_db()
 try:
@@ -8270,5 +8698,36 @@ if __name__ == "__main__":
             rep["id"] = save_selftest_run(db, rep)
         print(_selftest_text(rep))
         sys.exit(1 if rep["summary"]["failed"] else 0)
+    if len(sys.argv) > 1 and sys.argv[1] == "seed":       # CLI: SH_DB=test.db python SparingHorse.py seed
+        # Populates a TOKEN-FREE local test/demo instance. seed_synthetic_db DELETEs the data
+        # tables first, so two independent guards keep it from ever wiping a REAL database:
+        #   1. SH_DB must be set (never target the default path implicitly), AND
+        #   2. the target must not already hold real data — it must be empty or a prior synthetic
+        #      seed (the `synthetic_seed` meta marker). This is DATA-aware, not filename-aware, so
+        #      an absolute prod path (the deploy uses SH_DB=/data/sparinghorse.db) is also refused.
+        # Pass --force to wipe-and-reseed a DB that has real data anyway (explicit opt-in).
+        target = os.environ.get("SH_DB")
+        if not target:
+            print("Refusing to seed: SH_DB is not set (would target the default DB).\n"
+                  "Point SH_DB at a throwaway file, e.g.:\n"
+                  "  SH_DB=test_local.db python SparingHorse.py seed")
+            sys.exit(2)
+        with app.app_context():
+            db = get_db()
+            has_real = (db.execute("SELECT 1 FROM activities LIMIT 1").fetchone() is not None
+                        and get_meta(db, "synthetic_seed") != "1")
+            if has_real and "--force" not in sys.argv:
+                n = db.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
+                print(f"Refusing to seed {target}: it already holds real data ({n} activities, "
+                      f"no synthetic-seed marker).\nUse a fresh SH_DB path, or pass --force to "
+                      f"wipe and reseed it.")
+                sys.exit(2)
+            info = seed_synthetic_db(db, with_objective="--no-objective" not in sys.argv,
+                                     past_race="--past-race" in sys.argv)
+        print(f"Seeded {target}: {info['activities']} activities, {info['snapshots']} daily "
+              f"snapshots, history {info['from']} → {info['to']}.")
+        print(f"Run it:  SH_DB={target} RUNALYZE_TOKEN= python SparingHorse.py   "
+              f"# private console, no token, fully populated")
+        sys.exit(0)
     print(f"Sparing Horse → http://127.0.0.1:{PORT}  (token {'set' if RUNALYZE_TOKEN else 'MISSING'})")
     app.run(host="127.0.0.1", port=PORT, debug=False)
