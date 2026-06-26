@@ -55,7 +55,18 @@ HOUSE_NAME = os.environ.get("SH_HOUSE_NAME", "")
 # The medical SAFETY net (cardiac/exertional symptom → halt + see a doctor) is always on regardless.
 ATHLETE_CONTEXT = os.environ.get("SH_ATHLETE_CONTEXT", "").strip()
 # Optional weather widget cities: "Name,lat,lon;Name,lat,lon". Empty = the widget is hidden.
-RUNNING_SPORT = "Running"  # the Runalyze sport name used to filter runs (the engine is run-focused)
+RUNNING_SPORT = "Running"  # the canonical run sport name (used for seed/synthetic inserts)
+# The engine counts the whole RUNNING FAMILY — Running, Trail Running, Treadmill Running, … — as runs.
+# This SQL predicate is the SINGLE source of truth so trail/treadmill runs reach the plan-side run views
+# (effort discipline, banking adherence, plan-vs-actual, the block log, weekly mileage, HR) the way they
+# already reach the latest-activity tile. The CTL/ATL reconstruction (daily_trimp_series) is all-sport
+# already, so broadening here never touches the digit-for-digit-validated fitness model.
+RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
+
+
+def _is_run_family(sport):
+    """True for any running-family sport name (Running, Trail Running, Treadmill Running, …)."""
+    return "run" in (sport or "").lower()
 # Runalyze sits behind a WAF. Two learned quirks: (1) a non-browser User-Agent gets
 # tarpitted, so present a browser UA; (2) raw stdlib urllib stalls on the large chunked
 # /activity response — `requests` (urllib3) handles it. We also pace requests (PAGE_DELAY)
@@ -588,6 +599,108 @@ def save_settings(db, updates):
     return True, {}
 
 
+# ── Secrets store (private-only; NEVER the shared ./data DB) ───────────────────
+# The Runalyze token + Claude API key. Unlike SETTINGS_SPEC these are SECRETS, so they live in a
+# SEPARATE store (SH_SECRETS_DB) the deploy mounts ONLY to the private container — the public
+# read-only container shares ./data and would otherwise READ them (the same leak class as §H7). A
+# self-hoster sets them in the private Settings window (no .env edit, no restart) and they apply live.
+# WRITE-ONLY at the API: status (configured + provenance) is returned, never the value back. In
+# READONLY the store is never touched — even a mis-mounted file is ignored on the public box.
+SECRETS_DB = Path(os.environ.get("SH_SECRETS_DB", "secrets.db"))
+
+SECRET_SPEC = [
+    {"key": "runalyze_token", "env": "RUNALYZE_TOKEN", "label": "Runalyze API token",
+     "help": "From Runalyze → Settings → Personal API. Required to sync your training data."},
+    {"key": "anthropic_api_key", "env": "ANTHROPIC_API_KEY", "label": "Claude API key",
+     "help": "Optional — turns on AI plan explanations and natural-language adjustments. Without it "
+             "the deterministic engine still does all the planning and safety clamping."},
+]
+SECRET_BY_KEY = {s["key"]: s for s in SECRET_SPEC}
+
+
+def _secrets_conn():
+    """Open (creating if needed) the private-only secrets store. Callers guarantee not-READONLY."""
+    conn = sqlite3.connect(SECRETS_DB, timeout=15)
+    conn.execute("CREATE TABLE IF NOT EXISTS secret (key TEXT PRIMARY KEY, value TEXT)")
+    return conn
+
+
+def _stored_secret(key):
+    """The window-set secret value, or None. ALWAYS None in READONLY — the public container must never
+    read a secret even if the store is somehow present beside it."""
+    if READONLY:
+        return None
+    try:
+        conn = _secrets_conn()
+        row = conn.execute("SELECT value FROM secret WHERE key=?", (key,)).fetchone()
+        conn.close()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        print(f"[secrets] read {key} failed: {e}")
+        return None
+
+
+def _resolve_secret(spec):
+    """Effective (value, source) for a secret: a window-set value wins, else the env var, else none."""
+    v = _stored_secret(spec["key"])
+    if v:
+        return v, "saved"
+    env = os.environ.get(spec["env"], "")
+    if env:
+        return env, "env"
+    return "", "none"
+
+
+def secret_status():
+    """GET payload: per-secret configured flag + provenance ONLY — never the value itself."""
+    out = []
+    for s in SECRET_SPEC:
+        value, source = _resolve_secret(s)
+        out.append({"key": s["key"], "label": s["label"], "help": s["help"],
+                    "configured": bool(value), "source": source})
+    return out
+
+
+def apply_secret_overrides():
+    """Overlay the effective (stored → env) secrets onto the module globals the read-sites use, and
+    reset the cached LLM client so a key change takes effect live. Called at startup and after each
+    save. No-op in READONLY — the public container keeps its empty env and never holds a secret."""
+    global RUNALYZE_TOKEN, ANTHROPIC_API_KEY, _anthropic_client
+    if READONLY:
+        return
+    RUNALYZE_TOKEN = _resolve_secret(SECRET_BY_KEY["runalyze_token"])[0]
+    new_key = _resolve_secret(SECRET_BY_KEY["anthropic_api_key"])[0]
+    if new_key != ANTHROPIC_API_KEY:
+        ANTHROPIC_API_KEY = new_key
+        _anthropic_client = None   # rebuilt lazily by _anthropic() with the new key (or stays None)
+
+
+def save_secret(key, value):
+    """Set (or clear, when blank) one secret in the private store, then apply live. An empty value =
+    clear → fall back to env. Returns (ok, error); NEVER echoes the value. Refused in READONLY."""
+    if READONLY:
+        return False, "not available on the public instance"
+    if key not in SECRET_BY_KEY:
+        return False, "unknown key"
+    value = "" if value is None else str(value).strip()
+    try:
+        conn = _secrets_conn()
+        if value:
+            conn.execute("INSERT INTO secret(key,value) VALUES(?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        else:
+            conn.execute("DELETE FROM secret WHERE key=?", (key,))   # clear → env fallback
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[secrets] write {key} failed: {e}")
+        return False, "could not save — check the server log"
+    apply_secret_overrides()
+    if key == "runalyze_token":
+        start_scheduler()   # a freshly-set token enables the nightly sync (idempotent; no-op if on)
+    return True, None
+
+
 # ── ETL ─────────────────────────────────────────────────────────────────────
 def upsert_activity(db, a):
     sport = a.get("sport") or {}
@@ -879,6 +992,7 @@ EFFORT_WINDOW_DAYS = 21
 EASY_HR_FRAC = 0.78         # %HRmax ceiling for a genuinely easy run (top of Z2)
 HARD_HR_FRAC = 0.85         # %HRmax above which an 'easy' run was actually threshold+ effort
 TE_HARD_CORROBORATE = 3.5   # Training Effect backing a too-hard HR read → 'high' confidence
+EASY_PACE_GRACE = 0.03      # public PACE read: allow GAP up to 3% quicker than the easy ceiling = 'on'
 AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (his documented failure mode)
 
 
@@ -886,8 +1000,8 @@ def _robust_hrmax(db):
     """A spike-resistant HRmax: the 95th percentile of per-run hr_max (one bad strap reading hits 210
     where his real max is ~189). HR is the gate, so this anchors the zones. None if too little data."""
     hrs = sorted(r["hr_max"] for r in db.execute(
-        "SELECT hr_max FROM activities WHERE sport=? AND hr_max IS NOT NULL",
-        (RUNNING_SPORT,)).fetchall() if r["hr_max"])
+        "SELECT hr_max FROM activities WHERE " + RUN_FAMILY_SQL + " AND hr_max IS NOT NULL"
+        ).fetchall() if r["hr_max"])
     if not hrs:
         return None
     return hrs[min(len(hrs) - 1, round(0.95 * (len(hrs) - 1)))]
@@ -904,8 +1018,8 @@ def derive_hr_zones(db, sample=12):
     if not rmax:
         return {"ok": False, "error": "no robust HRmax yet"}
     rows = db.execute(
-        "SELECT id, date FROM activities WHERE sport=? AND hr_max IS NOT NULL AND hr_max>=? "
-        "ORDER BY date DESC LIMIT ?", (RUNNING_SPORT, int(rmax * 0.8), sample)).fetchall()
+        "SELECT id, date FROM activities WHERE " + RUN_FAMILY_SQL + " AND hr_max IS NOT NULL AND hr_max>=? "
+        "ORDER BY date DESC LIMIT ?", (int(rmax * 0.8), sample)).fetchall()
     cols = [[], [], [], []]   # one list of %HRmax estimates per boundary
     per = []
     for r in rows:
@@ -976,16 +1090,37 @@ def _effort_verdict(kind, hrf, te):
     return ("too_easy" if hrf < EASY_HR_FRAC else "on"), "low"
 
 
-def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS):
-    """Per-run effort vs prescription over the recent window (§6m). Reads Runalyze's HR-derived effort
-    metrics — no pace-confounder modeling: HR fraction is the intensity gate, Training Effect
-    corroborates, GAP is shown as a terrain-fair pace, subjective_feeling + decoupling as context.
-    Each run's prescribed kind comes from the saved plan (frozen past weeks included); an unplanned
-    run defaults to 'easy' (the polarized expectation). Public-safe (effort/HR/pace, no medical).
-    Returns per-run verdicts + the easy-discipline SCORE (the confident half: his easy days run hard)
-    and a softer quality read."""
+def _effort_verdict_pace(kind, gap_pace, zones):
+    """The PUBLIC, PACE-based easy-discipline verdict — no heart rate (HR stays private). An aerobic
+    (easy/long) run is judged on grade-adjusted pace vs the pace zones: 'on' at/slower than the easy
+    ceiling (a 3% grace for GPS/grade noise), 'too_hard' faster than marathon pace, 'hot' between. A
+    quality run isn't pace-judged here — the honest 'did you hit it' read needs HR — so it's 'unknown'
+    (excluded from the score). gap_pace/zones are sec/km; larger = slower."""
+    easy_ceiling = (zones or {}).get("easy_top")
+    if not gap_pace or not easy_ceiling or kind not in AEROBIC_KINDS:
+        return "unknown"
+    if gap_pace >= easy_ceiling * (1 - EASY_PACE_GRACE):
+        return "on"
+    mp = zones.get("marathon")
+    if mp and gap_pace < mp:
+        return "too_hard"
+    return "hot"
+
+
+def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
+    """Per-run effort vs prescription over the recent window (§6m). Each run's prescribed kind comes
+    from the saved plan (frozen past weeks included); an unplanned run defaults to 'easy' (the
+    polarized expectation), and the easy-discipline SCORE is the headline (his easy days run hard).
+
+    PRIVATE (default): the HR-led read — HR fraction gates, Training Effect corroborates, GAP is a
+    terrain-fair pace, subjective_feeling + decoupling as context.
+    PUBLIC (`public=True`, the read-only showcase): SANITIZED — no heart rate, TE, or feeling reach the
+    open box (the same posture that drops per-run HR from the activity payload, §H7). Runs are judged on
+    grade-adjusted PACE vs the easy-pace ceiling instead; the score is the public, conservative read."""
     from datetime import timedelta
-    hrmax = _robust_hrmax(db)
+    hrmax = None if public else _robust_hrmax(db)
+    snap = latest_snapshot(db)
+    zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     since = (datetime.now().date() - timedelta(days=window_days)).isoformat()
     drop = dropped_ids(db)
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
@@ -998,28 +1133,35 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS):
     runs = []
     for r in db.execute(
         "SELECT id, date, distance, duration, hr_avg, raw FROM activities "
-        "WHERE sport=? AND date>=? ORDER BY date DESC", (RUNNING_SPORT, since)).fetchall():
-        if r["id"] in drop or not r["distance"] or r["distance"] < 2 or not r["hr_avg"]:
+        "WHERE " + RUN_FAMILY_SQL + " AND date>=? ORDER BY date DESC", (since,)).fetchall():
+        if r["id"] in drop or not r["distance"] or r["distance"] < 2:
             continue
         raw = json.loads(r["raw"] or "{}")
         kind = kind_by_date.get(r["date"]) or "easy"
-        hrf = (r["hr_avg"] / hrmax) if hrmax else None
-        te = raw.get("fit_training_effect")
         gap = raw.get("gap")                              # Runalyze grade-adjusted speed (km/h)
         gap_pace = (round(3600.0 / gap) if gap else
                     (round(r["duration"] / r["distance"]) if r["duration"] else None))
-        verdict, conf = _effort_verdict(kind, hrf, te)
-        runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
-                     "hr_avg": r["hr_avg"], "hr_pct": round(hrf * 100) if hrf else None,
-                     "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
-                     "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
-                     "verdict": verdict, "confidence": conf})
+        if public:
+            if not gap_pace:                              # pace-judged → needs a pace
+                continue
+            runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
+                         "gap_pace": gap_pace, "verdict": _effort_verdict_pace(kind, gap_pace, zones)})
+        else:
+            if not r["hr_avg"]:                           # HR-judged → needs HR
+                continue
+            hrf = (r["hr_avg"] / hrmax) if hrmax else None
+            te = raw.get("fit_training_effect")
+            verdict, conf = _effort_verdict(kind, hrf, te)
+            runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
+                         "hr_avg": r["hr_avg"], "hr_pct": round(hrf * 100) if hrf else None,
+                         "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
+                         "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
+                         "verdict": verdict, "confidence": conf})
     aerobic = [x for x in runs if x["kind"] in AEROBIC_KINDS]
     quality = [x for x in runs if x["kind"] not in AEROBIC_KINDS]
     on = sum(1 for x in aerobic if x["verdict"] == "on")
-    return {
-        "window_days": window_days, "hrmax": hrmax,
-        "easy_hr_ceiling": round(EASY_HR_FRAC * hrmax) if hrmax else None,
+    out = {
+        "window_days": window_days, "public": public,
         "easy_score": round(100 * on / len(aerobic)) if aerobic else None,
         "easy_counts": {"judged": len(aerobic), "on": on,
                         "hot": sum(1 for x in aerobic if x["verdict"] == "hot"),
@@ -1028,6 +1170,12 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS):
                            "too_easy": sum(1 for x in quality if x["verdict"] == "too_easy")},
         "runs": runs,
     }
+    if public:
+        out["easy_pace_ceiling"] = fmt_pace(zones["easy_top"]) if zones.get("easy_top") else None
+    else:
+        out["hrmax"] = hrmax
+        out["easy_hr_ceiling"] = round(EASY_HR_FRAC * hrmax) if hrmax else None
+    return out
 
 
 # ── Plan engine v1 (deterministic; §6) ──────────────────────────────────────
@@ -1688,8 +1836,8 @@ def _week_banked(db, ws, we, planned_km, planned_runs, drop):
     Single source of truth for BOTH the re-base graduation and the earned volume lift, so the two
     gates judge a week identically. Returns (banked, act_km, act_runs)."""
     rows = db.execute(
-        "SELECT id, date, distance FROM activities WHERE date>=? AND date<=? AND sport=?",
-        (ws.isoformat(), we.isoformat(), RUNNING_SPORT)).fetchall()
+        "SELECT id, date, distance FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+        (ws.isoformat(), we.isoformat())).fetchall()
     act_km = sum(r["distance"] for r in rows if r["id"] not in drop and r["distance"])
     act_runs = len({r["date"] for r in rows if r["id"] not in drop and r["distance"]})
     adh = act_km >= BANK_ADHERENCE * (planned_km or 0) and act_runs >= (planned_runs or 0) - 1
@@ -1994,12 +2142,55 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
     return {"verdict": verdict, "projected_ctl": proj, "estimate_ctl": est, "note": msg}
 
 
+REBASE_GAP_WEEKS = 2   # consecutive run-free weeks that count as a real break between training blocks
+
+
+def _derive_block_start(db, today):
+    """Machine-INDEPENDENT re-base anchor for a FRESH db (no stored `rebase_start`): the Monday the
+    CURRENT training block resumed, derived purely from the synced run history so every machine — and a
+    rebuilt db — agrees. (The old fresh-plan default keyed off the week the APP first ran on that
+    machine, which differs Mac↔Manjaro off identical data.) Walk back from this week through run-weeks,
+    tolerating isolated empty weeks (a down or taper week) but stopping at a real gap (≥ REBASE_GAP_WEEKS
+    consecutive run-free weeks); the anchor is the earliest week of that contiguous block. Continuous
+    training all the way back through the trailing re-base window = an ESTABLISHED block (no real re-base
+    to do) → this week's Monday, the prior default. Bounded to the window and never after today, so the
+    anchor always sits inside the non-elapsed re-base horizon."""
+    from datetime import timedelta
+    this_mon = _monday(today)
+    window_start = this_mon - timedelta(weeks=len(REBASE_SHAPE) - 1)
+    active = set()
+    try:
+        rows = db.execute(
+            "SELECT date FROM activities WHERE " + RUN_FAMILY_SQL + " AND date>=? AND date<=?",
+            (window_start.isoformat(), today.isoformat())).fetchall()
+    except sqlite3.OperationalError:
+        rows = []                                   # no activities table (a bare test db) ⇒ no runs
+    for r in rows:
+        try:
+            active.add(_monday(_date(r["date"])))
+        except (ValueError, TypeError):
+            continue
+    block_start, empties, broke, wk = this_mon, 0, False, this_mon
+    while wk >= window_start:
+        if wk in active:
+            block_start, empties = wk, 0
+        else:
+            empties += 1
+            if empties >= REBASE_GAP_WEEKS:
+                broke = True
+                break
+        wk -= timedelta(weeks=1)
+    return block_start if broke else this_mon   # no real gap back through the window ⇒ established ⇒ now
+
+
 def _rebase_start(db, today):
     """The re-base start day — stored once and reused across regenerations so changing an
     objective re-periodizes the road *ahead* without sliding the block's start (a simple
-    'freeze the past' approximation, §6b). The block anchors to the **Monday** of the week it first
-    runs, so weeks are calendar Mon–Sun: run-day layouts map to real weekdays and the long run lands
-    on the actual weekend (offset 6 = Sunday). Storing it keeps the anchor stable across regenerations.
+    'freeze the past' approximation, §6b). The block anchors to a **Monday**, so weeks are calendar
+    Mon–Sun: run-day layouts map to real weekdays and the long run lands on the actual weekend (offset
+    6 = Sunday). Storing it keeps the anchor stable across regenerations; a FRESH db derives the anchor
+    from the run history (`_derive_block_start`) so it's the same on every machine, not keyed off the
+    week the app first ran here.
 
     A legacy non-Monday anchor (the old 'starts today' scheme) is migrated to its **containing**
     Monday — back-only, never forward. Back-only is the safe direction: it never pushes block_start
@@ -2020,7 +2211,7 @@ def _rebase_start(db, today):
                 set_meta(db, "rebase_start", mon.isoformat())
                 db.commit()
             return mon
-    start = _monday(today)                      # fresh plan: anchor to this week's Monday; freeze holds it
+    start = _derive_block_start(db, today)      # fresh db: data-derived block start (machine-independent)
     set_meta(db, "rebase_start", start.isoformat())
     db.commit()
     return start
@@ -2086,7 +2277,7 @@ def _race_day_activity(db, race_date_iso, race_type):
     rd = _date(race_date_iso)
     rows = db.execute(
         "SELECT id, date, distance, duration FROM activities "
-        "WHERE date BETWEEN ? AND ? AND LOWER(sport) LIKE '%run%' AND distance > 0 AND duration > 0",
+        "WHERE date BETWEEN ? AND ? AND " + RUN_FAMILY_SQL + " AND distance > 0 AND duration > 0",
         ((rd - timedelta(days=2)).isoformat(), (rd + timedelta(days=2)).isoformat())).fetchall()
     full = [r for r in rows if abs(r["distance"] - target_km) / target_km <= 0.15]
     if full:
@@ -2556,7 +2747,7 @@ def llm_json(system, user, schema, effort="low", max_tokens=1024):
     deliberately small — the engine, not the model, makes the numeric decisions."""
     client = _anthropic()
     if client is None:
-        return {"ok": False, "error": "LLM not configured — set ANTHROPIC_API_KEY in .env"}
+        return {"ok": False, "error": "AI features aren't set up — add a Claude API key in Settings"}
     try:
         import anthropic
         resp = client.messages.create(
@@ -3160,8 +3351,8 @@ def runs_on_date(db, date):
     drop = dropped_ids(db)
     km = sec = 0.0
     for r in db.execute(
-        "SELECT id, distance, duration FROM activities WHERE date=? AND sport=?",
-        (date, RUNNING_SPORT)
+        "SELECT id, distance, duration FROM activities WHERE date=? AND " + RUN_FAMILY_SQL,
+        (date,)
     ).fetchall():
         if r["id"] in drop or not r["distance"]:
             continue
@@ -3237,7 +3428,7 @@ def block_log(db):
     acts = {}
     for r in db.execute(
         "SELECT id, date, distance, duration FROM activities "
-        "WHERE date>=? AND date<=? AND sport=? ORDER BY date_time", (start, end, RUNNING_SPORT)
+        "WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL + " ORDER BY date_time", (start, end)
     ).fetchall():
         if r["id"] in drop or not r["distance"]:
             continue
@@ -3388,10 +3579,11 @@ def _private_only_path(p):
     """Paths the public read-only container must never serve — location/medical/personal privacy.
     Centralised so the map-privacy self-test can assert this invariant can't silently regress:
     `/api/health` (blood markers), the workout `/map` (route geo reveals where the owner lives),
-    `/api/effort-discipline` (§6m — per-run HR + a personal effort critique, more granular than the
-    public 'training shape + plan only' posture), and `/api/settings` (athlete context is personal,
-    and the panel is an owner-only control surface)."""
-    return (p in ("/api/health", "/api/effort-discipline", "/api/settings", "/api/geocode")
+    `/api/settings` + `/api/secrets` (athlete context + keys are personal, owner-only control surfaces),
+    and `/api/geocode` (the city-picker proxy). NOTE `/api/effort-discipline` is NOT here: it self-
+    sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
+    so the score is public while the HR-led critique stays private."""
+    return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets")
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -3536,10 +3728,11 @@ def api_hr_zones_derive():
 
 @app.get("/api/effort-discipline")
 def api_effort_discipline():
-    """§6m — per-run effort vs prescription over the recent window (HR-led, Runalyze-native). Public-
-    safe (effort/HR/pace, no medical); the readonly guard allows this GET. `?days=N` (default 21)."""
+    """§6m — effort vs prescription over the recent window. PRIVATE console = the HR-led read (per-run
+    HR + TE + feeling); PUBLIC read-only showcase = a SANITIZED pace-based easy-discipline score with no
+    HR or personal critique (READONLY → public=True). `?days=N` (default 21)."""
     days = int(request.args.get("days", str(EFFORT_WINDOW_DAYS)))
-    return jsonify(effort_discipline(get_db(), window_days=days))
+    return jsonify(effort_discipline(get_db(), window_days=days, public=READONLY))
 
 
 @app.get("/api/projector")
@@ -4150,9 +4343,9 @@ def _activity_payload(db, a):
         "ignored": bool(db.execute("SELECT 1 FROM ignored_activities WHERE id=?",
                                    (a.get("id"),)).fetchone()),
     }
-    if READONLY:                      # per-run HR is private (same posture that gates /api/effort-discipline) —
-        payload.pop("hr_avg", None)   # withhold it server-side on the public container, not just in the UI
-        payload.pop("hr_max", None)
+    if READONLY:                      # per-run HR is private (same posture that drops HR from the public
+        payload.pop("hr_avg", None)   # effort-discipline read) — withhold it server-side on the public
+        payload.pop("hr_max", None)   # container, not just in the UI
     return payload
 
 
@@ -4162,11 +4355,11 @@ def latest_running_activity(db):
     OVERALL most-recent activity is a non-run (e.g. a tennis match). The non-run still reaches the
     plan via Runalyze's all-sport CTL/ATL snapshot — it just isn't a run to show here. Returns
     (run_row_or_None, cross_note_or_None)."""
-    run = db.execute("SELECT raw FROM activities WHERE LOWER(sport) LIKE '%run%' "
+    run = db.execute("SELECT raw FROM activities WHERE " + RUN_FAMILY_SQL + " "
                      "ORDER BY date_time DESC LIMIT 1").fetchone()
     top = db.execute("SELECT sport, date FROM activities ORDER BY date_time DESC LIMIT 1").fetchone()
     cross = ({"sport": top["sport"], "date": top["date"]}
-             if top and "run" not in (top["sport"] or "").lower() else None)
+             if top and not _is_run_family(top["sport"]) else None)
     return run, cross
 
 
@@ -4349,8 +4542,8 @@ def vo2max_trend(db, months=6):
     from datetime import timedelta
     cutoff = (datetime.now().date() - timedelta(days=round(months * 30.4))).isoformat()
     rows = db.execute(
-        "SELECT date, raw FROM activities WHERE sport = ? AND date >= ? ORDER BY date ASC",
-        (RUNNING_SPORT, cutoff),
+        "SELECT date, raw FROM activities WHERE " + RUN_FAMILY_SQL + " AND date >= ? ORDER BY date ASC",
+        (cutoff,),
     ).fetchall()
     sm, out = None, []
     for r in rows:
@@ -4372,8 +4565,7 @@ def vo2max_trend(db, months=6):
 def db_weekly_running():
     db = get_db()
     rows = db.execute(
-        "SELECT date, distance FROM activities WHERE sport = ? AND date IS NOT ''",
-        (RUNNING_SPORT,),
+        "SELECT date, distance FROM activities WHERE " + RUN_FAMILY_SQL + " AND date IS NOT ''"
     ).fetchall()
     buckets = {}
     for r in rows:
@@ -4576,6 +4768,25 @@ def api_settings_save():
     if not ok:
         return jsonify(ok=False, errors=result), 400
     return jsonify(ok=True, settings=current_settings(get_db()))
+
+
+@app.get("/api/secrets")
+def api_secrets():
+    """Status of the Runalyze token + Claude key — configured flag + provenance ONLY, never the value.
+    Private-only via `_private_only_path` (the public container 403s it)."""
+    return jsonify(ok=True, secrets=secret_status())
+
+
+@app.post("/api/secrets")
+def api_secrets_save():
+    """Set or clear a secret in the private-only store; applied live (no restart, no .env edit). The
+    `_readonly_guard` already 403s this on the public container. Body: {key, value}; an empty value
+    clears the secret (reverting to the env var, if any). Never echoes the value back."""
+    d = body()
+    ok, err = save_secret(d.get("key", ""), d.get("value", ""))
+    if not ok:
+        return jsonify(ok=False, error=err), 400
+    return jsonify(ok=True, secrets=secret_status())
 
 
 @app.get("/")
@@ -4882,7 +5093,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .ready .rhrv{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px}
   .ready .raisrc{font-family:var(--mono);font-size:10px;color:var(--accent);margin-top:5px;letter-spacing:.04em}
   /* §3 status card — "lead with the verdict" (DESIGN.md Almanac). The bg swaps with the state. */
-  .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:#fff;
+  .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:var(--onacc);
     background:linear-gradient(155deg,var(--readybg),var(--readybg2));
     box-shadow:0 8px 22px color-mix(in oklab,var(--readybg),transparent 60%)}
   .statuscard.amber{background:linear-gradient(155deg,var(--warn),color-mix(in oklab,var(--warn),#000 30%));
@@ -4894,8 +5105,8 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .statuscard .sc-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.78)}
   .statuscard .sc-pill{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.16);
     border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:4px 11px;
-    font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:#fff}
-  .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:#fff;box-shadow:0 0 8px rgba(255,255,255,.9)}
+    font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--onacc)}
+  .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--onacc);box-shadow:0 0 8px rgba(255,255,255,.9)}
   .statuscard .sc-verdict{font-family:var(--serif);font-weight:600;font-size:23px;margin-top:14px;line-height:1.18;position:relative}
   .statuscard .halt{font-weight:600;margin-top:10px;position:relative}
   .statuscard .sc-foot{font-family:var(--mono);font-size:10.5px;color:rgba(255,255,255,.82);
@@ -5223,9 +5434,16 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     border-radius:8px;padding:8px 10px}
   .setrow textarea{min-height:64px;resize:vertical;line-height:1.5}
   .setrow .help{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5}
-  .setrow .err{color:#c0392b;font-size:11px;margin-top:4px}
+  .setrow .err{color:var(--danger);font-size:11px;margin-top:4px}
   .setbar{display:flex;align-items:center;gap:12px;margin-top:4px}
   .setbar .ok{color:var(--accent);font-size:12px}
+  /* Settings — keys block (write-only secrets: status shown, value never echoed) */
+  .secblock{display:flex;flex-direction:column;gap:16px;margin:6px 0 18px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+  .sectitle{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .setrow .src.ok{color:var(--ok)}
+  .setrow .src.warn{color:var(--warn)}
+  .secinput{display:flex;gap:8px;align-items:center}
+  .secinput input{flex:1}
   /* Settings modal — native <dialog>, centered, backdrop-dimmed */
   dialog.modal{border:none;border-radius:16px;padding:0;width:min(560px,92vw);max-height:86vh;
     background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
@@ -5247,7 +5465,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .wxchip b{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--muted)}
   .wxchip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;
     line-height:1;padding:0 2px;border-radius:6px}
-  .wxchip button:hover{color:#c0392b}
+  .wxchip button:hover{color:var(--danger)}
   .wxsearchrow{display:flex;gap:8px}
   .wxsearchrow input{flex:1}
   .wxresults{list-style:none;margin:6px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;
@@ -5364,9 +5582,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 
     <dialog id="settingsDialog" class="modal">
       <div class="modal-head">
-        <h2>Settings <span class="muted mono" style="font-size:12px">— personalization, stored in your database (overrides env)</span></h2>
+        <h2>Settings <span class="muted mono" style="font-size:12px">— keys &amp; personalization, stored privately on your instance</span></h2>
         <button class="modal-x" id="settingsClose" aria-label="Close settings">✕</button>
       </div>
+      <div id="secretsBox"></div>
       <div id="settings"><div class="empty">Loading…</div></div>
     </dialog>
 
@@ -6023,9 +6242,10 @@ function refreshFirstRun(){
   const hasObj = OBJECTIVES.some(o=>o.status==='upcoming');
   const steps=[
     {label:"Connect Runalyze", done: TOKEN_OK || HAS_SHAPE,
-     // the token is a SECRET (env-only, needs a restart), so this step is instructional, not a form
-     desc:"Set <code>RUNALYZE_TOKEN</code> in your environment (or <code>.env</code>), then restart. "+
-          "It is a secret, so it cannot be set from this page.", act:null},
+     // the token is a secret, but it's now settable in the private Settings window (stored off the
+     // public box, applied live) — so this step opens Settings instead of asking for a file edit
+     desc:"Add your Runalyze API token in Settings — it's stored privately and takes effect right away, "+
+          "no restart needed.", act:{id:"fr_keys", text:"Open Settings"}},
     {label:"Pull your training history", done: HAS_SHAPE,
      desc:"Fetch your activities from Runalyze to build your current shape.",
      act:{id:"fr_sync", text:"Sync now"}},
@@ -6045,6 +6265,7 @@ function refreshFirstRun(){
   }).join("");
   host.innerHTML=`<div class="firstrun"><div class="fr-head"><b>Welcome to Sparing Horse.</b> `+
     `Three steps to your first plan.</div><ol class="fr-steps">${li}</ol></div>`;
+  const kb=$("#fr_keys"); if(kb) kb.addEventListener("click", ()=>{ const dlg=$("#settingsDialog"); if(dlg){ if(!$("#setform")) loadSettings(); loadSecrets(); dlg.showModal(); } });
   const sb=$("#fr_sync"); if(sb) sb.addEventListener("click", ()=>$("#syncBtn")&&$("#syncBtn").click());
   const rb=$("#fr_race"); if(rb) rb.addEventListener("click", async ()=>{
     const p=document.getElementById("plan"); if(p) p.scrollIntoView({behavior:"smooth", block:"start"});
@@ -6075,14 +6296,14 @@ function objManager(p){
   const aCount = OBJECTIVES.filter(o=>o.status==='upcoming' && o.priority==='A').length;
   const conflictRow = aCount>=2 ? `
     <div class="conflictrow">
-      <button id="adjBtn" ${LLM_OK?'':'disabled'}>⚖ ${aCount} A-races compete — get advice${LLM_OK?'':' (set ANTHROPIC_API_KEY)'}</button>
+      <button id="adjBtn" ${LLM_OK?'':'disabled'}>⚖ ${aCount} A-races compete — get advice${LLM_OK?'':' (add a Claude API key in Settings)'}</button>
       <div id="objAdjudicate"></div>
     </div>` : "";
   const nlRow = `
     <div class="nlobj">
       <input id="ao_nl" ${LLM_OK?'':'disabled'} placeholder="Describe a goal — e.g. &quot;sub-45 10k in October&quot;, &quot;spring marathon, want to BQ&quot;" style="flex:1">
       <button id="ao_parse" ${LLM_OK?'':'disabled'} style="font-size:12px;padding:6px 11px">✨ Parse</button>
-      <span id="ao_interp" class="nlinterp${LLM_OK?'':' guess'}">${LLM_OK?'':'⚙ Set ANTHROPIC_API_KEY in .env to enable AI parsing'}</span>
+      <span id="ao_interp" class="nlinterp${LLM_OK?'':' guess'}">${LLM_OK?'':'⚙ Add a Claude API key in Settings to enable AI parsing'}</span>
     </div>`;
   return `<div class="objs">${rows}</div>
     ${conflictRow}
@@ -6194,7 +6415,7 @@ function adjustmentUI(p){
       <input id="adj_text" ${LLM_OK?'':'disabled'} placeholder="How'd it go / how are you? e.g. “felt great today”, “knee’s a bit sore”, “travelling Mon–Fri”">
       <button id="adj_propose" ${LLM_OK?'':'disabled'}>💬 Tell the horse</button>
       <div class="adjhint">A run that's done → I'll <b>log it</b> · something ahead (a niggle, travel, a cold) → I'll <b>propose easing</b> the plan. I only ever ease or hold — never push harder.</div>
-      <div id="adj_preview" class="adjpreview">${LLM_OK?'':'<div class="adjclamp">⚙ Set ANTHROPIC_API_KEY in .env to enable — the engine still clamps every suggestion.</div>'}</div>
+      <div id="adj_preview" class="adjpreview">${LLM_OK?'':'<div class="adjclamp">⚙ Add a Claude API key in Settings to enable — the engine still clamps every suggestion.</div>'}</div>
     </div>`;
   return banner + ask;
 }
@@ -6506,7 +6727,7 @@ function renderPlan(p){
     ${header}
     ${adjustmentUI(p)}
     ${SH_READONLY?'':`<div class="explainrow">
-      <button id="explainBtn" ${LLM_OK?'':'disabled'}>📖 Explain this plan${LLM_OK?'':' — set ANTHROPIC_API_KEY'}</button>
+      <button id="explainBtn" ${LLM_OK?'':'disabled'}>📖 Explain this plan${LLM_OK?'':' — add a Claude API key in Settings'}</button>
     </div>
     <div id="planExplain"></div>`}
     <p class="feas">${esc(p.feasibility.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')}</p>
@@ -6766,38 +6987,57 @@ const EFFV = {on:["var(--ok)","on target"], hot:["var(--warn)","hot"],
               unknown:["var(--muted)","—"]};
 async function loadEffort(){
   const host=$("#effort"); if(!host) return;
-  if(SH_READONLY){ const s=$("#sec-effort"); if(s) s.style.display="none"; return; }  // private-only (per-run HR + critique)
-  let d; try{ d=await getJSON("/api/effort-discipline"); }catch(e){ return; }
+  let d; try{ d=await getJSON("/api/effort-discipline"); }catch(e){ const s=$("#sec-effort"); if(s) s.style.display="none"; return; }
   if(!d || d.easy_score==null){
-    host.innerHTML=`<div class="empty">Not enough heart-rate runs in the last ${d&&d.window_days||21} days yet — this reads your synced runs' HR.</div>`; return; }
+    host.innerHTML=`<div class="empty">Not enough runs in the last ${d&&d.window_days||21} days yet${d&&d.public?" to score easy-pace discipline.":" — this reads your synced runs' HR."}</div>`; return; }
   const c=d.easy_counts, score=d.easy_score;
   const tone = score>=80?"var(--ok)":score>=50?"var(--warn)":"var(--danger)";
   const verdict = score>=80?"dialed in":score>=50?"drifting hard":"easy days are threshold days";
-  const rows=(d.runs||[]).map(r=>{
-    const [col,lbl]=EFFV[r.verdict]||EFFV.unknown;
-    const tag = r.confidence==="high"?"":r.confidence==="low"?` <span class="muted" style="font-weight:400">·low conf</span>`:"";
-    return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
-      `<td class="mono">${r.km}k</td><td class="mono">${EFFP(r.gap_pace)}</td>`+
-      `<td class="mono">${r.hr_avg} <span class="muted">${r.hr_pct}%</span></td>`+
-      `<td class="mono">${r.te==null?"—":r.te}</td>`+
-      `<td class="mono">${r.feeling==null?"—":r.feeling+"/5"}</td>`+
-      `<td style="color:${col};font-weight:600">${lbl}${tag}</td></tr>`;
-  }).join("");
+  let rows, headCols, capLine, note;
+  if(d.public){
+    // sanitized public read — pace-judged, no HR / TE / feeling
+    rows=(d.runs||[]).map(r=>{
+      const [col,lbl]=EFFV[r.verdict]||EFFV.unknown;
+      return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
+        `<td class="mono">${r.km}k</td><td class="mono">${EFFP(r.gap_pace)}</td>`+
+        `<td style="color:${col};font-weight:600">${lbl}</td></tr>`;
+    }).join("");
+    headCols=`<th>date</th><th>session</th><th>dist</th>`+
+      `<th>GAP ${qhint("Grade Adjusted Pace — pace corrected for hills so efforts compare fairly across terrain (from Runalyze).")}</th>`+
+      `<th>vs easy ${qhint("Whether the grade-adjusted pace stayed at or below the easy-pace ceiling. The public read judges on pace; heart rate stays private.")}</th>`;
+    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed at easy pace (≤ <b>${esc(d.easy_pace_ceiling||"—")}</b>/km, grade-adjusted).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran quicker than easy.`:""}`;
+    note=`Judged on grade-adjusted pace, not heart rate (HR stays private). Pace is a rough proxy — heat &amp; fatigue don't show in it — so this is the conservative public read; the owner's console uses heart rate.`;
+  }else{
+    // private read — full HR-led detail
+    rows=(d.runs||[]).map(r=>{
+      const [col,lbl]=EFFV[r.verdict]||EFFV.unknown;
+      const tag = r.confidence==="high"?"":r.confidence==="low"?` <span class="muted" style="font-weight:400">·low conf</span>`:"";
+      return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
+        `<td class="mono">${r.km}k</td><td class="mono">${EFFP(r.gap_pace)}</td>`+
+        `<td class="mono">${r.hr_avg} <span class="muted">${r.hr_pct}%</span></td>`+
+        `<td class="mono">${r.te==null?"—":r.te}</td>`+
+        `<td class="mono">${r.feeling==null?"—":r.feeling+"/5"}</td>`+
+        `<td style="color:${col};font-weight:600">${lbl}${tag}</td></tr>`;
+    }).join("");
+    headCols=`<th>date</th><th>session</th><th>dist</th>`+
+      `<th>GAP ${qhint("Grade Adjusted Pace — your pace corrected for hills so efforts compare fairly across terrain (from Runalyze). Runs here are judged on heart rate, not this.")}</th>`+
+      `<th>avg HR</th>`+
+      `<th>TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>`+
+      `<th>feel</th>`+
+      `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th>`;
+    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm (78% of HRmax ${d.hrmax}).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
+    note=`Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Runs with no matching plan session (incl. before the plan existed) are judged against the easy default; one mismatch is an observation, not a verdict.`;
+  }
   host.innerHTML=`
     <div class="effort-head">
       <div class="effort-score" style="color:${tone}">${score}<span class="pct">%</span></div>
       <div class="effort-cap">
         <div class="big">Easy discipline — <b style="color:${tone}">${verdict}</b></div>
-        <div class="muted">Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm (78% of HRmax ${d.hrmax}).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}</div>
-        <div class="muted" style="font-size:11px;margin-top:4px">Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Runs with no matching plan session (incl. before the plan existed) are judged against the easy default; one mismatch is an observation, not a verdict.</div>
+        <div class="muted">${capLine}</div>
+        <div class="muted" style="font-size:11px;margin-top:4px">${note}</div>
       </div>
     </div>
-    <table class="efftbl"><thead><tr><th>date</th><th>session</th><th>dist</th>
-      <th>GAP ${qhint("Grade Adjusted Pace — your pace corrected for hills so efforts compare fairly across terrain (from Runalyze). Runs here are judged on heart rate, not this.")}</th>
-      <th>avg HR</th>
-      <th>TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>
-      <th>feel</th>
-      <th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th></tr></thead><tbody>${rows}</tbody></table>`;
+    <table class="efftbl"><thead><tr>${headCols}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
@@ -7030,6 +7270,46 @@ async function saveSettings(e){
   loadSettings();          // refresh provenance badges (env → saved)
   if(typeof loadWeather==="function") loadWeather();   // weather cities take effect live
 }
+// Keys block — the two secrets (Runalyze token / Claude key). WRITE-ONLY: the value is never sent back,
+// so the field is always empty and shows status only. Private console only (#secretsBox is removed on
+// the public view). Saving applies live — no .env edit, no restart.
+async function loadSecrets(){
+  const host=$("#secretsBox"); if(!host) return;
+  let d; try{ d=await getJSON("/api/secrets"); }catch(e){ host.innerHTML=""; return; }
+  if(!d.ok){ host.innerHTML=""; return; }
+  const badge=s=> s.source==="saved" ? `<span class="src ok">✓ configured</span>`
+              : s.source==="env"   ? `<span class="src ok">✓ from environment</span>`
+              :                       `<span class="src warn">not set</span>`;
+  const row=s=>`<div class="setrow">
+      <label for="sec_${s.key}">${esc(s.label)} ${badge(s)}</label>
+      <div class="secinput">
+        <input id="sec_${s.key}" type="password" autocomplete="new-password"
+               placeholder="${s.configured?"•••• — paste a new value to replace":"Paste your key to enable"}">
+        <button type="button" class="primary" data-sec="${s.key}">Save</button>
+        ${s.source==="saved"?`<button type="button" class="ghost" data-clr="${s.key}">Clear</button>`:""}
+      </div>
+      <div class="help">${esc(s.help)}</div>
+      <div class="err" id="secerr_${s.key}"></div>
+    </div>`;
+  host.innerHTML=`<div class="secblock"><div class="sectitle">Connections &amp; keys</div>
+    ${d.secrets.map(row).join("")}</div>`;
+  host.querySelectorAll("button[data-sec]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.sec,false)));
+  host.querySelectorAll("button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
+}
+async function saveSecret(key, clear){
+  const inp=$("#sec_"+key), errEl=$("#secerr_"+key); if(errEl) errEl.textContent="";
+  const value = clear ? "" : (inp ? inp.value : "");
+  if(!clear && !value){ if(errEl) errEl.textContent="⚠ paste a value first"; return; }
+  let d; try{
+    const r=await fetch("/api/secrets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,value})});
+    d=await r.json();
+  }catch(e){ if(errEl) errEl.textContent="⚠ could not save"; return; }
+  if(!d.ok){ if(errEl) errEl.textContent="⚠ "+(d.error||"could not save"); return; }
+  if(inp) inp.value="";
+  loadSecrets();   // refresh the status badges
+  // a freshly-set token/key changes what the app can do — refresh the affected surfaces live
+  fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; TOKEN_OK=!!h.token_configured; refreshFirstRun(); }).catch(()=>{});
+}
 
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
@@ -7037,7 +7317,7 @@ loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEff
 // Settings modal open/close (private only — the button is removed on the public view below).
 const _setBtn=$("#settingsBtn"), _setDlg=$("#settingsDialog");
 if(_setBtn && _setDlg){
-  _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); _setDlg.showModal(); });  // (re)load if the initial fetch failed
+  _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); loadSecrets(); _setDlg.showModal(); });  // (re)load settings if the initial fetch failed; refresh key status each open
   const _x=$("#settingsClose"); if(_x) _x.addEventListener("click", ()=>_setDlg.close());
   _setDlg.addEventListener("click", e=>{ if(e.target===_setDlg) _setDlg.close(); });  // backdrop click
 }
@@ -7054,7 +7334,7 @@ if(SH_READONLY){
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
 }else{
-  loadReadiness(); loadHealth(); loadSettings();
+  loadReadiness(); loadHealth(); loadSettings(); loadSecrets();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 </script>
@@ -7245,7 +7525,7 @@ def _stc_map_privacy(db):
         if "cross_training" in pub_latest:
             fail.append("/api/activity/latest leaks the cross-training note on the public view")
         # per-run HR (avg/max + the per-second profile stream) is private — the public container must
-        # not serve it (same posture that gates /api/effort-discipline). Assert both surfaces.
+        # not serve it (same posture that drops HR from the public effort-discipline read). Assert both.
         try:
             READONLY = True
             prof_pub = client.get("/api/activity/-1/profile").get_data(as_text=True)
@@ -7653,6 +7933,73 @@ def _stc_settings():
                got={"violations": fails or "none"})
 
 
+def _stc_secrets():
+    """The private-only key store (Runalyze token / Claude key). Locks the SECURITY invariants the
+    feature exists for: (a) status NEVER returns the value — only configured+source; (b) a window-set
+    value wins over env, and clearing reverts to env; (c) setting the Claude key resets the cached LLM
+    client (live-apply); (d) in READONLY the store is never read AND a save is refused — secrets can't
+    reach the internet-facing public box; (e) /api/secrets is gated private. Uses a temp store + a
+    synthetic env; restores ALL module/env globals in a finally (incl. SH_SCHEDULE so no thread spawns)."""
+    import sqlite3 as _sq, os as _os, tempfile, json as _json
+    global SECRETS_DB, READONLY, RUNALYZE_TOKEN, ANTHROPIC_API_KEY, _anthropic_client
+    snap = dict(db=SECRETS_DB, ro=READONLY, rt=RUNALYZE_TOKEN, ak=ANTHROPIC_API_KEY,
+                cli=_anthropic_client, e_rt=_os.environ.get("RUNALYZE_TOKEN"),
+                e_ak=_os.environ.get("ANTHROPIC_API_KEY"), e_sch=_os.environ.get("SH_SCHEDULE"))
+    fails = []
+    leaked = lambda needle: any(needle in _json.dumps(s) for s in secret_status())
+    src = lambda k: next(s["source"] for s in secret_status() if s["key"] == k)
+    cfg = lambda k: next(s["configured"] for s in secret_status() if s["key"] == k)
+    try:
+        SECRETS_DB = Path(tempfile.mktemp(suffix=".db"))
+        READONLY = False
+        _os.environ["SH_SCHEDULE"] = "0"     # stop save_secret→start_scheduler spawning a real thread
+        _os.environ.pop("RUNALYZE_TOKEN", None); _os.environ.pop("ANTHROPIC_API_KEY", None)
+        if cfg("runalyze_token") or src("runalyze_token") != "none":
+            fails.append("unset secret should read none")
+        _os.environ["RUNALYZE_TOKEN"] = "ENVTOKEN"
+        if not (cfg("runalyze_token") and src("runalyze_token") == "env"):
+            fails.append("env secret should read configured/env")
+        if leaked("ENVTOKEN"):
+            fails.append("status LEAKED the env secret value")
+        ok, _ = save_secret("runalyze_token", "WINDOWTOKEN")
+        if not (ok and src("runalyze_token") == "saved"):
+            fails.append("a window-set value should win over env")
+        if leaked("WINDOWTOKEN"):
+            fails.append("status LEAKED the saved secret value")
+        if RUNALYZE_TOKEN != "WINDOWTOKEN":
+            fails.append("save didn't apply to the live global")
+        save_secret("runalyze_token", "")                 # clear → revert to env
+        if src("runalyze_token") != "env":
+            fails.append("cleared secret should revert to env")
+        _anthropic_client = "STALE"
+        save_secret("anthropic_api_key", "sk-test")
+        if _anthropic_client is not None:
+            fails.append("setting the Claude key didn't reset the cached LLM client")
+        READONLY = True                                   # the public-box invariant
+        if _stored_secret("runalyze_token") is not None:
+            fails.append("READONLY read the secrets store")
+        if save_secret("runalyze_token", "X")[0]:
+            fails.append("READONLY allowed a secret save")
+        READONLY = False
+        if save_secret("nope", "X")[0]:
+            fails.append("unknown secret key accepted")
+        if not _private_only_path("/api/secrets"):
+            fails.append("/api/secrets not gated private")
+    finally:
+        try: _os.remove(SECRETS_DB)
+        except Exception: pass
+        SECRETS_DB, READONLY = snap["db"], snap["ro"]
+        RUNALYZE_TOKEN, ANTHROPIC_API_KEY, _anthropic_client = snap["rt"], snap["ak"], snap["cli"]
+        for var, val in (("RUNALYZE_TOKEN", snap["e_rt"]), ("ANTHROPIC_API_KEY", snap["e_ak"]),
+                         ("SH_SCHEDULE", snap["e_sch"])):
+            if val is None: _os.environ.pop(var, None)
+            else: _os.environ[var] = val
+    return _st("det", "secrets",
+               "private key store: status never leaks the value; window-set wins over env + clear "
+               "reverts; Claude-key reset is live; READONLY never reads it + refuses a save; gated private",
+               passed=not fails, got={"violations": fails or "none"})
+
+
 def _stc_multi_a_chain():
     """§6q select_chain — role assignment by race-type-scaled separation + the no-A fallback + B→tune-ups.
     Pure function of (objectives, today)."""
@@ -7803,6 +8150,82 @@ def _stc_latest_running():
                "latest tile filters to running-family (trail counts) + notes a non-run iff it's the most recent",
                passed=not fails, expect="running picked · cross note only when latest is a non-run",
                got={"violations": fails or "none"})
+
+
+def _stc_rebase_anchor_derive():
+    """§ cross-machine re-base anchor — a FRESH db derives the block start from run history (the SAME on
+    every machine), not the week the app first ran here. REBASE_SHAPE is 6 wks → the window is offsets
+    0..5. Covers: a real gap→resume anchors at the resume week; a single down-week doesn't break the
+    block; an isolated run behind a ≥2-wk gap doesn't drag the anchor back; continuous training ⇒
+    established ⇒ this week; empty db ⇒ this week; and DETERMINISM (identical runs ⇒ identical anchor)."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    this_mon = _monday(date.today())
+    def anchor(week_offsets):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, sport TEXT)")
+        for w in week_offsets:                       # the Monday of each week (always ≤ today)
+            m.execute("INSERT INTO activities(date, sport) VALUES(?,?)",
+                      ((this_mon - _td(weeks=w)).isoformat(), "Trail Running"))
+        a = _derive_block_start(m, date.today()); m.close(); return a
+    fails = []
+    cases = [
+        ([0, 1, 2], this_mon - _td(weeks=2), "gap→resume anchors at the resume week (-2)"),
+        ([0, 2, 3], this_mon - _td(weeks=3), "single down-week (-1 empty) doesn't break the block"),
+        ([0, 5], this_mon, "isolated run behind a ≥2-wk gap doesn't drag the anchor back"),
+        (list(range(6)), this_mon, "continuous training through the window ⇒ established ⇒ this week"),
+        ([], this_mon, "empty db ⇒ this week"),
+    ]
+    for offsets, want, desc in cases:
+        got = anchor(offsets)
+        if got != want:
+            fails.append(f"{desc}: got {got}, want {want}")
+    if anchor([0, 1, 2]) != anchor([2, 0, 1]):       # order-independent ⇒ machine-independent
+        fails.append("anchor not deterministic across builds (cross-machine guarantee broken)")
+    return _st("det", "rebase-anchor-derive",
+               "fresh-db re-base anchor is derived from run history (machine-independent): gap→resume "
+               "anchors at the resume week, down-weeks don't break it, a pre-gap run doesn't drag it, "
+               "continuous ⇒ this week",
+               passed=not fails, got={"violations": fails or "none", "this_monday": this_mon.isoformat()})
+
+
+def _stc_run_family():
+    """§ run-family filter — trail/treadmill runs must reach the PLAN-SIDE run views, not just the
+    latest-activity tile. The engine used to filter exact sport='Running', so a trail run silently fell
+    out of effort/banking/HR/logs; RUN_FAMILY_SQL is now the single source of truth. Insert Trail +
+    Treadmill + plain Running + a non-run (Tennis, with a HIGHER HRmax that would spike the read if it
+    leaked) and assert the run views count the running family and exclude the non-run."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+        "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, raw TEXT);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);"
+        "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+    tdy = date.today()
+    mem.execute("INSERT INTO shape_snapshots VALUES(?,?,?,?)", (tdy.isoformat(), 50.0, 30.0, 28.0))
+    acts = [("Trail Running", 150, 175), ("Treadmill Running", 140, 168),
+            ("Running", 145, 170), ("Tennis", 160, 200)]   # tennis HRmax 200 = a spike if it leaks in
+    for i, (sport, hra, hrm) in enumerate(acts):
+        d = (tdy - _td(days=i + 1)).isoformat()
+        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (i + 1, d + "T18:00:00", d, sport, 8.0, 2400, hra, hrm, 40.0, json.dumps({"gap": 11.0})))
+    fails = []
+    n_judged = len(effort_discipline(mem)["runs"])
+    if n_judged != 3:                              # trail + treadmill + running; NOT tennis
+        fails.append(f"effort judged {n_judged} runs, expected 3 (trail+treadmill+running, not tennis)")
+    if _robust_hrmax(mem) != 175:                  # the run-family max (175), not the tennis 200 spike
+        fails.append(f"robust HRmax {_robust_hrmax(mem)} ≠ 175 — a non-run leaked into the HR read")
+    if not (_is_run_family("Trail Running") and _is_run_family("Treadmill Running")
+            and not _is_run_family("Tennis") and not _is_run_family(None)):
+        fails.append("_is_run_family misclassified a sport")
+    mem.close()
+    return _st("det", "run-family",
+               "trail/treadmill runs reach the plan-side run views (effort + HR), a non-run is excluded "
+               "(single source of truth = RUN_FAMILY_SQL)",
+               passed=not fails, got={"violations": fails or "none"})
 
 
 def _stc_projector(db):
@@ -8388,8 +8811,10 @@ def _stc_effort_discipline(db):
         "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
         "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);"
         "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
     tdy = datetime.now().date()
+    mem.execute("INSERT INTO shape_snapshots VALUES(?,?,?,?)", (tdy.isoformat(), 50.0, 30.0, 28.0))
     qd, ed = (tdy - _td(days=3)).isoformat(), (tdy - _td(days=5)).isoformat()
     mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
                 ("now", tdy.isoformat(), "{}", json.dumps(
@@ -8407,17 +8832,31 @@ def _stc_effort_discipline(db):
         fails.append(f"easy date not matched: {kinds.get(ed)}")
     if md["easy_counts"]["judged"] != 1:          # only the easy-prescribed run is in the easy bucket
         fails.append(f"quality run leaked into easy score: judged={md['easy_counts']['judged']}")
+    # PUBLIC (sanitized) read: the showcase serves a PACE-based score with NO heart rate, TE, feeling,
+    # or HR ceiling anywhere — the per-run HR + critique stay private (the reason this used to be gated).
+    pub = effort_discipline(mem, public=True)
+    PRIV_FIELDS = ("hrmax", "easy_hr_ceiling")
+    if any(k in pub for k in PRIV_FIELDS):
+        fails.append(f"public payload leaked a private top-level field: {[k for k in PRIV_FIELDS if k in pub]}")
+    leak_keys = ("hr_avg", "hr_pct", "te", "feeling", "decoupling", "confidence")
+    if any(any(k in r for k in leak_keys) for r in pub["runs"]):
+        fails.append("public per-run payload leaked HR/TE/feeling/critique")
+    if pub.get("easy_score") is None or not pub.get("easy_pace_ceiling"):
+        fails.append("public pace-based score didn't compute (needs the easy-pace ceiling)")
+    if {r["verdict"] for r in pub["runs"]} - {"on", "hot", "too_hard", "unknown"}:
+        fails.append("public verdicts not pace-based on/hot/too_hard/unknown")
+    if _private_only_path("/api/effort-discipline"):   # it must now be PUBLICLY servable (self-sanitizing)
+        fails.append("effort endpoint still gated private (should self-sanitize, not 403)")
     mem.close()
-    if not _private_only_path("/api/effort-discipline"):   # per-run HR must not reach the public view
-        fails.append("effort endpoint not gated private")
     return _st("det", "effort-discipline",
                "effort monitor is HR-LED (a low-HR long run w/ duration-lifted TE reads ON not too-hard); "
                "prescribed quality dates are matched + excluded from the easy score; HRmax spike-resistant; "
-               "endpoint gated private",
-               passed=not fails, expect="HR gates · TE corroborates · quality excluded · private",
+               "the PUBLIC read is sanitized to a pace-based score with no HR/TE/feeling/critique",
+               passed=not fails, expect="HR gates · TE corroborates · quality excluded · public = pace, no HR",
                got={"violations": fails or "none"},
                output={"easy_score": d.get("easy_score"), "hrmax": d.get("hrmax"),
-                       "easy_counts": d.get("easy_counts")})
+                       "easy_counts": d.get("easy_counts"),
+                       "public_score": pub.get("easy_score"), "public_ceiling": pub.get("easy_pace_ceiling")})
 
 
 def _stc_plan_structure(db):
@@ -9034,9 +9473,11 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
-                 lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_multi_a_chain(),
+                 lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
+                 lambda: _stc_multi_a_chain(),
                  lambda: _stc_periodize_chain(), lambda: _stc_multi_a_plan(),
-                 lambda: _stc_latest_running(),
+                 lambda: _stc_latest_running(), lambda: _stc_run_family(),
+                 lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
@@ -9425,6 +9866,7 @@ try:
         apply_settings_overrides(get_db())   # overlay any saved meta settings onto the env defaults
 except Exception as e:
     print(f"[settings] startup overlay skipped: {e}")
+apply_secret_overrides()   # overlay window-set secrets (Runalyze token / Claude key) before the scheduler
 start_scheduler()   # runs under waitress (import) and the dev server alike (logs the effective TZ)
 
 if __name__ == "__main__":

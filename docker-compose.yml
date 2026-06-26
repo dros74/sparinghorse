@@ -6,12 +6,17 @@ services:
     container_name: sparinghorse
     restart: unless-stopped
     environment:
-      # Runalyze Personal API token (Premium). Generate at
-      # https://runalyze.com/settings/personal-api  — sent as the `token` header.
+      # Secrets (Runalyze token + Claude key) are OPTIONAL here — you can set them in the private
+      # Settings window instead (stored in ./secrets below, applied live, no restart). These env vars
+      # are a fallback/bootstrap; a value set in the window overrides them.
+      # Runalyze Personal API token (Premium): https://runalyze.com/settings/personal-api
       - RUNALYZE_TOKEN=${RUNALYZE_TOKEN:-}
       # The LLM adjustment layer (the plan engine's language/judgment).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - SH_DB=/data/sparinghorse.db
+      # Private-only secrets store — keys set in the Settings window land here, NOT in ./data (which
+      # the public container shares + can read). This volume is mounted ONLY on this private service.
+      - SH_SECRETS_DB=/secrets/secrets.db
       # Personalization — real values live in the git-ignored .env on the host, kept OUT of this
       # tracked file so the public mirror + publish_mirror.sh leak gate stay clean.
       # Header widgets (also set on the public container so they render there too):
@@ -26,6 +31,9 @@ services:
       # Locally-owned data copy lives on the NAS — back it up by copying this folder.
       # This is the single writer of the DB.
       - ./data:/data
+      # Private-only key store (Runalyze token / Claude key set in the Settings window). Deliberately
+      # NOT under ./data and NOT mounted on the public container — keeps secrets off the open box.
+      - ./secrets:/secrets
     networks:
       - edge
     # NO host-published port. This instance has the tokens + medical data and NO app-level auth —

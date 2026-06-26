@@ -13,6 +13,7 @@ document*.pdf
 *.db-wal
 *.db-journal
 data/
+secrets/        # private-only key store (Runalyze token / Claude key set in the Settings window)
 
 # ── python ──────────────────────────────────────────────────────────
 __pycache__/
