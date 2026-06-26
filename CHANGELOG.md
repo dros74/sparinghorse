@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-27
+
+A mobile app experience. On a phone the app now behaves like an installed app rather than
+a long web page, and it opens on what matters today.
+
+### Added
+- **Mobile app shell** — on phones a fixed bottom tab bar (Today / Plan / Fitness / Body)
+  replaces the endless scroll; each area is its own tab with deep-linkable sections.
+- **Home-screen icons** — crisp app icons for installing Sparing Horse to your home screen.
+
+### Changed
+- **Readiness-first home** — the app opens on Today's Readiness, with your current main
+  objective pinned at the top and the latest activity right beneath it.
+- **Current-shape numbers** moved into their own section, grouped with the rest of your
+  fitness readouts under the Fitness tab.
+
+### Fixed
+- **Effort table on small screens** — it now fits a phone in portrait (the key columns,
+  with the verdict always visible) and shows every column again in landscape.
+
 ## [0.2.0] - 2026-06-26
 
 Multi-race periodization, a more honest feasibility verdict, in-app key setup, and
