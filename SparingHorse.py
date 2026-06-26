@@ -602,9 +602,14 @@ def sync_activities(db, max_pages=60, backfill=False):
       (routine sync — fast, only fetches the new activities since last time).
     - backfill=True: walk ALL pages to the end regardless of known/unknown — needed for the
       one-time full-history pull, because the newest pages are already known and the
-      incremental stop-condition would otherwise never reach the older history."""
-    known = {r["id"] for r in db.execute("SELECT id FROM activities").fetchall()}
+      incremental stop-condition would otherwise never reach the older history.
+    Already-synced rows whose upstream content CHANGED are refreshed in place (§DB1 MED-1) so an
+    edit-down on Runalyze converges instead of leaving stale-high load; this never counts as 'new',
+    so the incremental stop is unchanged."""
+    existing = {r["id"]: r["raw"] for r in db.execute("SELECT id, raw FROM activities").fetchall()}
+    known = set(existing)
     added = 0
+    refreshed = 0
     pages = 0
     for page in range(1, max_pages + 1):
         if page > 1:
@@ -615,15 +620,26 @@ def sync_activities(db, max_pages=60, backfill=False):
             break
         new_here = 0
         for a in items:
-            if a.get("id") not in known:
+            aid = a.get("id")
+            if aid not in known:
                 upsert_activity(db, a)
-                known.add(a.get("id"))
+                known.add(aid)
                 new_here += 1
+            elif json.dumps(a, separators=(",", ":")) != existing.get(aid):
+                # §DB1 MED-1 — an already-synced activity changed upstream (e.g. Runalyze recomputed
+                # TRIMP, or the owner cropped an over-long run → load edited DOWN). The old code SKIPPED
+                # every known id, so a stale-high load lingered forever. Refresh it so the local copy
+                # converges. NOT counted as new (new_here untouched), so the incremental stop-condition
+                # below is preserved: recent edits (page 1, always fetched) converge on the next sync;
+                # older ones on a full backfill (which walks every page anyway).
+                upsert_activity(db, a)
+                existing[aid] = json.dumps(a, separators=(",", ":"))
+                refreshed += 1
         db.commit()  # commit per page → durable progress, no all-or-nothing stall
         added += new_here
         if new_here == 0 and not backfill:
             break  # caught up (incremental only; backfill keeps going to the end)
-    return {"added": added, "pages_fetched": pages}
+    return {"added": added, "refreshed": refreshed, "pages_fetched": pages}
 
 
 # Single source of the shape_snapshots column contract — shared by the live API capture
@@ -751,11 +767,14 @@ def delete_activity_local(db, aid):
     this is the only way to drop a row Runalyze no longer holds. Returns True if a row was removed,
     False if no such id. CAVEAT: if the activity STILL exists on Runalyze, the next incremental sync
     re-inserts it (page 1 is always re-fetched) — this is for activities already removed upstream;
-    an accidental delete of a live activity self-heals on re-sync (or a full backfill)."""
+    an accidental delete of a live activity self-heals on re-sync (or a full backfill).
+    §DB1 — we deliberately KEEP any `ignored_activities` tombstone: if this row was a manually-ignored
+    near-dup (one `find_duplicates` can't catch, e.g. a drifted timestamp) and is still upstream, a
+    re-sync re-inserts the activity; the surviving tombstone keeps it excluded instead of letting it
+    double-count. An orphan tombstone (id matches no activity) is a harmless no-op in `dropped_ids`."""
     if not db.execute("SELECT 1 FROM activities WHERE id=?", (aid,)).fetchone():
         return False
     db.execute("DELETE FROM activities WHERE id=?", (aid,))
-    db.execute("DELETE FROM ignored_activities WHERE id=?", (aid,))
     db.execute("DELETE FROM trackcache WHERE activity_id=?", (aid,))
     db.commit()
     return True
@@ -1564,8 +1583,12 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
 
 def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
     """Roll the projector across one full week (Mon–Sun). Returns
-    (end_ctl, end_atl, eow_acwr, peak_acwr). We bound on END-OF-WEEK ACWR — the settled
-    weekly state, the natural planning cadence — rather than the long-run-day daily transient.
+    (end_ctl, end_atl, eow_acwr, peak_acwr). The PRIMARY governor bound is END-OF-WEEK ACWR
+    against the SOFT cap — the settled weekly state, the natural planning cadence — and normal
+    long-run-day daily transients (~1.0) are deliberately tolerated. The governor ALSO bounds the
+    in-week PEAK against the HARD cap (§H1): that only ever binds at low CTL, where a quality
+    session's fixed TRIMP floor makes the mid-week transient pathological (~1.5–1.6); it never
+    touches normal-CTL weeks, so the EOW-only soft bound above stands for the common case.
     project_forward only spans to the last planned day, so we extend rest days to Sunday.
     `roll_from` (default = week_start) is where the roll BEGINS: for a partially-elapsed week (§6o)
     pass `today` and seed (ctl, atl) with today's snapshot — the elapsed days' load is already in
@@ -1589,16 +1612,19 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
 
 
 def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None, days_override=None):
-    """Binary-search the largest weekly TRIMP whose peak projected ACWR stays ≤ cap. Distributes
-    WITH the week's quality (via `zones`) so the bound is on the real, intensity-distributed week.
+    """Binary-search the largest weekly TRIMP whose END-OF-WEEK projected ACWR stays ≤ cap AND whose
+    in-week PEAK ACWR stays ≤ ACWR_HARD (§H1). Distributes WITH the week's quality (via `zones`) so
+    the bound is on the real, intensity-distributed week. The peak/hard bound only bites at low CTL,
+    where a quality session's fixed TRIMP floor spikes the mid-week transient; at normal CTL eow is
+    the binding constraint and the hard ceiling is slack.
     `roll_from`/`days_override` thread through to project only today-onward days for a partially-
     elapsed week (§6o), so the remaining allowance is bounded against load already done this week."""
     lo, hi = 0.0, 700.0
     for _ in range(34):
         mid = (lo + hi) / 2
         _, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones, days_override=days_override)
-        _, _, eow, _peak = _project_week(ctl, atl, start, dt, roll_from=roll_from)
-        if eow and eow > cap:
+        _, _, eow, peak = _project_week(ctl, atl, start, dt, roll_from=roll_from)
+        if (eow and eow > cap) or (peak and peak > ACWR_HARD):
             hi = mid
         else:
             lo = mid
@@ -1875,12 +1901,27 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             continue
         allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT, zones)
         chosen = min(intent_trimp, allowed)
-        if chosen < intent_trimp - 1:
-            clipped_any = True
         sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, zones)
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
-        ctl, atl, eow, peak = _project_week(ctl, atl, wk_start, dt)
+        ctl_n, atl_n, eow, peak = _project_week(ctl, atl, wk_start, dt)
+        # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
+        # the governor cannot shrink; at low CTL that floor's mid-week spike pushes PEAK ACWR past the
+        # hard cap even while end-of-week stays under the soft cap. When it does, drop THIS week's
+        # quality to pure easy (easy load scales toward zero, so the hard cap can always be met) and
+        # re-govern. Quality returns automatically once CTL can afford it — self-heals as fitness
+        # rebuilds. Preserves the deliberate EOW soft bound + normal-transient tolerance; the hard
+        # ceiling only catches this low-CTL floor pathology, never a normal-CTL week.
+        if zones and peak and peak > ACWR_HARD:
+            allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT, zones=None)
+            chosen = min(intent_trimp, allowed)
+            sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, None)
+            adjusted = _apply_adjustment(sessions, dt, adjust)
+            sessions, dt = adjusted["sessions"], adjusted["dt"]
+            ctl_n, atl_n, eow, peak = _project_week(ctl, atl, wk_start, dt)
+        ctl, atl = ctl_n, atl_n  # carry forward the FINAL distribution, stepped exactly once
+        if chosen < intent_trimp - 1:
+            clipped_any = True
         weeks.append({**wk, "start": wk_start, "sessions": sessions,
                       "km": round(sum(s["km"] for s in sessions), 1),
                       "trimp_total": round(sum(dt.values()), 1), "proj_acwr": eow, "peak_acwr": peak,
@@ -1909,6 +1950,28 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
     proj = round(projected_ctl) if projected_ctl is not None else est
     src = ("the engine's projection through the planned blocks (ACWR-capped)"
            if projected_ctl is not None else "~3–4%/wk sustained")
+    # §PER1 F2 — a lower bound, so the verdict can warn "too soon" instead of always promising "finish".
+    # The honest "too soon" signal is the CONJUNCTION of a short runway AND a projected race-day fitness
+    # too low to carry the distance — NOT either alone:
+    #   • runway alone mis-fires: weeks_away shrinks as the race nears, so it would flag every race in
+    #     its final weeks — exactly when a well-built athlete is most ready (false positive, common case).
+    #   • CTL alone mis-fires: a long-runway marathon off a low detrained CTL is the "finish healthy off
+    #     a layoff" case this function is meant to bless.
+    # Together they catch only the genuine pathology (the §PER1-F1 fresh-near-race overrun): not enough
+    # time AND not enough projected base. Distance-aware thresholds.
+    MIN_RUNWAY = {"marathon": 14, "half": 9, "10k": 5, "5k": 4}
+    MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}
+    typ = (objective.get("type") or "").lower()
+    short_runway = weeks_away is not None and weeks_away < MIN_RUNWAY.get(typ, 6)
+    low_fitness = proj < MIN_CTL.get(typ, 0)
+    if short_runway and low_fitness:
+        label = objective.get("label", "the race")
+        msg = (f"That's only **{weeks_away} week{'s' if weeks_away != 1 else ''}** to {label}"
+               f"{f' (a {typ})' if typ else ''}, with projected race-day fitness ≈ CTL {proj:.0f} "
+               f"(from {ctl0:.0f} now) — too little time AND base to build to a healthy finish. Consider "
+               f"a later date or a shorter distance; the engine still builds you safely toward it and "
+               f"re-reads this each block as fitness returns.")
+        return {"verdict": "too soon", "projected_ctl": proj, "estimate_ctl": est, "note": msg}
     verdict = "finish"  # default honest verdict for a marathon off a detrained base
     msg = (f"Projected fitness by race day ≈ CTL {proj:.0f} (from {ctl0:.0f} now, via "
            f"{src}). That supports **finishing {objective.get('label','the race')} "
@@ -2063,6 +2126,22 @@ def _prior_weeks_by_start(prior_plan, key):
     return {w.get("start"): w for w in blk.get("weeks", []) if w.get("start")}
 
 
+def _prior_weeks_all(prior_plan):
+    """§H6 — every prior week mapped by start date across ALL phase blocks (rebase/base/build/bridge/
+    peak/taper…), not just one key. Calendar drift slides phase boundaries as a race nears, so a Monday
+    lived under 'base' can land in 'build' on the next regenerate; a per-phase lookup would miss it and
+    REGENERATE an already-lived week (history corruption, §6f E violation). Freezing by start across the
+    whole prior plan carries each elapsed week verbatim regardless of which phase now owns its slot.
+    Phases tile the calendar contiguously, so each start belongs to exactly one prior week (no clashes)."""
+    out = {}
+    for v in (prior_plan or {}).values():
+        if isinstance(v, dict) and isinstance(v.get("weeks"), list):
+            for w in v["weeks"]:
+                if w.get("start"):
+                    out[w["start"]] = w
+    return out
+
+
 def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, prior_by_start, today):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
@@ -2123,8 +2202,27 @@ def generate_plan(db):
     block_start = _rebase_start(db, today)
     adj = active_adjustment(db, today.isoformat())   # §6c — clamped directive or None
     adj_dir = adj["directive"] if adj else None
+    # §6q — select the A-race chain up front: the runway to the first race is needed to clamp the
+    # re-base length just below (§PER1 F1). Pure function of (objectives, today); no side effects.
+    objs = [dict(r) for r in db.execute(
+        "SELECT * FROM objectives WHERE status='upcoming' ORDER BY date").fetchall()]
+    chain, tune_ups = select_chain(objs, today)   # §6q — full A-race chain toward the FINAL peak
+    anchor = chain[-1] if chain else None
+
     bank = rebase_banking(db, block_start, today.isoformat())   # §6e — earned faster exit
-    shape = REBASE_SHAPE[:bank["effective_len"]]
+    natural_len = bank["effective_len"]
+    # §PER1 F1 — clamp the re-base to the runway so the phases can't overrun the first race (a taper
+    # scheduled AFTER race day). When the first race is closer than re-base + taper, shrink the re-base
+    # (the conservative phases collapse first) so re-base + taper ≤ runway and the taper bottom lands ON
+    # race week. Provably a NO-OP on an ample runway: total − taper ≫ natural_len ⇒ rebase_eff ==
+    # natural_len. The clamped length threads through to periodize_chain (rebase_weeks=rebase_weeks_n),
+    # so the phase list and the actually-generated re-base block agree.
+    rebase_eff = natural_len
+    if chain:
+        total0 = weeks_until(chain[0]["date"], today)
+        taper0 = _seg_taper(total0, _full_peak(chain[0]["role"]))
+        rebase_eff = min(natural_len, max(0, total0 - taper0))
+    shape = REBASE_SHAPE[:rebase_eff]
     rebase_weeks_n = len(shape)
 
     prior = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
@@ -2137,22 +2235,19 @@ def generate_plan(db):
     # after which later phases chain off the previous phase's projected end.
     live = {"ctl": ctl0, "atl": atl0, "started": False}
 
+    prior_all = _prior_weeks_all(prior_plan)   # §H6 — freeze elapsed weeks by start across ALL phases,
+    # not just the same key, so a week that crossed a phase boundary (calendar drift) is still carried
+    # verbatim instead of being regenerated from today's CTL.
     def _gen_phase(key, phase_start, shape_, zones_):
         seed = (live["ctl"], live["atl"])
         weeks_, ec, ea, gen = _split_freeze(shape_, phase_start, seed, zones["easy_top"],
-                                            adj_dir, zones_, _prior_weeks_by_start(prior_plan, key),
-                                            today)
+                                            adj_dir, zones_, prior_all, today)
         if gen:
             live["ctl"], live["atl"], live["started"] = ec, ea, True
         return {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": ec, "end_atl": ea,
                 "clipped_by_acwr": any(w.get("clipped") for w in weeks_)}, ec
 
     rb, _rb_end = _gen_phase("rebase", block_start, shape, None)   # re-base is pure easy (no zones)
-
-    objs = [dict(r) for r in db.execute(
-        "SELECT * FROM objectives WHERE status='upcoming' ORDER BY date").fetchall()]
-    chain, tune_ups = select_chain(objs, today)   # §6q — full A-race chain toward the FINAL peak
-    anchor = chain[-1] if chain else None
 
     plan = {
         "ok": True,
@@ -2211,12 +2306,17 @@ def generate_plan(db):
             # phase's measured/projected CTL (live["ctl"] is its seed), so the plan tracks fitness, not
             # just the fixed ramp. Dormant at low CTL (pure no-op). Applied BEFORE the earned lift so the
             # two compose predictably; both skip down weeks and the ACWR governor still caps every week.
+            # §H4 — but EXCLUDE the post-race bridge (matching the earned lift just below): a bridge is a
+            # recovery re-build off a fresh taper, where low ATL leaves the ACWR governor slack enough
+            # that the floor would inflate its volume unchecked (+66% on wk1 in testing). The bridge
+            # keeps its conservative recovery shaper; fitness-tracking resumes on the next true build.
             if building:
                 if kind == "base":
                     ctl_floor_anchor = live["ctl"]
-                floored = _apply_ctl_floor(sh, live["ctl"])
-                ctl_floor_active = ctl_floor_active or (floored is not sh)
-                sh = floored
+                if kind != "bridge":
+                    floored = _apply_ctl_floor(sh, live["ctl"])
+                    ctl_floor_active = ctl_floor_active or (floored is not sh)
+                    sh = floored
             # §6e/§6f — earned volume lift: apply ONCE, to the FIRST Base/Build phase (the initial
             # build), NOT to a post-race bridge — so a short first-race runway can't land the banked
             # boost on a recovery re-build. Build/Peak inherit the lifted level through `cur_km`.
@@ -2267,6 +2367,39 @@ def generate_plan(db):
     return plan
 
 
+def _adj_directive(adj):
+    """The clamped directive out of a stored `adjustment` block (which may be {note,directive,clamp}
+    or the bare directive), or None."""
+    if not adj:
+        return None
+    return adj.get("directive") if isinstance(adj, dict) and "directive" in adj else adj
+
+
+def _adj_fingerprint(d):
+    """What materially defines an adjustment for change-detection: its load multiplier, medical flag,
+    window and easy-only force. (Summary/situation prose is cosmetic — not part of the fingerprint.)"""
+    if not d:
+        return None
+    try:
+        m = round(float(d.get("volume_multiplier", 1.0)), 2)
+    except (TypeError, ValueError):
+        m = 1.0
+    return (m, bool(d.get("medical_flag")), d.get("scope_days"), bool(d.get("easy_only")))
+
+
+def _adj_summary(d):
+    """A short human label for an adjustment directive ('none', '×0.6 14d', '×0 medical 28d')."""
+    if not d:
+        return "none"
+    m = d.get("volume_multiplier", 1.0)
+    bits = [f"×{m:g}"]
+    if d.get("medical_flag"):
+        bits.append("medical")
+    if d.get("scope_days"):
+        bits.append(f"{d['scope_days']}d")
+    return " ".join(bits)
+
+
 def diff_plans(old, new):
     """Summarize how a regeneration changed the road ahead (§6b — so the owner sees it)."""
     if not old:
@@ -2290,6 +2423,28 @@ def diff_plans(old, new):
     if oo.get("weeks_away") != no.get("weeks_away"):
         wa = lambda v: f"{v}w" if v is not None else "no race"
         changes.append(f"Runway: {wa(oo.get('weeks_away'))} → {wa(no.get('weeks_away'))}")
+    # §H5 — the diff above is purely STRUCTURAL (objective, phase week-counts, runway). A re-plan can
+    # change the LOAD PROFILE — per-week volume, an applied/cleared adjustment — while leaving that
+    # structure identical (the §6e earned lift, §6h CTL floor, the §6e frequency advance, and a §6c
+    # ease/medical hold all do exactly this). Without a load fingerprint those re-plans falsely report
+    # "No change". Compare peak weekly intent_km per phase (over NON-frozen weeks, so a frozen carry
+    # isn't read as a phantom change) and the active adjustment, and surface what actually moved.
+    def _peak(plan, key, field):
+        wks = [w for w in (plan.get(key) or {}).get("weeks", []) if not w.get("frozen")]
+        vals = [w.get(field) for w in wks if w.get(field) is not None]
+        return max(vals) if vals else None
+    for k in sorted(set(op) | set(npz)):
+        name = (npz.get(k) or op.get(k))["phase"]
+        a, b = _peak(old, k, "intent_km"), _peak(new, k, "intent_km")
+        if a is not None and b is not None and abs(a - b) >= 1:
+            changes.append(f"{name} volume: {a:g} → {b:g} km/wk")
+        # §6e frequency advance changes RUNS at constant volume — invisible to the km fingerprint above.
+        ra, rb = _peak(old, k, "runs"), _peak(new, k, "runs")
+        if ra is not None and rb is not None and ra != rb:
+            changes.append(f"{name}: {ra:g} → {rb:g} runs/wk")
+    oa, na = _adj_directive(old.get("adjustment")), _adj_directive(new.get("adjustment"))
+    if _adj_fingerprint(oa) != _adj_fingerprint(na):
+        changes.append(f"Adjustment: {_adj_summary(oa)} → {_adj_summary(na)}")
     # No-op re-plan (the plan already matched the request — e.g. a priority set to what it already was,
     # or a re-generate with nothing new): say so plainly, so it doesn't read as "your action failed".
     return {"first": False, "changes": changes or ["The plan already matched — your objectives and priorities are unchanged."],
@@ -2599,6 +2754,25 @@ def active_adjustment(db, today):
     return {"note": row["note"], "directive": directive, "clamp": directive.get("clamp")}
 
 
+def active_medical_halt(db):
+    """§H3 — is a medical hold (a flagged exertional symptom) currently in force? Unlike
+    active_adjustment this IGNORES the calendar window: a medical halt persists across days until the
+    active row is cleared, never silently expiring back to green by the calendar. Read by
+    today_readiness to keep the gate red across days. CAVEATS (residual, surfaced to Duarte): (1) the
+    plan's load reduction still rides the §6c-clamped ≤28-day window — only the GATE is calendar-open;
+    (2) since /api/adjustment/apply deactivates all active rows ('one active at a time'), applying any
+    later adjustment also releases this hold — so it's 'until cleared OR superseded', not strictly
+    'until doctor clearance'. A fully dominant medical track is the proper fix if Duarte wants it."""
+    row = db.execute(
+        "SELECT directive FROM adjustments WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return False
+    try:
+        return bool(json.loads(row["directive"]).get("medical_flag"))
+    except (ValueError, TypeError):
+        return False
+
+
 # Readiness judgment (§6c×§6d) — the LLM turns HRV + the check-in (incl. free text) into the
 # amber/red call; the engine keeps a non-softenable FLOOR (the LLM may only escalate caution).
 READINESS_SCHEMA = {
@@ -2853,6 +3027,36 @@ def hrv_signal(db):
             "band": [round(lo, 1), round(hi, 1)]}
 
 
+# §H2 — a deterministic keyword backstop for the free-text readiness note. The LLM net
+# (llm_readiness, below) only runs when a key is configured; the live NAS runs llm:false, so without
+# this the free-text safety catch is DEAD in production and a symptom typed into the note (rather than
+# ticked in the checkbox) sails through green. Curated, high-precision exertional/cardiac phrases.
+# Deliberately NO negation guard: on a cardiac net a missed symptom is the catastrophe and a false
+# halt is merely recoverable, so we bias to catch ("didn't seem bad but my chest got tight and I had
+# to stop" must still fire). The LLM, when present, adds nuance ON TOP of this floor — it can escalate
+# but the floor itself is non-softenable.
+_STOP_SYMPTOM_PHRASES = (
+    "chest pain", "chest tight", "tight chest", "chest pressure", "chest pound",
+    "tightness in my chest", "pressure in my chest", "pressure in chest",
+    "couldn't breathe", "could not breathe", "couldnt breathe", "can't breathe", "cant breathe",
+    "cannot breathe", "couldn't catch my breath", "couldnt catch my breath",
+    "passed out", "blacked out", "blackout", "black out", "faint", "collapse",
+    "had to stop", "forced to stop", "couldn't continue", "could not continue", "couldnt continue",
+    "heart racing", "racing heart", "heart pounding", "pounding heart", "palpitation",
+    "irregular heartbeat", "skipped beat",
+    "dizz", "light headed", "lightheaded", "light-headed",
+)
+
+
+def _deterministic_stop_symptom(note):
+    """True if the free-text note contains a curated exertional/cardiac stop-symptom phrase.
+    Substring match on the lowercased note; works with no LLM (the production path). See §H2 above."""
+    if not note:
+        return False
+    t = note.lower()
+    return any(p in t for p in _STOP_SYMPTOM_PHRASES)
+
+
 def assess_readiness(db, checkin):
     """Combine the HRV signal + the day's check-in → a traffic-light verdict + action.
     GREEN proceed · AMBER hold (keep easy, no progression) · RED rest/walk (and, on a
@@ -2861,6 +3065,7 @@ def assess_readiness(db, checkin):
     energy = (checkin or {}).get("energy", "ok")
     sleep = (checkin or {}).get("sleep", "ok")
     stop = bool((checkin or {}).get("stop_symptom"))
+    note = (checkin or {}).get("note", "")
     reasons = []
 
     if stop:
@@ -2868,6 +3073,13 @@ def assess_readiness(db, checkin):
                 "action": "Stop — do not train. The exertional symptom that preceded 2025 is "
                           "back. Rest and contact your doctor before resuming.",
                 "reasons": ["Returning 'had-to-stop' exertional symptom"]}
+
+    if _deterministic_stop_symptom(note):  # §H2 — non-softenable floor, runs with or without the LLM
+        return {"verdict": "red", "halt": True, "hrv": hrv,
+                "action": "Stop — your note describes the kind of exertional symptom that preceded "
+                          "2025. Rest and contact your doctor before resuming.",
+                "reasons": ["A stop-the-run exertional symptom was detected in your note"],
+                "source": "engine"}
 
     poor = 0
     if hrv["state"] == "low":
@@ -3082,6 +3294,16 @@ def today_readiness(db):
     row = db.execute("SELECT * FROM readiness WHERE date=?", (today,)).fetchone()
     checkin = dict(row) if row else None
     assessment = assess_readiness(db, checkin)
+    # §H3 — a flagged exertional symptom persists as a medical HOLD until explicitly cleared (doctor
+    # clearance), not just a one-day red light. Surface it as red+halt on any later day — even with no
+    # new check-in, or a green one — so the gate never silently reverts to green tomorrow. Applied
+    # before the bonus-run / done rewords below so they see the halt and stand down.
+    if not assessment.get("halt") and active_medical_halt(db):
+        assessment = {**assessment, "verdict": "red", "halt": True,
+                      "action": "Plan halted — an exertional symptom was flagged and the hold is "
+                                "still active. Rest and contact your doctor; clear it here once "
+                                "they've cleared you.",
+                      "reasons": ["Active medical hold — awaiting doctor clearance"], "source": "engine"}
     session = todays_session(db, today)
     # A green light on a planned rest day means "follow the plan — which today is rest", not
     # "run your session". Reword so the action matches the day (engine or LLM source alike). And when
@@ -3870,6 +4092,25 @@ def api_readiness_post():
          1 if d.get("stop_symptom") else 0, d.get("note", ""), _now_iso()),
     )
     db.commit()
+    # §H3 — if THIS check-in flags a stop-symptom (checkbox or the §H2 deterministic note catch),
+    # persist a medical hold (mult 0, parity with the chat-apply path) AND regenerate the plan, so the
+    # prescription is actually cut to rest and the halt survives to tomorrow — not just a one-day red
+    # tile. Gated on this check-in's own signal (not the assessment's halt, which also reflects an
+    # already-active hold), so a later green check-in never silently re-arms or extends the window.
+    if bool(d.get("stop_symptom")) or _deterministic_stop_symptom(d.get("note", "")):
+        directive, _ = clamp_adjustment(
+            {"situation": "medical", "volume_multiplier": 0.0, "scope_days": 28, "medical_flag": True,
+             "summary": "Exertional stop-symptom flagged in the daily check-in — rest and see your doctor."},
+            today)
+        base = plan_baseline(db)
+        db.execute("UPDATE adjustments SET active=0 WHERE active=1")  # one active at a time
+        db.execute(
+            "INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active) "
+            "VALUES (?,?,?,?,?,1)",
+            (_now_iso(), "Daily check-in: exertional stop-symptom → medical hold",
+             json.dumps(directive), directive["applies_from"], directive["applies_until"]))
+        db.commit()
+        regenerate(db, baseline=base)   # rebuild + persist the plan so today's load drops to rest
     return jsonify(today_readiness(db))
 
 
@@ -3881,7 +4122,7 @@ def _activity_payload(db, a):
     cad = a.get("cadence")
     if cad and cadence_is_halved(a.get("source")):  # Suunto logs one-leg cadence → ×2 for spm
         cad *= 2
-    return {
+    payload = {
         "id": a.get("id"), "sport": (a.get("sport") or {}).get("name"),
         "date_time": a.get("date_time"), "date": (a.get("date_time") or "")[:10],
         "title": a.get("title") or "",
@@ -3892,6 +4133,10 @@ def _activity_payload(db, a):
         "ignored": bool(db.execute("SELECT 1 FROM ignored_activities WHERE id=?",
                                    (a.get("id"),)).fetchone()),
     }
+    if READONLY:                      # per-run HR is private (same posture that gates /api/effort-discipline) —
+        payload.pop("hr_avg", None)   # withhold it server-side on the public container, not just in the UI
+        payload.pop("hr_max", None)
+    return payload
 
 
 def latest_running_activity(db):
@@ -4037,6 +4282,9 @@ def api_activity_profile(aid):
         return jsonify(error=str(err), dist=[], pace=[], hr=[]), 502
     out = _strip_geo(prof)
     out["hrmax"] = _robust_hrmax(db)   # anchors the HR-line zone colouring on the frontend
+    if READONLY:                       # the per-second HR stream is private, like avg/max HR — the public
+        out.pop("hr", None)            # container serves the profile for the pace overlay, but HR-stripped
+        out["hrmax"] = None
     return jsonify(out)
 
 
@@ -4763,7 +5011,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .qhint:hover,.qhint:focus,.qhint.open{color:var(--text);border-color:var(--muted);outline:none}
   .qtip{display:none;position:fixed;z-index:200;padding:9px 11px;background:var(--surface);color:var(--text);
     border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 34px rgba(0,0,0,.22);font-family:var(--sans);
-    font-size:11.5px;font-weight:400;line-height:1.45;letter-spacing:0;text-align:left;white-space:normal}
+    font-size:11.5px;font-weight:400;line-height:1.45;letter-spacing:0;text-transform:none;text-align:left;white-space:normal}
   .qhint.open .qtip{display:block}
   .wk.wdown{opacity:.82}
   .wk.wfrozen{opacity:.5}
@@ -5503,8 +5751,8 @@ async function loadActivity(aid){
         ${m("Distance", fmt(a.distance,2), "km")}
         ${m("Duration", durStr(a.duration), "")}
         ${m("Pace", paceStr(a.pace_min_km), "/km", "pace")}
-        ${m("Avg HR", a.hr_avg||"—", "bpm", "hr")}
-        ${m("Max HR", a.hr_max||"—", "bpm", "hr")}
+        ${SH_READONLY?"":m("Avg HR", a.hr_avg||"—", "bpm", "hr")}
+        ${SH_READONLY?"":m("Max HR", a.hr_max||"—", "bpm", "hr")}
         ${a.cadence?m("Cadence", a.cadence, "spm", "cadence"):""}
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
@@ -5803,7 +6051,7 @@ function objManager(p){
     return `<div class="obj ${isAnchor?'anchor':''}">
       ${priBadge(o)}
       <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:10px">· anchor</span>':''}</span>
-      <span class="od">${o.date} · ${o.type} · ${o.target}</span>
+      <span class="od">${esc(o.date)} · ${esc(o.type)} · ${esc(o.target)}</span>
       <button class="x" data-oid="${o.id}">remove</button>
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;
   if(SH_READONLY) return `<div class="objs">${rows}</div>`;   // public: list only, no controls
@@ -5833,8 +6081,8 @@ function objManager(p){
 }
 function diffBanner(diff){
   if(!diff || diff.first) return "";
-  return `<div class="diff"><div class="dh">Re-planned — ${diff.summary}</div>
-    <ul>${(diff.changes||[]).map(c=>`<li>${c}</li>`).join("")}</ul></div>`;
+  return `<div class="diff"><div class="dh">Re-planned — ${esc(diff.summary)}</div>
+    <ul>${(diff.changes||[]).map(c=>`<li>${esc(c)}</li>`).join("")}</ul></div>`;
 }
 function renderAdjudicate(d){
   const host=$("#objAdjudicate"); if(!host) return;
@@ -5847,7 +6095,7 @@ function renderAdjudicate(d){
       ${changed?`<button class="applyrec" data-id="${r.id}" data-pri="${r.suggested_priority}" style="font-size:11px;padding:3px 9px;margin-top:4px">Set ${r.suggested_priority}</button>`:''}</li>`;
   }).join("");
   host.innerHTML=`<div class="adjudbox">
-    <div class="exh">${d.summary||''}</div>
+    <div class="exh">${esc(d.summary||'')}</div>
     <ul class="expts">${recs}</ul>
     <div class="exfoot">Claude advises; the engine periodizes from the priorities you keep.</div>
   </div>`;
@@ -5921,7 +6169,7 @@ function adjustmentUI(p){
   const banner = a ? `<div class="${(a.medical||a.medical_flag)?'adjmed':'adjbox'}">
       <div class="adjh">${(a.medical||a.medical_flag)?'⚠ Medical flag':'Active adjustment'} — ${adjEffect(a)}</div>
       <div class="adjmeta">“${esc(a.note)}” · ${a.applies_from}→${a.applies_until}${a.summary?` · ${esc(a.summary)}`:''}</div>
-      ${a.clamp?`<div class="adjclamp">engine clamp: ${a.clamp}</div>`:''}
+      ${a.clamp?`<div class="adjclamp">engine clamp: ${esc(a.clamp)}</div>`:''}
       ${(a.medical||a.medical_flag)?`<div class="adjclamp">Sparing Horse tracks &amp; flags — it never diagnoses. Clear this once your doctor signs off.</div>`:''}
       <button id="adj_clear" style="font-size:11px;padding:4px 9px;margin-top:8px">Clear adjustment</button>
     </div>` : "";
@@ -5971,8 +6219,8 @@ function renderExplain(d){
   const host=$("#planExplain"); if(!host) return;
   if(!d.ok){ host.innerHTML=`<div class="adjclamp err">⚠ ${esc(d.error||'could not explain')}</div>`; return; }
   host.innerHTML=`<div class="explainbox">
-    <div class="exh">${d.headline||''}</div>
-    <ul class="expts">${(d.points||[]).map(p=>`<li>${p}</li>`).join("")}</ul>
+    <div class="exh">${esc(d.headline||'')}</div>
+    <ul class="expts">${(d.points||[]).map(p=>`<li>${esc(p)}</li>`).join("")}</ul>
     ${d.change_note?`<div class="exchange"><b>Latest change:</b> ${esc(d.change_note)}</div>`:""}
     <div class="exfoot">Claude explains the engine's numbers — it doesn't set them.</div>
   </div>`;
@@ -6942,6 +7190,7 @@ def _stc_map_privacy(db):
     client = app.test_client()
     db.execute("INSERT OR REPLACE INTO trackcache (activity_id, profile, cached_at) VALUES (?,?,?)",
                (-1, json.dumps({"v": PROFILE_VERSION, "pace": [1], "has_pace": True,
+                                "hr": [151], "has_hr": True,
                                 "path": [[49.5, 6.0]], "has_gps": True}), _now_iso()))
     db.commit()
     try:
@@ -6978,6 +7227,20 @@ def _stc_map_privacy(db):
             READONLY = saved
         if "cross_training" in pub_latest:
             fail.append("/api/activity/latest leaks the cross-training note on the public view")
+        # per-run HR (avg/max + the per-second profile stream) is private — the public container must
+        # not serve it (same posture that gates /api/effort-discipline). Assert both surfaces.
+        try:
+            READONLY = True
+            prof_pub = client.get("/api/activity/-1/profile").get_data(as_text=True)
+            hr_payload = _activity_payload(db, {"id": -1, "distance": 5, "duration": 1500,
+                                                "date_time": "2026-06-16T08:00:00",
+                                                "hr_avg": 152, "hr_max": 175})
+        finally:
+            READONLY = saved
+        if "151" in prof_pub:   # the seeded HR-stream sample
+            fail.append("/profile leaks the per-run HR stream on the public view")
+        if "hr_avg" in hr_payload or "hr_max" in hr_payload:
+            fail.append("/api/activity payload leaks per-run HR on the public view")
     finally:
         db.execute("DELETE FROM trackcache WHERE activity_id=?", (-1,))
         db.execute("DELETE FROM activities WHERE id=?", (-2,))
@@ -7271,43 +7534,58 @@ def _stc_dedup(db):
 def _stc_local_delete():
     """Hard local-delete — the sync-no-delete gap fix. Insert-only sync never removes a row a
     Runalyze deletion left behind, so it keeps inflating the structural duplicate count + banner;
-    `delete_activity_local` is the only way to drop it. Verifies the row + its derived rows
-    (ignore-list, trackcache) are removed, the structural dup clears, the keeper survives, and a
-    missing id no-ops. In-memory so it never touches the real DB."""
+    `delete_activity_local` is the only way to drop it. Verifies the activity + trackcache are removed,
+    the structural dup clears, the keeper survives, a missing id no-ops — AND (§DB1 MED-2) that a
+    manual-ignore TOMBSTONE is KEPT, so a re-synced near-dup the exact-match finder can't catch stays
+    excluded instead of double-counting. In-memory so it never touches the real DB."""
     import sqlite3 as _sq
     mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
     mem.executescript(
-        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, distance REAL, sport TEXT, raw TEXT);"
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, distance REAL, "
+        "sport TEXT, trimp REAL, raw TEXT);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);"
         "CREATE TABLE trackcache(activity_id INTEGER PRIMARY KEY, profile TEXT, cached_at TEXT);")
-    for i in (1, 2):   # two exact-dups → find_duplicates keeps id 1, flags id 2
-        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?)",
-                    (i, "2026-06-14T19:00:00", 5.02, RUNNING_SPORT, "{}"))
-    mem.execute("INSERT INTO ignored_activities VALUES(2,'manual','now')")
-    mem.execute("INSERT INTO trackcache VALUES(2,'{}','now')")
-    mem.commit()
+    def ins(i, dt, dist=5.02, trimp=78.0):
+        mem.execute("INSERT OR REPLACE INTO activities VALUES(?,?,?,?,?,?,?)",
+                    (i, dt, dt[:10], dist, RUNNING_SPORT, trimp, "{}"))
     fails = []
+    # (A) exact-dup delete: row + trackcache gone, structural dup cleared, keeper survives, missing id no-ops
+    ins(1, "2026-06-14T19:00:00"); ins(2, "2026-06-14T19:00:00")
+    mem.execute("INSERT INTO trackcache VALUES(2,'{}','now')"); mem.commit()
     if find_duplicates(mem) != [2]:
         fails.append(f"setup: find_duplicates={find_duplicates(mem)} (expected [2])")
     if not delete_activity_local(mem, 2):
         fails.append("delete returned False for an existing id")
     if mem.execute("SELECT 1 FROM activities WHERE id=2").fetchone():
         fails.append("activity row survived delete")
-    if mem.execute("SELECT 1 FROM ignored_activities WHERE id=2").fetchone():
-        fails.append("ignore-list row not cleaned")
     if mem.execute("SELECT 1 FROM trackcache WHERE activity_id=2").fetchone():
         fails.append("trackcache row not cleaned")
-    if find_duplicates(mem) != [] or dropped_ids(mem) != set():
-        fails.append(f"dup not cleared: find_dups={find_duplicates(mem)} dropped={dropped_ids(mem)}")
+    if find_duplicates(mem) != []:
+        fails.append(f"structural dup not cleared: {find_duplicates(mem)}")
     if mem.execute("SELECT COUNT(*) c FROM activities").fetchone()["c"] != 1:
         fails.append("kept activity (id 1) not preserved")
     if delete_activity_local(mem, 999):
         fails.append("delete returned True for a missing id")
+    # (B) §DB1 MED-2 — a manually-ignored NEAR-dup (1s timestamp drift → find_duplicates misses it):
+    # deleting it must KEEP the tombstone so a re-sync (re-insert) doesn't double-count it.
+    ins(10, "2026-06-20T18:00:00"); ins(11, "2026-06-20T18:00:01")
+    mem.execute("INSERT INTO ignored_activities VALUES(11,'manual','now')"); mem.commit()
+    if 11 in find_duplicates(mem):
+        fails.append("setup: near-dup unexpectedly caught by find_duplicates")
+    base = daily_trimp_series(mem).get("2026-06-20", 0.0)        # 11 excluded via the tombstone
+    delete_activity_local(mem, 11)
+    if not mem.execute("SELECT 1 FROM ignored_activities WHERE id=11").fetchone():
+        fails.append("ignore tombstone dropped on delete (DB1 MED-2 regression)")
+    ins(11, "2026-06-20T18:00:01"); mem.commit()                  # re-sync re-inserts the still-upstream near-dup
+    after = daily_trimp_series(mem).get("2026-06-20", 0.0)
+    if after != base:
+        fails.append(f"near-dup double-counted after re-sync: {base} → {after}")
     mem.close()
     return _st("det", "local-delete",
-               "hard local-delete drops the row + its ignore/trackcache rows and clears the structural "
-               "duplicate (closes the insert-only sync no-delete gap); no-ops on a missing id",
-               passed=not fails, expect="row gone · derived rows cleaned · dup count→0 · keeper survives",
+               "hard local-delete drops the row + trackcache + clears the structural duplicate, KEEPS the "
+               "manual-ignore tombstone so a re-synced near-dup stays excluded; no-ops on a missing id",
+               passed=not fails,
+               expect="row+trackcache gone · dup cleared · tombstone kept · no double-count · keeper survives",
                got={"violations": fails or "none"})
 
 
@@ -7578,12 +7856,50 @@ def _stc_acwr_ceiling(db):
     tagged = [(k, w) for k in keys for w in (p.get(k) or {}).get("weeks", [])]
     over = [{"phase": k, "wk": w["wk"], "acwr": w.get("proj_acwr")} for k, w in tagged
             if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02]
+    # §H1 — end-of-week ≤ soft cap is the primary bound; the in-week PEAK must also never breach the
+    # HARD cap. (On a healthy-CTL plan the peak is slack — the dedicated lock is _stc_peak_acwr_floor,
+    # which forces the low-CTL breaching condition. This guards any plan that drifts into it.)
+    peak_over = [{"phase": k, "wk": w["wk"], "peak": w.get("peak_acwr")} for k, w in tagged
+                 if (w.get("peak_acwr") or 0) > ACWR_HARD]
     counts = {k: len((p.get(k) or {}).get("weeks", [])) for k in keys}
     return _st("det", "plan-acwr-ceiling",
-               f"every week's projected end-ACWR ≤ soft cap {ACWR_SOFT} across ALL phases",
-               passed=not over, expect=f"≤{ACWR_SOFT}", got="all within" if not over else over,
+               f"every week: end-ACWR ≤ soft cap {ACWR_SOFT} AND peak-ACWR ≤ hard cap {ACWR_HARD}, all phases",
+               passed=not over and not peak_over, expect=f"eow≤{ACWR_SOFT}, peak≤{ACWR_HARD}",
+               got="all within" if not (over or peak_over) else {"eow_over": over, "peak_over": peak_over},
                output={"phase_weeks": counts,
-                       "max_acwr": max((w.get("proj_acwr") or 0 for _ph, w in tagged), default=None)})
+                       "max_acwr": max((w.get("proj_acwr") or 0 for _ph, w in tagged), default=None),
+                       "max_peak": max((w.get("peak_acwr") or 0 for _ph, w in tagged), default=None)})
+
+
+def _stc_peak_acwr_floor():
+    """§H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep, ~38
+    TRIMP) the governor can't shrink. At LOW CTL that floor's mid-week spike pushes PEAK ACWR well past
+    the hard cap (1.5–1.6) even while end-of-week stays under the soft cap — invisible to the eow-only
+    ceiling test, which is exactly the blind spot that let it ship. The governor must drop a week's
+    quality to pure easy when the floor would breach peak, then restore quality once CTL can afford it.
+    Asserts: (a) at a detrained CTL≈5 every base week's PEAK ≤ ACWR_HARD (would be ~1.6 pre-fix);
+    (b) at a healthy CTL quality is STILL delivered (the drop is conditional, not a global kill)."""
+    from datetime import date
+    z = {"easy_top": 360, "easy": 360, "threshold": 270, "interval": 240, "marathon": 300}
+    bs = date(2026, 8, 1)
+    fail = []
+    # (a) detrained restart — the breaching condition. Post-fix every week must hold the hard cap.
+    lo_weeks, _ = generate_block(base_shape(8, 19), bs, 5.0, 5.0, 360.0, zones=z)
+    lo_peak = max((w.get("peak_acwr") or 0) for w in lo_weeks)
+    if lo_peak > ACWR_HARD:
+        fail.append(f"low-CTL peak {round(lo_peak, 3)} > hard cap {ACWR_HARD}")
+    # (b) healthy CTL — quality must survive (self-healing: the drop only fires when unaffordable).
+    hi_weeks, _ = generate_block(base_shape(8, 30), bs, 45.0, 40.0, 360.0, zones=z)
+    has_quality = any(any(s.get("kind") in ("threshold", "interval", "tempo", "long_mp")
+                          or s.get("reps") for s in w["sessions"]) for w in hi_weeks)
+    if not has_quality:
+        fail.append("quality globally suppressed even at a healthy CTL")
+    return _st("det", "peak-acwr-floor",
+               "quality dropped to easy when its TRIMP floor would breach the hard peak-ACWR cap at "
+               "low CTL; quality retained once CTL can afford it",
+               passed=not fail, expect=f"low-CTL peak ≤ {ACWR_HARD}; quality kept when affordable",
+               got={"low_ctl_peak": round(lo_peak, 3), "healthy_keeps_quality": has_quality,
+                    "failures": fail or "none"})
 
 
 def _stc_base_phase():
@@ -8099,6 +8415,238 @@ def _stc_plan_structure(db):
                output={"objective": p.get("objective"), "feasibility": p.get("feasibility")})
 
 
+def _stc_sync_refresh():
+    """§DB1 MED-1 — an already-synced activity edited DOWN on Runalyze (TRIMP recomputed / over-long run
+    cropped) must converge locally; the old skip-known sync left stale-high load forever. Refresh fires
+    only on a real content change and never counts as 'new', so the incremental stop (new_here==0) still
+    holds — a no-change sync does NOT re-walk pages. Mocks fetch_activities_page (no network)."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row; mem.executescript(SCHEMA)
+    orig = {"id": 1, "date_time": "2026-06-20T18:00:00", "sport": {"id": 1, "name": RUNNING_SPORT},
+            "distance": 12.0, "duration": 3600, "trimp": 78.0}
+    saved = globals().get("fetch_activities_page")
+    fails = []
+    try:
+        globals()["fetch_activities_page"] = lambda page=1: [orig] if page == 1 else []
+        sync_activities(mem)
+        if mem.execute("SELECT trimp FROM activities WHERE id=1").fetchone()["trimp"] != 78.0:
+            fails.append("initial sync didn't store the activity")
+        # (a) edit DOWN upstream → refresh converges, NOT counted as new
+        edited = {**orig, "trimp": 39.0, "duration": 1800}
+        globals()["fetch_activities_page"] = lambda page=1: [edited] if page == 1 else []
+        r1 = sync_activities(mem)
+        got = mem.execute("SELECT trimp FROM activities WHERE id=1").fetchone()["trimp"]
+        if got != 39.0:
+            fails.append(f"edit-down did not converge: trimp still {got}")
+        if r1.get("added") != 0 or r1.get("refreshed") != 1:
+            fails.append(f"refresh accounting off: {r1}")
+        # (b) unchanged sync → no refresh, no add, single page (incremental stop preserved)
+        r2 = sync_activities(mem)
+        if r2.get("added") != 0 or r2.get("refreshed") != 0 or r2.get("pages_fetched") != 1:
+            fails.append(f"no-change sync should be a 1-page no-op: {r2}")
+    finally:
+        if saved is not None:
+            globals()["fetch_activities_page"] = saved
+    mem.close()
+    return _st("det", "sync-refresh",
+               "an edited-down activity converges on re-sync (refresh, not skip); a no-change sync stays "
+               "a 1-page no-op (incremental stop preserved)",
+               passed=not fails, got={"failures": fails or "none"})
+
+
+def _stc_rebase_runway_clamp():
+    """§PER1 F1 — the re-base is clamped to the runway so phases never overrun the first race (a taper
+    scheduled AFTER race day, leaving the runner under-tapered). Ample runway ⇒ re-base stays full (a
+    no-op) and the build phases are intact; a too-short runway ⇒ the re-base shrinks so every taper's
+    last week lands on/before its race. Checks the single-race case AND the chain cascade."""
+    import sqlite3 as _sq
+    from datetime import timedelta
+    today = datetime.now().date()
+    def build(objs):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row; mem.executescript(SCHEMA)
+        mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+                    "VALUES(?,?,?,?)", (today.isoformat(), 50.0, 30.0, 28.0))
+        for typ, lbl, wks in objs:
+            mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                        "VALUES(?,?,?,?,?,?,?)", (typ, lbl, (today + timedelta(weeks=wks)).isoformat(),
+                                                  "finish", "A", "upcoming", _now_iso()))
+        mem.commit(); p = generate_plan(mem); mem.close(); return p
+    def taper_overruns(p):
+        races = {c["label"]: c["date"] for c in p.get("chain", [])}
+        bad = []
+        for ph in p["phases"]:
+            if ph["kind"] != "taper":
+                continue
+            w = (p.get(ph["key"]) or {}).get("weeks", [])
+            race = races.get(ph.get("race"))
+            if w and race and w[-1]["start"] > race:
+                bad.append((ph["key"], w[-1]["start"], race))
+        return bad
+    fails = []
+    pa = build([("marathon", "Far", 24)])                       # (1) ample-runway no-op lock
+    rb = next(ph["weeks"] for ph in pa["phases"] if ph["kind"] == "rebase")
+    if rb != len(REBASE_SHAPE):
+        fails.append(f"ample re-base clamped to {rb} (expected full {len(REBASE_SHAPE)})")
+    if not any(ph["kind"] == "base" for ph in pa["phases"]):
+        fails.append("ample plan lost its base phase")
+    if taper_overruns(pa):
+        fails.append(f"ample taper overruns?! {taper_overruns(pa)}")
+    o2 = taper_overruns(build([("marathon", "Close", 6)]))       # (2) too-short single
+    if o2:
+        fails.append(f"single too-short taper overruns: {o2}")
+    o3 = taper_overruns(build([("10k", "R1", 6), ("marathon", "R2", 9)]))   # (3) chain cascade
+    if o3:
+        fails.append(f"chain taper overruns: {o3}")
+    return _st("det", "rebase-runway-clamp",
+               "re-base clamped to the runway: ample stays full (build intact), too-short shrinks so no "
+               "taper lands after its race (single + chain)",
+               passed=not fails, got={"ample_rebase_weeks": rb, "failures": fails or "none"})
+
+
+def _stc_feasibility_floor():
+    """§PER1 F2 — feasibility gains a lower bound: 'too soon' only on the CONJUNCTION of a short runway
+    AND a projected race-day fitness too low to carry the distance. Neither alone fires — runway alone
+    would mis-flag every race in its final weeks (weeks_away shrinks as the race nears, hitting a well-
+    built athlete); CTL alone would mis-flag the legit long-runway 'finish off a layoff' case."""
+    def v(typ, wks, proj):
+        return feasibility({"label": "R", "type": typ}, 25.0, 50.0, wks, projected_ctl=proj)["verdict"]
+    cases = [
+        ("marathon", 6, 30.0, "too soon"),   # short AND low → the genuine pathology
+        ("marathon", 20, 30.0, "finish"),    # long runway → blessed even off a modest CTL
+        ("marathon", 10, 55.0, "finish"),    # short remaining runway BUT well-built → NOT too soon (the §F2 false-positive guard)
+        ("marathon", 20, 22.0, "finish"),    # long-runway detrained ('finish off a layoff') → must not flag
+        ("half", 5, 30.0, "too soon"),       # 5<9 AND 30<35
+        ("half", 12, 30.0, "finish"),
+        ("5k", 2, 15.0, "too soon"),         # 2<4 AND 15<20
+        ("5k", 2, 30.0, "finish"),           # short BUT CTL 30 finishes a 5k fine → not too soon
+        ("5k", 8, 30.0, "finish"),
+    ]
+    fails = [f"{t}@{w}w proj{p:g}: got {v(t, w, p)!r} want {want!r}"
+             for t, w, p, want in cases if v(t, w, p) != want]
+    return _st("det", "feasibility-floor",
+               "feasibility warns 'too soon' only when a short runway AND a low projected fitness "
+               "coincide; a short runway off high fitness, or a long runway off a low CTL, still reads "
+               "'finish'",
+               passed=not fails, got={"failures": fails or "none"})
+
+
+def _stc_bridge_no_ctl_floor():
+    """§H4 — the §6h CTL volume floor lifts building phases toward measured fitness, but (like the
+    earned lift) must EXCLUDE the post-race bridge: a fresh taper's low ATL leaves the ACWR governor
+    slack, so a floored bridge inflates a recovery re-build unchecked (+66% wk1 in testing). At a high
+    CTL where the floor is active, assert every bridge week stays BELOW the floor km — i.e. it kept its
+    conservative recovery shaper, not the fitness floor. Self-contained in-memory DB."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = datetime.now().date()
+    ctl = 80.0
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (today.isoformat(), 55.0, ctl, ctl * 0.95))
+    def add(label, wks, typ):
+        mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (typ, label, (today + timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming",
+                     _now_iso()))
+    add("Tune 10k", 12, "10k"); add("Goal Marathon", 24, "marathon")   # coequal ⇒ a bridge segment
+    mem.commit()
+    p = generate_plan(mem)
+    fails = []
+    floor_km = K_CTL_VOLUME * ctl
+    if not (p.get("ctl_floor") or {}).get("active"):
+        fails.append("CTL floor not active at high CTL — test can't distinguish the fix")
+    bridge_keys = [ph["key"] for ph in p.get("phases", []) if ph["kind"] == "bridge"]
+    if not bridge_keys:
+        fails.append("no bridge segment to check")
+    bridge_peak = None
+    for k in bridge_keys:
+        kms = [w.get("intent_km") for w in (p.get(k) or {}).get("weeks", [])
+               if w.get("intent_km") is not None]
+        if kms:
+            mx = max(kms)
+            bridge_peak = mx if bridge_peak is None else max(bridge_peak, mx)
+            if mx >= floor_km:
+                fails.append(f"bridge {k} peak {mx} ≥ floor {round(floor_km,1)} — floor leaked onto bridge")
+    mem.close()
+    return _st("det", "bridge-no-ctl-floor",
+               "the CTL volume floor excludes the post-race bridge (a recovery re-build is not lifted to "
+               "the fitness floor; the slack post-taper governor would otherwise let it inflate)",
+               passed=not fails,
+               expect=f"every bridge week < floor {round(floor_km,1)} km, floor active elsewhere",
+               got={"floor_km": round(floor_km, 1), "bridge_peak_km": bridge_peak,
+                    "violations": fails or "none"})
+
+
+def _stc_cross_phase_freeze():
+    """§H6 — calendar drift slides the Base→Build boundary backward as a race nears; a Monday that was
+    the last BASE week in the prior plan can become the first BUILD week in the new one even AFTER it's
+    been lived. The per-phase freeze lookup misses it (stored under 'base', looked up under 'build') and
+    REGENERATES the lived week from today's CTL — history corruption. The all-phase union freezes it
+    verbatim. Assert the union freezes the lived week where the per-phase lookup drops it."""
+    from datetime import date
+    easy = 425
+    z = {"easy_top": 425, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    prior = {"base": {"weeks": [{"start": "2026-10-19"}, {"start": "2026-10-26"},
+                                {"start": "2026-11-02", "wk": 4, "intent_km": 33,
+                                 "_lived_as": "BASE down-week"}]},
+             "build": {"weeks": [{"start": "2026-11-09"}, {"start": "2026-11-16"}]}}
+    args = (build_shape(2, 30), date(2026, 11, 2), (35.0, 33.0), easy, None, z)
+    today = date(2026, 12, 7)
+    old_w, *_ = _split_freeze(*args, _prior_weeks_by_start(prior, "build"), today)   # old per-phase
+    old = next(w for w in old_w if w["start"] == "2026-11-02")
+    bug_reproduced = (old.get("frozen") is False)         # the lived week was regenerated
+    new_w, *_ = _split_freeze(*args, _prior_weeks_all(prior), today)                 # the §H6 union
+    new = next(w for w in new_w if w["start"] == "2026-11-02")
+    fixed = (new.get("frozen") is True and new.get("intent_km") == 33
+             and new.get("_lived_as") == "BASE down-week")
+    return _st("det", "cross-phase-freeze",
+               "an elapsed week that crossed a phase boundary is frozen verbatim via the all-phase "
+               "union (the per-phase lookup would regenerate it from today's CTL — history corruption)",
+               passed=(bug_reproduced and fixed),
+               got={"old_per_phase_frozen": old.get("frozen"), "old_intent_km": old.get("intent_km"),
+                    "union_frozen": new.get("frozen"), "union_intent_km": new.get("intent_km"),
+                    "union_lived_as": new.get("_lived_as")})
+
+
+def _stc_diff_load_fingerprint():
+    """§H5 — diff_plans must catch a LOAD change that leaves the structure (objective, phase
+    week-counts, runway) identical: per-week volume, or an applied/cleared adjustment. These used to
+    read as 'No change' (load-blind). Also: a true no-op still reads no-change, and a frozen-only carry
+    is not a phantom change."""
+    obj = {"label": "Berlin Marathon", "date": "2026-12-06", "weeks_away": 20}
+    phs = [{"key": "base", "phase": "Base — aerobic", "weeks": 8},
+           {"key": "build", "phase": "Build — specific", "weeks": 6}]
+    def plan(base_km, build_km, adj=None, base_frozen=False, base_runs=5):
+        return {"objective": obj, "phases": phs,
+                "base": {"weeks": [{"start": "2026-08-01", "intent_km": base_km, "runs": base_runs,
+                                    "frozen": base_frozen}]},
+                "build": {"weeks": [{"start": "2026-09-26", "intent_km": build_km, "runs": 5}]},
+                "adjustment": adj}
+    out, ok = [], True
+    d1 = diff_plans(plan(30, 40), plan(42, 58))            # +40%/+45%, identical structure
+    p1 = (not d1["summary"].startswith("No change")) and any("km/wk" in c for c in d1["changes"])
+    out.append({"case": "+40% volume, same structure ⇒ change surfaced", "summary": d1["summary"],
+                "changes": d1["changes"], "passed": p1}); ok = ok and p1
+    d1b = diff_plans(plan(30, 40, base_runs=5), plan(30, 40, base_runs=6))   # §6e freq advance, SAME km
+    p1b = any("runs/wk" in c for c in d1b["changes"])
+    out.append({"case": "5→6 runs at constant volume ⇒ change surfaced", "changes": d1b["changes"],
+                "passed": p1b}); ok = ok and p1b
+    d2 = diff_plans(plan(30, 40), plan(30, 40))            # genuine no-op
+    p2 = d2["summary"].startswith("No change")
+    out.append({"case": "identical ⇒ no-op preserved", "summary": d2["summary"], "passed": p2}); ok = ok and p2
+    med = {"directive": {"volume_multiplier": 0.0, "medical_flag": True, "scope_days": 28, "easy_only": True}}
+    d3 = diff_plans(plan(30, 40), plan(30, 40, adj=med))   # none → medical hold
+    p3 = any("Adjustment" in c for c in d3["changes"])
+    out.append({"case": "adjustment applied ⇒ surfaced", "changes": d3["changes"], "passed": p3}); ok = ok and p3
+    d4 = diff_plans(plan(30, 40), plan(99, 40, base_frozen=True))  # frozen base week ignored
+    p4 = not any(("Base" in c and "km/wk" in c) for c in d4["changes"])
+    out.append({"case": "frozen carry ⇒ not a phantom change", "changes": d4["changes"], "passed": p4}); ok = ok and p4
+    return _st("det", "diff-load-fingerprint",
+               "diff_plans surfaces intra-structure load changes (per-phase km/wk + adjustment); "
+               "true no-op preserved; frozen carry not a phantom change",
+               passed=ok, output=out)
+
+
 def _stc_block_generator():
     """§6f Step A regression: the phase-agnostic generate_block reproduces the re-base byte-for-byte
     (generate_rebase is now a thin wrapper), AND it generalizes — an arbitrary longer/heavier shape
@@ -8133,6 +8681,60 @@ def _stc_readiness_floor(db):
     ok = p1 and p2
     return _st("det", "readiness-floor",
                "engine safety floor: stop-symptom⇒red+halt; two poor signals⇒red, never softened",
+               passed=ok, output=out)
+
+
+def _stc_readiness_deterministic_halt(db):
+    """§H2+§H3 — the medical gate's production-path fixes, exercised under the conditions where the
+    bugs lived (no LLM; a day AFTER the symptom). (a) The free-text note backstop fires with NO LLM
+    (the live llm:false NAS) and is non-softenable — including notes a negation heuristic would have
+    eaten — while benign notes don't false-halt. (b) A persisted medical hold keeps the gate red+halt
+    on a later day with no new check-in, and stays red even past the adjustment's calendar window
+    (open-ended until cleared), then releases when it's cleared (active=0)."""
+    import sqlite3 as _sq
+    from datetime import date
+    out, ok = [], True
+    # (a) deterministic catch on the no-LLM path (the test env has no key → llm_available() is False)
+    catches = [("chest got tight and I had to stop", True),
+               ("didn't seem bad but my chest got tight and i had to stop", True),   # negation-trap
+               ("felt a bit dizzy on the climb", True),
+               ("legs felt great, easy run by the river", False),
+               ("", False)]
+    for note, want in catches:
+        r = assess_readiness(db, {"note": note})
+        got = bool(r.get("halt")) and r.get("verdict") == "red"
+        p = (got == want); ok = ok and p
+        out.append({"note": note or "(empty)", "want_halt": want, "got_halt": got,
+                    "source": r.get("source"), "passed": p})
+    no_llm = not llm_available()
+    out.append({"case": "exercised the production no-LLM path", "llm_available": (not no_llm),
+                "passed": no_llm}); ok = ok and no_llm
+    # (b) persisted hold survives the day boundary AND the calendar window (open-ended until cleared)
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    directive, _ = clamp_adjustment({"situation": "medical", "volume_multiplier": 0.0, "scope_days": 28,
+                                     "medical_flag": True, "summary": "stop-symptom"},
+                                    date.today().isoformat())
+    mem.execute("INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active) "
+                "VALUES (?,?,?,?,?,1)",
+                (_now_iso(), "test hold", json.dumps(directive), "2020-01-01", "2020-01-28"))  # long expired
+    mem.commit()
+    held = active_medical_halt(mem)
+    tr = today_readiness(mem)
+    p_held = held and (tr["assessment"].get("halt") is True) and tr["assessment"]["verdict"] == "red"
+    out.append({"case": "expired-window medical hold still red+halt (open-ended gate)",
+                "active_medical_halt": held, "verdict": tr["assessment"]["verdict"],
+                "halt": tr["assessment"].get("halt"), "passed": p_held}); ok = ok and p_held
+    mem.execute("UPDATE adjustments SET active=0 WHERE active=1"); mem.commit()
+    cleared = not active_medical_halt(mem)
+    tr2 = today_readiness(mem)
+    p_clear = cleared and not tr2["assessment"].get("halt")
+    out.append({"case": "cleared (active=0) ⇒ gate releases", "halt_after_clear":
+                tr2["assessment"].get("halt"), "passed": p_clear}); ok = ok and p_clear
+    mem.close()
+    return _st("det", "readiness-deterministic-halt",
+               "free-text stop-symptom caught with NO LLM (non-softenable, no negation misses); "
+               "medical hold persists red+halt past its window until explicitly cleared",
                passed=ok, output=out)
 
 
@@ -8306,6 +8908,10 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_periodize_chain(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
+                 lambda: _stc_peak_acwr_floor(),
+                 lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
+                 lambda: _stc_bridge_no_ctl_floor(), lambda: _stc_feasibility_floor(),
+                 lambda: _stc_rebase_runway_clamp(), lambda: _stc_sync_refresh(),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),
                  lambda: _stc_long_run(), lambda: _stc_ctl_floor(),
@@ -8313,6 +8919,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
+                 lambda: _stc_readiness_deterministic_halt(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),
                  lambda: _stc_readiness_note_catch(db), lambda: _stc_plan_explain(db)]

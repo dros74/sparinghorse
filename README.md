@@ -117,8 +117,13 @@ as your fitness proves itself.
 `python SparingHorse.py selftest` runs the deterministic engine battery (and the key-gated LLM checks where a
 key is present). Also at `/selftest` (private only).
 
+## Changelog
+Notable features and fixes are tracked in [`CHANGELOG.md`](CHANGELOG.md)
+([Keep a Changelog](https://keepachangelog.com) + Semantic Versioning).
+
 ## Layout
     SparingHorse.py     the app (Flask + waitress backend + embedded SPA)
+    CHANGELOG.md        versioned record of features and fixes
     Dockerfile          container build
     docker-compose.yml  optional two-service public/private deployment
     requirements.txt    pinned dependencies
