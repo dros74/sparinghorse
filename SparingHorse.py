@@ -329,7 +329,8 @@ CREATE TABLE IF NOT EXISTS adjustments (
     directive    TEXT,              -- JSON: the engine-clamped directive that was applied
     applies_from TEXT,              -- YYYY-MM-DD inclusive
     applies_until TEXT,             -- YYYY-MM-DD inclusive
-    active       INTEGER DEFAULT 1  -- 0 once superseded/cleared
+    active       INTEGER DEFAULT 1, -- 0 once superseded/cleared
+    medical      INTEGER DEFAULT 0  -- §H3 dominant medical hold: open-ended load + survives routine applies
 );
 
 -- Session log (the daily-workflow journal). A reflection on how a run felt attaches to its
@@ -413,6 +414,18 @@ def init_db():
         return   # public read-only: the private side owns the schema; never write here
     db = connect_db()
     db.executescript(SCHEMA)
+    # §H3 migration: add the dominant-medical-track column to a pre-existing DB (idempotent) and
+    # backfill it from the directive JSON, so a hold saved by the old code is recognised as medical
+    # (dominant + open-ended) after the upgrade — not silently downgraded to a window-clamped ease.
+    cols = {r["name"] for r in db.execute("PRAGMA table_info(adjustments)").fetchall()}
+    if "medical" not in cols:
+        db.execute("ALTER TABLE adjustments ADD COLUMN medical INTEGER DEFAULT 0")
+        for row in db.execute("SELECT id, directive FROM adjustments").fetchall():
+            try:
+                if json.loads(row["directive"]).get("medical_flag"):
+                    db.execute("UPDATE adjustments SET medical=1 WHERE id=?", (row["id"],))
+            except (ValueError, TypeError):
+                continue
     # Self-healing migration: deactivate any legacy *active* no-op adjustment (multiplier ≥ 1,
     # no easy-only, no medical) saved before the §6c routing fix — those were reflections that
     # got stored as an "Active adjustment" and still render a pointless banner. New no-ops are
@@ -2740,8 +2753,13 @@ def propose_adjustment(text, today=None, easy_pace=None):
 
 def active_adjustment(db, today):
     """The current clamped adjustment still in its window (most recent active), or None. Read by
-    generate_plan so the plan stays a pure function of (today, shape, objectives, adjustments)."""
+    generate_plan so the plan stays a pure function of (today, shape, objectives, adjustments).
+    §H3 — a MEDICAL hold dominates and ignores the calendar window: its load reduction (full rest)
+    stays in force open-ended until cleared, matching the open-ended gate (so the plan can't resume
+    prescribing load after the 28-day window while the gate still reads halt)."""
     row = db.execute(
+        "SELECT note, directive FROM adjustments "
+        "WHERE active=1 AND medical=1 ORDER BY id DESC LIMIT 1").fetchone() or db.execute(
         "SELECT note, directive FROM adjustments "
         "WHERE active=1 AND applies_until >= ? ORDER BY id DESC LIMIT 1", (today,)
     ).fetchone()
@@ -2755,22 +2773,32 @@ def active_adjustment(db, today):
 
 
 def active_medical_halt(db):
-    """§H3 — is a medical hold (a flagged exertional symptom) currently in force? Unlike
-    active_adjustment this IGNORES the calendar window: a medical halt persists across days until the
-    active row is cleared, never silently expiring back to green by the calendar. Read by
-    today_readiness to keep the gate red across days. CAVEATS (residual, surfaced to Duarte): (1) the
-    plan's load reduction still rides the §6c-clamped ≤28-day window — only the GATE is calendar-open;
-    (2) since /api/adjustment/apply deactivates all active rows ('one active at a time'), applying any
-    later adjustment also releases this hold — so it's 'until cleared OR superseded', not strictly
-    'until doctor clearance'. A fully dominant medical track is the proper fix if Duarte wants it."""
-    row = db.execute(
-        "SELECT directive FROM adjustments WHERE active=1 ORDER BY id DESC LIMIT 1").fetchone()
-    if not row:
-        return False
-    try:
-        return bool(json.loads(row["directive"]).get("medical_flag"))
-    except (ValueError, TypeError):
-        return False
+    """§H3 — is a medical hold (a flagged exertional symptom) currently in force? A medical hold lives
+    on its own DOMINANT track (`medical=1`): it ignores the calendar window (persists across days until
+    explicitly cleared, never expiring back to green) AND is not deactivated by a later routine
+    adjustment (see `_save_adjustment`) — so it's strictly 'until cleared', not 'until superseded'.
+    Read by today_readiness to keep the gate red, and by active_adjustment to keep the load at rest."""
+    return db.execute(
+        "SELECT 1 FROM adjustments WHERE active=1 AND medical=1 LIMIT 1").fetchone() is not None
+
+
+def _save_adjustment(db, note, directive):
+    """Persist `directive` as the active adjustment, honouring the §H3 dominant medical track:
+      • a MEDICAL hold supersedes everything (any prior hold) and becomes the dominant active row;
+      • a ROUTINE ease deactivates other ROUTINE rows but LEAVES a medical hold in force — applying a
+        routine adjustment can never silently release a medical halt (only an explicit clear or a new
+        medical hold does). One routine + at most one medical may be active at once; the medical row
+        wins every read (active_adjustment / active_medical_halt)."""
+    medical = 1 if directive.get("medical_flag") else 0
+    if medical:
+        db.execute("UPDATE adjustments SET active=0 WHERE active=1")           # supersede everything
+    else:
+        db.execute("UPDATE adjustments SET active=0 WHERE active=1 AND medical=0")  # spare the hold
+    db.execute(
+        "INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active, medical) "
+        "VALUES (?,?,?,?,?,1,?)",
+        (_now_iso(), note, json.dumps(directive),
+         directive["applies_from"], directive["applies_until"], medical))
 
 
 # Readiness judgment (§6c×§6d) — the LLM turns HRV + the check-in (incl. free text) into the
@@ -3977,13 +4005,7 @@ def api_adjustment_apply():
     db = get_db()
 
     def mutate():
-        db.execute("UPDATE adjustments SET active=0 WHERE active=1")  # one active at a time
-        db.execute(
-            "INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active) "
-            "VALUES (?,?,?,?,?,1)",
-            (_now_iso(), note, json.dumps(directive),
-             directive["applies_from"], directive["applies_until"]),
-        )
+        _save_adjustment(db, note, directive)  # §H3 dominant medical track (routine spares a hold)
     return replan(db, mutate)
 
 
@@ -4103,12 +4125,7 @@ def api_readiness_post():
              "summary": "Exertional stop-symptom flagged in the daily check-in — rest and see your doctor."},
             today)
         base = plan_baseline(db)
-        db.execute("UPDATE adjustments SET active=0 WHERE active=1")  # one active at a time
-        db.execute(
-            "INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active) "
-            "VALUES (?,?,?,?,?,1)",
-            (_now_iso(), "Daily check-in: exertional stop-symptom → medical hold",
-             json.dumps(directive), directive["applies_from"], directive["applies_until"]))
+        _save_adjustment(db, "Daily check-in: exertional stop-symptom → medical hold", directive)
         db.commit()
         regenerate(db, baseline=base)   # rebuild + persist the plan so today's load drops to rest
     return jsonify(today_readiness(db))
@@ -8608,6 +8625,69 @@ def _stc_cross_phase_freeze():
                     "union_lived_as": new.get("_lived_as")})
 
 
+def _stc_cross_phase_freeze_integration():
+    """§H6 INTEGRATION — drives the REAL generate_plan across a phase-key mismatch (the `prior_all =
+    _prior_weeks_all(...)` wiring), not just the _split_freeze seam the sibling test covers. Setup: a
+    lived (fully-elapsed) week is filed in the prior plan under a phase the CURRENT layout no longer
+    assigns to its Monday. Asserts end-to-end: (a) the old per-phase lookup for the week's current
+    phase MISSES it (the bug) while the all-phase union FINDS it (the fix), and (b) generate_plan
+    carries the week VERBATIM (a sentinel + a tell-tale intent only the prior plan has) — proof the
+    union, not a fresh regeneration from today's CTL, produced the frozen week."""
+    import sqlite3 as _sq, copy
+    from datetime import timedelta
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = datetime.now().date()
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (today.isoformat(), 50.0, 30.0, 28.0))
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                ("marathon", "Goal", (today + timedelta(weeks=20)).isoformat(), "finish", "A", "upcoming", _now_iso()))
+    monday = today - timedelta(days=today.weekday())
+    set_meta(mem, "rebase_start", (monday - timedelta(weeks=3)).isoformat())   # block starts ~3wk back
+    mem.commit()
+    p1 = generate_plan(mem)
+    blocks = lambda p: ([{"key": "rebase"}] + p.get("phases", []))
+    elapsed = sorted((w for ph in blocks(p1) for w in (p1.get(ph["key"]) or {}).get("weeks", [])
+                      if w.get("elapsed")), key=lambda w: w["start"])
+    if not elapsed:
+        mem.close()
+        return _st("det", "cross-phase-freeze-integration", "needs a fully-elapsed week to freeze",
+                   skipped=True, note="no elapsed week in the generated plan")
+    wstart = elapsed[0]["start"]
+    cur_phase = next(ph["key"] for ph in blocks(p1)
+                     if any(w.get("start") == wstart for w in (p1.get(ph["key"]) or {}).get("weeks", [])))
+    # build the prior plan = p1, but MIS-FILE the lived week under a non-matching phase ('taper') with a
+    # sentinel + tell-tale intent, and drop it from every other block — so ONLY the all-phase union can
+    # still find it by start (the per-phase lookup for its current phase will miss).
+    prior = copy.deepcopy(p1)
+    for ph in blocks(p1):
+        blk = prior.get(ph["key"])
+        if isinstance(blk, dict) and isinstance(blk.get("weeks"), list):
+            blk["weeks"] = [w for w in blk["weeks"] if w.get("start") != wstart]
+    mis = {**elapsed[0], "_sentinel": True, "intent_km": 777}
+    prior.setdefault("taper", {"weeks": []})
+    prior["taper"]["weeks"] = [w for w in prior["taper"].get("weeks", []) if w.get("start") != wstart] + [mis]
+    mem.execute("INSERT INTO plans(created_at, plan) VALUES(?,?)", (_now_iso(), json.dumps(prior)))
+    mem.commit()
+    per_phase_misses = wstart not in _prior_weeks_by_start(prior, cur_phase)   # the bug the old code hit
+    union_finds = wstart in _prior_weeks_all(prior)                            # the §H6 fix
+    p2 = generate_plan(mem)
+    w2 = next((w for ph in blocks(p2) for w in (p2.get(ph["key"]) or {}).get("weeks", [])
+               if w.get("start") == wstart), None)
+    froze_verbatim = bool(w2) and w2.get("frozen") is True and w2.get("_sentinel") is True \
+        and w2.get("intent_km") == 777
+    ok = per_phase_misses and union_finds and froze_verbatim
+    mem.close()
+    return _st("det", "cross-phase-freeze-integration",
+               "generate_plan freezes a lived week verbatim even when the prior plan filed it under a "
+               "phase the current layout no longer owns (all-phase union, end-to-end)",
+               passed=ok, got={"week": wstart, "cur_phase": cur_phase,
+                               "per_phase_misses": per_phase_misses, "union_finds": union_finds,
+                               "froze_verbatim": froze_verbatim,
+                               "w2_frozen": (w2 or {}).get("frozen"),
+                               "w2_sentinel": (w2 or {}).get("_sentinel")})
+
+
 def _stc_diff_load_fingerprint():
     """§H5 — diff_plans must catch a LOAD change that leaves the structure (objective, phase
     week-counts, runway) identical: per-week volume, or an applied/cleared adjustment. These used to
@@ -8715,8 +8795,8 @@ def _stc_readiness_deterministic_halt(db):
     directive, _ = clamp_adjustment({"situation": "medical", "volume_multiplier": 0.0, "scope_days": 28,
                                      "medical_flag": True, "summary": "stop-symptom"},
                                     date.today().isoformat())
-    mem.execute("INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active) "
-                "VALUES (?,?,?,?,?,1)",
+    mem.execute("INSERT INTO adjustments (created_at, note, directive, applies_from, applies_until, active, medical) "
+                "VALUES (?,?,?,?,?,1,1)",
                 (_now_iso(), "test hold", json.dumps(directive), "2020-01-01", "2020-01-28"))  # long expired
     mem.commit()
     held = active_medical_halt(mem)
@@ -8735,6 +8815,56 @@ def _stc_readiness_deterministic_halt(db):
     return _st("det", "readiness-deterministic-halt",
                "free-text stop-symptom caught with NO LLM (non-softenable, no negation misses); "
                "medical hold persists red+halt past its window until explicitly cleared",
+               passed=ok, output=out)
+
+
+def _stc_medical_track(db):
+    """§H3 dominant medical track — closes the two residuals the full-app review surfaced, exercised
+    through the production write path (`_save_adjustment`). (a) LOAD is open-ended: a medical hold
+    rests the plan even past its §6c ≤28-day window, so generate_plan can't resume prescribing load
+    while the gate still reads halt. (b) DOMINANCE: a routine ease applied afterward does NOT lift the
+    hold — only an explicit clear or a fresh medical hold changes it (was 'until cleared OR superseded')."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta
+    out, ok = [], True
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = date.today().isoformat()
+    long_ago = (date.today() - timedelta(days=120)).isoformat()   # its 28-day window is long expired
+    med, _ = clamp_adjustment({"situation": "medical", "volume_multiplier": 0.0, "scope_days": 28,
+                               "medical_flag": True, "summary": "stop-symptom"}, long_ago)
+    _save_adjustment(mem, "hold", med); mem.commit()
+    # (a) open-ended load: active_adjustment still returns the full-rest medical directive past its window
+    adj = active_adjustment(mem, today)
+    p_open = bool(adj) and adj["directive"].get("medical_flag") and adj["directive"]["volume_multiplier"] == 0.0
+    out.append({"case": "expired-window hold still rests the plan (open-ended load)",
+                "got_mult": (adj or {}).get("directive", {}).get("volume_multiplier"), "passed": p_open})
+    ok = ok and p_open
+    # (b) a routine ease applied afterward does NOT release the hold (the residual H3-b bug)
+    routine, _ = clamp_adjustment({"situation": "travel", "volume_multiplier": 0.7, "scope_days": 7}, today)
+    _save_adjustment(mem, "easing back", routine); mem.commit()
+    adj2 = active_adjustment(mem, today)
+    p_dom = (active_medical_halt(mem) and adj2["directive"].get("medical_flag")
+             and adj2["directive"]["volume_multiplier"] == 0.0)
+    out.append({"case": "routine ease afterward does NOT lift the hold (still rest)",
+                "halt": active_medical_halt(mem), "load_mult": adj2["directive"].get("volume_multiplier"),
+                "passed": p_dom}); ok = ok and p_dom
+    # a fresh medical hold supersedes the prior one (exactly one active medical row)
+    med2, _ = clamp_adjustment({"situation": "medical", "volume_multiplier": 0.0, "scope_days": 28,
+                                "medical_flag": True, "summary": "again"}, today)
+    _save_adjustment(mem, "hold2", med2); mem.commit()
+    n_med = mem.execute("SELECT COUNT(*) c FROM adjustments WHERE active=1 AND medical=1").fetchone()["c"]
+    p_super = active_medical_halt(mem) and n_med == 1
+    out.append({"case": "a fresh hold supersedes the prior (one active medical row)",
+                "active_medical": n_med, "passed": p_super}); ok = ok and p_super
+    # the explicit clear (doctor cleared you) releases everything
+    mem.execute("UPDATE adjustments SET active=0 WHERE active=1"); mem.commit()
+    p_rel = (not active_medical_halt(mem)) and active_adjustment(mem, today) is None
+    out.append({"case": "explicit clear releases the hold", "passed": p_rel}); ok = ok and p_rel
+    mem.close()
+    return _st("det", "medical-track",
+               "a medical hold rests the plan open-ended (not §6c-clamped) and survives a later "
+               "routine ease; only an explicit clear or a fresh hold changes it",
                passed=ok, output=out)
 
 
@@ -8910,6 +9040,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
+                 lambda: _stc_cross_phase_freeze_integration(),
                  lambda: _stc_bridge_no_ctl_floor(), lambda: _stc_feasibility_floor(),
                  lambda: _stc_rebase_runway_clamp(), lambda: _stc_sync_refresh(),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(), lambda: _stc_polarized(),
@@ -8919,7 +9050,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
-                 lambda: _stc_readiness_deterministic_halt(db),
+                 lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),
                  lambda: _stc_readiness_note_catch(db), lambda: _stc_plan_explain(db)]
