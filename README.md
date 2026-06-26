@@ -62,6 +62,10 @@ The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB
 physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
 server-side (not just hidden in the UI).
 
+## Manual
+A full how-to — setup, the first-run checklist, daily/weekly workflow, and how to read every panel — lives
+in [`MANUAL.md`](MANUAL.md). The sections below are the quick-start.
+
 ## Requirements
 - **Runalyze Premium** + a **Personal API token** (generate at `runalyze.com/settings/personal-api`). The
   app reads your activities and Runalyze's computed shape/effort metrics — it does not replace them.
@@ -80,6 +84,10 @@ locally-owned `sparinghorse.db`, then **Backfill all** once for your full histor
 **Objectives** panel (or seed one with `SH_SEED_OBJECTIVE`); with no objective the engine runs in maintenance
 mode. A nightly auto-sync (default `22:00` in `SH_TZ`, override `SH_SYNC_AT`, disable `SH_SCHEDULE=0`) keeps
 the data current.
+
+**Install it as an app.** Sparing Horse is a PWA — open it in a browser and use *Install / Add to Home
+Screen* for a standalone window with an offline app shell. No store, no build step; the service worker
+caches only the shell and never the API.
 
 ## Run with Docker — optional public + private split
 `docker compose` runs the **same image twice off one shared `./data` DB**:

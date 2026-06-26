@@ -8,6 +8,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-26
+
+Multi-race periodization, a more honest feasibility verdict, in-app key setup, and
+the app becomes installable. Each engine change ships with a regression lock test.
+
+### Added
+- **Installable app (PWA)** — install Sparing Horse to your home screen or desktop for a
+  standalone window with an offline app shell. The service worker caches only the UI shell,
+  never your data or the API.
+- **Set your API keys in the app** — the Settings window now configures your Runalyze token
+  and (optional) Claude key directly, with a live "valid / rejected" check, so a fresh
+  self-host needs no `.env` editing. Keys live in a private-only store, never the shared DB.
+- **Per-race fitness on combined A-race builds** — each race in a chained build shows its own
+  projected race-day fitness and feasibility verdict, not just the final peak.
+- **Multi-peak plan-drift** — the drift scorecard breaks out each A-race's projected-fitness
+  drift against the founding plan and names the next peak still ahead.
+- **Public effort-discipline** — the read-only showcase now shows a sanitized, pace-based
+  easy-discipline score (no heart-rate data or personal critique).
+- **Self-hoster manual** — a full how-to (`MANUAL.md`): setup, the first-run checklist,
+  daily/weekly workflow, and a panel-by-panel reading guide.
+
+### Changed
+- **The taper now lands on race week** — periodization is anchored so the final taper week
+  spans race day, instead of ending up to ~2 weeks short for a race that isn't a whole number
+  of weeks out.
+- **Honest "earn it" feasibility verdict** — a third reading between "too soon" and "finish":
+  when the plan's own projection is below the fitness a healthy finish needs but the runway is
+  long, the verdict says the race is reachable *only if you build into it*, rather than
+  promising a flat "finish".
+- **Anticipated / postponed sessions read correctly** — a run is matched to its nearest
+  prescribed session within ±2 days, so doing tomorrow's quality session today (or shifting an
+  easy day) is no longer misread as a missed session plus a stray extra.
+- **Trail and treadmill runs count** — the running family now reaches the plan-side views
+  (effort, mileage, HR), not just activities typed exactly "Running".
+- **Stable re-base anchor** — the re-base start is derived from your run history, so it's
+  consistent across machines and database rebuilds.
+- **Readiness card colours** — the light theme's readiness status card adopts the richer
+  green/amber/red signal colours from the dark theme.
+- **Deletes explain themselves** — removing an activity now spells out the consequence before
+  you confirm.
+
+### Fixed
+- **Phase-bar week count** — the "periodization" label now distinguishes the full re-base→race
+  span from the weeks still ahead, instead of overstating time-to-race.
+- **Medical-hold residuals** — closed remaining gaps so a logged stop symptom holds the plan at
+  rest until explicitly cleared; the dominant medical track is locked by test.
+
 ## [0.1.1] - 2026-06-26
 
 A full-engine safety and correctness review. Seven load/safety defects and a batch

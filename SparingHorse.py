@@ -701,6 +701,42 @@ def save_secret(key, value):
     return True, None
 
 
+def validate_secret(key):
+    """Live validity probe for one secret — lets the Settings window distinguish 'in use & valid' from
+    'set but the provider rejected it' and 'not set'. Returns 'valid' | 'invalid' | 'unset' | 'unknown'
+    ('unknown' = a network/transient error we can't pin on the key). Cheap: a single authenticated GET
+    with NO generation cost — Runalyze `statistics/current`, Anthropic `GET /v1/models` (key check, not a
+    completion). Always 'unset' in READONLY — the public box never holds a secret to test."""
+    if READONLY or key not in SECRET_BY_KEY:
+        return "unset"
+    value = _resolve_secret(SECRET_BY_KEY[key])[0]
+    if not value:
+        return "unset"
+    try:
+        if key == "runalyze_token":
+            r = requests.get(f"{RUNALYZE_BASE}/statistics/current",
+                             headers={"token": value, "Accept": "application/json",
+                                      "User-Agent": USER_AGENT}, timeout=8)
+            if r.status_code == 200:
+                return "valid"
+            return "invalid" if r.status_code in (401, 403) else "unknown"
+        if key == "anthropic_api_key":
+            import anthropic
+            try:
+                # models.list() is a plain GET — validates the key, bills no tokens. max_retries=0 so a
+                # bad key fails fast instead of backing off.
+                anthropic.Anthropic(api_key=value, timeout=8.0, max_retries=0).models.list()
+                return "valid"
+            except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
+                return "invalid"
+            except Exception:
+                return "unknown"
+    except Exception as e:
+        print(f"[secrets] validate {key} failed: {e}")
+        return "unknown"
+    return "unknown"
+
+
 # ── ETL ─────────────────────────────────────────────────────────────────────
 def upsert_activity(db, a):
     sport = a.get("sport") or {}
@@ -994,6 +1030,7 @@ HARD_HR_FRAC = 0.85         # %HRmax above which an 'easy' run was actually thre
 TE_HARD_CORROBORATE = 3.5   # Training Effect backing a too-hard HR read → 'high' confidence
 EASY_PACE_GRACE = 0.03      # public PACE read: allow GAP up to 3% quicker than the easy ceiling = 'on'
 AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (his documented failure mode)
+EFFORT_MATCH_DAYS = 2       # a session shuffled within ±2 days reads as a reschedule, not a new run
 
 
 def _robust_hrmax(db):
@@ -1107,6 +1144,49 @@ def _effort_verdict_pace(kind, gap_pace, zones):
     return "hot"
 
 
+def _match_prescriptions(run_dates, prescribed, match_days=EFFORT_MATCH_DAYS):
+    """Assign each run the kind of the plan session it belongs to (§6m). The runner doesn't always run a
+    session on its prescribed calendar day — they anticipate or postpone by a day or two. Exact-date logic
+    mis-reads that: an anticipated tempo lands on a rest day, defaults to 'easy', and gets flagged 'hot'
+    against the wrong band, while its real prescription shows as a silent miss. So:
+      • an exact-date prescription always wins (unambiguous — the runner kept the calendar);
+      • a run on a day with NO prescription adopts the NEAREST still-unclaimed session within ±match_days
+        (the same nearest-match posture §6s uses for race day);
+      • each prescription is claimed by at most ONE run (closest wins, deterministic tie-break), so two
+        runs can't both inherit one session and a moved session is matched once;
+      • a run with nothing in range falls back to 'easy' (the polarized default).
+    Pure function over date strings → list of kinds aligned to `run_dates` (for testability)."""
+    from datetime import date as _date
+    out = [None] * len(run_dates)
+    by_date = {}
+    for i, (pd, pk) in enumerate(prescribed):
+        by_date.setdefault(pd, []).append(i)
+    consumed = set()
+    for ri, rd in enumerate(run_dates):                 # pass 1 — exact-date matches consume their session
+        free = [pi for pi in by_date.get(rd, []) if pi not in consumed]
+        if free:
+            out[ri] = prescribed[free[0]][1]
+            consumed.add(free[0])
+    pairs = []                                          # pass 2 — nearest match for runs on unprescribed days
+    for ri, rd in enumerate(run_dates):
+        if out[ri] is not None:
+            continue
+        rdd = _date.fromisoformat(rd)                   # hoisted — constant across the inner loop
+        for pi, (pd, pk) in enumerate(prescribed):
+            if pi in consumed:
+                continue
+            dist = abs((rdd - _date.fromisoformat(pd)).days)
+            if dist <= match_days:
+                pairs.append((dist, pd, ri, pi))
+    pairs.sort()                                        # closest first; ISO date + indices = deterministic
+    for dist, pd, ri, pi in pairs:
+        if out[ri] is not None or pi in consumed:
+            continue
+        out[ri] = prescribed[pi][1]
+        consumed.add(pi)
+    return [k or "easy" for k in out]
+
+
 def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     """Per-run effort vs prescription over the recent window (§6m). Each run's prescribed kind comes
     from the saved plan (frozen past weeks included); an unplanned run defaults to 'easy' (the
@@ -1125,19 +1205,22 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     drop = dropped_ids(db)
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     plan = json.loads(row["plan"]) if row else {}
-    kind_by_date = {}
+    prescribed = []                                       # [(date, kind)] across all phases
     for ph in ("rebase", "base", "build", "peak", "taper"):
         for w in (plan.get(ph) or {}).get("weeks", []):
             for s in w.get("sessions", []):
-                kind_by_date[s["date"]] = s.get("kind")
-    runs = []
-    for r in db.execute(
+                if s.get("date") and s.get("kind"):
+                    prescribed.append((s["date"], s["kind"]))
+    rows = [r for r in db.execute(
         "SELECT id, date, distance, duration, hr_avg, raw FROM activities "
-        "WHERE " + RUN_FAMILY_SQL + " AND date>=? ORDER BY date DESC", (since,)).fetchall():
-        if r["id"] in drop or not r["distance"] or r["distance"] < 2:
-            continue
+        "WHERE " + RUN_FAMILY_SQL + " AND date>=? ORDER BY date DESC", (since,)).fetchall()
+        if not (r["id"] in drop or not r["distance"] or r["distance"] < 2)]
+    # Match each run to its prescription (nearest within ±EFFORT_MATCH_DAYS — an anticipated/postponed
+    # session is judged against its real prescription, not the easy default of the day it landed on).
+    matched = _match_prescriptions([r["date"] for r in rows], prescribed)
+    runs = []
+    for r, kind in zip(rows, matched):
         raw = json.loads(r["raw"] or "{}")
-        kind = kind_by_date.get(r["date"]) or "easy"
         gap = raw.get("gap")                              # Runalyze grade-adjusted speed (km/h)
         gap_pace = (round(3600.0 / gap) if gap else
                     (round(r["duration"] / r["distance"]) if r["duration"] else None))
@@ -1299,6 +1382,18 @@ def weeks_until(d, today=None):
     return max(0, (_date(d) - today).days // 7)
 
 
+def _plan_span(block_start, race_date):
+    """Monday-anchored weeks from `block_start` THROUGH the week that contains `race_date` (1-based,
+    inclusive) — the calendar length the plan must span so its final taper week lands ON race day.
+    The plan is laid contiguously in whole Mon–Sun weeks from `block_start`, but `weeks_until(race,
+    today)` counted from *today* and floored the remainder, so the plan ended ~1–2 weeks short and the
+    race fell in an un-generated week. Anchoring to the same grid the weeks are laid on, and including
+    the race's own week, closes that gap (the extra weeks land in the building phases; the taper keeps
+    its length). `block_start` is a date; `race_date` a date or ISO string."""
+    rd = _date(race_date) if isinstance(race_date, str) else race_date
+    return max(0, (rd - block_start).days // 7 + 1)
+
+
 def periodize(today, race_date, rebase_weeks=6):
     """Reverse periodization: split the runway into Phase-0 re-base → Base → Build →
     Peak → Taper. Phase lengths scale with the weeks available."""
@@ -1327,14 +1422,25 @@ def _seg_taper(total, full):
     return min((3 if total >= 16 else 2) if full else 1, max(0, total))
 
 
-def periodize_chain(today, chain, rebase_weeks=6):
+def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
     """§6q — reverse-periodize the whole A-race CHAIN into a flat phase list. Each phase carries a
     unique `key` (what generate_plan stores its block under + the UI selects), a `kind` (which shaper
     builds it), and the `race`/`role` it serves. Segment 0 is the full Re-base→Base→Build→Peak→Taper
     toward the first race; each later race adds a re-build BRIDGE→Peak→Taper off the prior race. A
     subordinate race gets peak=0 + a 1-week sharpen instead of a full peak. Returns (phases,
     total_weeks). For a single goal race this REDUCES to periodize() (same kinds + same week counts;
-    the Peak/Taper names just gain the race label). `chain` is select_chain()'s first return."""
+    the Peak/Taper names just gain the race label). `chain` is select_chain()'s first return.
+
+    When `block_start` (a date) is given, each segment's week count is anchored to that Monday grid and
+    is INCLUSIVE of the race's own week (`_plan_span` / cumulative deltas), so the plan laid contiguously
+    from block_start lands every race week ON race day — instead of the old today-floored count that
+    ended ~1–2 weeks short. With block_start None it keeps the legacy today-anchored counts (the
+    single-race oracle path used by the reduction self-test). The returned total_weeks stays the
+    intuitive `weeks_until(final_race, today)` for the 'weeks away' display either way."""
+    # Cumulative Monday-week index (from block_start) of the week containing a race — segment counts are
+    # deltas of these, so the contiguous layout hits each race's week exactly.
+    cum = (lambda d: _plan_span(block_start, d)) if block_start is not None else None
+
     def seg0_split(total, full):
         taper = _seg_taper(total, full)
         rem = max(0, total - rebase_weeks - taper)
@@ -1349,7 +1455,7 @@ def periodize_chain(today, chain, rebase_weeks=6):
 
     r0 = chain[0]
     lbl0, role0 = r0.get("label", "race"), r0["role"]
-    total0 = weeks_until(r0["date"], today)
+    total0 = cum(r0["date"]) if cum else weeks_until(r0["date"], today)
     base, build, peak0, taper0 = seg0_split(total0, _full_peak(role0))
     phases = [
         {"phase": "Re-base (Phase 0)", "weeks": rebase_weeks, "kind": "rebase", "key": "rebase", "race": None, "role": None},
@@ -1362,7 +1468,7 @@ def periodize_chain(today, chain, rebase_weeks=6):
         rk, prev = chain[k], chain[k - 1]
         lblk, rolek = rk.get("label", "race"), rk["role"]
         fullk = _full_peak(rolek)
-        totalk = weeks_until(rk["date"], _date(prev["date"]))
+        totalk = max(0, cum(rk["date"]) - cum(prev["date"])) if cum else weeks_until(rk["date"], _date(prev["date"]))
         taperk = _seg_taper(totalk, fullk)        # clamped ≤ totalk → segment never overruns the race
         remk = max(0, totalk - taperk)
         peakk = min(2, remk) if fullk else 0      # short inter-race sharpen; fitness is held, no new base
@@ -2123,8 +2229,9 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
     MIN_RUNWAY = {"marathon": 14, "half": 9, "10k": 5, "5k": 4}
     MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}
     typ = (objective.get("type") or "").lower()
+    floor = MIN_CTL.get(typ, 0)
     short_runway = weeks_away is not None and weeks_away < MIN_RUNWAY.get(typ, 6)
-    low_fitness = proj < MIN_CTL.get(typ, 0)
+    low_fitness = proj < floor
     if short_runway and low_fitness:
         label = objective.get("label", "the race")
         msg = (f"That's only **{weeks_away} week{'s' if weeks_away != 1 else ''}** to {label}"
@@ -2133,6 +2240,20 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
                f"a later date or a shorter distance; the engine still builds you safely toward it and "
                f"re-reads this each block as fitness returns.")
         return {"verdict": "too soon", "projected_ctl": proj, "estimate_ctl": est, "note": msg}
+    if low_fitness:
+        # §PER1 F3 — runway is long enough, but the engine's OWN projection lands BELOW the floor a
+        # healthy finish needs. Don't promise a flat "finish" on a number the conservative plan doesn't
+        # deliver (the floor-projection deliberately ignores the opt-in earned levers / CTL floor, which
+        # the real plan WILL trigger as measured fitness returns). Honest middle verdict — reachable, but
+        # only if you build into it — not a red "too soon". Closes the "CTL 16 · finish" incongruity.
+        label = objective.get("label", "the race")
+        msg = (f"Projected race-day fitness ≈ CTL {proj:.0f} (from {ctl0:.0f} now, via {src}) — below the "
+               f"~CTL {floor:.0f} a healthy {typ or 'race'} finish needs. The "
+               f"**{weeks_away}-week** runway makes {label} reachable, but only if you **build into it**: "
+               f"the engine lifts volume as your measured fitness proves itself (the CTL floor and the "
+               f"earned levers) and re-reads this each block — the conservative floor-projection alone "
+               f"doesn't get you there yet.")
+        return {"verdict": "earn it", "projected_ctl": proj, "estimate_ctl": est, "note": msg}
     verdict = "finish"  # default honest verdict for a marathon off a detrained base
     msg = (f"Projected fitness by race day ≈ CTL {proj:.0f} (from {ctl0:.0f} now, via "
            f"{src}). That supports **finishing {objective.get('label','the race')} "
@@ -2384,6 +2505,24 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
     return weeks, round(end_ctl, 1), round(end_atl, 1), generated_any
 
 
+def _trim_post_race(plan, chain, block_start):
+    """§PER1 — display-side cleanup after the race-week-inclusive periodization: the final taper week
+    of each segment now SPANS the race day (so the taper bottom lands ON race week), but we don't
+    prescribe training in the dead days between the race and that week's Sunday. Drop any session dated
+    strictly after a race up to and including that race's Monday-week Sunday. Pure read-model edit — the
+    CTL projection already ran during generation off the full (untrimmed) week, so removing these tail
+    sessions changes only what's shown, never the chained fitness seed."""
+    from datetime import timedelta
+    blocks = [v for v in plan.values() if isinstance(v, dict) and "weeks" in v]
+    for c in chain:
+        R = _date(c["date"])
+        wk_end = block_start + timedelta(days=((R - block_start).days // 7) * 7 + 6)
+        for blk in blocks:
+            for w in blk.get("weeks", []):
+                w["sessions"] = [s for s in w.get("sessions", [])
+                                 if not (R < _date(s["date"]) <= wk_end)]
+
+
 def generate_plan(db):
     """Engine entry point (§6b): a pure function of (today, current shape, objectives), with the
     PAST frozen (§6f Step E). Re-periodizes forward to the nearest A-race; falls back to a
@@ -2423,7 +2562,10 @@ def generate_plan(db):
     # so the phase list and the actually-generated re-base block agree.
     rebase_eff = natural_len
     if chain:
-        total0 = weeks_until(chain[0]["date"], today)
+        # §PER1 — clamp in the SAME block_start-anchored, race-week-inclusive units periodize_chain
+        # now uses (`_plan_span`), so the clamped re-base and the periodized phase list agree and the
+        # taper bottom lands ON race week (not the old today-floored count that ended ~1–2 wk short).
+        total0 = _plan_span(block_start, chain[0]["date"])
         taper0 = _seg_taper(total0, _full_peak(chain[0]["role"]))
         rebase_eff = min(natural_len, max(0, total0 - taper0))
     shape = REBASE_SHAPE[:rebase_eff]
@@ -2479,7 +2621,8 @@ def generate_plan(db):
         # path: same base/build/peak/taper keys + week counts). Each later race adds a bridge/peak/taper
         # segment; generate_plan WALKS the resulting phase list, chaining the live CTL seed segment-to-
         # segment with the past frozen (§6f E), so the multi-peak road is one continuous, diff-able plan.
-        phases, total_weeks = periodize_chain(today, chain, rebase_weeks=rebase_weeks_n)
+        phases, total_weeks = periodize_chain(today, chain, rebase_weeks=rebase_weeks_n,
+                                              block_start=block_start)
         plan["mode"] = "race"
         plan["objective"] = {"label": anchor["label"], "date": anchor["date"],
                              "type": anchor.get("type"),   # §6s — needed to match the race-day activity
@@ -2557,6 +2700,16 @@ def generate_plan(db):
             tk = "taper" if i == 0 else f"taper{i}"
             if tk in race_proj:
                 c["proj_ctl"] = round(race_proj[tk], 1)
+                # #2 — a per-race feasibility verdict on each chain segment, so a multi-A build surfaces
+                # WHERE each race lands (not just the final peak). Same feasibility() as the final anchor,
+                # re-read on that race's own runway + its projected end-of-taper CTL.
+                c["feasibility"] = feasibility(c, ctl0, vo2, weeks_until(c["date"], today),
+                                               projected_ctl=race_proj[tk]).get("verdict")
+        # §PER1 — drop any prescribed session dated strictly AFTER a race within that race's own
+        # Monday-week (the race-week-inclusive span means the final taper week now spans race day; we
+        # don't prescribe training in the days between the race and that Sunday). Display-only: the CTL
+        # projection already ran during generation, so trimming these tail sessions doesn't re-seed it.
+        _trim_post_race(plan, chain, block_start)
     else:  # §6b maintenance fallback — no objective: hold fitness, ACWR centred, no taper
         plan["mode"] = "maintenance"
         plan["objective"] = None
@@ -3560,6 +3713,78 @@ FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" rol
 def favicon_svg():
     return FAVICON_SVG, 200, {"Content-Type": "image/svg+xml", "Cache-Control": "public, max-age=86400"}
 
+
+# ── PWA (installable + offline app shell) ────────────────────────────────────────────────────────
+# A web manifest + a small service worker make the app installable (home-screen / desktop) and give it
+# an offline shell. Both are public-safe static assets (no secrets, no token) so they serve on BOTH the
+# private and the public read-only container — they're not in _private_only_path and carry nothing
+# personal. The private and public boxes live on different origins, so each gets its own SW scope and
+# nothing crosses. The SVG icon is declared "any maskable" so launchers that mask get a clean full-bleed.
+WEB_MANIFEST = json.dumps({
+    "name": "Sparing Horse",
+    "short_name": "Sparing Horse",
+    "description": "Your current running shape and a dynamic, objective-driven training plan, "
+                   "built on your own Runalyze data.",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#f4f1ea",
+    "theme_color": "#f4f1ea",
+    "icons": [
+        {"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+    ],
+}, separators=(",", ":"))
+
+# The service worker: app-shell caching only. Deliberately NEVER caches /api/* (would risk serving stale
+# or — across the shared deploy — privacy-sensitive data) and ignores non-GET + cross-origin (fonts /
+# tiles / Leaflet pass straight through). Navigations are network-first with an offline fallback to the
+# cached shell; same-origin static is stale-while-revalidate. Bump SHELL to invalidate the old cache.
+SERVICE_WORKER_JS = """\
+const SHELL='sh-shell-v1';
+const SHELL_URLS=['/','/favicon.svg','/manifest.webmanifest'];
+self.addEventListener('install',e=>{
+  e.waitUntil(caches.open(SHELL).then(c=>c.addAll(SHELL_URLS)).then(()=>self.skipWaiting()));
+});
+self.addEventListener('activate',e=>{
+  e.waitUntil(caches.keys()
+    .then(ks=>Promise.all(ks.filter(k=>k!==SHELL).map(k=>caches.delete(k))))
+    .then(()=>self.clients.claim()));
+});
+self.addEventListener('fetch',e=>{
+  const req=e.request;
+  if(req.method!=='GET') return;                       // never touch writes
+  const url=new URL(req.url);
+  if(url.origin!==self.location.origin) return;        // let cross-origin (fonts/tiles/leaflet) pass
+  if(url.pathname.startsWith('/api/')) return;         // never cache the API (stale / privacy-sensitive)
+  if(req.mode==='navigate'){                           // app shell: network-first, offline -> cached shell
+    e.respondWith(fetch(req)
+      .then(r=>{const cp=r.clone();caches.open(SHELL).then(c=>c.put('/',cp));return r;})
+      .catch(()=>caches.match('/')));
+    return;
+  }
+  e.respondWith(caches.match(req).then(cached=>{        // same-origin static: stale-while-revalidate
+    const net=fetch(req)
+      .then(r=>{const cp=r.clone();caches.open(SHELL).then(c=>c.put(req,cp));return r;})
+      .catch(()=>cached);
+    return cached||net;
+  }));
+});
+"""
+
+
+@app.get("/manifest.webmanifest")
+def web_manifest():
+    return WEB_MANIFEST, 200, {"Content-Type": "application/manifest+json",
+                               "Cache-Control": "public, max-age=86400"}
+
+
+@app.get("/sw.js")
+def service_worker():
+    # no-cache so a new SW is picked up promptly; Service-Worker-Allowed lets it claim the root scope.
+    return SERVICE_WORKER_JS, 200, {"Content-Type": "application/javascript",
+                                    "Cache-Control": "no-cache",
+                                    "Service-Worker-Allowed": "/"}
+
 # Runalyze wordmark for the footer attribution link. The brand icon keeps its green/teal palette;
 # the wordmark (.st19) is set to currentColor so it adapts to every theme (dark on Daylight, light on
 # Charcoal/Aurora) from a single inlined asset — no per-theme file. viewBox added (source had only a
@@ -3583,7 +3808,8 @@ def _private_only_path(p):
     and `/api/geocode` (the city-picker proxy). NOTE `/api/effort-discipline` is NOT here: it self-
     sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
     so the score is public while the HR-led critique stays private."""
-    return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets")
+    return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
+                  "/api/secrets/validate")
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -3826,6 +4052,42 @@ def isoweek_monday(year, wk):
     return jan4 - timedelta(days=jan4.weekday()) + timedelta(weeks=wk - 1)
 
 
+def _chain_drift(anchor, current, today, race_date, dup_count):
+    """§6q/#3 — multi-peak awareness for the drift scorecard. The scorecard's `race` axis settles only
+    the FINAL peak, but a chained build (§6q) has earlier A-races whose race-day projection also drifts.
+    Returns (chain_drift, next_peak):
+      • chain_drift — one entry per A-race across the founding (anchor) + current chains, its founding vs
+        current projected race-day CTL matched BY DATE (graceful when a pre-§6q founding plan carries no
+        chain → founding None → trend 'unknown'), with the same ±0.5 gaining/slipping/steady trend the
+        race axis uses (suppressed to 'unknown' while a duplicate inflates the snapshot).
+      • next_peak — the nearest A-race still ahead of today but before the final goal: the peak to point
+        at in the live headline. None on a single-A build or once only the final remains.
+    Pure (no DB, no globals). Single-A collapses to one entry ≡ the race axis (the caller suppresses it)."""
+    def by_date(plan):
+        return {c["date"]: c for c in (plan.get("chain") or []) if c.get("date")}
+    a_chain, c_chain = by_date(anchor), by_date(current)
+
+    def trend(g):
+        return ("unknown" if dup_count or g is None else
+                "gaining" if g > 0.5 else "slipping" if g < -0.5 else "steady")
+
+    drift = []
+    for d in sorted(set(a_chain) | set(c_chain)):
+        cc = c_chain.get(d) or a_chain.get(d) or {}
+        fc = (a_chain.get(d) or {}).get("proj_ctl")
+        nc = (c_chain.get(d) or {}).get("proj_ctl")
+        g = None if (fc is None or nc is None) else round(nc - fc, 1)
+        drift.append({"label": cc.get("label"), "date": d, "role": cc.get("role"),
+                      "founding": fc, "now": nc, "gap": g, "trend": trend(g),
+                      "verdict": cc.get("feasibility"), "passed": _date(d) < today})
+    next_peak = None
+    for d in sorted(c_chain):
+        if today < _date(d) and (race_date is None or _date(d) < race_date):
+            next_peak = c_chain[d]
+            break
+    return drift, next_peak
+
+
 @app.get("/api/plandrift")
 def api_plandrift():
     """The plan's drift from its founding statement (§6b, visible). Three slow-moving, weekly
@@ -3991,6 +4253,10 @@ def api_plandrift():
     race_trend = ("unknown" if dup_count or race_gap is None else
                   "gaining" if race_gap > 0.5 else "slipping" if race_gap < -0.5 else "steady")
 
+    # §6q/#3 — multi-peak awareness: per-race founding-vs-now projection drift across the whole A-race
+    # chain, plus the next peak still ahead (for the live headline). Single-A → one entry (suppressed).
+    chain_drift, next_peak = _chain_drift(anchor, current, today, race_date, dup_count)
+
     settled = race_date is not None and today >= race_date
 
     # §6s — post-race reckoning: once the race date passes, stop PROJECTING and settle against what
@@ -4071,9 +4337,14 @@ def api_plandrift():
     else:
         race_name = obj.get("label") or "Race-day"
         tail = "" if race_trend in ("unknown", "steady") else f" {race_name} projection {race_trend}."
+        # §6q/#3 — point at the next peak first when the build chains an earlier A-race still ahead.
+        peak_tail = ""
+        if next_peak:
+            wa = max(0, (_date(next_peak["date"]) - today).days // 7)
+            peak_tail = f" Next peak: {next_peak.get('label') or 'an earlier A-race'} in {wa} week{'' if wa == 1 else 's'}."
         # settled is handled by the §6s reckoning/complete branches above, so this is the open score:
         verdict = "Score open." if not READONLY else "Too early to call."
-        headline = f"The rebuild is {PHRASE[(fit_state, vol_state)]}.{tail} " + verdict
+        headline = f"The rebuild is {PHRASE[(fit_state, vol_state)]}.{tail}{peak_tail} " + verdict
 
     scorecard = {
         "open": not is_current,
@@ -4083,6 +4354,7 @@ def api_plandrift():
         "fitness": {"founding": fit_found, "now": fit_now, "gap": fit_gap, "state": fit_state},
         "race":    {"founding": race_found, "now": race_now, "gap": race_gap, "trend": race_trend,
                     "caveat": bool(dup_count), "verdict": (current.get("feasibility") or {}).get("verdict")},
+        "chain":   chain_drift if len(chain_drift) > 1 else None,   # §6q/#3 — per-peak drift (multi-A only)
         "reckoning": reckoning,     # §6s — present only once the race is run (settled)
         "headline": headline,
     }
@@ -4789,6 +5061,20 @@ def api_secrets_save():
     return jsonify(ok=True, secrets=secret_status())
 
 
+@app.get("/api/secrets/validate")
+def api_secrets_validate():
+    """Live validity of each configured secret — valid / invalid / unset / unknown. A cheap authenticated
+    probe with NO generation cost (Runalyze statistics, Anthropic GET /v1/models). Private-only via
+    `_private_only_path`; the public container 403s it. Probes run CONCURRENTLY so the worst case is one
+    timeout (~8s), not the sum across keys — `validate_secret` touches only module globals + its own
+    sqlite connection + the network, so it's safe off the request thread."""
+    from concurrent.futures import ThreadPoolExecutor
+    keys = [s["key"] for s in SECRET_SPEC]
+    with ThreadPoolExecutor(max_workers=max(1, len(keys))) as ex:
+        results = dict(zip(keys, ex.map(validate_secret, keys)))
+    return jsonify(ok=True, results=results)
+
+
 @app.get("/")
 def index():
     # inject the mode flag + private-console URL synchronously so the UI gates with no round-trip
@@ -4821,7 +5107,13 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/favicon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Sparing Horse">
+<meta name="mobile-web-app-capable" content="yes">
 <script>try{var t=localStorage.getItem("sh-theme");document.documentElement.dataset.theme=(t==="dark"||t==="aurora")?t:"light"}catch(e){document.documentElement.dataset.theme="light"}</script>
+<script>if("serviceWorker" in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/sw.js").catch(function(){})})}</script>
 <style>
   /* House design system tokens (DESIGN.md §2.3) — apps reference TOKEN NAMES only, never raw hex,
      so one data-theme switch re-skins the whole app. Light/Daylight is the CSS base (:root) so a
@@ -4832,7 +5124,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     --bg:#f4f1ea; --surface:#fbf9f4; --surface2:#ece7db; --line:#ddd6c7;
     --text:#2a2620; --muted:#6f6857; --accent:#b9542c;
     --ok:#4f8c5f; --warn:#a9781f; --danger:#b5563f;
-    --readybg:#4d8a5c; --readybg2:#3c6a48; --onacc:#fff;
+    --readybg:#2f9760; --readybg2:#1d6240; --readyamber:#f7b32b; --readyred:#fc6a55; --onacc:#fff;   /* readiness status-card palette borrowed from the dark theme (richer signals) */
     --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);   /* legacy aliases */
     --serif:'Fraunces',Georgia,serif; --sans:'Inter',system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
@@ -4841,14 +5133,14 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     --bg:#191a1d; --surface:#222327; --surface2:#2a2b30; --line:#3a3c43;
     --text:#edeef1; --muted:#9b9da5; --accent:#fa7d42;
     --ok:#33d98a; --warn:#f7b32b; --danger:#fc6a55;
-    --readybg:#2f9760; --readybg2:#1d6240; --onacc:#fff;
+    --readybg:#2f9760; --readybg2:#1d6240; --readyamber:#f7b32b; --readyred:#fc6a55; --onacc:#fff;
     --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
   [data-theme="aurora"]{   /* Electric — deep indigo, violet→cyan accents, neon signals */
     --bg:#121226; --surface:#1c1d3e; --surface2:#262752; --line:#3a3c74;
     --text:#eef0ff; --muted:#a2a6dc; --accent:#7b61ff; --accent2:#28d6ee;
     --ok:#22e3a6; --warn:#ffc24d; --danger:#ff5d8a;
-    --readybg:#12b39a; --readybg2:#0a7d6e; --onacc:#fff;
+    --readybg:#12b39a; --readybg2:#0a7d6e; --readyamber:var(--warn); --readyred:var(--danger); --onacc:#fff;
     --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
   *{box-sizing:border-box}
@@ -4897,6 +5189,18 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   button.primary{background:var(--accent);border-color:var(--accent);color:var(--onacc)}
   button.ghost{background:transparent;color:var(--muted);font-size:12px;padding:8px 12px}
   button.ghost:hover{color:var(--text)}
+  button.danger{background:var(--danger);border-color:var(--danger);color:var(--onacc)}
+  button.danger:hover{border-color:var(--danger);filter:brightness(1.08)}
+  /* Consequence-explaining confirm dialog (destructive actions) — reuses dialog.modal chrome */
+  dialog.modal.confirm-modal{width:min(460px,92vw)}  /* .modal sets 680px at equal specificity + later — qualify to win */
+  .cf-body{padding:18px 22px;overflow:auto;flex:1 1 auto;min-height:0}
+  .cf-body p{margin:0 0 11px;font-size:13.5px;line-height:1.55}
+  .cf-body ul{margin:0 0 4px;padding-left:20px;font-size:12.5px;line-height:1.6;color:var(--muted)}
+  .cf-body li{margin:3px 0}
+  .cf-body .cf-alt{margin-top:12px;font-size:12.5px;color:var(--muted)}
+  .cf-body .cf-alt:empty{display:none}
+  .cf-foot{flex:none;display:flex;justify-content:flex-end;gap:10px;
+    padding:14px 22px;border-top:1px solid var(--line);background:var(--surface)}
   /* shared house chrome: a fixed top-right control cluster (login + swatches) and a
      top-left hub link. Swatches mirror bookworm's component (30px + accent underline);
      the login pill sits to their left (the sparinghorse arrangement). */
@@ -5096,10 +5400,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:var(--onacc);
     background:linear-gradient(155deg,var(--readybg),var(--readybg2));
     box-shadow:0 8px 22px color-mix(in oklab,var(--readybg),transparent 60%)}
-  .statuscard.amber{background:linear-gradient(155deg,var(--warn),color-mix(in oklab,var(--warn),#000 30%));
-    box-shadow:0 8px 22px color-mix(in oklab,var(--warn),transparent 60%)}
-  .statuscard.red{background:linear-gradient(155deg,var(--danger),color-mix(in oklab,var(--danger),#000 32%));
-    box-shadow:0 8px 22px color-mix(in oklab,var(--danger),transparent 55%)}
+  .statuscard.amber{background:linear-gradient(155deg,var(--readyamber),color-mix(in oklab,var(--readyamber),#000 30%));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--readyamber),transparent 60%)}
+  .statuscard.red{background:linear-gradient(155deg,var(--readyred),color-mix(in oklab,var(--readyred),#000 32%));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--readyred),transparent 55%)}
   .statuscard .sc-orb{position:absolute;border-radius:50%;background:rgba(255,255,255,.09);pointer-events:none}
   .statuscard .sc-top{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative}
   .statuscard .sc-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.78)}
@@ -5195,6 +5499,19 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     padding:5px 10px;color:var(--muted)}
   .zone b{color:var(--accent);font-weight:500}
   .zone.hl{border-color:var(--accent)}
+  /* §6q/#2 — multi-A race-chain strip: one row per A-race, projected CTL + per-race verdict */
+  .chainstrip{margin:10px 0 2px}
+  .chainrace{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:7px 0;
+    border-top:1px solid var(--line)}
+  .chainrace .crole{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);border:1px solid var(--line);border-radius:6px;padding:2px 6px}
+  .chainrace .cname{font-family:var(--serif);font-weight:600;font-size:15px}
+  .chainrace .cwhen{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .chainrace .cctl{font-family:var(--mono);font-size:11px;color:var(--text);margin-left:auto}
+  .chainrace .cverd{font-family:var(--mono);font-size:10px;border-radius:6px;padding:2px 7px;
+    border:1px solid var(--line);color:var(--muted)}
+  .chainrace .cverd.ok{color:var(--ok);border-color:var(--ok)}
+  .chainrace .cverd.warn{color:var(--warn);border-color:var(--warn)}
   .wk{display:grid;grid-template-columns:30px 1fr auto;gap:12px;align-items:center;
     padding:10px 0;border-top:1px solid var(--line)}
   .wk .wn{font-family:var(--serif);font-weight:600;font-size:17px;color:var(--accent)}
@@ -5383,6 +5700,15 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .scorecard .sc-verdict{font-family:var(--serif);font-size:14.5px;line-height:1.45;color:var(--text);
     padding-top:11px;border-top:1px solid var(--line)}
   .scorecard .sc-verdict .wks{font-family:var(--mono);font-size:10px;color:var(--muted)}
+  /* §6q/#3 — per-peak chain drift rows (multi-A only) */
+  .scorecard .sc-chain{margin:2px 0 13px;padding:11px 0 1px;border-top:1px dashed var(--line)}
+  .scorecard .sc-crow{display:flex;align-items:baseline;gap:8px;padding:3px 0}
+  .scorecard .sc-crow .sc-cname{font-family:var(--serif);font-weight:600;font-size:13.5px}
+  .scorecard .sc-crow .sc-cwhen{font-family:var(--mono);font-size:9.5px;color:var(--muted)}
+  .scorecard .sc-crow .sc-cv{font-family:var(--mono);font-size:11px;margin-left:auto}
+  .scorecard .sc-crow .sc-cv.ahead{color:var(--ok)} .scorecard .sc-crow .sc-cv.behind{color:var(--danger)}
+  .scorecard .sc-crow .sc-cv.level,.scorecard .sc-crow .sc-cv.unknown{color:var(--muted)}
+  .scorecard .sc-crow .sc-cv .sub{font-size:9px;letter-spacing:.04em}
   .driftcap{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:20px;line-height:1.5}
   .driftcap .warn{color:var(--warn)}
   .driftblock{margin-bottom:26px} .driftblock:last-child{margin-bottom:0}
@@ -5442,10 +5768,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .sectitle{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
   .setrow .src.ok{color:var(--ok)}
   .setrow .src.warn{color:var(--warn)}
+  .setrow .src.bad{color:var(--danger)}
   .secinput{display:flex;gap:8px;align-items:center}
   .secinput input{flex:1}
+  #secretsBox:not(:empty){padding:20px 22px 0}  /* match #settings/modal-head inset so the keys block isn't flush-left */
   /* Settings modal — native <dialog>, centered, backdrop-dimmed */
-  dialog.modal{border:none;border-radius:16px;padding:0;width:min(560px,92vw);max-height:86vh;
+  dialog.modal{border:none;border-radius:16px;padding:0;width:min(680px,94vw);max-height:86vh;
     background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
   /* flex ONLY when open — a bare display: on a dialog overrides the UA dialog:not([open]){display:none},
      so a closed dialog would render in-flow (the panel-at-the-bottom bug). Scope it to [open]. */
@@ -5589,6 +5917,21 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       <div id="settings"><div class="empty">Loading…</div></div>
     </dialog>
 
+    <!-- Reusable consequence-explaining confirmation for destructive actions (house-styled, replaces the
+         bare browser confirm). Body filled in by confirmDanger(); returns a Promise<bool>. -->
+    <dialog id="confirmDialog" class="modal confirm-modal" aria-labelledby="cfTitle">
+      <div class="modal-head"><h2 id="cfTitle">Are you sure?</h2></div>
+      <div class="cf-body">
+        <p id="cfIntro"></p>
+        <ul id="cfList"></ul>
+        <p id="cfAlt" class="cf-alt"></p>
+      </div>
+      <div class="cf-foot">
+        <button type="button" class="ghost" id="cfCancel">Cancel</button>
+        <button type="button" class="danger" id="cfOk">Delete</button>
+      </div>
+    </dialog>
+
     <footer>
       <span id="foot">Spares the horse by being the horse · not synced yet</span>
       <a class="ralink" href="https://runalyze.com" target="_blank" rel="noopener noreferrer"
@@ -5725,7 +6068,16 @@ async function loadShape(){
   dq.innerHTML=dqhtml;
   dq.querySelectorAll(".dupdel").forEach(el=>el.addEventListener("click", async ev=>{
     ev.preventDefault();
-    if(!confirm("Delete this leftover duplicate from your LOCAL copy?\n\nFor a dup you already removed on Runalyze that insert-only sync left behind. If it still exists on Runalyze it returns on the next sync.")) return;
+    if(!await confirmDanger({
+      title:"Delete this leftover duplicate?",
+      intro:"This hard-removes the leftover row from your local copy — for a duplicate you've already deleted on Runalyze that the insert-only sync left behind.",
+      lines:[
+        "It stops inflating the duplicate count and this banner; the fitness/fatigue chart already excludes it.",
+        "If the duplicate still exists on Runalyze it will reappear on the next sync — delete it on Runalyze first.",
+        "There's no local undo once it's gone from Runalyze.",
+      ],
+      alt:"Not sure it's gone upstream? ⊘ Ignore excludes it from the maths reversibly instead.",
+      confirmLabel:"Delete locally"})) return;
     await fetch(`/api/activity/${el.dataset.id}/delete`,
       {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
     await Promise.all([loadShape(), loadActivity(CURACT), loadProjector()]);
@@ -6026,7 +6378,16 @@ async function loadActivity(aid){
   const del=$("#delact");
   if(del) del.addEventListener("click", async ev=>{
     ev.preventDefault();
-    if(!confirm("Delete this activity from your LOCAL copy?\n\nUse this only for an activity you already deleted on Runalyze — insert-only sync left the row behind. If it still exists on Runalyze it will return on the next sync (use ⊘ Ignore instead). An accidental delete recovers with a full backfill.")) return;
+    if(!await confirmDanger({
+      title:"Delete this activity?",
+      intro:"This hard-removes the activity from your local copy — only meant for one you've ALREADY deleted on Runalyze that the insert-only sync left behind.",
+      lines:[
+        "It's dropped from your fitness/fatigue reconstruction, weekly mileage and effort history.",
+        "If it still exists on Runalyze it will reappear on the next sync — the delete won't stick.",
+        "There's no local undo: if you deleted it on Runalyze too, it's gone (an accidental delete of a live activity recovers with a full backfill).",
+      ],
+      alt:"Just want to exclude a duplicate or mis-tag from the maths? Use ⊘ Ignore instead — that's reversible.",
+      confirmLabel:"Delete locally"})) return;
     await fetch(`/api/activity/${del.dataset.id}/delete`,
       {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
     CURACT=null;   // the row is gone → fall back to the latest activity
@@ -6204,6 +6565,32 @@ function acBadge(a){
   return `<span class="acbadge ${cls}">ACWR →${a.toFixed(2)}</span>`+
     qhint("Projected acute:chronic load at this week's end — rolled forward from today's fitness if you run the plan. Stay in the green band (≤ ~1.3); the engine trims volume to keep it there.");
 }
+// House-styled confirmation for destructive actions — spells out the consequences before anything is
+// removed. opts: {title, intro, lines:[…consequences], alt, confirmLabel}. Returns a Promise<bool>
+// (true = proceed). Falls back to a native confirm() if the dialog element isn't present.
+function confirmDanger(opts){
+  const o = opts||{};
+  return new Promise(resolve=>{
+    const dlg=$("#confirmDialog");
+    if(!dlg || typeof dlg.showModal!=="function"){
+      resolve(confirm([o.intro, ...(o.lines||[]), o.alt].filter(Boolean).join("\n\n"))); return;
+    }
+    if(dlg.open){ resolve(false); return; }   // re-entrant guard — never stack/showModal-throw while one is up
+    $("#cfTitle").textContent = o.title || "Are you sure?";
+    $("#cfIntro").textContent = o.intro || "";
+    $("#cfList").innerHTML = (o.lines||[]).map(l=>`<li>${esc(l)}</li>`).join("");
+    $("#cfAlt").textContent = o.alt || "";
+    const ok=$("#cfOk"); ok.textContent = o.confirmLabel || "Delete";
+    let done=false;
+    const finish=v=>{ if(done) return; done=true; try{ dlg.close(); }catch(e){} resolve(v); };
+    ok.onclick=()=>finish(true);
+    $("#cfCancel").onclick=()=>finish(false);
+    dlg.onclick=e=>{ if(e.target===dlg) finish(false); };           // backdrop click ⇒ cancel (onclick = no accrual)
+    dlg.addEventListener("close", ()=>finish(false), {once:true});   // Esc ⇒ cancel
+    dlg.showModal();
+    $("#cfCancel").focus();   // default focus on the safe action, not Delete
+  });
+}
 // Reusable click-to-open help bubble (Runalyze-style "?"). Delegated, so it works on dynamic content;
 // positioned as a fixed bubble so an overflow:hidden ancestor can't clip it.
 function qhint(text){
@@ -6265,7 +6652,7 @@ function refreshFirstRun(){
   }).join("");
   host.innerHTML=`<div class="firstrun"><div class="fr-head"><b>Welcome to Sparing Horse.</b> `+
     `Three steps to your first plan.</div><ol class="fr-steps">${li}</ol></div>`;
-  const kb=$("#fr_keys"); if(kb) kb.addEventListener("click", ()=>{ const dlg=$("#settingsDialog"); if(dlg){ if(!$("#setform")) loadSettings(); loadSecrets(); dlg.showModal(); } });
+  const kb=$("#fr_keys"); if(kb) kb.addEventListener("click", ()=>{ const dlg=$("#settingsDialog"); if(dlg){ if(!$("#setform")) loadSettings(); loadSecrets(true); dlg.showModal(); } });
   const sb=$("#fr_sync"); if(sb) sb.addEventListener("click", ()=>$("#syncBtn")&&$("#syncBtn").click());
   const rb=$("#fr_race"); if(rb) rb.addEventListener("click", async ()=>{
     const p=document.getElementById("plan"); if(p) p.scrollIntoView({behavior:"smooth", block:"start"});
@@ -6697,6 +7084,27 @@ function renderPlan(p){
     : "");
   const tuneTxt = (p.tune_ups&&p.tune_ups.length)
     ? `<div class="legend" style="margin-top:8px">Tune-ups before the peak: ${p.tune_ups.map(t=>`${esc(t.label)} (${t.date}, ${t.priority})`).join(" · ")}</div>` : "";
+  // §6q/#2 — multi-A chain strip: when the build chains ≥2 A-races, surface each race's projected
+  // race-day fitness (end-of-taper CTL) + its own feasibility verdict, so the roadmap reads "where does
+  // each race land", not just the final peak. Single-A skips it (the objline + headline verdict cover one).
+  const verdTone = v => v==="too soon" ? "warn" : (v==="finish"||v==="maintain") ? "ok" : "muted";
+  const roleName = r => r==="goal" ? "Goal" : r==="coequal" ? "Co-equal" : r==="subordinate" ? "Tune-up" : (r||"");
+  const chainRaces = p.chain||[];
+  const chainStrip = chainRaces.length>1
+    ? `<div class="chainstrip">
+        <div class="legend" style="margin-bottom:5px">Race chain — projected fitness &amp; verdict at each A-race${qhint("Each A-race in the build, with the chronic load (CTL — your fitness) the engine projects you'll carry into it at the end of that race's taper, and whether that supports a healthy finish on its runway. Re-read every block as real fitness returns.")}</div>
+        ${chainRaces.map(c=>{
+          const ctl = (c.proj_ctl!=null) ? `CTL ≈ ${Math.round(c.proj_ctl)}` : "—";
+          const v = c.feasibility;
+          return `<div class="chainrace">
+            <span class="crole">${esc(roleName(c.role))}</span>
+            <span class="cname">${esc(c.label)}</span>
+            <span class="cwhen">${esc(c.date)}</span>
+            <span class="cctl" title="Projected race-day fitness (end-of-taper CTL, ACWR-capped)">${ctl}</span>
+            ${v?`<span class="cverd ${verdTone(v)}">${esc(v)}</span>`:""}
+          </div>`;
+        }).join("")}
+      </div>` : "";
   const header = o
     ? `<div class="objline">
         <span class="race">${esc(o.label)}</span>
@@ -6732,7 +7140,8 @@ function renderPlan(p){
     <div id="planExplain"></div>`}
     <p class="feas">${esc(p.feasibility.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')}</p>
     <div class="phases">${phaseBar}</div>
-    <div class="legend" style="margin-top:4px">${o?`Periodization to race day (${totalw} weeks) · tap a phase to open its weeks`:'Re-base, then hold'}</div>
+    <div class="legend" style="margin-top:4px">${o?`Full periodization, re-base → race week (${totalw} weeks; ${o.weeks_away} still ahead) · tap a phase to open its weeks`:'Re-base, then hold'}</div>
+    ${chainStrip}
     ${tuneTxt}
     <div class="zones">${zoneChips}</div>
     ${refreshed}
@@ -6972,12 +7381,28 @@ function scorecardHTML(sc, r){
          raceMain = `${Math.round(rc.founding)} → ${Math.round(rc.now)}`; raceSub = rc.trend; }
   const sub = s => s.state==="unknown"?"":"vs founding road";
   const wks = sc.weeks_to_go!=null?`<span class="wks"> — ${sc.weeks_to_go}w to go</span>`:"";
+  // §6q/#3 — multi-peak awareness: when the build chains ≥2 A-races, the single "Race day" row above
+  // tracks only the final peak; this breaks out each peak's founding→now projection + its own trend
+  // (and marks ones already run). Single-A omits it (sc.chain is null server-side).
+  const chainHTML = (sc.chain && sc.chain.length>1)
+    ? `<div class="sc-chain"><div class="sc-k" style="margin-bottom:5px">Each A-race peak (projected CTL)</div>`+
+      sc.chain.map(c=>{
+        const cls = c.passed ? "level"
+          : c.trend==="gaining"?"ahead":c.trend==="slipping"?"behind":c.trend==="steady"?"level":"unknown";
+        const proj = (c.founding!=null&&c.now!=null) ? `${Math.round(c.founding)} → ${Math.round(c.now)}`
+          : (c.now!=null ? `proj ${Math.round(c.now)}` : "—");
+        const tag = c.passed ? "run" : (c.trend!=="unknown"?c.trend:"");
+        return `<div class="sc-crow"><span class="sc-cname">${esc(c.label||c.date)}</span>`+
+          `<span class="sc-cwhen">${esc(c.date)}</span>`+
+          `<span class="sc-cv ${cls}">${proj}${tag?` <span class="sub">${esc(tag)}</span>`:""}</span></div>`;
+      }).join("")+`</div>`
+    : "";
   return `<div class="scorecard"><div class="sc-head">The road vs the road as it stands</div>`+
     `<div class="sc-rows">`+
       scoreRow("Volume", volMain, sub(v), v.state)+
       scoreRow("Fitness", fitMain, sub(f), f.state)+
       scoreRow(r&&r.label?r.label:"Race day", raceMain, raceSub, raceCls)+
-    `</div><div class="sc-verdict">${esc(sc.headline)}${wks}</div></div>`;
+    `</div>${chainHTML}<div class="sc-verdict">${esc(sc.headline)}${wks}</div></div>`;
 }
 // §6m — effort discipline: HR-led "are your easy days actually easy?" Judged by heart rate (terrain
 // & heat already live in HR), TE corroborates, GAP shown as terrain-fair pace.
@@ -6993,6 +7418,10 @@ async function loadEffort(){
   const c=d.easy_counts, score=d.easy_score;
   const tone = score>=80?"var(--ok)":score>=50?"var(--warn)":"var(--danger)";
   const verdict = score>=80?"dialed in":score>=50?"drifting hard":"easy days are threshold days";
+  const scoreHint = qhint(
+    `The share of your easy & long runs that actually stayed easy — judged on ${d.public?"grade-adjusted pace":"heart rate"}. `+
+    `100% is the target: every easy day run easy. 80%+ reads as "dialed in", 50–79% "drifting", below 50% means easy days have crept up to threshold. `+
+    `Hard sessions are meant to be hard, so they're never counted against this score.`);
   let rows, headCols, capLine, note;
   if(d.public){
     // sanitized public read — pace-judged, no HR / TE / feeling
@@ -7006,7 +7435,7 @@ async function loadEffort(){
       `<th>GAP ${qhint("Grade Adjusted Pace — pace corrected for hills so efforts compare fairly across terrain (from Runalyze).")}</th>`+
       `<th>vs easy ${qhint("Whether the grade-adjusted pace stayed at or below the easy-pace ceiling. The public read judges on pace; heart rate stays private.")}</th>`;
     capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed at easy pace (≤ <b>${esc(d.easy_pace_ceiling||"—")}</b>/km, grade-adjusted).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran quicker than easy.`:""}`;
-    note=`Judged on grade-adjusted pace, not heart rate (HR stays private). Pace is a rough proxy — heat &amp; fatigue don't show in it — so this is the conservative public read; the owner's console uses heart rate.`;
+    note=`Judged on grade-adjusted pace, not heart rate (HR stays private). Pace is a rough proxy — a run that looks easy on pace can still have been hard on heart rate (heat, hills, fatigue it can't see), so a verdict here can differ from the owner's HR-led console on the same run.`;
   }else{
     // private read — full HR-led detail
     rows=(d.runs||[]).map(r=>{
@@ -7026,13 +7455,13 @@ async function loadEffort(){
       `<th>feel</th>`+
       `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th>`;
     capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm (78% of HRmax ${d.hrmax}).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
-    note=`Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Runs with no matching plan session (incl. before the plan existed) are judged against the easy default; one mismatch is an observation, not a verdict.`;
+    note=`Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Each run is matched to its nearest prescribed session within a couple of days, so an anticipated or postponed session is judged against its real prescription, not the day it landed on; a run with no session in range falls back to the easy default. One mismatch is an observation, not a verdict.`;
   }
   host.innerHTML=`
     <div class="effort-head">
       <div class="effort-score" style="color:${tone}">${score}<span class="pct">%</span></div>
       <div class="effort-cap">
-        <div class="big">Easy discipline — <b style="color:${tone}">${verdict}</b></div>
+        <div class="big">Easy discipline ${scoreHint} — <b style="color:${tone}">${verdict}</b></div>
         <div class="muted">${capLine}</div>
         <div class="muted" style="font-size:11px;margin-top:4px">${note}</div>
       </div>
@@ -7273,13 +7702,16 @@ async function saveSettings(e){
 // Keys block — the two secrets (Runalyze token / Claude key). WRITE-ONLY: the value is never sent back,
 // so the field is always empty and shows status only. Private console only (#secretsBox is removed on
 // the public view). Saving applies live — no .env edit, no restart.
-async function loadSecrets(){
+async function loadSecrets(probe){
   const host=$("#secretsBox"); if(!host) return;
   let d; try{ d=await getJSON("/api/secrets"); }catch(e){ host.innerHTML=""; return; }
   if(!d.ok){ host.innerHTML=""; return; }
-  const badge=s=> s.source==="saved" ? `<span class="src ok">✓ configured</span>`
-              : s.source==="env"   ? `<span class="src ok">✓ from environment</span>`
-              :                       `<span class="src warn">not set</span>`;
+  // Initial badge = configured-or-not + where it came from. When `probe` is set we then live-check
+  // each configured key against its provider and rewrite the badge to valid / rejected (see validateSecrets).
+  const srcWord=s=> s.source==="env" ? "from environment" : "configured";
+  const badge=s=> s.configured
+        ? `<span class="src ok" id="secbadge_${s.key}">✓ ${srcWord(s)}${probe?" · checking…":""}</span>`
+        : `<span class="src warn" id="secbadge_${s.key}">not set</span>`;
   const row=s=>`<div class="setrow">
       <label for="sec_${s.key}">${esc(s.label)} ${badge(s)}</label>
       <div class="secinput">
@@ -7295,6 +7727,25 @@ async function loadSecrets(){
     ${d.secrets.map(row).join("")}</div>`;
   host.querySelectorAll("button[data-sec]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.sec,false)));
   host.querySelectorAll("button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
+  if(probe) validateSecrets(d.secrets);
+}
+// Live key check — fires when the Settings window opens (or after a save), not on every page load (the
+// Anthropic probe is a network round-trip). A configured key resolves to ✓ in use · valid, ✗ key rejected,
+// or — if the provider couldn't be reached — falls back to the plain configured badge.
+async function validateSecrets(secrets){
+  const configured=(secrets||[]).filter(s=>s.configured);
+  if(!configured.length) return;
+  let d; try{ d=await getJSON("/api/secrets/validate"); }catch(e){ d=null; }
+  configured.forEach(s=>{
+    const el=$("#secbadge_"+s.key); if(!el) return;
+    const v = (d&&d.ok) ? d.results[s.key] : "unknown";
+    if(v==="valid"){ el.className="src ok"; el.textContent="✓ in use · valid";
+      el.title="Verified against the provider just now."; }
+    else if(v==="invalid"){ el.className="src bad"; el.textContent="✗ key rejected";
+      el.title="A key is set but the provider rejected it — paste a fresh one to fix."; }
+    else { el.className="src ok"; el.textContent="✓ "+(s.source==="env"?"from environment":"configured");
+      el.title="A key is set; couldn't reach the provider to verify it right now."; }
+  });
 }
 async function saveSecret(key, clear){
   const inp=$("#sec_"+key), errEl=$("#secerr_"+key); if(errEl) errEl.textContent="";
@@ -7306,7 +7757,7 @@ async function saveSecret(key, clear){
   }catch(e){ if(errEl) errEl.textContent="⚠ could not save"; return; }
   if(!d.ok){ if(errEl) errEl.textContent="⚠ "+(d.error||"could not save"); return; }
   if(inp) inp.value="";
-  loadSecrets();   // refresh the status badges
+  loadSecrets(true);   // refresh the status badges + re-validate the key that was just set
   // a freshly-set token/key changes what the app can do — refresh the affected surfaces live
   fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; TOKEN_OK=!!h.token_configured; refreshFirstRun(); }).catch(()=>{});
 }
@@ -7317,7 +7768,7 @@ loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEff
 // Settings modal open/close (private only — the button is removed on the public view below).
 const _setBtn=$("#settingsBtn"), _setDlg=$("#settingsDialog");
 if(_setBtn && _setDlg){
-  _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); loadSecrets(); _setDlg.showModal(); });  // (re)load settings if the initial fetch failed; refresh key status each open
+  _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); loadSecrets(true); _setDlg.showModal(); });  // (re)load settings if the initial fetch failed; refresh + live-validate keys each open
   const _x=$("#settingsClose"); if(_x) _x.addEventListener("click", ()=>_setDlg.close());
   _setDlg.addEventListener("click", e=>{ if(e.target===_setDlg) _setDlg.close(); });  // backdrop click
 }
@@ -7474,6 +7925,48 @@ def _stc_clamp():
                "clamp_adjustment forces multiplier∈[0,1], window∈[1,28]d, medical⇒full rest",
                passed=not bad, expect="all bounded",
                got="all bounded" if not bad else f"violations: {bad}", output=detail)
+
+
+def _stc_pwa():
+    """PWA wiring — the manifest + service worker are installable, public-safe static assets that must
+    serve on BOTH containers (not in _private_only_path, no secrets), so the public box is installable
+    too. The manifest carries the install fields; the SW handles only GET and NEVER caches /api/ (which
+    would risk stale or — on the shared deploy — privacy-sensitive data). Driven via a test client under
+    both READONLY states."""
+    global READONLY
+    fail = []
+    client = app.test_client()
+    saved = READONLY
+    try:
+        for ro in (False, True):
+            READONLY = ro                                 # the routes are public-safe under either
+            m = client.get("/manifest.webmanifest")
+            if m.status_code != 200:
+                fail.append(f"manifest {m.status_code} (READONLY={ro})")
+            else:
+                if "manifest" not in (m.headers.get("Content-Type") or ""):
+                    fail.append(f"manifest content-type {m.headers.get('Content-Type')}")
+                try:
+                    man = json.loads(m.get_data(as_text=True))
+                    if man.get("start_url") != "/" or man.get("display") != "standalone" or not man.get("icons"):
+                        fail.append(f"manifest missing install fields: {sorted(man)}")
+                except ValueError:
+                    fail.append("manifest is not valid JSON")
+            sw = client.get("/sw.js")
+            if sw.status_code != 200:
+                fail.append(f"sw {sw.status_code} (READONLY={ro})")
+            else:
+                js = sw.get_data(as_text=True)
+                if "javascript" not in (sw.headers.get("Content-Type") or ""):
+                    fail.append(f"sw content-type {sw.headers.get('Content-Type')}")
+                if "/api/" not in js or "addEventListener('fetch'" not in js:
+                    fail.append("sw missing the /api bypass or the fetch handler")
+    finally:
+        READONLY = saved
+    return _st("det", "pwa",
+               "manifest + service worker install the app on both containers; the SW handles only GET and never caches /api",
+               passed=not fail, expect="manifest+sw 200 (incl. READONLY), install fields present, SW bypasses /api",
+               got={"violations": fail or "none"})
 
 
 def _stc_map_privacy(db):
@@ -7980,11 +8473,19 @@ def _stc_secrets():
             fails.append("READONLY read the secrets store")
         if save_secret("runalyze_token", "X")[0]:
             fails.append("READONLY allowed a secret save")
+        if validate_secret("runalyze_token") != "unset":   # never probe with a secret on the public box
+            fails.append("READONLY validate_secret didn't short-circuit to unset")
         READONLY = False
         if save_secret("nope", "X")[0]:
             fails.append("unknown secret key accepted")
-        if not _private_only_path("/api/secrets"):
-            fails.append("/api/secrets not gated private")
+        save_secret("anthropic_api_key", "")               # drop the sk-test set above (no live probe)
+        # An unknown or unconfigured key resolves to 'unset' with NO network probe (only configured keys
+        # are ever sent to a provider). Don't assert the valid/invalid paths here — they'd need live creds.
+        if validate_secret("nope") != "unset" or validate_secret("anthropic_api_key") != "unset":
+            fails.append("validate_secret of an unknown/unconfigured key should be 'unset' (no probe)")
+        for p in ("/api/secrets", "/api/secrets/validate"):
+            if not _private_only_path(p):
+                fails.append(f"{p} not gated private")
     finally:
         try: _os.remove(SECRETS_DB)
         except Exception: pass
@@ -8080,6 +8581,98 @@ def _stc_periodize_chain():
                got={"violations": fails or "none"})
 
 
+def _stc_race_day_landing():
+    """§PER1 calendar-precision — with a block_start the periodized phases, laid contiguously from that
+    Monday grid, land the final taper week ON the race's calendar week (race-week-inclusive span), where
+    the old today-floored count ended ~1–2 weeks short. Pure: span math + periodize_chain block_start
+    path + the _trim_post_race tail-cleanup helper."""
+    fails = []
+    bs = _date("2026-06-01")
+    while bs.weekday() != 0:                       # back up to the week's Monday (block_start is Mon-anchored)
+        bs = bs - timedelta(days=1)
+    # (a) _plan_span is race-week-INCLUSIVE: a race anywhere in block_start's own week → 1; +7d → 2
+    for d, want in [(0, 1), (6, 1), (7, 2), (8, 2)]:
+        got = _plan_span(bs, bs + timedelta(days=d))
+        if got != want:
+            fails.append(f"span(+{d}d)={got} want {want}")
+    # (b) a race NOT a clean 7-multiple out (24wk+4d): the contiguous layout's last taper week == race week,
+    #     and the inclusive span EXCEEDS the old today-floored count (the exact bug this closes).
+    race_date = bs + timedelta(days=24 * 7 + 4)   # a Friday, 24 whole weeks + 4 days from block_start
+    today = bs + timedelta(days=2)                # mid-week "today"
+    goal = {"id": 1, "date": race_date.isoformat(), "type": "marathon", "label": "Goal", "role": "goal"}
+    phases, _ = periodize_chain(today, [goal], rebase_weeks=6, block_start=bs)
+    span = sum(p["weeks"] for p in phases)
+    if span != _plan_span(bs, race_date):
+        fails.append(f"phase sum {span} != inclusive span {_plan_span(bs, race_date)}")
+    last_wk_monday = bs + timedelta(weeks=span - 1)
+    race_wk_monday = bs + timedelta(days=((race_date - bs).days // 7) * 7)
+    if last_wk_monday != race_wk_monday:
+        fails.append(f"last taper week {last_wk_monday} != race week {race_wk_monday}")
+    if _plan_span(bs, race_date) <= weeks_until(race_date.isoformat(), today):
+        fails.append("inclusive span should exceed the old today-floored count for a non-7-multiple race")
+    # (c) _trim_post_race drops sessions strictly AFTER the race within its week, keeps before/on race day
+    rwm = race_wk_monday
+    after1 = (race_date + timedelta(days=1)).isoformat()   # Sat, in-week, after race → DROP
+    sun = (rwm + timedelta(days=6)).isoformat()            # Sun, after race → DROP
+    on = race_date.isoformat()                             # race day → KEEP
+    before = (rwm + timedelta(days=1)).isoformat()         # Tue, before race → KEEP
+    plan = {"objective": {"label": "Goal"},                # a non-"weeks" dict must be ignored
+            "taper": {"weeks": [{"sessions": [{"date": before}, {"date": on},
+                                              {"date": after1}, {"date": sun}]}]}}
+    _trim_post_race(plan, [goal], bs)
+    kept = [s["date"] for s in plan["taper"]["weeks"][0]["sessions"]]
+    if after1 in kept or sun in kept:
+        fails.append(f"post-race session not trimmed: {kept}")
+    if on not in kept or before not in kept:
+        fails.append(f"pre/on-race session wrongly trimmed: {kept}")
+    return _st("det", "race-day-landing",
+               "block_start-anchored span lands the taper on race week (race-week-inclusive); _trim_post_race drops post-race tail sessions",
+               passed=not fails, expect="span inclusive + last taper week == race week + tail trimmed",
+               got={"violations": fails or "none"})
+
+
+def _stc_chain_drift():
+    """§6q/#3 drift-scorecard multi-peak awareness — _chain_drift matches each A-race's founding vs current
+    projected race-day CTL by date, computes the same ±0.5 trend, marks passed races, finds the next peak,
+    degrades gracefully when a founding plan predates the chain, and suppresses trend under a dup. Pure."""
+    today = _date("2026-06-01")
+    fails = []
+    def race(label, wks, ctl, role="coequal", **kw):
+        return {"label": label, "date": (today + timedelta(weeks=wks)).isoformat(),
+                "role": role, "proj_ctl": ctl, **kw}
+    # founding road projected R1→40, R2(goal)→55; the current plan now projects R1→44 (gaining), R2→52 (slipping)
+    anchor = {"chain": [race("R1", 8, 40.0), race("R2", 20, 55.0, role="goal")]}
+    current = {"chain": [race("R1", 8, 44.0), race("R2", 20, 52.0, role="goal")]}
+    race_date = _date(current["chain"][-1]["date"])
+    drift, nxt = _chain_drift(anchor, current, today, race_date, 0)
+    by = {d["label"]: d for d in drift}
+    if round(by["R1"]["gap"], 1) != 4.0 or by["R1"]["trend"] != "gaining":
+        fails.append(f"R1 gap/trend: {by['R1']['gap']}/{by['R1']['trend']}")
+    if round(by["R2"]["gap"], 1) != -3.0 or by["R2"]["trend"] != "slipping":
+        fails.append(f"R2 gap/trend: {by['R2']['gap']}/{by['R2']['trend']}")
+    if nxt is None or nxt["label"] != "R1":          # next peak = the earliest still-ahead, before the goal
+        fails.append(f"next_peak: {nxt and nxt.get('label')}")
+    # a duplicate inflating the snapshot → trend forced unknown (matches the race axis)
+    d2, _ = _chain_drift(anchor, current, today, race_date, 1)
+    if any(x["trend"] != "unknown" for x in d2):
+        fails.append(f"dup did not suppress trend: {[x['trend'] for x in d2]}")
+    # founding plan predates the §6q chain (no chain key) → founding None, trend unknown, still lists races
+    d3, _ = _chain_drift({}, current, today, race_date, 0)
+    if len(d3) != 2 or any(x["founding"] is not None or x["trend"] != "unknown" for x in d3):
+        fails.append(f"pre-chain founding not graceful: {[(x['founding'], x['trend']) for x in d3]}")
+    # a passed race is flagged; once only the final remains ahead there's no next peak
+    past = {"chain": [race("Done", -3, 41.0), race("R2", 20, 52.0, role="goal")]}
+    d4, nxt4 = _chain_drift(past, past, today, race_date, 0)
+    if not next(x for x in d4 if x["label"] == "Done")["passed"]:
+        fails.append("passed race not flagged")
+    if nxt4 is not None:        # only the FINAL goal (R2, == race_date) remains ahead → no intermediate peak
+        fails.append(f"next_peak should be None when only the final remains: {nxt4.get('label')}")
+    return _st("det", "chain-drift",
+               "_chain_drift: per-peak founding→now projection drift matched by date, ±0.5 trend, dup-suppressed, passed-flagged, next-peak, graceful pre-chain founding",
+               passed=not fails, expect="per-peak gaps/trends + next peak + graceful degradation",
+               got={"violations": fails or "none"})
+
+
 def _stc_multi_a_plan():
     """§6q INTEGRATION — generate_plan over a real 2-A chain (in-memory DB): produces the chain + a
     bridge segment, and the ACWR ceiling holds on EVERY week across ALL segments (the safety invariant
@@ -8105,6 +8698,11 @@ def _stc_multi_a_plan():
         fails.append(f"chain roles: {[(c.get('label'), c.get('role')) for c in chain]}")
     if not any(ph["kind"] == "bridge" for ph in p.get("phases", [])):
         fails.append("no bridge segment in multi-A phases")
+    # #2 — every chain race that got a projected end-of-taper CTL must also carry its own feasibility
+    # verdict (the per-race surface): proj_ctl + verdict travel together, both present on each segment.
+    for c in chain:
+        if "proj_ctl" in c and c.get("feasibility") not in ("finish", "earn it", "too soon", "maintain"):
+            fails.append(f"chain race {c.get('label')} proj_ctl w/o verdict: {c.get('feasibility')}")
     overs = []
     for ph in p.get("phases", []):
         for w in (p.get(ph.get("key")) or {}).get("weeks", []):
@@ -8115,8 +8713,8 @@ def _stc_multi_a_plan():
         fails.append(f"ACWR ceiling breached: {overs[:5]}")
     mem.close()
     return _st("det", "multi-a-plan",
-               "generate_plan over a 2-A chain: chain roles + bridge segment + ACWR ≤1.25 on every week of every segment",
-               passed=not fails, expect="chain + bridge + ceiling held across all segments",
+               "generate_plan over a 2-A chain: chain roles + bridge segment + per-race feasibility verdict + ACWR ≤1.25 on every week of every segment",
+               passed=not fails, expect="chain + bridge + per-race verdict + ceiling held across all segments",
                got={"violations": fails or "none"})
 
 
@@ -8832,6 +9430,25 @@ def _stc_effort_discipline(db):
         fails.append(f"easy date not matched: {kinds.get(ed)}")
     if md["easy_counts"]["judged"] != 1:          # only the easy-prescribed run is in the easy bucket
         fails.append(f"quality run leaked into easy score: judged={md['easy_counts']['judged']}")
+    # Nearest-prescription matching (§6m follow-up): the pure matcher is the contract effort_discipline
+    # calls. An ANTICIPATED quality session — run a day before its prescribed date, on a day with no session
+    # — must claim that session and be judged as quality, not flagged as a blown easy day. An exact-date run
+    # still wins its own session ahead of a neighbour, and a run with nothing in range falls back to easy.
+    presc = [(ed, "easy"), (qd, "interval")]                       # easy@-5, interval@-3
+    nb = (tdy - _td(days=4)).isoformat()                           # -4 — a day with no session
+    if _match_prescriptions([nb], [(qd, "interval")]) != ["interval"]:
+        fails.append("anticipated quality not nearest-matched (should claim the ±1d interval)")
+    if _match_prescriptions([qd, nb], presc) != ["interval", "easy"]:   # exact run takes its own; nb takes the rest
+        fails.append("exact-date run + neighbour mis-assigned")
+    if _match_prescriptions([(tdy - _td(days=10)).isoformat()], presc) != ["easy"]:
+        fails.append("a run with no session within ±2d should fall back to easy")
+    # CONTENTION — two runs both in range of ONE session: exactly one claims it (the `pi in consumed`
+    # recheck), the other falls back to easy. Pins that a session is never double-claimed.
+    if _match_prescriptions([(tdy - _td(days=2)).isoformat(), nb], [(qd, "interval")]) != ["interval", "easy"]:
+        fails.append("contention: a lone session was double-claimed or both runs fell back")
+    # TIE-BREAK — a run equidistant between two sessions resolves deterministically to the earlier-dated one.
+    if _match_prescriptions([nb], presc) != ["easy"]:              # -4 is ±1 of both; easy@-5 wins by date
+        fails.append("equidistant tie-break not deterministic (earlier date should win)")
     # PUBLIC (sanitized) read: the showcase serves a PACE-based score with NO heart rate, TE, feeling,
     # or HR ceiling anywhere — the per-run HR + critique stay private (the reason this used to be gated).
     pub = effort_discipline(mem, public=True)
@@ -8850,7 +9467,8 @@ def _stc_effort_discipline(db):
     mem.close()
     return _st("det", "effort-discipline",
                "effort monitor is HR-LED (a low-HR long run w/ duration-lifted TE reads ON not too-hard); "
-               "prescribed quality dates are matched + excluded from the easy score; HRmax spike-resistant; "
+               "prescribed quality dates are matched + excluded from the easy score (incl. an anticipated/"
+               "postponed session matched to its nearest prescription within ±2d); HRmax spike-resistant; "
                "the PUBLIC read is sanitized to a pace-based score with no HR/TE/feeling/critique",
                passed=not fails, expect="HR gates · TE corroborates · quality excluded · public = pace, no HR",
                got={"violations": fails or "none"},
@@ -8960,29 +9578,32 @@ def _stc_rebase_runway_clamp():
 
 
 def _stc_feasibility_floor():
-    """§PER1 F2 — feasibility gains a lower bound: 'too soon' only on the CONJUNCTION of a short runway
-    AND a projected race-day fitness too low to carry the distance. Neither alone fires — runway alone
-    would mis-flag every race in its final weeks (weeks_away shrinks as the race nears, hitting a well-
-    built athlete); CTL alone would mis-flag the legit long-runway 'finish off a layoff' case."""
+    """§PER1 F2/F3 — feasibility is a THREE-WAY verdict on the projected race-day fitness vs a distance
+    floor: 'too soon' (short runway AND below floor — no time AND no base), 'earn it' (long runway but the
+    engine's own projection is still below floor — reachable only if you build into it, §F3 closes the
+    'CTL 16 · finish' incongruity), and 'finish' (projection at/above the floor). A short runway off HIGH
+    fitness is never 'too soon' (the §F2 false-positive guard); an unknown distance has no floor → 'finish'."""
     def v(typ, wks, proj):
         return feasibility({"label": "R", "type": typ}, 25.0, 50.0, wks, projected_ctl=proj)["verdict"]
     cases = [
-        ("marathon", 6, 30.0, "too soon"),   # short AND low → the genuine pathology
-        ("marathon", 20, 30.0, "finish"),    # long runway → blessed even off a modest CTL
-        ("marathon", 10, 55.0, "finish"),    # short remaining runway BUT well-built → NOT too soon (the §F2 false-positive guard)
-        ("marathon", 20, 22.0, "finish"),    # long-runway detrained ('finish off a layoff') → must not flag
+        ("marathon", 6, 30.0, "too soon"),   # short AND below floor (45) → the genuine pathology
+        ("marathon", 20, 30.0, "earn it"),   # long runway but 30<45 → reachable only if you build (§F3)
+        ("marathon", 20, 22.0, "earn it"),   # long-runway detrained, 22<45 → 'earn it', NOT a flat 'finish'
+        ("marathon", 20, 46.0, "finish"),    # long runway AND projection at/above floor → a real finish call
+        ("marathon", 10, 55.0, "finish"),    # short remaining runway BUT well-built (≥45) → NOT too soon, a finish
         ("half", 5, 30.0, "too soon"),       # 5<9 AND 30<35
-        ("half", 12, 30.0, "finish"),
+        ("half", 12, 30.0, "earn it"),       # long runway, 30<35 → earn it
+        ("half", 12, 40.0, "finish"),        # 40≥35 → finish
         ("5k", 2, 15.0, "too soon"),         # 2<4 AND 15<20
-        ("5k", 2, 30.0, "finish"),           # short BUT CTL 30 finishes a 5k fine → not too soon
-        ("5k", 8, 30.0, "finish"),
+        ("5k", 2, 30.0, "finish"),           # short BUT CTL 30 (≥20) finishes a 5k fine → not too soon
+        ("5k", 8, 30.0, "finish"),           # long runway AND 30≥20 → finish
+        ("5k", 8, 15.0, "earn it"),          # long runway, 15<20 → earn it
     ]
     fails = [f"{t}@{w}w proj{p:g}: got {v(t, w, p)!r} want {want!r}"
              for t, w, p, want in cases if v(t, w, p) != want]
     return _st("det", "feasibility-floor",
-               "feasibility warns 'too soon' only when a short runway AND a low projected fitness "
-               "coincide; a short runway off high fitness, or a long runway off a low CTL, still reads "
-               "'finish'",
+               "feasibility is three-way: 'too soon' (short runway AND below floor), 'earn it' (long runway "
+               "but projection still below floor — build into it), 'finish' (projection at/above the floor)",
                passed=not fails, got={"failures": fails or "none"})
 
 
@@ -9469,13 +10090,14 @@ def _stc_post_race_reckoning():
 
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
                  lambda: _stc_multi_a_chain(),
-                 lambda: _stc_periodize_chain(), lambda: _stc_multi_a_plan(),
+                 lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
+                 lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
