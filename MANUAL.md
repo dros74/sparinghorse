@@ -203,6 +203,32 @@ hard). Prescribed quality sessions are matched to your runs within ±2 days and 
 so an anticipated or postponed session isn't misread. The **public** view is sanitized to a pace-based score
 with no HR, no critique.
 
+**How "effort" is actually computed.** The app keeps the *prescription* and the *judgment* on different
+anchors, on purpose:
+
+- The **plan prescribes pace** (Daniels VDOT zones from your VO₂max). That is what feeds the engine — volume,
+  TRIMP load, taper, the ACWR ceiling. None of the HR machinery below touches the plan numbers.
+- The **monitor judges heart rate**, anchored on a **derived lactate-threshold HR (LTHR)**, not %HRmax —
+  because two runners with the same HRmax can have thresholds 15+ bpm apart, and %HRmax is loosest exactly at
+  the easy↔threshold line this score is about. Run zones use Friel's %LTHR grid (Z1 < 0.85 · Z2 0.85–0.89 ·
+  Z3 0.90–0.94 · Z4 0.95–0.99 · Z5 ≥ 1.00 · LTHR). An easy run averaging above the Z1/Z2 boundary reads
+  *hot*; at/above Z4 (threshold) it reads *too hard*.
+
+**Where the LTHR comes from.** It is estimated from runs you already did — no field test. For a continuous
+hard effort (a race, or a tempo with little warm-up/cool-down) the whole-run average HR ≈ LTHR; the app pools
+your sustained hard efforts (20–70 min at ≥ 85 % robust HRmax) and takes a spike-resistant high percentile,
+with a **confidence** flag that decays as the data ages (LTHR drifts up as fitness returns). With too little
+data it falls back to a %HRmax estimate, flagged *provisional*. Known limitation: for *structured* tempos the
+warm-up/cool-down dilute the whole-run average, so this method **understates** LTHR — which is why the easy
+ceiling is pinned to the conservative (lower) Friel boundary, never a looser one. (A manual LTHR override and
+the classic 30-min time-trial protocol are on the roadmap, gated behind readiness so the app never prompts a
+maximal test during a restart.)
+
+**Pace vs HR coherence.** Because prescription and judgment are independent estimates, the app cross-checks
+them: if your runs done *at* the prescribed easy pace keep landing *above* the easy HR ceiling, your easy pace
+is ahead of your current aerobic fitness (classic cardiac decoupling in a rebuild) — the check says so and
+tells you to trust HR on easy days. It is a **diagnostic only**; it never silently rewrites the plan.
+
 ### Readiness
 A daily **green / amber / red** verdict. It flags stop-the-run / cardiac-type symptoms deterministically (no
 AI needed to catch them) and, on red, halts the plan and tells you to see a doctor. The public view shows the
@@ -212,6 +238,13 @@ AI needed to catch them) and, on red, halts the plan and tells you to see a doct
 The most recent **running** activity (trail and treadmill count), with a per-point trace (pace / HR / cadence
 / elevation) and a route map. The **map is private-only** (location privacy). If the most recent activity is
 a non-run, a private note tells you so.
+
+A thin **HR-zone band** runs along the top of the chart: each section of the run is coloured by the HR zone
+you were in (the same Z1–Z5 model used everywhere else — LTHR-anchored when confident, %HRmax otherwise; hover
+the HR metric to see the legend and the anchor). Because the zones are Friel-LTHR, a *properly* easy run reads
+mostly Z1 (wide by design) with any creep into Z2+ clearly visible — that band *is* your easy-discipline read,
+section by section. The per-point HR trace and the band are **private**: on the public box both the HR stream
+and the zone model are stripped server-side, so the band simply doesn't render there.
 
 ---
 
@@ -315,7 +348,14 @@ Anything you'd rather set via environment still works — see the env table in t
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.
 - **ACWR** — Acute:Chronic Workload Ratio (ATL ÷ CTL). The injury-risk lever; the plan caps every week ≤ 1.25.
 - **TRIMP** — TRaining IMPulse. A single number for a session's load (intensity × duration), the input to CTL/ATL.
-- **VO₂max** — Aerobic ceiling, read from Runalyze; drives the pace zones.
+- **VO₂max** — Aerobic ceiling, read from Runalyze; drives the prescribed pace zones (Daniels VDOT).
+- **LTHR** — Lactate-Threshold Heart Rate. The HR you can hold at the aerobic/anaerobic turnpoint; anchors the
+  HR zones and the effort monitor (Friel's run zones are all %LTHR). Derived from your sustained hard efforts,
+  with a confidence flag; a %HRmax estimate stands in (provisional) until there's enough data.
+- **HR zones (Z1–Z5)** — Friel's %LTHR run grid (Z1 < 0.85 … Z5 ≥ 1.00 · LTHR), shown as the activity-chart
+  band and used by the effort monitor. Falls back to a %HRmax grid when LTHR isn't yet confident.
+- **Pace↔HR coherence** — a diagnostic that checks whether your prescribed easy *pace* and your easy *HR*
+  ceiling agree; flags when easy-paced runs run hot on HR (decoupling). Never alters the plan.
 - **Re-base (Phase 0)** — the gentle restart block that re-establishes the easy-aerobic habit before the real build.
 - **Founding road** — the first plan saved for your current goal; what the drift scorecard measures "now" against.
 - **Reckoning** — the post-race settle-up: fitness you arrived with vs. projected, finish vs. goal (private only).

@@ -1033,6 +1033,31 @@ EASY_PACE_GRACE = 0.03      # public PACE read: allow GAP up to 3% quicker than 
 AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (his documented failure mode)
 EFFORT_MATCH_DAYS = 2       # a session shuffled within ±2 days reads as a reschedule, not a new run
 
+# ── LTHR (lactate-threshold HR) derivation — see [[hr-zones-lthr-design]] ─────
+# A data-derived LTHR anchors HR zones + the effort monitor more accurately than %HRmax at the
+# easy↔threshold turnpoint (two runners, same HRmax, can have thresholds 15+ bpm apart). Slice #1 is
+# STREAMLESS on purpose (reads activities.hr_avg/duration only) → token-free + seed-testable; the
+# best-20-min-window via live MCP streams is a later refinement.
+LTHR_MIN_SEC = 20 * 60      # a qualifying sustained effort lasts ≥20 min …
+LTHR_MAX_SEC = 70 * 60      # … and ≤70 min (longer drifts below threshold; whole-run avg understates LTHR)
+LTHR_QUAL_FRAC = 0.85       # … at ≥85% robust HRmax — a genuine threshold+ effort, not an easy run
+LTHR_PCTL = 0.85            # robust-HIGH statistic over the pool (spike-resistant vs a raw max)
+LTHR_HRMAX_PROXY = 0.92     # thin-data fallback: LTHR ≈ 92% HRmax (Friel-ish run default), provisional
+LTHR_RECENT_DAYS = 120      # efforts within this window are "recent" (LTHR drifts up as fitness returns)
+
+# Friel run-zone grid as a fraction of LTHR (5 zones → 4 ascending boundaries). The classic Friel run
+# split: Z1<0.85, Z2 0.85–0.89, Z3 0.90–0.94, Z4 0.95–0.99, Z5 ≥1.00 (LTHR sits at the top of Z4).
+LTHR_ZONE_FRACS = (0.85, 0.90, 0.95, 1.00)
+# The effort monitor's easy/hard ceilings ARE the chart's zone boundaries — DERIVED from the one grid, not
+# re-typed, so the chart, the zone band, and the monitor can never silently disagree (the whole point of
+# unifying the model). det/hr-zones locks the equality so a future un-derive is caught.
+LTHR_EASY_FRAC = LTHR_ZONE_FRACS[0]   # Z1/Z2 boundary (Friel easy/recovery ceiling): above this an 'easy'
+#                                       run drifted hot. =0.85 → ≤ the old %HRmax ceiling, so the LTHR switch
+#                                       never LOOSENS his easy bar (the streamless LTHR is biased low).
+LTHR_HARD_FRAC = LTHR_ZONE_FRACS[2]   # Z3/Z4 boundary: at/above threshold ⇒ an 'easy' run was threshold+
+LTHR_MIN_CONFIDENCE = {"moderate", "high"}   # only ANCHOR on a derived LTHR this trustworthy (else %HRmax)
+HRMAX_ZONE_FRACS = (0.60, 0.70, 0.80, 0.90)  # %HRmax fallback grid — the values the reconstruction confirmed
+
 
 def _robust_hrmax(db):
     """A spike-resistant HRmax: the 95th percentile of per-run hr_max (one bad strap reading hits 210
@@ -1043,6 +1068,93 @@ def _robust_hrmax(db):
     if not hrs:
         return None
     return hrs[min(len(hrs) - 1, round(0.95 * (len(hrs) - 1)))]
+
+
+def _pctile(xs, q):
+    """Spike-resistant percentile (nearest-rank, like _robust_hrmax). xs need not be sorted."""
+    xs = sorted(xs)
+    if not xs:
+        return None
+    return xs[min(len(xs) - 1, round(q * (len(xs) - 1)))]
+
+
+def derive_lthr(db, today=None):
+    """Estimate LTHR (lactate-threshold HR) from sustained hard efforts the athlete already ran — no
+    field test, self-calibrating. For a CONTINUOUS hard effort (a race, or a tempo with little
+    warmup/cooldown) the whole-run avg HR ≈ LTHR; we pool qualifying efforts (≥20 min, ≤70 min, ≥85%
+    robust HRmax) and take a robust-high percentile. Thin/zero data ⇒ a %HRmax proxy at LOW confidence
+    (provisional — that crudeness is the very reason we prefer a derived LTHR). STREAMLESS by design:
+    reads activities.hr_avg/duration only, so it's token-free and testable on the synthetic seed (the
+    best-20-min-window via live MCP streams is a later slice). Known bias: understates LTHR for
+    STRUCTURED tempos (warmup/cooldown dilute the whole-run avg) — fine for a confidence-flagged v1.
+
+    Returns {lthr, source, confidence, n, n_recent, hrmax, pct_hrmax, provisional}:
+      • source: 'derived' (from efforts) | 'hrmax_proxy' (fallback) | None (no HRmax at all)
+      • confidence: 'high' | 'moderate' | 'low' | 'none'
+      • lthr is None only when there's no robust HRmax to even proxy from."""
+    from datetime import date as _d
+    rmax = _robust_hrmax(db)
+    base = {"hrmax": rmax, "n": 0, "n_recent": 0, "provisional": False}
+    if not rmax:
+        return {**base, "lthr": None, "source": None, "confidence": "none", "pct_hrmax": None}
+    today = today or _d.today()
+    floor = int(rmax * LTHR_QUAL_FRAC)
+    rows = db.execute(
+        "SELECT date, hr_avg, duration FROM activities WHERE " + RUN_FAMILY_SQL +
+        " AND hr_avg IS NOT NULL AND duration IS NOT NULL AND duration BETWEEN ? AND ? AND hr_avg>=?",
+        (LTHR_MIN_SEC, LTHR_MAX_SEC, floor)).fetchall()
+    quals = []   # (days_ago, hr_avg) for every qualifying sustained hard effort
+    for r in rows:
+        try:
+            days_ago = (today - _d.fromisoformat(r["date"][:10])).days
+        except (TypeError, ValueError):
+            days_ago = None
+        quals.append((days_ago, int(r["hr_avg"])))
+    n = len(quals)
+    n_recent = sum(1 for d, _ in quals if d is not None and 0 <= d <= LTHR_RECENT_DAYS)
+    if n == 0:
+        # No sustained hard effort to read — proxy off HRmax, honestly flagged provisional/low.
+        return {**base, "lthr": round(rmax * LTHR_HRMAX_PROXY), "source": "hrmax_proxy",
+                "confidence": "low", "pct_hrmax": LTHR_HRMAX_PROXY, "provisional": True}
+    # Prefer the RECENT pool when it's substantial (LTHR drifts up as fitness returns); otherwise read
+    # all qualifiers but let confidence reflect the staleness.
+    recent_hrs = [hr for d, hr in quals if d is not None and 0 <= d <= LTHR_RECENT_DAYS]
+    pool = recent_hrs if len(recent_hrs) >= 3 else [hr for _, hr in quals]
+    lthr = _pctile(pool, LTHR_PCTL)
+    confidence = ("high" if n_recent >= 5 else "moderate" if n_recent >= 2 else "low")
+    return {**base, "lthr": lthr, "source": "derived", "confidence": confidence,
+            "n": n, "n_recent": n_recent, "pct_hrmax": round(lthr / rmax, 3)}
+
+
+def hr_zones(db, today=None):
+    """The app's OWN 5-zone HR model in bpm — the bridge until Runalyze exposes real boundaries. Anchors
+    on a DATA-DERIVED LTHR (Friel %LTHR grid) when that LTHR is trustworthy (source='derived' and
+    confidence ≥ moderate — see derive_lthr), else falls back to a fixed %HRmax grid (60/70/80/90, the
+    values the Runalyze reconstruction already confirmed for him, so the fallback is continuous with the
+    chart today). PURE + token-free (derive_lthr is streamless), so it's seed-testable and det-lockable.
+    Distinct from derive_hr_zones, which stays the (token-gated, slow) corroboration against Runalyze's
+    own zones — this is what the app should USE, that is what checks our work.
+
+    Returns {anchor, ref, cutoffs, zones, lthr_confidence}:
+      • anchor: 'lthr' | 'hrmax' | None  (None ⇒ no robust HRmax to scale from at all)
+      • ref:    the bpm the grid is scaled from (LTHR, or robust HRmax in fallback)
+      • cutoffs: 4 ascending bpm boundaries (Z1/Z2 … Z4/Z5), or None
+      • zones:  [(label, lo, hi)] for Z1–Z5 (lo None on Z1, hi None on Z5)
+      • lthr_confidence: carried through so the caller/UI can gate how much to trust the anchor."""
+    info = derive_lthr(db, today=today)
+    labels = ["Z1", "Z2", "Z3", "Z4", "Z5"]
+    if info.get("source") == "derived" and info.get("confidence") in LTHR_MIN_CONFIDENCE:
+        anchor, ref, fracs = "lthr", info["lthr"], LTHR_ZONE_FRACS
+    elif info.get("hrmax"):
+        anchor, ref, fracs = "hrmax", info["hrmax"], HRMAX_ZONE_FRACS
+    else:
+        return {"anchor": None, "ref": None, "cutoffs": None, "zones": None,
+                "lthr_confidence": info.get("confidence")}
+    cutoffs = [round(ref * f) for f in fracs]
+    bounds = [None] + cutoffs + [None]
+    zones = [(labels[i], bounds[i], bounds[i + 1]) for i in range(5)]
+    return {"anchor": anchor, "ref": ref, "cutoffs": cutoffs, "zones": zones,
+            "lthr_confidence": info.get("confidence")}
 
 
 def derive_hr_zones(db, sample=12):
@@ -1110,22 +1222,25 @@ def derive_hr_zones(db, sample=12):
             "activities": per}
 
 
-def _effort_verdict(kind, hrf, te):
-    """Pure per-run verdict — HR-LED, TE corroborates (returns (verdict, confidence)). `hrf` =
-    hr_avg / HRmax. For an aerobic (easy/long) session: on / hot / too_hard by HR fraction, with
-    confidence rising to 'high' when a too-hard HR read is backed by a high Training Effect. For a
-    quality session: 'did you hit it' — too_easy if HR never reached the aerobic ceiling (sandbagged),
-    else on — always LOW confidence (little compliant-quality data yet to calibrate, and his problem
-    is the too-hard direction). hrf None ⇒ ('unknown','none')."""
+def _effort_verdict(kind, hrf, te, easy_frac=EASY_HR_FRAC, hard_frac=HARD_HR_FRAC):
+    """Pure per-run verdict — HR-LED, TE corroborates (returns (verdict, confidence)). `hrf` is the
+    run's avg HR as a fraction of an anchor; `easy_frac`/`hard_frac` are the ceilings ON THAT SAME
+    anchor. Default anchor = %HRmax (0.78/0.85); when a derived LTHR is trustworthy the caller passes
+    %LTHR fractions instead (0.90/0.95 = Friel Z2-top / Z4-start), a sharper read at the easy↔threshold
+    turnpoint. For an aerobic (easy/long) session: on / hot / too_hard by fraction, confidence rising to
+    'high' when a too-hard read is backed by a high Training Effect. For a quality session: 'did you hit
+    it' — too_easy if HR never reached the aerobic ceiling (sandbagged), else on — always LOW confidence
+    (little compliant-quality data yet, and his problem is the too-hard direction). hrf None ⇒
+    ('unknown','none')."""
     if hrf is None:
         return "unknown", "none"
     if kind in AEROBIC_KINDS:
-        if hrf > HARD_HR_FRAC:
+        if hrf > hard_frac:
             return "too_hard", ("high" if (te or 0) >= TE_HARD_CORROBORATE else "moderate")
-        if hrf > EASY_HR_FRAC:
+        if hrf > easy_frac:
             return "hot", "moderate"
         return "on", "moderate"
-    return ("too_easy" if hrf < EASY_HR_FRAC else "on"), "low"
+    return ("too_easy" if hrf < easy_frac else "on"), "low"
 
 
 def _effort_verdict_pace(kind, gap_pace, zones):
@@ -1200,6 +1315,11 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     grade-adjusted PACE vs the easy-pace ceiling instead; the score is the public, conservative read."""
     from datetime import timedelta
     hrmax = None if public else _robust_hrmax(db)
+    # Anchor the easy/hard ceilings on a DERIVED LTHR when it's trustworthy (sharper at the
+    # easy↔threshold turnpoint); otherwise fall back byte-for-byte to today's %HRmax read.
+    lthr_info = None if public else derive_lthr(db)
+    use_lthr = bool(lthr_info and lthr_info.get("source") == "derived"
+                    and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
     snap = latest_snapshot(db)
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     since = (datetime.now().date() - timedelta(days=window_days)).isoformat()
@@ -1233,11 +1353,16 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
         else:
             if not r["hr_avg"]:                           # HR-judged → needs HR
                 continue
-            hrf = (r["hr_avg"] / hrmax) if hrmax else None
             te = raw.get("fit_training_effect")
-            verdict, conf = _effort_verdict(kind, hrf, te)
+            if use_lthr:                                  # judge on %LTHR (Friel ceilings)
+                verdict, conf = _effort_verdict(kind, r["hr_avg"] / lthr_info["lthr"], te,
+                                                LTHR_EASY_FRAC, LTHR_HARD_FRAC)
+            else:                                         # %HRmax fallback (unchanged)
+                hrf = (r["hr_avg"] / hrmax) if hrmax else None
+                verdict, conf = _effort_verdict(kind, hrf, te)
             runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
-                         "hr_avg": r["hr_avg"], "hr_pct": round(hrf * 100) if hrf else None,
+                         "hr_avg": r["hr_avg"],
+                         "hr_pct": round(r["hr_avg"] / hrmax * 100) if hrmax else None,
                          "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
                          "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
                          "verdict": verdict, "confidence": conf})
@@ -1258,8 +1383,85 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
         out["easy_pace_ceiling"] = fmt_pace(zones["easy_top"]) if zones.get("easy_top") else None
     else:
         out["hrmax"] = hrmax
-        out["easy_hr_ceiling"] = round(EASY_HR_FRAC * hrmax) if hrmax else None
+        if use_lthr:
+            out["anchor"] = "lthr"
+            out["lthr"] = lthr_info["lthr"]
+            out["lthr_confidence"] = lthr_info["confidence"]
+            out["easy_hr_ceiling"] = round(LTHR_EASY_FRAC * lthr_info["lthr"])
+        else:
+            out["anchor"] = "hrmax"
+            out["easy_hr_ceiling"] = round(EASY_HR_FRAC * hrmax) if hrmax else None
     return out
+
+
+PACE_HR_OVER_FRAC = 0.5     # ≥ this share of easy-PACED runs landing over the easy HR ceiling ⇒ the
+#                             two models disagree (his easy pace is ahead of his aerobic fitness)
+PACE_HR_MIN_RUNS = 3        # need at least this many easy-paced runs with HR to judge coherence
+
+
+def pace_hr_coherence(db, window_days=EFFORT_WINDOW_DAYS):
+    """Cross-check the app's TWO intensity models for internal consistency — the seam the engine never
+    closed. The plan PRESCRIBES effort as pace (VO2max → Daniels VDOT); the monitor JUDGES it by HR
+    (LTHR-anchored, %HRmax fallback). They're independent fitness estimates that SHOULD agree: running at
+    the easy-pace ceiling should keep HR under the easy-HR ceiling. They diverge most under cardiac
+    decoupling — a detrained athlete's given easy pace drives a HIGHER HR than VDOT predicts — i.e. the
+    divergence is largest exactly for the post-illness restart this app serves.
+
+    This SURFACES the divergence as a diagnostic; it does NOT touch the prescription (feeding it back into
+    the engine would be a separate, deliberate slice). Pure read, private (uses HR). Returns:
+      {ok, verdict, n_easy_paced, n_hr_over, frac_over, easy_pace_ceiling, easy_hr_ceiling, anchor, note}
+      verdict: 'coherent' | 'pace_ahead_of_hr' | 'insufficient' | 'no_model'."""
+    from datetime import timedelta
+    snap = latest_snapshot(db)
+    zones = pace_zones(snap["effective_vo2max"]) if snap else {}
+    easy_top = zones.get("easy_top")                       # sec/km (larger = slower)
+    lthr_info = derive_lthr(db)
+    use_lthr = (lthr_info.get("source") == "derived" and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
+    hrmax = _robust_hrmax(db)
+    if use_lthr:
+        easy_hr_ceiling, anchor = round(LTHR_EASY_FRAC * lthr_info["lthr"]), "lthr"
+    elif hrmax:
+        easy_hr_ceiling, anchor = round(EASY_HR_FRAC * hrmax), "hrmax"
+    else:
+        easy_hr_ceiling, anchor = None, None
+    if not easy_top or not easy_hr_ceiling:
+        return {"ok": False, "verdict": "no_model", "easy_pace_ceiling": easy_top,
+                "easy_hr_ceiling": easy_hr_ceiling, "anchor": anchor,
+                "note": "need both a pace zone (VO2max snapshot) and an HR ceiling"}
+    since = (datetime.now().date() - timedelta(days=window_days)).isoformat()
+    drop = dropped_ids(db)
+    rows = [r for r in db.execute(
+        "SELECT id, date, distance, duration, hr_avg, raw FROM activities WHERE " + RUN_FAMILY_SQL +
+        " AND date>=? AND hr_avg IS NOT NULL ORDER BY date DESC", (since,)).fetchall()
+        if not (r["id"] in drop or not r["distance"] or r["distance"] < 2)]
+    n_easy_paced = n_hr_over = 0
+    for r in rows:
+        raw = json.loads(r["raw"] or "{}")
+        gap = raw.get("gap")                              # grade-adjusted speed (km/h), terrain-fair
+        gap_pace = (round(3600.0 / gap) if gap else
+                    (round(r["duration"] / r["distance"]) if r["duration"] else None))
+        if not gap_pace:
+            continue
+        if gap_pace >= easy_top * (1 - EASY_PACE_GRACE):  # ran AT or slower than the easy-pace ceiling
+            n_easy_paced += 1
+            if r["hr_avg"] > easy_hr_ceiling:
+                n_hr_over += 1
+    frac_over = round(n_hr_over / n_easy_paced, 2) if n_easy_paced else None
+    if n_easy_paced < PACE_HR_MIN_RUNS:
+        verdict = "insufficient"
+    elif frac_over >= PACE_HR_OVER_FRAC:
+        verdict = "pace_ahead_of_hr"
+    else:
+        verdict = "coherent"
+    note = {
+        "coherent": "Easy pace keeps HR under the easy ceiling — the pace and HR models agree.",
+        "pace_ahead_of_hr": "Easy-paced runs are landing above the easy HR ceiling: your easy pace is ahead "
+                            "of your current aerobic fitness (cardiac decoupling). Trust HR on easy days.",
+        "insufficient": "Not enough easy-paced runs with HR in the window to judge coherence.",
+    }[verdict]
+    return {"ok": True, "verdict": verdict, "n_easy_paced": n_easy_paced, "n_hr_over": n_hr_over,
+            "frac_over": frac_over, "easy_pace_ceiling": easy_top, "easy_hr_ceiling": easy_hr_ceiling,
+            "anchor": anchor, "note": note}
 
 
 # ── Plan engine v1 (deterministic; §6) ──────────────────────────────────────
@@ -3982,6 +4184,34 @@ def api_hr_zones_derive():
     return jsonify(derive_hr_zones(get_db()))
 
 
+@app.get("/api/lthr")
+def api_lthr():
+    """Private diagnostic: the data-derived LTHR (lactate-threshold HR) + its confidence/source. Pure
+    read, derives nothing into the DB. HR is private (H7), so private-only even though it needs no token."""
+    if READONLY:
+        return jsonify(ok=False, error="diagnostics are private"), 403
+    return jsonify(derive_lthr(get_db()))
+
+
+@app.get("/api/hr-zones")
+def api_hr_zones():
+    """Private diagnostic: the app's OWN HR-zone model (bpm) — LTHR-anchored when trustworthy, %HRmax
+    fallback otherwise (see hr_zones). Pure read, token-free; distinct from /api/hr-zones/derive, which
+    reconstructs Runalyze's own zones for corroboration. HR is private (H7), so private-only."""
+    if READONLY:
+        return jsonify(ok=False, error="diagnostics are private"), 403
+    return jsonify(hr_zones(get_db()))
+
+
+@app.get("/api/pace-hr-coherence")
+def api_pace_hr_coherence():
+    """Private diagnostic: do the pace-prescription and HR-judgment models agree? (See pace_hr_coherence.)
+    Pure read, surfaces divergence only — never adjusts the plan. HR-derived ⇒ private-only."""
+    if READONLY:
+        return jsonify(ok=False, error="diagnostics are private"), 403
+    return jsonify(pace_hr_coherence(get_db()))
+
+
 @app.get("/api/effort-discipline")
 def api_effort_discipline():
     """§6m — effort vs prescription over the recent window. PRIVATE console = the HR-led read (per-run
@@ -4793,10 +5023,15 @@ def api_activity_profile(aid):
     if prof is None:
         return jsonify(error=str(err), dist=[], pace=[], hr=[]), 502
     out = _strip_geo(prof)
-    out["hrmax"] = _robust_hrmax(db)   # anchors the HR-line zone colouring on the frontend
+    out["hrmax"] = _robust_hrmax(db)   # kept for the avg line / defensive zone fallback
+    # The unified HR-zone model (LTHR-anchored when confident, %HRmax fallback) — ONE definition shared by
+    # the chart hover, the zone band, and the effort monitor. Set on the endpoint (not baked into the cached
+    # blob) so it stays live as LTHR drifts. bpm cutoffs are HR-derived ⇒ private, stripped on the public box.
+    out["hrzones"] = hr_zones(db)
     if READONLY:                       # the per-second HR stream is private, like avg/max HR — the public
         out.pop("hr", None)            # container serves the profile for the pace overlay, but HR-stripped
         out["hrmax"] = None
+        out["hrzones"] = None
     return jsonify(out)
 
 
@@ -5909,6 +6144,73 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     .efftbl .col-sec,.efftbl .hrpct{display:none}
     .efftbl-rot{display:block}
   }
+
+  /* ====================================================================== */
+  /* SQUARE POLYCHROME PALETTE — trial overlay from _appMockups (2026-06-27) */
+  /* Square (tetradic) palette: four hues 90 deg apart on the oklch wheel,    */
+  /* anchored at terracotta (45 deg), deployed BY CATEGORY. Remove this whole */
+  /* block to revert to the analogous scheme.                                 */
+  /* --accent1 is a REAL token (the terracotta we started with) — never `--accent: var(--accent)`,
+     which is a self-reference cycle that resolves to guaranteed-invalid and leaves anything reading
+     var(--accent) (tile chart shade, re-base segment) uncoloured. --accent stays aliased to it so the
+     brand default is unchanged. */
+  :root{
+    --accent1: oklch(0.575 0.185 45);    /* terracotta — brand */
+    --accent:  var(--accent1);
+    --accent2: oklch(0.575 0.185 135);   /* green */
+    --accent3: oklch(0.575 0.185 225);   /* blue */
+    --accent4: oklch(0.575 0.185 315);   /* magenta */
+  }
+  [data-theme="dark"]{
+    --accent1: oklch(0.72 0.17 45);
+    --accent:  var(--accent1);
+    --accent2: oklch(0.72 0.17 135);
+    --accent3: oklch(0.72 0.17 225);
+    --accent4: oklch(0.72 0.17 315);
+  }
+  /* Aurora keeps its OWN identity. The palette :root above (equal specificity, later in source) would
+     otherwise win over the original [data-theme="aurora"] block and repaint Aurora terracotta — so we
+     re-assert the four category hues HERE. TRUE SQUARE: anchored at Aurora's brand violet (~292) and
+     stepped exactly 90deg (292/112/202/22). Lifted to L0.78/C0.21 (brighter than the other themes'
+     0.72/0.185) so the hues read neon on the deep-indigo ground rather than muddy. */
+  [data-theme="aurora"]{
+    --accent1: oklch(0.78 0.21 292);     /* violet — brand */
+    --accent:  var(--accent1);
+    --accent2: oklch(0.78 0.21 112);     /* green */
+    --accent3: oklch(0.78 0.21 202);     /* cyan/blue */
+    --accent4: oklch(0.78 0.21 22);      /* coral */
+  }
+  /* Current shape tiles: VO2max(terracotta) / Fitness(green) / Fatigue(blue) / Form(magenta) */
+  #tiles .tile:nth-child(1){ --accent: var(--accent1); }
+  #tiles .tile:nth-child(2){ --accent: var(--accent2); }
+  #tiles .tile:nth-child(3){ --accent: var(--accent3); }
+  #tiles .tile:nth-child(4){ --accent: var(--accent4); }
+  #tiles .tile::before{ background: var(--accent); }
+  /* Plan phases — keyed by data-pk so the hue is stable regardless of segment count/order, and set on
+     BOTH the bar segment AND its panel so the week strip + week cards inherit the phase's hue (was
+     always terracotta). Chain segments (peak2/taper2/bridge2…) match by prefix. rebase = the terracotta
+     we started with; taper cycles back to terracotta (4 hues, 5 phases — the two low-volume bookends). */
+  .phaseseg[data-pk="rebase"],  .phasepanel[data-pk="rebase"] { --accent: var(--accent1); }
+  .phaseseg[data-pk="base"],    .phasepanel[data-pk="base"]   { --accent: var(--accent2); }
+  .phaseseg[data-pk="build"],   .phasepanel[data-pk="build"],
+  .phaseseg[data-pk^="bridge"], .phasepanel[data-pk^="bridge"]{ --accent: var(--accent3); }
+  .phaseseg[data-pk^="peak"],   .phasepanel[data-pk^="peak"]  { --accent: var(--accent4); }
+  .phaseseg[data-pk^="taper"],  .phasepanel[data-pk^="taper"] { --accent: var(--accent1); }
+  .phaseseg{ opacity: .72; }
+  .phaseseg.active{ opacity: 1; }
+  /* Health markers: cycle four hues */
+  .hgrid .hcard:nth-child(4n+1){ --accent: var(--accent1); }
+  .hgrid .hcard:nth-child(4n+2){ --accent: var(--accent2); }
+  .hgrid .hcard:nth-child(4n+3){ --accent: var(--accent3); }
+  .hgrid .hcard:nth-child(4n+4){ --accent: var(--accent4); }
+  /* Weekly volume bars: green (fitness/volume) hue */
+  .chart .col .barb{ background: var(--accent2); }
+  /* Fitness/fatigue chart: CTL=terracotta (default), ATL=blue */
+  .ff .atl{ stroke: var(--accent3); }
+  .ffdot.atl{ fill: var(--accent3); }
+  .legend .atl{ color: var(--accent3); }
+  .fftip .t-atl{ color: var(--accent3); }
+  /* ====================================================================== */
 </style></head>
 <body data-mtab="today">
   <div class="topbar">
@@ -6357,16 +6659,46 @@ function profileLabel(kind){
 function rg(t){ t=t<0?0:t>1?1:t; return `hsl(${Math.round(120*t)} 60% 42%)`; }
 // 5 HR zones at 60/70/80/90 %HRmax — reconstructed from Runalyze's per-activity zone distribution
 // (see runalyze-hr-zones-api). [label, colour, upper %HRmax bound]; single source for line + legend.
-const HRZONES=[["Z1","#7c8597",0.60],["Z2","#3f7fd0",0.70],["Z3","var(--ok)",0.80],
-               ["Z4","var(--warn)",0.90],["Z5","var(--danger)",Infinity]];
+// 5 HR-zone colours + labels (Z1→Z5). The BOUNDARIES come from the server's unified hr_zones model
+// (LTHR-anchored when confident, %HRmax fallback) — served per-activity as bpm cutoffs, so the chart
+// hover, the zone band, and the effort monitor all read ONE definition.
+const HRZONE_COLORS=["#7c8597","#3f7fd0","var(--ok)","var(--warn)","var(--danger)"];
+const HRZONE_LABELS=["Z1","Z2","Z3","Z4","Z5"];
+// per-sample zone index from bpm cutoffs (4 ascending boundaries → 5 zones); -1 when uncolourable.
+function hrZoneIdx(v, cutoffs){
+  if(v==null || !cutoffs || !cutoffs.length) return -1;
+  for(let i=0;i<cutoffs.length;i++) if(v<cutoffs[i]) return i;
+  return cutoffs.length;
+}
+function hrZoneColor(v, cutoffs){ const i=hrZoneIdx(v,cutoffs); return i<0 ? "transparent" : HRZONE_COLORS[i]; }
+// A thin discrete strip across the TOP of the activity chart: which HR zone the runner was in at each
+// section of the run. Always-on (no hover) — segments coloured by the unified zone model. Empty when
+// there's no HR / no zone model (e.g. the public box strips both), so it degrades to nothing.
+function hrBandSvg(p, W, bandH){
+  const cut=(p.hrzones||{}).cutoffs, hr=p.hr;
+  if(!cut || !cut.length || !hr || !hr.length) return "";
+  const n=hr.length; let segs="";
+  for(let i=0;i<n;i++){
+    const c=hrZoneColor(hr[i], cut); if(c==="transparent") continue;
+    const x0=i/n*W;
+    segs+=`<rect x="${x0.toFixed(1)}" y="0" width="${(W/n+0.6).toFixed(1)}" height="${bandH}" fill="${c}"/>`;
+  }
+  return segs ? `<g class="hrband" opacity="0.9">${segs}</g>` : "";
+}
 function hrLegendHtml(){
-  return `<span class="hrleg">`+HRZONES.map(z=>`<span class="hrz"><i style="background:${z[1]}"></i>${z[0]}</span>`).join("")+`</span>`;
+  const z=(ACTPROFILE||{}).hrzones||{};
+  const basis = z.anchor==="lthr" ? ` · LTHR ${z.ref}` : z.anchor==="hrmax" ? ` · %HRmax` : "";
+  return `<span class="hrleg">`+HRZONE_LABELS.map((lb,i)=>`<span class="hrz"><i style="background:${HRZONE_COLORS[i]}"></i>${lb}</span>`).join("")
+         +(basis?`<span class="hrz" style="opacity:.7">${basis}</span>`:"")+`</span>`;
 }
 // per-sample colour for the hover line — meaning differs by metric
 function metricColor(kind, v, ctx){
   if(v==null) return "transparent";
-  if(kind==="hr"){ const hm=ctx.hrmax||ctx.hi||0, f=hm?v/hm:0;       // robust HRmax anchors the zones
-    return (HRZONES.find(z=>f<z[2])||HRZONES[4])[1]; }
+  if(kind==="hr"){
+    if(ctx.cutoffs && ctx.cutoffs.length) return hrZoneColor(v, ctx.cutoffs);  // unified bpm zones
+    const hm=ctx.hrmax||ctx.hi||0, f=hm?v/hm:0;                                // defensive %HRmax fallback
+    const FB=[0.60,0.70,0.80,0.90]; for(let i=0;i<FB.length;i++) if(f<FB[i]) return HRZONE_COLORS[i];
+    return HRZONE_COLORS[4]; }
   if(kind==="pace")    return rg((ctx.hi-v)/((ctx.hi-ctx.lo)||1));   // faster (smaller sec/km) = green
   if(kind==="cadence"){ const d=Math.abs(v-180);                    // 170–190 stays green, then ramps
     return rg(d<=10 ? 1 : 1-(d-10)/15); }                           // to red by ±25 (155 / 205)
@@ -6393,12 +6725,13 @@ function renderProfile(hoverKind){
   if(hb){
     const bh=buildProfilePath(hb.vals,{W,H,invert:hb.invert});
     if(bh){
-      const ctx={hi:bh.hi, lo:bh.lo, hrmax:p.hrmax};
+      const ctx={hi:bh.hi, lo:bh.lo, hrmax:p.hrmax, cutoffs:(p.hrzones||{}).cutoffs};
       const stops=bh.pts.map(pt=>`<stop offset="${(bh.x(pt[0])/W*100).toFixed(2)}%" style="stop-color:${metricColor(hoverKind,pt[1],ctx)}"/>`).join("");
       svg += `<defs><linearGradient id="aclg" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${W}" y2="0">${stops}</linearGradient></defs>`+
              `<path d="${bh.line}" class="profline" stroke="url(#aclg)"/>`;
     }
   }
+  svg += hrBandSvg(p, W, 6);   // always-on zone strip at the top — independent of locked/hover layers
   bg.innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${svg}</svg>`;
   bg.classList.toggle("on", !!svg);
   const lblKind = (showHover && hb) ? hoverKind : LOCKED;
@@ -7568,8 +7901,19 @@ async function loadEffort(){
       `<th class="col-sec">TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>`+
       `<th class="col-sec">feel</th>`+
       `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th>`;
-    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm (78% of HRmax ${d.hrmax}).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
+    const basis = d.anchor==="lthr" ? `(85% of LTHR ${d.lthr})` : `(78% of HRmax ${d.hrmax})`;
+    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm ${basis}.${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
     note=`Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Each run is matched to its nearest prescribed session within a couple of days, so an anticipated or postponed session is judged against its real prescription, not the day it landed on; a run with no session in range falls back to the easy default. One mismatch is an observation, not a verdict.`;
+  }
+  let cohLine="";   // pace↔HR coherence — private diagnostic; surfaces the two-model divergence, never the plan
+  if(!d.public){
+    try{ const co=await getJSON("/api/pace-hr-coherence");
+      if(co && co.ok && co.verdict!=="insufficient"){
+        const bad = co.verdict==="pace_ahead_of_hr";
+        cohLine=`<div class="muted" style="font-size:11px;margin-top:4px${bad?";color:var(--warn)":""}">`+
+          `Pace↔HR ${qhint("Your plan prescribes effort by PACE (from VO₂max); this monitor judges it by HEART RATE (from your threshold HR). They should agree — running at the easy-pace ceiling should keep HR under the easy-HR ceiling. They drift apart most when you're detrained (a given easy pace runs hot on HR). This is a read-only check; it never changes your plan.")}: ${esc(co.note)}</div>`;
+      }
+    }catch(e){}
   }
   host.innerHTML=`
     <div class="effort-head">
@@ -7578,6 +7922,7 @@ async function loadEffort(){
         <div class="big">Easy discipline ${scoreHint} — <b style="color:${tone}">${verdict}</b></div>
         <div class="muted">${capLine}</div>
         <div class="muted" style="font-size:11px;margin-top:4px">${note}</div>
+        ${cohLine}
       </div>
     </div>
     <div class="efftbl-wrap"><table class="efftbl"><thead><tr>${headCols}</tr></thead><tbody>${rows}</tbody></table></div>${d.public?"":'<div class="efftbl-rot">↻ Rotate to landscape for pace, training effect &amp; feel</div>'}`;
@@ -9008,6 +9353,205 @@ def _stc_run_family():
                passed=not fails, got={"violations": fails or "none"})
 
 
+def _stc_lthr():
+    """§ LTHR derivation (slice #1, STREAMLESS) — assert the LOGIC, not 'recovered the right LTHR' (the
+    synthetic efforts are flat-HR, so this can't distinguish A from a windowed read). The ladder:
+    no-HR ⇒ none; no sustained effort ⇒ honest %HRmax proxy (low + provisional); qualifiers ⇒ derived,
+    robust-HIGH + spike-resistant; the 20–70min × ≥85%HRmax band gates membership; confidence tracks
+    RECENCY (LTHR drifts up as fitness returns)."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    def mkdb(acts):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, sport TEXT, "
+                  "hr_avg INTEGER, hr_max INTEGER, duration REAL);")
+        for i, (d, hra, hrm, dur) in enumerate(acts):
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?)", (i + 1, d, "Running", hra, hrm, dur))
+        return m
+    tdy = date.today()
+    def ago(n): return (tdy - _td(days=n)).isoformat()
+    easy = [(ago(i + 1), 140, 189, 3000) for i in range(8)]   # 50-min easy @140 — below the ≥160 floor
+    quals = [(ago(i * 5 + 1), 166, 189, 30 * 60) for i in range(6)]  # 6 recent 30-min threshold efforts @166
+    fails = []
+
+    # 1) no HR at all ⇒ none (can't even proxy)
+    r = derive_lthr(mkdb([(ago(1), None, None, 3000)]), today=tdy)
+    if not (r["lthr"] is None and r["source"] is None and r["confidence"] == "none"):
+        fails.append(f"no-HR not 'none': {r}")
+    # 2) HRmax but ZERO qualifiers (easy only) ⇒ %HRmax proxy, low + provisional
+    r = derive_lthr(mkdb(easy), today=tdy)
+    if not (r["source"] == "hrmax_proxy" and r["confidence"] == "low" and r["provisional"]
+            and r["lthr"] == round(189 * LTHR_HRMAX_PROXY) and r["n"] == 0):
+        fails.append(f"no-qualifier proxy wrong: {r}")
+    # 3) duration band — a hard effort too SHORT (<20min) or too LONG (>70min) must NOT qualify
+    r = derive_lthr(mkdb(easy + [(ago(2), 175, 189, 15 * 60), (ago(3), 175, 189, 90 * 60)]), today=tdy)
+    if not (r["source"] == "hrmax_proxy" and r["n"] == 0):
+        fails.append(f"duration band leaked a non-qualifier: {r}")
+    # 4) qualifiers ⇒ derived, high confidence, robust-high in band
+    r = derive_lthr(mkdb(easy + quals), today=tdy)
+    if not (r["source"] == "derived" and r["confidence"] == "high" and r["n"] == 6 and r["n_recent"] == 6):
+        fails.append(f"derived/high wrong: {r}")
+    if not (160 <= (r["lthr"] or 0) <= 175):
+        fails.append(f"derived lthr {r['lthr']} out of plausible band")
+    # 4b) spike resistance — one 230-bpm strap glitch must not blow up the estimate (percentile, not max)
+    r = derive_lthr(mkdb(easy + quals + [(ago(2), 230, 189, 30 * 60)]), today=tdy)
+    if (r["lthr"] or 0) > 175:
+        fails.append(f"spike leaked into lthr: {r['lthr']}")
+    # 5) recency — only STALE qualifiers (beyond the recent window) ⇒ derived but LOW, n_recent 0
+    r = derive_lthr(mkdb(easy + [(ago(200 + i * 5), 166, 189, 30 * 60) for i in range(6)]), today=tdy)
+    if not (r["source"] == "derived" and r["confidence"] == "low" and r["n_recent"] == 0):
+        fails.append(f"stale qualifiers not low-confidence: {r}")
+
+    return _st("det", "lthr",
+               "LTHR slice #1 (streamless): no-HR⇒none; no sustained effort⇒honest %HRmax proxy "
+               "(low/provisional); qualifiers⇒derived robust-high + spike-resistant; 20–70min×≥85%HRmax "
+               "band gates membership; confidence tracks recency",
+               passed=not fails, expect="none⇒proxy⇒derived ladder + band + spike + recency hold",
+               got={"violations": fails or "none"})
+
+
+def _stc_hr_zones():
+    """§ HR-zone model (slice #3) — assert the ANCHOR-SELECTION + grid shape, NOT 'recovered the right
+    zones' (flat synthetic HR can't tell a right LTHR from a wrong one). The ladder: a trustworthy
+    derived LTHR ⇒ Friel %LTHR grid; thin/proxy LTHR ⇒ %HRmax fallback (60/70/80/90, continuous with
+    the chart); no HRmax ⇒ no zones. Cutoffs round to bpm, strictly ascending. AND the effort monitor
+    switches anchor on the same gate — falling back to today's exact %HRmax read when LTHR isn't trusted."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    def mkdb(acts):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+                  "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
+        m.execute("CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
+        m.execute("CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);")
+        m.execute("CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+        for i, a in enumerate(acts):
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
+                      (i + 1, a["date"] + "T19:00:00", a["date"], "Running", a.get("km", 8.0), a["dur"],
+                       a["hra"], a["hrm"], json.dumps(a.get("raw", {}))))
+        return m
+    tdy = date.today()
+    def ago(n): return (tdy - _td(days=n)).isoformat()
+    # confident derived LTHR: 6 recent 30-min threshold efforts @166 (+ easy filler below the floor)
+    conf_acts = ([{"date": ago(i + 1), "dur": 3000, "hra": 140, "hrm": 189} for i in range(8)] +
+                 [{"date": ago(i * 5 + 1), "dur": 30 * 60, "hra": 166, "hrm": 189} for i in range(6)])
+    # thin: HRmax present but ZERO sustained qualifiers ⇒ derive_lthr proxies (low) ⇒ %HRmax fallback
+    thin_acts = [{"date": ago(i + 1), "dur": 3000, "hra": 140, "hrm": 189} for i in range(8)]
+    fails = []
+
+    z = hr_zones(mkdb(conf_acts), today=tdy)
+    if z["anchor"] != "lthr":
+        fails.append(f"confident LTHR not anchored on lthr: {z['anchor']}")
+    if z["cutoffs"] != [round(z["ref"] * f) for f in LTHR_ZONE_FRACS]:
+        fails.append(f"lthr cutoffs not Friel-scaled: {z['cutoffs']} ref={z['ref']}")
+    if z["cutoffs"] != sorted(z["cutoffs"]) or len(set(z["cutoffs"])) != 4:
+        fails.append(f"lthr cutoffs not strictly ascending: {z['cutoffs']}")
+
+    z = hr_zones(mkdb(thin_acts), today=tdy)
+    if z["anchor"] != "hrmax":
+        fails.append(f"thin data not falling back to hrmax: {z['anchor']}")
+    if z["cutoffs"] != [round(z["ref"] * f) for f in HRMAX_ZONE_FRACS]:
+        fails.append(f"hrmax cutoffs not %HRmax-scaled: {z['cutoffs']} ref={z['ref']}")
+
+    z = hr_zones(mkdb([{"date": ago(1), "dur": 3000, "hra": None, "hrm": None}]), today=tdy)
+    if not (z["anchor"] is None and z["cutoffs"] is None):
+        fails.append(f"no-HRmax should yield no zones: {z}")
+
+    # COHERENCE INVARIANT (the payoff of unifying the model): the effort monitor's easy/hard ceilings
+    # ARE the chart's Z1/Z2 and Z3/Z4 boundaries — so chart, band, and monitor can never disagree. A
+    # future un-derive of either constant breaks this lock, not the user's trust silently.
+    if LTHR_EASY_FRAC != LTHR_ZONE_FRACS[0]:
+        fails.append(f"monitor easy ceiling != chart Z1/Z2: {LTHR_EASY_FRAC} vs {LTHR_ZONE_FRACS[0]}")
+    if LTHR_HARD_FRAC != LTHR_ZONE_FRACS[2]:
+        fails.append(f"monitor too_hard != chart Z3/Z4: {LTHR_HARD_FRAC} vs {LTHR_ZONE_FRACS[2]}")
+
+    # the effort monitor flips anchor on the SAME gate (needs a verdict-worthy easy run in the window)
+    recent_easy = {"date": ago(1), "dur": 3000, "hra": 150, "hrm": 189, "km": 8.0,
+                   "raw": {"gap": 12.0, "fit_training_effect": 2.5}}
+    dc = effort_discipline(mkdb(conf_acts + [recent_easy]))
+    if dc.get("anchor") != "lthr" or "lthr" not in dc:
+        fails.append(f"effort monitor didn't anchor on lthr when confident: anchor={dc.get('anchor')}")
+    if dc.get("easy_hr_ceiling") != round(LTHR_EASY_FRAC * dc.get("lthr", 0)):
+        fails.append(f"lthr easy ceiling wrong: {dc.get('easy_hr_ceiling')} vs lthr={dc.get('lthr')}")
+    # the switch must NEVER LOOSEN his easy bar — the LTHR ceiling stays ≤ the %HRmax ceiling on the
+    # same data (a future LTHR drift can't silently re-introduce a looser easy ceiling).
+    if dc.get("easy_hr_ceiling", 999) > round(EASY_HR_FRAC * dc.get("hrmax", 0)):
+        fails.append(f"lthr easy ceiling LOOSER than %HRmax: {dc.get('easy_hr_ceiling')} > "
+                     f"{round(EASY_HR_FRAC * dc.get('hrmax', 0))}")
+    dt = effort_discipline(mkdb(thin_acts + [recent_easy]))
+    if dt.get("anchor") != "hrmax":
+        fails.append(f"effort monitor not %HRmax when LTHR thin: {dt.get('anchor')}")
+    if dt.get("easy_hr_ceiling") != round(EASY_HR_FRAC * dt.get("hrmax", 0)):
+        fails.append(f"fallback easy ceiling not byte-for-byte %HRmax: {dt.get('easy_hr_ceiling')}")
+
+    return _st("det", "hr-zones",
+               "HR-zone model: trustworthy LTHR⇒Friel %LTHR grid, thin⇒%HRmax fallback (60/70/80/90), "
+               "no-HRmax⇒none; cutoffs round-to-bpm + strictly ascending; effort monitor switches anchor "
+               "on the same confidence gate (fallback = today's exact %HRmax read); COHERENCE: monitor "
+               "easy/hard ceilings ARE the chart Z1/Z2 + Z3/Z4 boundaries (one definition, can't drift)",
+               passed=not fails, expect="anchor-selection + grid shape + monitor gate hold",
+               got={"violations": fails or "none"})
+
+
+def _stc_pace_hr_coherence():
+    """§ Pace↔HR coherence check (slice C2) — the cross-model seam. Assert the verdict LADDER on
+    controlled data: easy-paced runs whose HR sits UNDER the easy ceiling ⇒ 'coherent'; the same runs
+    landing OVER it ⇒ 'pace_ahead_of_hr'; too few ⇒ 'insufficient'; no pace/HR model ⇒ 'no_model'. And
+    the SURFACE-ONLY contract: it never writes (the plans table is untouched after the call)."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    tdy = date.today()
+    def ago(n): return (tdy - _td(days=n)).isoformat()
+    VO2 = 50.0
+    zones = pace_zones(VO2)
+    easy_top = zones["easy_top"]                          # sec/km; an easy-paced run runs at this speed
+    easy_kmh = round(3600.0 / easy_top, 2)               # gap (km/h) that lands exactly on the easy ceiling
+    fast_kmh = round(3600.0 / (easy_top * 0.8), 2)       # clearly faster than easy (excluded from the count)
+    def mkdb(easy_runs):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+                  "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
+        m.execute("CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
+        m.execute("CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);")
+        m.execute("CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+        m.execute("INSERT INTO shape_snapshots VALUES(?,?,?,?)", (ago(1), VO2, 30.0, 28.0))
+        i = 0
+        # 6 LTHR qualifiers (30-min @166, fast pace) ⇒ confident LTHR 168 ⇒ easy HR ceiling 143
+        for k in range(6):
+            i += 1
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
+                      (i, ago(k * 5 + 1) + "T19:00:00", ago(k * 5 + 1), "Running", 8.0, 30 * 60, 166, 189,
+                       json.dumps({"gap": fast_kmh})))
+        for k, hr in enumerate(easy_runs):                # easy-PACED runs (gap on the easy ceiling)
+            i += 1
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
+                      (i, ago(k + 1) + "T07:00:00", ago(k + 1), "Running", 9.0, 2700, hr, hr + 18,
+                       json.dumps({"gap": easy_kmh})))
+        return m
+    fails = []
+    # the easy HR ceiling here is 0.85·168 = 143 (confident LTHR); HR 150 > 143 (over), 135 < 143 (under)
+    coh = pace_hr_coherence(mkdb([135, 134, 136, 138]))
+    if not (coh["verdict"] == "coherent" and coh["anchor"] == "lthr" and coh["n_easy_paced"] == 4
+            and coh["n_hr_over"] == 0):
+        fails.append(f"under-ceiling not coherent: {coh}")
+    div = pace_hr_coherence(mkdb([150, 152, 149, 151]))
+    if not (div["verdict"] == "pace_ahead_of_hr" and div["n_hr_over"] == 4 and div["frac_over"] >= 0.5):
+        fails.append(f"over-ceiling not pace_ahead_of_hr: {div}")
+    ins = pace_hr_coherence(mkdb([150, 152]))
+    if ins["verdict"] != "insufficient":
+        fails.append(f"too-few not insufficient: {ins}")
+    # surface-only contract: the call must not write anything (plans table stays empty)
+    db2 = mkdb([150, 152, 149, 151])
+    pace_hr_coherence(db2)
+    if db2.execute("SELECT COUNT(*) c FROM plans").fetchone()["c"] != 0:
+        fails.append("pace_hr_coherence WROTE to the DB (must be surface-only)")
+    return _st("det", "pace-hr-coherence",
+               "pace↔HR cross-model check: easy-paced + HR-under-ceiling⇒coherent; HR-over⇒pace_ahead_of_hr; "
+               "too-few⇒insufficient; surface-only (never writes the plan)",
+               passed=not fails, expect="verdict ladder + surface-only contract hold",
+               got={"violations": fails or "none"})
+
+
 def _stc_projector(db):
     # Validate the reconstruction only where it's LIKE-FOR-LIKE with Runalyze's snapshot. A
     # snapshot is comparable only when both hold:
@@ -10281,6 +10825,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
                  lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
+                 lambda: _stc_lthr(), lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(),
@@ -10565,12 +11110,19 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
             hr_avg = z["hr"] + rnd.randint(-4, 4)
             hr_max = hr_avg + z["spread"] + rnd.randint(0, 6)
             aid += 1
+            # per-run effective VO2max (what /api/vo2max charts as the VO2max tile sparkline) — a
+            # rising baseline ~46→54 tracking the build, with a small zone bump (quality reads higher)
+            # and mild run-to-run noise. use_vo2max gates it on, matching Runalyze's per-activity field.
+            run_vo2 = round(46.0 + 8.0 * (w / max(1, weeks - 1))
+                            + {"easy": 0.0, "threshold": 1.5, "long": 0.5}[zone]
+                            + rnd.uniform(-0.8, 0.8), 1)
             upsert_activity(db, {
                 "id": aid, "date_time": f"{day.isoformat()}T18:30:00", "title": z["title"],
                 "sport": {"id": 1, "name": RUNNING_SPORT},
                 "distance": km, "duration": dur, "elapsed_time": dur + rnd.randint(20, 90),
                 "hr_avg": hr_avg, "hr_max": hr_max, "trimp": est_trimp(dur / 60.0, zone),
                 "cadence": rnd.randint(168, 176), "elevation_up": round(km * 6),
+                "vo2max": run_vo2, "use_vo2max": True,
                 "source": "synthetic",
             })
     race_day = today - timedelta(days=5)
@@ -10581,7 +11133,9 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
             "sport": {"id": 1, "name": RUNNING_SPORT}, "distance": 42.2,
             "duration": 13920, "elapsed_time": 13950,    # 3:52:00 finish (goal was 3:45)
             "hr_avg": 168, "hr_max": 182, "trimp": est_trimp(13920 / 60.0, "marathon"),
-            "cadence": 172, "elevation_up": 120, "source": "synthetic",
+            "cadence": 172, "elevation_up": 120,
+            "vo2max": 54.0, "use_vo2max": True,
+            "source": "synthetic",
         })
     db.commit()
 

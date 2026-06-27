@@ -38,7 +38,7 @@ showcase deliberately shows a slice; the real console has the full set.
   it stands now, plus a settle-the-score verdict.
 - **Effort discipline** — grades whether your easy days are actually easy (HR-led, Runalyze-native).
 - **Readiness gate** — a daily green/amber/red verdict that flags stop-the-run / cardiac-type symptoms.
-- **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation) and a route map.
+- **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation), an HR-zone band, and a route map.
 
 **AI layer** *(optional — set `ANTHROPIC_API_KEY`; blank = dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), multi-A adjudication advice, plain-language
@@ -116,10 +116,30 @@ caches only the shell and never the API.
 
 ## Calibration
 The engine **self-calibrates** most things from your synced data (pace zones from VO₂max, CTL/ATL from TRIMP,
-HR zones from your `hr_max`). A few constants near the top of the engine — `EASY_TRIMP_PER_MIN`,
-`K_CTL_VOLUME`, and the `REBASE_SHAPE` starter block — are sensible defaults derived from one masters-runner
-dataset; they're conservative on purpose and tunable. The CTL floor and earned levers adapt the plan upward
-as your fitness proves itself.
+HR zones from a derived lactate-threshold HR). A few constants near the top of the engine —
+`EASY_TRIMP_PER_MIN`, `K_CTL_VOLUME`, and the `REBASE_SHAPE` starter block — are sensible defaults derived
+from one masters-runner dataset; they're conservative on purpose and tunable. The CTL floor and earned levers
+adapt the plan upward as your fitness proves itself.
+
+### Two intensity models (and the check that keeps them honest)
+Effort lives in two places, on two different physiological anchors:
+
+- **Prescription — pace, from VO₂max.** What the plan *tells you to run*. Daniels VDOT zones (fractions of
+  velocity-at-VO₂max), validated to reproduce Runalyze's 5 k prognosis. Session load is TRIMP from the zone.
+- **Judgment — heart rate, from LTHR.** How a completed run is *graded* (the effort-discipline monitor) and
+  how the activity chart colours HR. Run zones anchor on a **data-derived lactate-threshold HR** (Friel's
+  %LTHR grid: Z1<0.85, Z2 0.85–0.89, Z3 0.90–0.94, Z4 0.95–0.99, Z5 ≥1.00·LTHR), because %HRmax is loosest
+  exactly at the easy↔threshold turnpoint the app cares about. LTHR is estimated streamlessly from the
+  whole-run average HR of your sustained hard efforts (20–70 min at ≥85 % robust HRmax), with a confidence
+  flag; below confidence it falls back to a %HRmax grid, flagged provisional. The monitor's easy/hard
+  ceilings *are* the chart's zone boundaries — one definition, so they can never disagree.
+
+These are **independent fitness estimates that should agree**: running at the easy *pace* ceiling should keep
+HR under the easy *HR* ceiling. They diverge most under cardiac decoupling (when detrained, a given easy pace
+drives a higher HR than VDOT predicts). A **pace↔HR coherence check** surfaces that divergence as a
+diagnostic — it does **not** alter the prescription. Caveat worth knowing: the streamless LTHR understates the
+true value for *structured* tempos (warm-up/cool-down dilute the whole-run average), so the easy HR ceiling is
+deliberately set at the conservative (lower) Friel boundary.
 
 ## Self-test
 `python SparingHorse.py selftest` runs the deterministic engine battery (and the key-gated LLM checks where a
