@@ -396,6 +396,10 @@ MARKERS = {
     "vitamin_d":         {"label": "Vitamin D (25-OH)", "unit": "ng/mL", "ref": [30, 100], "good": "band"},
     "ferritin":          {"label": "Ferritin", "unit": "µg/L", "ref": [30, 400], "good": "band"},
     "systolic":          {"label": "Blood pressure (systolic)", "unit": "mmHg", "ref": [None, 130], "good": "low"},
+    # Watch-recorded daily metrics, synced from Runalyze (no fixed clinical band — they're individual;
+    # the trend vs your OWN history is the signal). HRV = sleeping RMSSD.
+    "resting_hr":        {"label": "Resting HR", "unit": "bpm", "ref": [None, None], "good": "low"},
+    "hrv":               {"label": "HRV (sleeping RMSSD)", "unit": "ms", "ref": [None, None], "good": "high"},
 }
 
 
@@ -841,6 +845,45 @@ def snapshot_shape(db):
     return s
 
 
+# Watch-recorded daily metrics → health_markers. marker key -> (MCP trend tool, item value field).
+# (The per-day HRV item carries metric='RMSSD'|'SDNN'|… ; we keep RMSSD, the one the baseline uses.)
+HEALTH_SYNC = {
+    "hrv":        ("get_hrv_trend", "hrv"),
+    "weight":     ("get_weight_trend", "weight"),
+    "resting_hr": ("get_resting_heart_rate_trend", "heart_rate"),
+}
+
+
+def sync_health_metrics(db, backfill=False):
+    """Pull watch-recorded daily metrics (HRV / weight / resting HR) from Runalyze's MCP trend tools into
+    the health_markers series (source='runalyze'), so the health view charts them next to the manual lab
+    markers — and the long horizon shows what the watch's short rolling baseline can't. Routine sync pulls
+    the last ~60 days (cheap, idempotent upsert on marker+date); backfill pulls the full history. Best
+    effort: a metric whose tool errors is skipped, never failing the whole sync. Returns {marker: count}."""
+    from datetime import timedelta
+    end = datetime.now().date()
+    start = "2015-01-01" if backfill else (end - timedelta(days=60)).isoformat()
+    out = {}
+    for marker, (tool, field) in HEALTH_SYNC.items():
+        try:
+            res = mcp_call(tool, {"start_date": start, "end_date": end.isoformat()})
+        except (RunalyzeError, requests.RequestException, KeyError, ValueError, TypeError):
+            continue
+        n = 0
+        for it in (res or {}).get("items") or []:
+            val, dt = it.get(field), it.get("date")
+            if val is None or not dt:
+                continue
+            if marker == "hrv" and it.get("metric") and it.get("metric") != "RMSSD":
+                continue   # one canonical HRV metric (RMSSD), ignore SDNN/etc. if returned
+            db.execute("INSERT OR REPLACE INTO health_markers (marker, date, value, source, note) "
+                       "VALUES (?,?,?,?,?)", (marker, dt[:10], float(val), "runalyze", it.get("source") or ""))
+            n += 1
+        out[marker] = n
+    db.commit()
+    return out
+
+
 def run_sync(backfill=False):
     """Routine incremental pull (default) or a one-time full-history backfill. Backfill is
     needed whenever the local copy is partial — e.g. a fresh machine — because incremental
@@ -849,10 +892,14 @@ def run_sync(backfill=False):
     try:
         act = sync_activities(db, backfill=backfill)
         snapshot_shape(db)
+        try:                                    # watch metrics are a nice-to-have — never fail the sync
+            health = sync_health_metrics(db, backfill=backfill)
+        except Exception:
+            health = None
         set_meta(db, "last_sync", _now_iso())
         db.commit()
-        return {"ok": True, "activities": act, "last_sync": get_meta(db, "last_sync"),
-                "backfill": backfill}
+        return {"ok": True, "activities": act, "health": health,
+                "last_sync": get_meta(db, "last_sync"), "backfill": backfill}
     finally:
         db.close()
 
@@ -4142,6 +4189,8 @@ def api_sync():
         return jsonify(run_sync(backfill=backfill))
     except RunalyzeError as e:
         return jsonify(ok=False, error=str(e)), 502
+    except Exception as e:                       # never leak an HTML 500 to the JSON client
+        return jsonify(ok=False, error=f"sync failed: {e}"), 500
 
 
 @app.get("/api/shape")
@@ -6594,25 +6643,38 @@ async function loadWeather(){
   if(RDY) renderReadiness(RDY);   // fold the three-city forecast into the readiness card footer
 }
 
+// Resilient sync POST: a long backfill can exceed the gateway timeout and return an HTML error page,
+// which r.json() would choke on with a cryptic "Unexpected token '<'". Catch that and return a clean,
+// actionable result. (The heavy part is the activity re-walk; the health-metric pull is ~seconds.)
+async function postSync(url){
+  let r;
+  try{ r=await fetch(url,{method:"POST"}); }
+  catch(e){ return {ok:false, error:"network error — "+e}; }
+  if(!(r.headers.get("content-type")||"").includes("application/json")){
+    return {ok:false, timeout:true, error:
+      `the request didn't return JSON (HTTP ${r.status}) — a full backfill can exceed the gateway `+
+      `timeout. It may still be finishing on the server, and your recent data syncs fine; a one-off `+
+      `full-history pull is best run on the host.`};
+  }
+  try{ return await r.json(); }catch(e){ return {ok:false, error:"couldn't read the response — "+e}; }
+}
 $("#syncBtn").addEventListener("click", async ()=>{
   const b=$("#syncBtn"); b.disabled=true; const t=b.textContent; b.textContent="Syncing…";
   try{
-    const r=await fetch("/api/sync",{method:"POST"}); const d=await r.json();
-    if(!d.ok){ alert("Sync failed: "+(d.error||"unknown")); }
+    const d=await postSync("/api/sync");
+    if(!d.ok) alert("Sync failed: "+(d.error||"unknown"));
     await loadShape(); await loadRecent(); await loadProjector(); await loadWeekly(); loadDrift(); loadEffort();
-  }catch(e){ alert("Sync error: "+e); }
-  finally{ b.disabled=false; b.textContent=t; }
+  }finally{ b.disabled=false; b.textContent=t; }
 });
 $("#backfillBtn").addEventListener("click", async ()=>{
-  if(!confirm("Full-history backfill: walks every page back to your first activity (a minute or two). Use on a fresh machine or if old history is missing. Proceed?")) return;
+  if(!confirm("Full-history backfill: walks every page back to your first activity. On a large history this can exceed the gateway timeout — it's usually only needed on a fresh machine. Proceed?")) return;
   const b=$("#backfillBtn"); b.disabled=true; const t=b.textContent; b.textContent="Backfilling…";
   try{
-    const r=await fetch("/api/sync?backfill=1",{method:"POST"}); const d=await r.json();
-    if(!d.ok){ alert("Backfill failed: "+(d.error||"unknown")); }
-    else { alert(`Backfill done — added ${d.activities.added} activities across ${d.activities.pages_fetched} pages.`); }
+    const d=await postSync("/api/sync?backfill=1");
+    if(!d.ok) alert("Backfill didn't complete: "+(d.error||"unknown"));
+    else alert(`Backfill done — added ${d.activities?.added ?? 0} activities across ${d.activities?.pages_fetched ?? 0} pages.`);
     await loadShape(); await loadRecent(); await loadProjector(); await loadWeekly(); loadDrift(); loadEffort();
-  }catch(e){ alert("Backfill error: "+e); }
-  finally{ b.disabled=false; b.textContent=t; }
+  }finally{ b.disabled=false; b.textContent=t; }
 });
 
 // ── Latest activity ─────────────────────────────────────────────────────────
@@ -6736,10 +6798,12 @@ function renderProfile(hoverKind){
   bg.classList.toggle("on", !!svg);
   const lblKind = (showHover && hb) ? hoverKind : LOCKED;
   $("#proflbl").textContent = profileLabel(lblKind) + ((showHover && hb) ? " · click to lock" : " · 🔒 locked");
-  const wideHR = showHover && hb && hoverKind==="hr";   // only the 5-zone HR legend is wide enough to reach the hint
-  const leg=$("#hrlegend"); if(leg) leg.innerHTML = wideHR ? hrLegendHtml() : "";
+  // The zone legend shows whenever the always-on HR-zone band is present (not just on HR hover) —
+  // otherwise the band's colours are uninterpretable. It carries the basis (LTHR vs %HRmax).
+  const bandOn = !!((p.hrzones||{}).cutoffs && p.has_hr);
+  const leg=$("#hrlegend"); if(leg) leg.innerHTML = bandOn ? hrLegendHtml() : "";
   // yield the hint to the wide HR legend (visibility, not display, so the row height never shifts)
-  const hint=document.querySelector("#recent .profhint"); if(hint) hint.style.visibility = wideHR ? "hidden" : "visible";
+  const hint=document.querySelector("#recent .profhint"); if(hint) hint.style.visibility = bandOn ? "hidden" : "visible";
   document.querySelectorAll("#recent .metric.hovx").forEach(el=>
     el.classList.toggle("locked", el.dataset.prof===LOCKED));
 }
@@ -9552,6 +9616,45 @@ def _stc_pace_hr_coherence():
                got={"violations": fails or "none"})
 
 
+def _stc_health_sync():
+    """Watch-metric sync maps Runalyze trend items → health_markers rows: HRV keeps RMSSD only, weight +
+    resting HR map their value fields, source='runalyze', upsert on (marker,date). MCP stubbed (token-free)."""
+    import sqlite3 as _sq
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.execute("CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, "
+              "PRIMARY KEY(marker,date));")
+    stub = {
+        "get_hrv_trend": {"items": [
+            {"hrv": 39, "metric": "RMSSD", "date": "2026-06-27", "source": "Suunto"},
+            {"hrv": 99, "metric": "SDNN", "date": "2026-06-27"},          # non-RMSSD must be ignored
+            {"hrv": 35, "metric": "RMSSD", "date": "2026-06-26"},
+            {"hrv": None, "metric": "RMSSD", "date": "2026-06-25"}]},      # null value skipped
+        "get_weight_trend": {"items": [{"weight": 65.5, "date": "2026-06-25"}]},
+        "get_resting_heart_rate_trend": {"items": [{"heart_rate": 47, "date": "2025-04-09"}]},
+    }
+    g = globals(); orig = g.get("mcp_call")
+    g["mcp_call"] = lambda tool, args: stub.get(tool, {})
+    try:
+        res = sync_health_metrics(m, backfill=True)
+    finally:
+        g["mcp_call"] = orig
+    fails = []
+    if res.get("hrv") != 2:
+        fails.append(f"hrv count {res.get('hrv')} (RMSSD-only + null-skip expected 2)")
+    if res.get("weight") != 1 or res.get("resting_hr") != 1:
+        fails.append(f"weight/rhr counts wrong: {res}")
+    row = m.execute("SELECT value, source FROM health_markers WHERE marker='hrv' AND date='2026-06-27'").fetchone()
+    if not (row and row["value"] == 39 and row["source"] == "runalyze"):
+        fails.append(f"hrv row wrong: {dict(row) if row else None}")
+    if m.execute("SELECT COUNT(*) c FROM health_markers WHERE value=99").fetchone()["c"] != 0:
+        fails.append("non-RMSSD HRV leaked into the series")
+    return _st("det", "health-sync",
+               "watch metrics → health_markers: HRV RMSSD-only (+null-skip), weight/RHR mapped, "
+               "source='runalyze', upsert on (marker,date)",
+               passed=not fails, expect="hrv=2, weight=1, resting_hr=1; no SDNN/null rows",
+               got={"violations": fails or "none", "counts": res})
+
+
 def _stc_projector(db):
     # Validate the reconstruction only where it's LIKE-FOR-LIKE with Runalyze's snapshot. A
     # snapshot is comparable only when both hold:
@@ -10826,6 +10929,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
+                 lambda: _stc_health_sync(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(),

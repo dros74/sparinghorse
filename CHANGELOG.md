@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-28
+
+Heart-rate zones get a real physiological anchor, and the health view starts tracking the
+metrics behind the engine — HRV, weight and resting heart rate over the long horizon.
+
+### Added
+- **LTHR-anchored HR zones** — heart-rate zones now anchor on a data-derived lactate-threshold
+  HR (Friel's %LTHR grid) when there's enough data, falling back to a %HRmax grid otherwise.
+  One definition drives the chart, the new zone band, and the effort monitor, so they can't
+  disagree.
+- **HR-zone band on the activity chart** — a thin strip along the top colours each section of
+  a run by the zone you were in, with an always-on legend showing the basis (LTHR vs %HRmax).
+- **Pace ↔ HR coherence check** — surfaces when your prescribed easy *pace* and your easy *HR*
+  ceiling disagree (classic when detrained), shown in the effort card. Diagnostic only — it
+  never changes the plan.
+- **Watch metrics in the health charts** — each sync pulls daily HRV (sleeping RMSSD), body
+  weight and resting heart rate from Runalyze, charted against your own long-horizon baseline
+  (the view a watch's short rolling baseline can't give you). Private; stripped on the public box.
+
+### Changed
+- **Effort monitor reads heart rate against LTHR** when it's confidently known — sharper at the
+  easy↔threshold turnpoint than %HRmax — and labels the basis it used. The easy ceiling never
+  loosens relative to the previous %HRmax read.
+
+### Fixed
+- **Sync/backfill errors are legible** — a backfill that exceeds the gateway timeout now shows a
+  clear message instead of a cryptic JSON-parse error, and the sync endpoint always returns JSON.
+
 ## [0.3.0] - 2026-06-27
 
 A mobile app experience. On a phone the app now behaves like an installed app rather than

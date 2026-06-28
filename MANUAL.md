@@ -112,6 +112,11 @@ The card removes itself once all three are done.
 - **Sync now** pulls recent activities plus today's shape snapshot. **Backfill all** walks your whole
   history (run it once at setup; after that, nightly sync keeps you current).
 - **Nightly auto-sync** runs at `SH_SYNC_AT` (default `22:00` in `SH_TZ`). Disable with `SH_SCHEDULE=0`.
+- **Watch-recorded health metrics.** Each sync also pulls your daily **HRV (sleeping RMSSD)**, **body weight**
+  and **resting HR** from Runalyze into the health-markers charts (a routine sync grabs the last ~60 days; a
+  **Backfill all** pulls the full history). These are private (stripped on the public box) and chart against
+  your own long-horizon baseline — useful precisely when a watch's short rolling baseline has re-anchored to
+  a depressed period. Lab values (triglycerides, cholesterol, etc.) are entered manually and kept local.
 - **Duplicates.** If the same activity lands twice (e.g. a re-upload), a banner appears with a link to the
   duplicate. Duplicates are excluded from the de-duplicated model that drives CTL/ATL, so they never quietly
   inflate your fitness.
