@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-28
+
+The plan starts learning from how a run actually went — not just that it happened. Every run
+becomes a controlled data point, compared against your own past runs on the same route, so
+patterns in heat, terrain, fatigue and how you felt can surface over time.
+
+### Added
+- **Per-run metrics table** — one queryable row per run with every signal we capture (weather,
+  terrain, heart rate, an efficiency measure, and your fitness/fatigue state on the day),
+  plus an automatic same-route analysis that only compares like-for-like (terrain and fitness
+  held) so a finding has to be real, not a season artifact. Private; not exposed on the public box.
+- **Worked examples** — each run is auto-compared to your recent runs on the same route, with
+  the directional changes laid out and a flag when how you *felt* pointed the opposite way to the
+  objective markers (fatigue, HRV). It records the case; it doesn't pass a verdict from a single
+  run. The casebook grows as you log more same-route runs. Private.
+- **Full-history fitness & fatigue on every run** — the reconstructed fitness/fatigue curve now
+  backfills every past run, so the analysis spans your whole history instead of the few days the
+  fitness service reports directly.
+
+### Changed
+- **Frequency-met days** — once you've already run the week's prescribed number of runs *and*
+  its distance, today's remaining run becomes optional rest rather than a forced extra. A short
+  junk run on an already-met week does nothing for aerobic shape; the plan stops asking for it.
+- **Honest building weeks** — when recent fatigue forces the safety governor to cut a long run
+  below a real long-run distance, the plan now relabels it a shakeout and flags the week, instead
+  of quietly calling a fitness-trivial run a "long run".
+
+### Fixed
+- **Plan ACWR-ceiling self-test** scoped to the weeks the governor actually controls, clearing a
+  spurious failure caused by a settled past week's load.
+
 ## [0.4.0] - 2026-06-28
 
 Heart-rate zones get a real physiological anchor, and the health view starts tracking the

@@ -384,6 +384,69 @@ CREATE TABLE IF NOT EXISTS selftest_runs (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
+# A queryable per-run analysis table — one row per (non-dropped) run, every metric we capture, with
+# the daily shape snapshot + HRV/weight joined on date. It's a VIEW, not a materialised table: the
+# raw activity JSON + the owned shape_snapshots are already durable, so a join layer "re-runs itself"
+# as data accrues and can never drift from them (the projector-snapshot-seam lesson). The exclusion
+# clause faithfully mirrors dropped_ids(db) = find_duplicates ∪ manual_ignores, in pure SQL, so this
+# table can't silently disagree with any other surface in the app. DROP+CREATE on every init so the
+# column list tracks the code (a view has no data, so there's no cost). hr_cost = hr/speed is a
+# known-nonlinear convenience column — the raw hr + speed_kmh sit beside it for a better metric later.
+RUN_METRICS_VIEW = """
+DROP VIEW IF EXISTS run_metrics;
+CREATE VIEW run_metrics AS
+SELECT
+  a.id, a.date,
+  json_extract(a.raw,'$.recurring_route.id')   AS route_id,
+  a.distance                                    AS km,
+  a.duration                                    AS dur_s,
+  a.hr_avg                                       AS hr,
+  a.hr_max                                       AS hr_max,
+  a.trimp                                        AS trimp,
+  a.training_effect                              AS te,
+  json_extract(a.raw,'$.temperature')           AS temp_c,
+  json_extract(a.raw,'$.humidity')              AS humidity,
+  json_extract(a.raw,'$.uv_index')              AS uv,
+  json_extract(a.raw,'$.wind_speed')            AS wind,
+  json_extract(a.raw,'$.elevation_up')          AS elev_up,
+  json_extract(a.raw,'$.percentage_hilly')      AS hilly_pct,
+  json_extract(a.raw,'$.x_pace')                AS speed_kmh,
+  json_extract(a.raw,'$.gap')                   AS gap_kmh,
+  json_extract(a.raw,'$.cadence')               AS cadence,
+  json_extract(a.raw,'$.stride_length')         AS stride,
+  json_extract(a.raw,'$.aerobic_decoupling_pace') AS decoupling,
+  json_extract(a.raw,'$.vo2max')                AS run_vo2max,
+  json_extract(a.raw,'$.subjective_feeling')    AS feel,
+  json_extract(a.raw,'$.is_night')              AS is_night,
+  ROUND(a.hr_avg * 1.0 / NULLIF(json_extract(a.raw,'$.x_pace'),0), 2) AS hr_cost,
+  -- GAP-normalised cost: HR per unit GRADE-ADJUSTED speed, so a hilly route doesn't inflate the cost
+  -- (raw hr_cost correlates +0.26 with elevation — a terrain confound this removes).
+  ROUND(a.hr_avg * 1.0 / NULLIF(json_extract(a.raw,'$.gap'),0), 2) AS hr_cost_gap,
+  -- daily shape snapshot, joined on date. Named *_snapshot (not *_start): the snapshot is the day's
+  -- capture and leads the activity frontier by a day (the documented seam), so it's not a guaranteed
+  -- pre-run reading — especially for his evening runs.
+  s.fitness            AS ctl_snapshot,
+  s.fatigue            AS atl_snapshot,
+  s.acwr               AS acwr_snapshot,
+  s.effective_vo2max   AS evo2_snapshot,
+  s.hrv_baseline       AS hrv_baseline,
+  hv.value             AS hrv_today,
+  wt.value             AS weight_kg
+FROM activities a
+LEFT JOIN shape_snapshots s ON s.snapshot_date = a.date
+LEFT JOIN health_markers hv ON hv.marker = 'hrv'    AND hv.date = a.date
+LEFT JOIN health_markers wt ON wt.marker = 'weight' AND wt.date = a.date
+WHERE LOWER(a.sport) LIKE '%run%'
+  AND a.id NOT IN (SELECT id FROM ignored_activities)
+  -- duplicate drop, mirroring find_duplicates: keep the lowest id per
+  -- (date_time, distance@2dp, sport) group; never collapse blank-timestamp rows (it skips them).
+  AND (COALESCE(a.date_time,'') = ''
+       OR a.id = (SELECT MIN(b.id) FROM activities b
+                  WHERE b.date_time = a.date_time
+                    AND ROUND(COALESCE(b.distance,0),2) = ROUND(COALESCE(a.distance,0),2)
+                    AND COALESCE(b.sport,'') = COALESCE(a.sport,'')));
+"""
+
 # Registry of trackable health markers: label, unit, reference band, and direction
 # ("low" = lower is better, "high" = higher is better, "band" = stay within range).
 # Generic clinical reference ranges only — no personal data here.
@@ -430,6 +493,7 @@ def init_db():
         return   # public read-only: the private side owns the schema; never write here
     db = connect_db()
     db.executescript(SCHEMA)
+    db.executescript(RUN_METRICS_VIEW)   # the queryable per-run analysis table (DROP+CREATE, tracks code)
     # §H3 migration: add the dominant-medical-track column to a pre-existing DB (idempotent) and
     # backfill it from the directive JSON, so a hold saved by the old code is recognised as medical
     # (dominant + open-ended) after the upgrade — not silently downgraded to a window-clamped ease.
@@ -1511,6 +1575,255 @@ def pace_hr_coherence(db, window_days=EFFORT_WINDOW_DAYS):
             "anchor": anchor, "note": note}
 
 
+# ── Per-run metrics table + self-re-running analysis (the feel/heat/load data foundation) ────────
+# The `run_metrics` VIEW (see RUN_METRICS_VIEW) is the queryable per-run table. These read it and run
+# the same deep-dive that produced the design direction, so the findings refresh as data accrues. The
+# honest result on the current data: ACCUMULATED FATIGUE (ATL/ACWR), not heat, is the dominant
+# correlate of efficiency — and the day-to-day swing at FIXED temperature already exceeds a clean 5°
+# heat step, so heat can't yet be isolated. We surface that, we don't bake a noisy coefficient into a
+# feature: the robust signal is the same-route paired contrast, the rho's stay flagged as exploratory.
+
+def run_metrics(db, route_id=None, days=None, limit=None, with_projection=True):
+    """Rows from the run_metrics view (newest first), optionally filtered to one recurring route, a
+    recency window, and/or a row cap. Pure read; HR/health-derived → callers must keep it private.
+
+    with_projection (default on) backfills ctl_proj/atl_proj/acwr_proj from the projector's
+    reconstructed EWMA curve (reconstruct_history) — modeled, NOT Runalyze's authoritative values, but
+    available for EVERY run instead of only the ~7 days shape_snapshots covers (Runalyze's API exposes
+    only TODAY's shape; there's no history endpoint). The projector is validated against Runalyze by
+    det/projector-validation. Computed on the fly (never materialised) so it can't drift from activities."""
+    sql = "SELECT * FROM run_metrics"
+    where, args = [], []
+    if route_id is not None:
+        where.append("route_id = ?"); args.append(route_id)
+    if days is not None:
+        from datetime import timedelta
+        since = (datetime.now().date() - timedelta(days=int(days))).isoformat()
+        where.append("date >= ?"); args.append(since)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY date DESC"
+    if limit is not None:
+        sql += " LIMIT ?"; args.append(int(limit))
+    rows = [dict(r) for r in db.execute(sql, args).fetchall()]
+    if with_projection and rows:
+        proj = {h["date"]: h for h in reconstruct_history(db)}     # one reconstruction, keyed by date
+        for r in rows:
+            h = proj.get(r["date"])
+            ctl = round(h["ctl"], 1) if h else None
+            atl = round(h["atl"], 1) if h else None
+            r["ctl_proj"] = ctl
+            r["atl_proj"] = atl
+            r["acwr_proj"] = round(atl / ctl, 2) if (ctl and atl is not None) else None
+    return rows
+
+
+def _spearman(pairs):
+    """Spearman rho on a list of (x, y) with Nones already dropped. None if n<4 or no variance."""
+    import math
+    n = len(pairs)
+    if n < 4:
+        return None
+    def ranks(vals):
+        order = sorted(range(len(vals)), key=lambda i: vals[i])
+        r = [0.0] * len(vals)
+        i = 0
+        while i < len(vals):
+            j = i
+            while j + 1 < len(vals) and vals[order[j + 1]] == vals[order[i]]:
+                j += 1
+            avg = (i + j) / 2 + 1
+            for k in range(i, j + 1):
+                r[order[k]] = avg
+            i = j + 1
+        return r
+    xr, yr = ranks([p[0] for p in pairs]), ranks([p[1] for p in pairs])
+    mx, my = sum(xr) / n, sum(yr) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(xr, yr))
+    den = math.sqrt(sum((a - mx) ** 2 for a in xr) * sum((b - my) ** 2 for b in yr))
+    return round(num / den, 2) if den else None
+
+
+def run_metrics_analysis(db):
+    """Re-run the feel/heat/load deep-dive on whatever data exists now. Two tiers, by trustworthiness:
+      • same_route_pairs — the ROBUST signal: consecutive runs on one recurring route (terrain held), with
+        the Δtemp / Δhr_cost / Δatl / Δfeel between them. A heat effect is only real if it exceeds the
+        Δhr_cost seen between SAME-temperature pairs (the noise floor).
+      • exploratory_rho — Spearman of hr_cost vs candidate drivers. EXPLORATORY only: observational,
+        season×fitness×temperature confounded. Association, never causation. Carried with that caveat.
+    Fatigue (ATL/ACWR) uses the PROJECTOR-reconstructed columns (atl_proj/acwr_proj) so the correlation
+    spans the FULL history (~1000 runs), not the ~7 days of Runalyze snapshots — modeled but validated.
+    Returns the caveats inline so no consumer can read a coefficient as settled."""
+    rows = run_metrics(db, with_projection=True)             # newest first, fatigue backfilled
+    by_route = {}
+    for r in rows:
+        if r.get("route_id") is not None:
+            by_route.setdefault(r["route_id"], []).append(r)
+
+    def _d(a, b, k):                                          # b is earlier, a later (chronological Δ)
+        if a.get(k) is None or b.get(k) is None:
+            return None
+        return round(a[k] - b[k], 2)
+
+    from datetime import date as _date
+    def _days(a, b):
+        try:
+            return (_date.fromisoformat(a) - _date.fromisoformat(b)).days
+        except (ValueError, TypeError):
+            return None
+    pairs = []
+    for rid, rs in by_route.items():
+        rs = sorted(rs, key=lambda x: x["date"])             # chronological
+        for earlier, later in zip(rs, rs[1:]):
+            if later.get("hr_cost") is None or earlier.get("hr_cost") is None:
+                continue
+            pairs.append({
+                "route_id": rid, "from": earlier["date"], "to": later["date"],
+                "gap_days": _days(later["date"], earlier["date"]),   # a wide gap = fitness changed, not a clean contrast
+                "d_temp": _d(later, earlier, "temp_c"),
+                "d_hr_cost": _d(later, earlier, "hr_cost"),
+                "d_hr_cost_gap": _d(later, earlier, "hr_cost_gap"),  # terrain-fair (GAP-normalised)
+                "d_atl": _d(later, earlier, "atl_proj"),             # projector-backfilled ⇒ present for every pair
+                "d_feel": _d(later, earlier, "feel"),
+            })
+    # The noise floor (day-to-day hr_cost swing at fixed temp) is only meaningful from NEAR-IN-TIME pairs —
+    # a same-route revisit months later conflates fitness, so it can't tell us what "same conditions" scatter
+    # looks like. Gate on a ≤2-week gap; that's the bar a real heat effect must clear to be credible.
+    NEAR_DAYS = 14
+    near = [p for p in pairs if p["gap_days"] is not None and p["gap_days"] <= NEAR_DAYS]
+    same_temp = [abs(p["d_hr_cost"]) for p in near if p["d_temp"] == 0 and p["d_hr_cost"] is not None]
+    noise_floor = round(sum(same_temp) / len(same_temp), 2) if same_temp else None
+
+    # ── THE headline, and the only VALID powered test ──────────────────────────────────────────────
+    # hr_cost is nonlinear across pace regimes, so a full-history Spearman of it is meaningless (fit-fast
+    # 2024 vs detrained-slow 2026). The valid question asks it WITHIN a controlled comparison: same route
+    # (terrain held), ≤14 days apart (fitness held) — i.e. on the Δ between a near pair. There the n=7
+    # "fatigue dominates (ρ≈0.9)" coincidence and the cross-regime full-history number both dissolve into
+    # the truth: heat and fatigue each move per-run efficiency only weakly, below the day-to-day noise.
+    def _pair_rho(xk, yk="d_hr_cost"):
+        pr = [(p[xk], p[yk]) for p in near if p.get(xk) is not None and p.get(yk) is not None]
+        return {"rho": _spearman(pr), "n": len(pr)}
+    controlled = {
+        "d_temp_vs_d_hr_cost":  _pair_rho("d_temp"),
+        "d_atl_vs_d_hr_cost":   _pair_rho("d_atl"),
+        "d_temp_vs_d_hr_cost_gap": _pair_rho("d_temp", "d_hr_cost_gap"),
+        "d_atl_vs_d_hr_cost_gap":  _pair_rho("d_atl", "d_hr_cost_gap"),
+    }
+
+    def _rho(xk, yk="hr_cost"):
+        pr = [(r[xk], r[yk]) for r in rows if r.get(xk) is not None and r.get(yk) is not None]
+        return {"rho": _spearman(pr), "n": len(pr)}
+
+    # CROSS-REGIME, NOT VALID for hr_cost — kept only to show it differs from the controlled test above.
+    cross_regime = {f"{k}_vs_hr_cost": _rho(k)
+                    for k in ("temp_c", "atl_proj", "acwr_proj", "ctl_proj",
+                              "humidity", "hrv_today", "elev_up")}
+    with_load_proj = sum(1 for r in rows if r.get("atl_proj") is not None)
+    with_load_snap = sum(1 for r in rows if r.get("atl_snapshot") is not None)
+    return {
+        "n_runs": len(rows),
+        "n_with_load_proj": with_load_proj,
+        "n_with_load_snapshot": with_load_snap,
+        "same_route_pairs": sorted(pairs, key=lambda p: (p["to"]), reverse=True),
+        "same_temp_noise_floor": noise_floor,
+        "controlled_pairs_rho": controlled,           # ← the headline: powered AND valid
+        "controlled_pairs_n": len(near),
+        "cross_regime_rho": cross_regime,             # ← invalid for hr_cost; do not headline
+        "caveats": [
+            "Association, NOT causation — all of this is observational; the controlled test removes terrain "
+            "and fitness confounds but can't prove cause.",
+            "HEADLINE = controlled_pairs_rho: Spearman on the Δ between same-route runs ≤14 days apart "
+            "(terrain held, fitness held). It's the ONLY test that's both powered and valid for hr_cost.",
+            "cross_regime_rho (full-history) is NOT valid for hr_cost: hr/speed is nonlinear and the "
+            "history spans fit-fast→detrained-slow regimes. Shown only to contrast with the controlled test. "
+            "ctl_proj-vs-hr_cost there is also near-circular (both proxy aerobic fitness).",
+            "The n=7 snapshot-window ρ≈0.9 for fatigue was an underpowered coincidence (one "
+            "detrain-then-rebuild-in-heat stretch); it does not survive the controlled test.",
+            f"Fatigue (atl_proj/acwr_proj/ctl_proj) is the PROJECTOR's reconstructed EWMA — modeled, not "
+            f"Runalyze-authoritative — but validated vs Runalyze (det/projector-validation) and present for "
+            f"{with_load_proj} of {len(rows)} runs; Runalyze's snapshots cover only {with_load_snap} "
+            "(its API exposes today's shape only). eVO2 ground-truth stays snapshot-gated.",
+            "A heat effect is credible only if a route's Δhr_cost across a temp step exceeds the "
+            f"same-temperature noise floor ({noise_floor if noise_floor is not None else 'n/a'} hr_cost).",
+            "hr_cost = hr/speed is nonlinear (penalises slow running); compare within a route, not across "
+            "pace regimes. Raw hr + speed_kmh are kept for a better metric later.",
+        ],
+    }
+
+
+WORKED_EXAMPLE_LOOKBACK = 21   # days back to find a same-route peer (terrain held, fitness ~held)
+
+def worked_example(db, activity_id=None):
+    """Auto-build a CONTROLLED worked example for one run (default: the latest run with a route+hr_cost):
+    the recent SAME-ROUTE runs (terrain held) + the directional deltas vs the nearest-in-time same-route
+    peer (fitness ~held), and whether subjective feel diverged from the objective readiness markers.
+
+    It records FACTS for a growing casebook — it deliberately does NOT adjudicate 'feel led' or score a
+    composite readiness: a per-case verdict is an n=1 judgment, the exact artifact this session proved
+    unreliable (the n=7 ρ≈0.9 that collapsed). The corpus earns conclusions later; here we store clean,
+    directional cases. On the fly — no casebook table yet (the schema of what we'll tune on isn't known)."""
+    from datetime import date as _d
+    rows = run_metrics(db, with_projection=True)
+    target = (next((r for r in rows if r["id"] == activity_id), None) if activity_id is not None
+              else next((r for r in rows if r.get("hr_cost") is not None), None))
+    if not target or target.get("route_id") is None or target.get("hr_cost") is None:
+        return {"ok": False, "reason": "no run with a recurring route + hr_cost to anchor on"}
+    td = _d.fromisoformat(target["date"])
+    peers = [r for r in rows if r.get("route_id") == target["route_id"] and r["id"] != target["id"]
+             and r.get("hr_cost") is not None
+             and 0 < (td - _d.fromisoformat(r["date"])).days <= WORKED_EXAMPLE_LOOKBACK]
+    if not peers:
+        return {"ok": False, "date": target["date"], "route_id": target["route_id"],
+                "reason": f"no same-route peer within {WORKED_EXAMPLE_LOOKBACK}d to control terrain "
+                          "(an uncontrolled run — banked, not comparable)"}
+    peers.sort(key=lambda r: r["date"], reverse=True)
+    nearest = peers[0]                                   # nearest-in-time = cleanest fitness-held contrast
+
+    keep = ("date", "temp_c", "hr", "speed_kmh", "hr_cost", "hr_cost_gap", "decoupling",
+            "run_vo2max", "feel", "atl_proj", "acwr_proj", "hrv_today")
+    def slim(r): return {k: r.get(k) for k in keep}
+    def delta(k):
+        a, b = target.get(k), nearest.get(k)
+        return round(a - b, 2) if (a is not None and b is not None) else None
+    deltas = {k: delta(k) for k in ("temp_c", "hr", "hr_cost", "hr_cost_gap", "feel",
+                                    "decoupling", "run_vo2max", "atl_proj", "acwr_proj", "hrv_today")}
+
+    def _sgn(x): return 0 if not x else (1 if x > 0 else -1)
+    # objective readiness DIRECTION per marker (+1 = more ready than the peer). Kept per-marker, NOT
+    # collapsed into a score (a composite would be another unvalidated model). ATL/ACWR lower = readier;
+    # HRV higher = readier.
+    obj_readiness = {
+        "atl_proj":  -_sgn(deltas["atl_proj"]) if deltas["atl_proj"] is not None else None,
+        "acwr_proj": -_sgn(deltas["acwr_proj"]) if deltas["acwr_proj"] is not None else None,
+        "hrv_today":  _sgn(deltas["hrv_today"]) if deltas["hrv_today"] is not None else None,
+    }
+    feel_dir = _sgn(deltas["feel"]) if deltas["feel"] is not None else None
+    # divergence = a FACT: feel pointed opposite to ≥1 objective readiness marker.
+    opposed = [m for m, d in obj_readiness.items()
+               if d is not None and feel_dir not in (None, 0) and _sgn(d) != feel_dir]
+    diverged = (bool(opposed) if feel_dir not in (None, 0) else None)
+
+    eff = ("better" if (deltas["hr_cost"] or 0) < 0 else "worse" if (deltas["hr_cost"] or 0) > 0 else "level")
+    note = (f"Same route as {nearest['date']} ({(td - _d.fromisoformat(nearest['date'])).days}d earlier): "
+            f"Δtemp {deltas['temp_c']}°, efficiency {eff} (Δhr_cost {deltas['hr_cost']}).")
+    if diverged:
+        note += (f" Feel moved {'up' if feel_dir > 0 else 'down'} while {', '.join(opposed)} pointed the "
+                 "other way — subjective feel and the objective markers diverged this run.")
+    return {
+        "ok": True, "route_id": target["route_id"],
+        "target": slim(target), "nearest_peer": slim(nearest),
+        "context": [slim(r) for r in ([target] + peers[:3])],   # the same-route table, newest first
+        "deltas_vs_nearest": deltas,
+        "feel_direction": feel_dir,                # +1 better / -1 worse / 0 same / None if no feel
+        "objective_readiness": obj_readiness,      # per-marker +1 readier / -1 less ready
+        "feel_objective_diverged": diverged,       # the casebook fact, not a verdict
+        "diverged_markers": opposed,
+        "note": note,
+        "caveat": "n=1 controlled observation for the casebook — directional facts only, no claim about "
+                  "cause or which signal to trust; the corpus earns that, not any single run.",
+    }
+
+
 # ── Plan engine v1 (deterministic; §6) ──────────────────────────────────────
 # Owns the numbers. Pace zones from effective VO2max (Daniels VDOT — validated to
 # reproduce Runalyze's 5k prognosis exactly), session load estimated as TRIMP, weekly
@@ -1751,6 +2064,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # (REBASE_LONG_CAP) so it stays byte-identical — the recalibration is for the marathon-prep phases.
 LONG_RUN_MAX_FRAC = 0.50
 REBASE_LONG_CAP = 0.35     # pure-easy blocks (re-base) keep the original cap — leave the cautious restart untouched
+LONG_RUN_MIN_KM = 4.0      # a "long run" the ACWR governor clips below this isn't functioning as a long run —
+                           # relabel it a shakeout (never force load past the safety ceiling). See _mark_load_integrity.
 REBASE_SHAPE = [
     {"wk": 1, "km": 13, "runs": 3, "long": 5, "strides": 0, "intent": "Re-establish frequency — pure easy feel, HR controlled, no urge to stop"},
     {"wk": 2, "km": 15, "runs": 4, "long": 6, "strides": 0, "intent": "Add the 4th run if week 1 felt easy"},
@@ -2184,6 +2499,30 @@ def _is_down(intent):
     return str(intent or "").lower().startswith("down")
 
 
+def _is_taper(intent):
+    """A taper or race week — deliberately low-volume by design. Its short long run is the plan
+    working, not a fatigue cap, so the load-integrity honesty pass must NOT relabel/flag it."""
+    t = str(intent or "").lower()
+    return t.startswith("taper") or t.startswith("race week")
+
+
+def _current_week_actuals(db, today):
+    """§6e-FREQ — actual run-days + km the athlete has logged in the CALENDAR week (Mon–Sun) holding
+    `today`, from owned data only (ignored/deleted excluded). Feeds the frequency-met check: once the
+    current week's prescribed run COUNT *and* volume are both already met, an additional same-week run
+    isn't forced (a short junk run on a met week does nothing for aerobic shape). Returns (runs, km)."""
+    from datetime import timedelta
+    mon = today - timedelta(days=today.weekday())
+    sun = mon + timedelta(days=6)
+    drop = dropped_ids(db)
+    rows = db.execute(
+        "SELECT id, date, distance FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+        (mon.isoformat(), sun.isoformat())).fetchall()
+    act_km = round(sum(r["distance"] for r in rows if r["id"] not in drop and r["distance"]), 1)
+    act_runs = len({r["date"] for r in rows if r["id"] not in drop and r["distance"]})
+    return act_runs, act_km
+
+
 def _week_banked(db, ws, we, planned_km, planned_runs, drop):
     """Shared §6e per-week test: was one fully-elapsed week well-absorbed, from owned data only?
       • adherence — ran ≥ BANK_ADHERENCE of the week's planned km AND within one of its planned runs;
@@ -2357,7 +2696,31 @@ def _apply_ctl_floor(shape, seed_ctl):
     return [{**w, "km": round(w["km"] * scale), "long": round(w["long"] * scale)} for w in shape]
 
 
-def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None):
+def _mark_load_integrity(w, zones):
+    """Honesty pass over one finalized week. When the ACWR governor has clipped a plain long run below
+    LONG_RUN_MIN_KM it's no longer a long run — relabel it a shakeout so the plan never calls a
+    fitness-trivial session a 'long run', and in a BUILDING phase (zones supplied) flag the week so the
+    UI can say the build intent was capped by recent fatigue instead of silently degrading. This ADDS
+    NO LOAD — it never fights what the safety governor decided; it only tells the truth about the clip.
+    Down AND taper/race weeks are exempt (deliberately light — a short long run there is the plan
+    working, not a cap; flagging it would be a FALSE fatigue attribution, the opposite of honest).
+    Quality long runs (long_mp) are left alone: their structure is governed elsewhere. Mutates + returns w."""
+    intent = w.get("intent")
+    if _is_down(intent) or _is_taper(intent):
+        return w
+    longs = [s for s in w.get("sessions", []) if s.get("kind") == "long"]
+    if longs and (longs[0].get("km") or 0) < LONG_RUN_MIN_KM:
+        s = longs[0]
+        s["kind"] = "easy"
+        s["note"] = "shakeout — long run held back by recent fatigue (ACWR ceiling)"
+        w["long_capped"] = True
+        if zones is not None:                  # building phase (re-base is the pure-easy zones=None block)
+            w["fatigue_capped"] = True
+    return w
+
+
+def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None,
+                   week_actuals=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -2395,11 +2758,29 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             rem = [o for o in offsets if o >= today_off]
             full, _ = _distribute_week(wk, wk_start_d, intent_trimp, easy_pace_sec, zones)
             elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
+            # §6e-FREQ — frequency met: if the athlete has already logged the week's prescribed run
+            # COUNT *and* km, an additional same-week run isn't forced (a met-week junk run does nothing
+            # for aerobic shape). Drop the remaining runs → rest; never force load. Down/quality-bearing
+            # remainders are unaffected because §6o already generates the remainder EASY in every phase.
+            freq_met = False
+            if rem and week_actuals is not None:
+                a_runs, a_km = week_actuals
+                freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= (wk.get("km") or 0)
+                if freq_met:
+                    rem = []
             if rem:
                 allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT,
                                           zones=None, roll_from=today.isoformat(), days_override=rem)
                 chosen = min(intent_trimp * len(rem) / max(1, len(offsets)), allowed)
                 rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None, days_override=rem)
+            elif freq_met:                                 # week's frequency + volume already met → optional
+                a_runs, a_km = week_actuals
+                rem_s = [{"date": today.isoformat(), "kind": "rest", "optional": True,
+                          "km": 0.0, "minutes": 0, "trimp": 0.0,
+                          "note": (f"✓ Week's frequency met — {a_runs}/{wk.get('runs')} runs, "
+                                   f"{a_km}km ≥ {wk.get('km')}km planned. Today is optional: rest is "
+                                   f"prescribed, but an easy run is fine if you feel good.")}]
+                chosen, dt = 0.0, {}
             else:                                          # today is past this week's last run → only decay
                 chosen, rem_s, dt = 0.0, [], {}
             adjusted = _apply_adjustment(rem_s, dt, adjust)
@@ -2414,7 +2795,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                           "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
                           "proj_acwr": eow, "peak_acwr": peak,
                           "intent_km": wk["km"], "adjusted": adjusted["touched"],
-                          "clipped": False, "partial": True})
+                          "clipped": False, "partial": True,
+                          "frequency_met": freq_met,
+                          "freq_actual": list(week_actuals) if freq_met else None})
             continue
         allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT, zones)
         chosen = min(intent_trimp, allowed)
@@ -2444,6 +2827,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                       "trimp_total": round(sum(dt.values()), 1), "proj_acwr": eow, "peak_acwr": peak,
                       "intent_km": wk["km"], "adjusted": adjusted["touched"],
                       "clipped": chosen < intent_trimp - 1})
+    for w in weeks:                       # honesty pass — relabel governor-gutted long runs (§6f Step F)
+        _mark_load_integrity(w, zones)
     return weeks, {"clipped_by_acwr": clipped_any,
                    "end_ctl": round(ctl, 1), "end_atl": round(atl, 1)}
 
@@ -2717,7 +3102,8 @@ def _prior_weeks_all(prior_plan):
     return out
 
 
-def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, prior_by_start, today):
+def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, prior_by_start, today,
+                  week_actuals=None):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
     start date), so a mid-block regeneration never rewrites weeks already lived. Today-onward weeks
@@ -2748,7 +3134,8 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
     fresh = []
     if future_sub:                                           # today-onward, seeded from live state
         fweeks, fbound = generate_block(future_sub, phase_start, end_ctl, end_atl,
-                                        easy_pace_sec, adjust, zones, today=today)   # §6o partial week
+                                        easy_pace_sec, adjust, zones, today=today,   # §6o partial week
+                                        week_actuals=week_actuals)                   # §6e-FREQ frequency-met
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True
     weeks = sorted(frozen + backfilled + fresh, key=lambda w: w["start"])
@@ -2834,10 +3221,11 @@ def generate_plan(db):
     prior_all = _prior_weeks_all(prior_plan)   # §H6 — freeze elapsed weeks by start across ALL phases,
     # not just the same key, so a week that crossed a phase boundary (calendar drift) is still carried
     # verbatim instead of being regenerated from today's CTL.
+    week_actuals = _current_week_actuals(db, today)   # §6e-FREQ — runs+km logged this calendar week
     def _gen_phase(key, phase_start, shape_, zones_):
         seed = (live["ctl"], live["atl"])
         weeks_, ec, ea, gen = _split_freeze(shape_, phase_start, seed, zones["easy_top"],
-                                            adj_dir, zones_, prior_all, today)
+                                            adj_dir, zones_, prior_all, today, week_actuals)
         if gen:
             live["ctl"], live["atl"], live["started"] = ec, ea, True
         return {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": ec, "end_atl": ea,
@@ -4268,6 +4656,26 @@ def api_effort_discipline():
     HR or personal critique (READONLY → public=True). `?days=N` (default 21)."""
     days = int(request.args.get("days", str(EFFORT_WINDOW_DAYS)))
     return jsonify(effort_discipline(get_db(), window_days=days, public=READONLY))
+
+
+@app.get("/api/run-metrics")
+def api_run_metrics():
+    """The queryable per-run metrics table + the self-re-running feel/heat/load analysis. Every column
+    is HR/health-derived, so this is PRIVATE-ONLY — 403 under READONLY (the coherence pattern, never the
+    sanitized effort-discipline one). `?route=<id>` filters to one recurring route, `?days=N` to a
+    window, `?limit=N` caps rows; `?analysis=0` returns just the table."""
+    if READONLY:
+        return jsonify(ok=False, error="per-run metrics are private"), 403
+    db = get_db()
+    route = request.args.get("route", type=int)
+    days = request.args.get("days", type=int)
+    limit = request.args.get("limit", type=int)
+    out = {"ok": True, "rows": run_metrics(db, route_id=route, days=days, limit=limit)}
+    if request.args.get("analysis", "1") != "0":
+        out["analysis"] = run_metrics_analysis(db)
+        # the worked example anchors on the latest run (or ?example=<id>), independent of the row filters
+        out["worked_example"] = worked_example(db, activity_id=request.args.get("example", type=int))
+    return jsonify(out)
 
 
 @app.get("/api/projector")
@@ -6977,7 +7385,7 @@ function plannedSession(s, easyPace){
   if(s.kind==="post") return `<div class="planned"><div class="rkick">Today's session</div>
     <div class="mrow"><span class="ttl">Re-base complete</span><span class="muted" style="font-size:13px">Regenerate to periodize the next phase.</span></div></div>`;
   if(s.kind==="rest") return `<div class="planned"><div class="rkick">Today's session</div>
-    <div class="mrow"><span class="ttl">Rest day</span><span class="muted" style="font-size:13px">${esc(s.note)}</span></div></div>`;
+    <div class="mrow"><span class="ttl">${s.optional?"Optional — week complete":"Rest day"}</span><span class="muted" style="font-size:13px">${esc(s.note)}</span></div></div>`;
   const act=s.actual||{};
   const kick=`Today's session · re-base week ${s.week}`+
     (s.done?` · <span style="color:var(--ok);font-weight:600">done ✓</span>`:"");
@@ -7409,7 +7817,9 @@ function weekHtml(w,p,today){
   if(w.start){ const we=new Date(w.start); we.setDate(we.getDate()+6);
     cur=!w.frozen && w.start<=today && today<=we.toISOString().slice(0,10); }
   const sess=w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="wsi${(s.reps&&s.reps.length)?' qs':''}">${sessSummary(s)}</span></div>`).join("");
-  const flags=[w.clipped?'<span class="down">clipped to fit ACWR</span>':'',
+  const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>':'',
+               w.fatigue_capped?'<span class="down" title="A building week, but recent fatigue left no ACWR headroom — the long run was held back. Load capped for safety, not silently degraded.">⚠ build intent capped by recent fatigue</span>'
+                 :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
                w.adjusted?'<span class="eased">eased</span>':'',
                w.frozen?'<span class="wfz">✓ done</span>':''].filter(Boolean).join(" · ");
   return `<div class="wk ${down?'wdown':''} ${w.frozen?'wfrozen':''} ${cur?'wcur':''}">
@@ -9712,6 +10122,7 @@ def _stc_projector(db):
 
 
 def _stc_acwr_ceiling(db):
+    from datetime import date
     p = generate_plan(db)
     if not (p.get("rebase") or {}).get("weeks"):
         return _st("det", "plan-acwr-ceiling", "every planned week's projected ACWR ≤ soft cap",
@@ -9721,21 +10132,37 @@ def _stc_acwr_ceiling(db):
     keys = ["rebase"] + [ph["key"] for ph in (p.get("phases") or [])
                          if ph.get("key") and ph["key"] != "rebase"]
     tagged = [(k, w) for k in keys for w in (p.get(k) or {}).get("weeks", [])]
-    over = [{"phase": k, "wk": w["wk"], "acwr": w.get("proj_acwr")} for k, w in tagged
+    # The governor only OWNS today-onward, FULL weeks. A past/elapsed week (block_start can sit weeks
+    # back) and the partial week straddling today both reflect already-lived load + the carried-in
+    # snapshot state — neither is the plan's to govern (the partial week's eow/peak is literally
+    # today's measured ATL/CTL), and history-integrity is covered by det/freeze-continuity. A real
+    # ATL spike in the seed (e.g. a hard session days ago) decays for ~2 weeks at low CTL and its
+    # tail can ride above the hard cap on these elapsed weeks no matter what the plan prescribes —
+    # asserting the ceiling there cries wolf on real, stale data. Scope to the weeks the governor controls.
+    today = date.today()
+    governed = [(k, w) for k, w in tagged
+                if not w.get("partial") and _date(w["start"]) >= today]
+    over = [{"phase": k, "wk": w["wk"], "acwr": w.get("proj_acwr")} for k, w in governed
             if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02]
     # §H1 — end-of-week ≤ soft cap is the primary bound; the in-week PEAK must also never breach the
     # HARD cap. (On a healthy-CTL plan the peak is slack — the dedicated lock is _stc_peak_acwr_floor,
     # which forces the low-CTL breaching condition. This guards any plan that drifts into it.)
-    peak_over = [{"phase": k, "wk": w["wk"], "peak": w.get("peak_acwr")} for k, w in tagged
-                 if (w.get("peak_acwr") or 0) > ACWR_HARD]
+    # A peak breach is excused ONLY when the week was clipped (`clipped`): the governor already drove
+    # this week's load to its floor, so the residual peak is pure carried-in seed decay it cannot
+    # touch. An UNCLIPPED governed week breaching peak = headroom the governor failed to use → caught.
+    peak_over = [{"phase": k, "wk": w["wk"], "peak": w.get("peak_acwr")} for k, w in governed
+                 if not w.get("clipped") and (w.get("peak_acwr") or 0) > ACWR_HARD]
     counts = {k: len((p.get(k) or {}).get("weeks", [])) for k in keys}
     return _st("det", "plan-acwr-ceiling",
-               f"every week: end-ACWR ≤ soft cap {ACWR_SOFT} AND peak-ACWR ≤ hard cap {ACWR_HARD}, all phases",
+               f"every governed (today-onward, full) week: end-ACWR ≤ soft cap {ACWR_SOFT} AND, unless "
+               f"clipped, peak-ACWR ≤ hard cap {ACWR_HARD}, all phases",
                passed=not over and not peak_over, expect=f"eow≤{ACWR_SOFT}, peak≤{ACWR_HARD}",
                got="all within" if not (over or peak_over) else {"eow_over": over, "peak_over": peak_over},
-               output={"phase_weeks": counts,
-                       "max_acwr": max((w.get("proj_acwr") or 0 for _ph, w in tagged), default=None),
-                       "max_peak": max((w.get("peak_acwr") or 0 for _ph, w in tagged), default=None)})
+               output={"phase_weeks": counts, "governed_weeks": len(governed),
+                       "max_acwr": max((w.get("proj_acwr") or 0 for _ph, w in governed), default=None),
+                       "max_peak": max((w.get("peak_acwr") or 0 for _ph, w in governed), default=None),
+                       "max_acwr_all": max((w.get("proj_acwr") or 0 for _ph, w in tagged), default=None),
+                       "max_peak_all": max((w.get("peak_acwr") or 0 for _ph, w in tagged), default=None)})
 
 
 def _stc_peak_acwr_floor():
@@ -9767,6 +10194,278 @@ def _stc_peak_acwr_floor():
                passed=not fail, expect=f"low-CTL peak ≤ {ACWR_HARD}; quality kept when affordable",
                got={"low_ctl_peak": round(lo_peak, 3), "healthy_keeps_quality": has_quality,
                     "failures": fail or "none"})
+
+
+def _stc_building_load_integrity():
+    """A building phase (Base/Build/Peak) must never silently hand back a fitness-trivial 'long run'.
+    From a HEALTHY post-re-base seed every non-down week delivers a real long run (≥ LONG_RUN_MIN_KM,
+    still labeled long/long_mp) and no week is flagged fatigue_capped — the normal building path is
+    intact. Under a FATIGUE SPIKE the governor still clips for safety (it never force-loads past the
+    ceiling), but the honesty pass MUST engage: the gutted long run is relabeled a shakeout (no longer
+    'long') AND the week is flagged fatigue_capped, and the block recovers a real long run once the
+    spike decays. This locks the user-visible promise — a building week either delivers load or says
+    why it couldn't, never a habit-only session masquerading as a long run. Pure/in-memory."""
+    from datetime import date
+    z = {"easy_top": 360, "easy": 360, "threshold": 270, "interval": 240, "marathon": 300}
+    bs = date(2026, 8, 1)
+    fail = []
+    longs = lambda w: [s for s in w["sessions"] if s.get("kind") in ("long", "long_mp")]
+    # (a) healthy seed — every non-down week of each building phase delivers a real long run, uncapped.
+    for name, shape in (("base", base_shape(8, 30)), ("build", build_shape(6, 34)), ("peak", peak_shape(4, 36))):
+        weeks, _ = generate_block(shape, bs, 30.0, 28.0, 360.0, zones=z)
+        for w in weeks:
+            if _is_down(w.get("intent")):
+                continue
+            ls = longs(w)
+            if not ls or (ls[0].get("km") or 0) < LONG_RUN_MIN_KM:
+                fail.append(f"{name} wk{w['wk']}: no real long run at healthy CTL (got {ls[0].get('km') if ls else None})")
+            if w.get("fatigue_capped"):
+                fail.append(f"{name} wk{w['wk']}: spuriously fatigue_capped at healthy CTL")
+    # (b) fatigue spike — in EVERY building phase named (Base/Build/Peak) the honesty pass engages on
+    # the gutted early week (in Build/Peak via the §H1 quality-strip → plain long → relabel), then the
+    # block recovers a real long run as the spike decays.
+    spike_caps = {}
+    for name, shape in (("base", base_shape(8, 30)), ("build", build_shape(6, 34)), ("peak", peak_shape(4, 36))):
+        spk, _ = generate_block(shape, bs, 30.0, 58.0, 360.0, zones=z)
+        capped = [w["wk"] for w in spk if w.get("fatigue_capped")]
+        spike_caps[name] = capped
+        relabeled = any(w.get("long_capped") and not [s for s in w["sessions"] if s.get("kind") == "long"]
+                        for w in spk)
+        recovered = any((not w.get("fatigue_capped")) and
+                        [s for s in w["sessions"] if s.get("kind") in ("long", "long_mp") and (s.get("km") or 0) >= LONG_RUN_MIN_KM]
+                        for w in spk)
+        if not capped:
+            fail.append(f"{name}: fatigue spike produced no fatigue_capped week (honesty pass never engaged)")
+        if not relabeled:
+            fail.append(f"{name}: a gutted long run was not relabeled off 'long'")
+        if not recovered:
+            fail.append(f"{name}: block never recovered a real long run after the spike decayed")
+    # (c) taper/race week must NEVER be falsely flagged — its short long run is by design, not a cap.
+    tap, _ = generate_block(taper_shape(3, 36), bs, 35.0, 30.0, 360.0, zones=z)
+    if any(w.get("fatigue_capped") or w.get("long_capped") for w in tap):
+        fail.append("taper/race week falsely flagged as fatigue-capped (deliberately light, not a cap)")
+    return _st("det", "building-load-integrity",
+               "building phases deliver a real long run from a healthy seed; under a fatigue spike each "
+               "of Base/Build/Peak relabels the gutted long run + flags fatigue_capped then recovers; "
+               "taper/race week is never falsely flagged",
+               passed=not fail, expect="healthy: long≥min, uncapped; spiked: relabel+flag+recover; taper: never flagged",
+               got={"spike_capped_weeks": spike_caps, "failures": fail or "none"})
+
+
+def _stc_frequency_met():
+    """§6e-FREQ — once the CURRENT week's prescribed run COUNT *and* volume are both already logged,
+    the partial-week remainder is dropped to optional rest (a met-week junk run does nothing for
+    aerobic shape). Short on EITHER bar (too few runs, or 4 tiny junk jogs) ⇒ the remaining run is
+    still prescribed. No actuals (legacy callers) ⇒ unchanged. Never forces load. Pure/in-memory."""
+    from datetime import date, timedelta
+    bs = date(2026, 8, 3)                  # a Monday
+    today = bs + timedelta(days=6)         # Sunday — a planned run day straddles
+    wkshape = [{"wk": 1, "km": 15, "runs": 4, "long": 6, "strides": 0, "intent": "x"}]
+
+    def week(actuals):
+        wks, _ = generate_block(wkshape, bs, 30.0, 28.0, 360.0, today=today, week_actuals=actuals)
+        return wks[0]
+
+    def run_today(w):
+        return [s for s in w["sessions"] if s["date"] == today.isoformat()
+                and s.get("kind") in ("easy", "long", "long_mp") and (s.get("km") or 0) > 0]
+
+    fail = []
+    met = week((4, 24.0))                  # count (4≥4) AND volume (24≥15) both met
+    if not met.get("frequency_met"):
+        fail.append("count+volume met but frequency_met not set")
+    if run_today(met):
+        fail.append("met week still prescribed a run today")
+    if not any(s.get("kind") == "rest" and "frequency met" in (s.get("note") or "").lower()
+               for s in met["sessions"] if s["date"] == today.isoformat()):
+        fail.append("met week missing the optional-rest note")
+    short_runs = week((2, 24.0))           # volume ok, run COUNT short
+    if short_runs.get("frequency_met") or not run_today(short_runs):
+        fail.append("count-short week wrongly dropped the run / set the flag")
+    short_vol = week((4, 5.0))             # count ok, VOLUME short (4 junk jogs)
+    if short_vol.get("frequency_met") or not run_today(short_vol):
+        fail.append("volume-short week wrongly dropped the run / set the flag")
+    legacy = week(None)                    # no actuals (existing callers) — unchanged
+    if legacy.get("frequency_met") or not run_today(legacy):
+        fail.append("legacy (no actuals) path changed behaviour")
+    # INTEGRATION — the value must survive the _split_freeze hop (the real delivery path from
+    # generate_plan), not just the direct generate_block call: a dropped pass-through would leave this
+    # unit green while the live plan silently re-forces the run (the "canned harness proves DESIGN not
+    # INTEGRATION" lesson). generate_plan itself reads today=now() so can't be driven deterministically.
+    sf_weeks, *_ = _split_freeze(wkshape, bs, (30.0, 28.0), 360.0, None, None, {}, today, (4, 24.0))
+    sf_partial = [w for w in sf_weeks if w.get("partial")]
+    if not (sf_partial and sf_partial[0].get("frequency_met")):
+        fail.append("_split_freeze did not propagate week_actuals → frequency_met")
+    return _st("det", "frequency-met",
+               "current week's run count+volume both met ⇒ remaining run becomes optional rest; short "
+               "on either ⇒ run still prescribed; no actuals ⇒ unchanged",
+               passed=not fail, expect="met⇒rest+flag; short⇒run kept; legacy⇒run kept",
+               got={"met_flag": met.get("frequency_met"), "failures": fail or "none"})
+
+
+def _stc_run_metrics():
+    """The queryable per-run table — locks the INVARIANTS that make it trustworthy, not just "returns
+    rows": (a) non-run sports excluded, (b) dropped_ids (dup ∪ manual-ignore) excluded so it agrees with
+    every other surface, (c) a missing x_pace ⇒ hr_cost NULL (the NULLIF guard, no divide error), (d) a
+    hand-checked hr_cost value, (e) snapshot/HRV joined on date, (f) the analysis surfaces the same-temp
+    noise floor + carries the not-causation caveat. In-memory so it never touches the real DB."""
+    import sqlite3 as _sq, json as _j
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+        "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, training_effect REAL, raw TEXT);"
+        "CREATE TABLE shape_snapshots(snapshot_date TEXT PRIMARY KEY, captured_at TEXT, effective_vo2max REAL, "
+        "effective_vo2max_progress REAL, fitness REAL, fatigue REAL, performance REAL, fitness_pct REAL, "
+        "acwr REAL, marathon_shape REAL, hrv_baseline REAL, monotony REAL, training_strain REAL, raw TEXT);"
+        "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
+    def ins(i, d, sport=RUNNING_SPORT, dist=5.0, hr=150, raw=None, dt=None, trimp=70.0):
+        mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,hr_avg,trimp,raw) VALUES(?,?,?,?,?,?,?,?)",
+                    (i, dt or (d + "T18:00:00"), d, sport, dist, hr, trimp, _j.dumps(raw or {})))
+    ins(1, "2026-06-16", hr=147, raw={"recurring_route": {"id": 700}, "temperature": 23, "x_pace": 8.54,
+                                       "gap": 8.46, "subjective_feeling": 3, "aerobic_decoupling_pace": 1380})
+    ins(2, "2026-06-18", hr=143, raw={"recurring_route": {"id": 700}, "temperature": 28, "x_pace": 8.26,
+                                       "subjective_feeling": 4})
+    ins(3, "2026-06-20", hr=154, raw={"recurring_route": {"id": 800}, "temperature": 26, "x_pace": 8.65})
+    ins(4, "2026-06-22", hr=152, raw={"recurring_route": {"id": 800}, "temperature": 26, "x_pace": 8.20})  # same-temp pair
+    ins(5, "2026-06-21", sport="Cycling", dist=20, hr=120, raw={"x_pace": 25.0})                            # not a run
+    ins(6, "2026-06-19", hr=160, raw={"recurring_route": {"id": 700}})                                      # no x_pace ⇒ NULL hr_cost
+    ins(7, "2026-06-23", dt="2026-06-23T09:00:00", hr=158, raw={"x_pace": 8.5})                             # keeper of a dup pair
+    ins(8, "2026-06-23", dt="2026-06-23T09:00:00", hr=158, raw={"x_pace": 8.5})                             # exact dup ⇒ dropped
+    mem.execute("INSERT INTO ignored_activities(id,reason) VALUES(2,'manual')")                             # manual-ignore id 2
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,fitness,fatigue,acwr,effective_vo2max,hrv_baseline) "
+                "VALUES('2026-06-20',28,45,1.6,33.5,40)")
+    mem.execute("INSERT INTO health_markers VALUES('hrv','2026-06-20',48,'runalyze',NULL)")
+    mem.executescript(RUN_METRICS_VIEW)
+    mem.commit()
+
+    fail = []
+    ids = {r["id"] for r in mem.execute("SELECT id FROM run_metrics")}
+    if 5 in ids:
+        fail.append("cycling activity leaked into the run table")
+    if 2 in ids:
+        fail.append("manual-ignored id not excluded (disagrees with dropped_ids)")
+    if 8 in ids or 7 not in ids:
+        fail.append(f"dedup wrong: keeper/dup handling off ({sorted(ids)})")
+    r6 = mem.execute("SELECT hr_cost FROM run_metrics WHERE id=6").fetchone()
+    if r6 is None or r6["hr_cost"] is not None:
+        fail.append("missing x_pace did not yield NULL hr_cost (NULLIF guard)")
+    r1 = mem.execute("SELECT hr_cost,temp_c,route_id FROM run_metrics WHERE id=1").fetchone()
+    if not r1 or round(r1["hr_cost"], 2) != round(147 / 8.54, 2):
+        fail.append(f"hr_cost math off: {r1 and r1['hr_cost']} vs {round(147/8.54,2)}")
+    r3 = mem.execute("SELECT ctl_snapshot,atl_snapshot,hrv_today FROM run_metrics WHERE id=3").fetchone()
+    if not r3 or r3["ctl_snapshot"] != 28 or r3["atl_snapshot"] != 45 or r3["hrv_today"] != 48:
+        fail.append("date-join (snapshot/HRV) did not land on the run")
+
+    # PROJECTOR BACKFILL — fatigue must be present for EVERY run (not just the 1 snapshot day), and
+    # acwr_proj must equal atl_proj/ctl_proj. This is what turns the n=7 fatigue finding into full-history.
+    enriched = {r["id"]: r for r in run_metrics(mem, with_projection=True)}
+    no_proj = [i for i, r in enriched.items() if r.get("atl_proj") is None or r.get("ctl_proj") is None]
+    if no_proj:
+        fail.append(f"projector backfill missing on runs {sorted(no_proj)} (should cover all)")
+    rp = enriched.get(3)
+    if rp and rp.get("ctl_proj") and rp.get("acwr_proj") != round(rp["atl_proj"] / rp["ctl_proj"], 2):
+        fail.append(f"acwr_proj != atl_proj/ctl_proj ({rp.get('acwr_proj')})")
+    off = run_metrics(mem, with_projection=False)
+    if any("atl_proj" in r for r in off):
+        fail.append("with_projection=False still emitted proj columns")
+
+    an = run_metrics_analysis(mem)
+    # the same-temp pair (ids 3,4 @26°) defines the noise floor; |Δhr_cost| = |152/8.20 - 154/8.65|
+    exp_nf = round(abs(round(152 / 8.20, 2) - round(154 / 8.65, 2)), 2)
+    if an["same_temp_noise_floor"] != exp_nf:
+        fail.append(f"same-temp noise floor wrong: {an['same_temp_noise_floor']} vs {exp_nf}")
+    if not any("causation" in c.lower() for c in an["caveats"]):
+        fail.append("analysis dropped the not-causation caveat")
+    if an["n_with_load_snapshot"] != 1:
+        fail.append(f"load-snapshot coverage count off: {an['n_with_load_snapshot']}")
+    if an["n_with_load_proj"] != len(ids):
+        fail.append(f"projector load coverage {an['n_with_load_proj']} != all {len(ids)} runs")
+    # the proj fatigue correlation draws on every run with hr_cost, far past the snapshot's single day
+    if an["cross_regime_rho"]["atl_proj_vs_hr_cost"]["n"] <= an["n_with_load_snapshot"]:
+        fail.append("proj fatigue correlation n not larger than the snapshot window")
+    # the headline must be the controlled same-route paired test, kept distinct from the cross-regime one
+    if "d_temp_vs_d_hr_cost" not in an["controlled_pairs_rho"] or "controlled_pairs_n" not in an:
+        fail.append("controlled paired test (the valid headline) missing from analysis")
+    mem.close()
+    return _st("det", "run-metrics",
+               "queryable per-run table: non-runs + dropped_ids excluded (agrees with every surface), "
+               "missing x_pace ⇒ NULL hr_cost, hand-checked hr_cost + date-joins; projector backfills "
+               "ctl/atl/acwr for EVERY run (acwr=atl/ctl); analysis exposes the same-temp noise floor + "
+               "keeps the not-causation caveat",
+               passed=not fail, expect="invariants hold + full-history fatigue backfill",
+               got={"rows": sorted(ids), "noise_floor": an["same_temp_noise_floor"],
+                    "proj_cover": an["n_with_load_proj"], "failures": fail or "none"})
+
+
+def _stc_worked_example():
+    """The auto-generated controlled worked example: same-route deltas vs the nearest peer + the FACT of
+    feel/objective divergence — and crucially NO per-case verdict (the n=1 trap this session disproved).
+    Locks: (a) the tonight-like case (feel↑ while ATL↑ + HRV↓) flags feel_objective_diverged True with
+    the right deltas, (b) no same-route peer ⇒ ok:False (uncontrolled, not comparable), (c) a feel-less
+    target degrades gracefully (deltas emitted, divergence None). In-memory; never touches the real DB."""
+    import sqlite3 as _sq, json as _j
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+        "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, training_effect REAL, raw TEXT);"
+        "CREATE TABLE shape_snapshots(snapshot_date TEXT PRIMARY KEY, captured_at TEXT, effective_vo2max REAL, "
+        "effective_vo2max_progress REAL, fitness REAL, fatigue REAL, performance REAL, fitness_pct REAL, "
+        "acwr REAL, marathon_shape REAL, hrv_baseline REAL, monotony REAL, training_strain REAL, raw TEXT);"
+        "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
+    def ins(i, d, route, hr, sp, feel, trimp=70.0):
+        raw = {"recurring_route": {"id": route}, "temperature": 25, "x_pace": sp, "gap": sp}
+        if feel is not None:
+            raw["subjective_feeling"] = feel
+        mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,hr_avg,trimp,raw) VALUES(?,?,?,?,?,?,?,?)",
+                    (i, d + "T18:00:00", d, RUNNING_SPORT, 7.0, hr, trimp, _j.dumps(raw)))
+    # tonight-like: route 900 — peer (earlier) feel 4, then target feel 5 with LOWER hr_cost (hr 146<152)
+    ins(1, "2026-06-22", 900, 152, 8.20, 4)         # peer
+    ins(2, "2026-06-28", 900, 146, 8.59, 5)         # target: feel↑, efficiency↑ (hr↓)
+    # an uncontrolled run on a one-off route (no same-route peer)
+    ins(3, "2026-06-27", 555, 160, 8.65, 3)
+    # HRV: target lower than peer (objective WORSE), and ATL higher via more trimp around the target date
+    mem.execute("INSERT INTO health_markers VALUES('hrv','2026-06-22',44,'r',NULL)")
+    mem.execute("INSERT INTO health_markers VALUES('hrv','2026-06-28',28,'r',NULL)")
+    # pile recent load so atl_proj(target) > atl_proj(peer): extra runs in the days before the target
+    for k, dd in enumerate(("2026-06-24", "2026-06-25", "2026-06-26", "2026-06-27"), start=10):
+        ins(k, dd, 700 + k, 150, 8.4, 3, trimp=140.0)
+    mem.executescript(RUN_METRICS_VIEW); mem.commit()
+
+    fail = []
+    we = worked_example(mem)                          # anchors on the latest run = id 2 (the target)
+    if not we.get("ok") or we["target"]["date"] != "2026-06-28":
+        fail.append(f"did not anchor on the latest controlled run: {we.get('reason') or we.get('target')}")
+    elif we["nearest_peer"]["date"] != "2026-06-22":
+        fail.append(f"nearest same-route peer wrong: {we['nearest_peer']['date']}")
+    elif we["deltas_vs_nearest"]["hr_cost"] >= 0:
+        fail.append(f"efficiency delta sign wrong: {we['deltas_vs_nearest']['hr_cost']}")
+    elif we["feel_direction"] != 1:
+        fail.append(f"feel direction not +1: {we['feel_direction']}")
+    elif we["feel_objective_diverged"] is not True:
+        fail.append(f"tonight-like divergence not flagged: {we.get('objective_readiness')}")
+    elif "hrv_today" not in we["diverged_markers"]:
+        fail.append(f"HRV (target 28<44) not among the diverged markers: {we['diverged_markers']}")
+    # (b) explicit no-peer run ⇒ ok:False
+    we3 = worked_example(mem, activity_id=3)
+    if we3.get("ok") is not False or "no same-route peer" not in we3.get("reason", ""):
+        fail.append(f"uncontrolled run not handled: {we3}")
+    # (c) a feel-less target degrades gracefully (deltas present, divergence None)
+    ins(99, "2026-06-29", 900, 150, 8.3, None); mem.executescript(RUN_METRICS_VIEW); mem.commit()
+    we99 = worked_example(mem, activity_id=99)
+    if not we99.get("ok") or we99["feel_direction"] is not None or we99["feel_objective_diverged"] is not None:
+        fail.append(f"feel-less target did not degrade gracefully: {we99.get('feel_direction')}")
+    if we99.get("ok") and we99["deltas_vs_nearest"].get("hr_cost") is None:
+        fail.append("feel-less target dropped the (still-valid) efficiency delta")
+    mem.close()
+    return _st("det", "worked-example",
+               "auto controlled worked example: same-route nearest-peer deltas + feel/objective divergence "
+               "as a FACT (no n=1 verdict); uncontrolled run ⇒ ok:False; feel-less target degrades to "
+               "deltas-only with divergence None",
+               passed=not fail, expect="divergence flagged on the tonight-like case; graceful edges",
+               got={"diverged": we.get("feel_objective_diverged"),
+                    "markers": we.get("diverged_markers"), "failures": fail or "none"})
 
 
 def _stc_base_phase():
@@ -10932,7 +11631,9 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_health_sync(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
-                 lambda: _stc_peak_acwr_floor(),
+                 lambda: _stc_peak_acwr_floor(), lambda: _stc_building_load_integrity(),
+                 lambda: _stc_frequency_met(),
+                 lambda: _stc_run_metrics(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
                  lambda: _stc_cross_phase_freeze_integration(),
                  lambda: _stc_bridge_no_ctl_floor(), lambda: _stc_feasibility_floor(),
