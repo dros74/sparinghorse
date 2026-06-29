@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-29
+
+A more accurate read on your fitness, and a safety fix that keeps easy days easy when you're
+rebuilding from a low base.
+
+### Fixed
+- **More precise fitness & fatigue reconstruction** — the reconstructed fitness/fatigue curve was
+  systematically undershooting the values your training service reports, and the gap grew as
+  training load rose. The smoothing was corrected so the reconstruction now matches the source
+  closely across both rest days and hard days. This sharpens every place the plan reasons about
+  fatigue.
+
+### Changed
+- **Easy days stay easy at low fitness** — when fitness is low and the safety governor trims a
+  week's volume hard, the small fixed amount of quality work could become an outsized share of the
+  shrunken week, leaving you doing intensity exactly when you're most fragile. The plan now drops
+  that week's quality to easy — never adding volume — so the week stays genuinely easy-dominant,
+  and restores the quality automatically as fitness returns. Your marathon-pace long-run finish is
+  preserved; only true high-intensity work is held back.
+
 ## [0.5.0] - 2026-06-28
 
 The plan starts learning from how a run actually went — not just that it happened. Every run
