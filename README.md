@@ -14,6 +14,11 @@ you below what your own data proves you can do.*
 
 Named for Pheidippides, who *spares the horse by being the horse*.
 
+> **Engine status — under active development.** The training-plan engine is evolving quickly: its
+> heuristics, safety levers and outputs can change between versions as the underlying model matures.
+> Treat its plans as an informed, safety-governed starting point to reason about — not a fixed
+> prescription — and read them alongside the *Not medical advice* note below.
+
 > **Not medical advice.** Sparing Horse is a training tool, not a medical device. It tracks and visualizes
 > your own data and applies sports-science heuristics; it does not diagnose. Its readiness gate flags
 > stop-the-run / cardiac-type symptoms and tells you to **see a doctor** — always do. Train at your own risk.

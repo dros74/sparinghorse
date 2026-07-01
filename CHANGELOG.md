@@ -6,7 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: the minor version moves for features, the patch version for fixes).
 
+> **Status — the training-plan engine is under heavy, active development.** Its behaviour, levers and
+> outputs may change between releases as the model matures. Versions are checkpoints on a moving
+> target, not a stable API.
+
 ## [Unreleased]
+
+## [0.7.0] - 2026-06-30
+
+The plan now *uses the safe headroom your own metrics reveal* instead of always playing it timid —
+an accelerator to match the brakes — while keeping every safety guardrail intact.
+
+### Added
+- **Adaptive, goal-driven progressive overload (the "assertive" build).** Once your data shows the
+  restart caution isn't needed — a clean symptom/medical window, settled readiness, and a couple of
+  well-absorbed weeks banked — the engine graduates from the conservative re-base into an assertive
+  build that *rides the safe ACWR ceiling* rather than a timid fixed ramp, so volume and load grow as
+  fast as the science safely allows and your fitness is retained through the build instead of bleeding
+  away. It's earned automatically from your training data (never from raw fitness alone), and the
+  conservative regime stays byte-for-byte identical for anyone still rebuilding.
+- **A self-calibrating sense of your response.** The build compares your measured fitness to what it
+  projected and eases off when you're falling behind, rides the full ceiling when you're on track —
+  your own rate of adaptation tunes how hard it pushes.
+- **Finish-time honesty valve.** A short runway isn't a refusal — it's a slower projected finish, and
+  now the plan says so: a projected marathon time plus how it improves with more weeks of runway.
+- **Two new at-a-glance surfaces on the plan** — a regime badge (with the reason it chose conservative
+  vs assertive) and the finish-time curve.
+
+### Safety
+- Every brake is preserved and was adversarially reviewed: the ACWR ceiling is never breached, a
+  recovery trough and periodic deloads bound the connective-tissue load the ratio can't see, readiness
+  and symptom halts still dominate, and a recent medical hold keeps the conservative regime in force.
 
 ## [0.6.0] - 2026-06-29
 

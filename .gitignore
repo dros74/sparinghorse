@@ -36,5 +36,12 @@ tmp/
 # local-only NAS pull helper (contains LAN host)
 pull_live_db.sh
 
+# verbatim copyrighted-book OCR — reference only, NEVER commit/mirror (kept on Desktop)
+book_raw.txt
+book_clean.txt
+book_summaries.txt
+JohnDavis-*/
+page_*.png
+
 # private dev notes — never in the public mirror
 PROJECT_LOG.md

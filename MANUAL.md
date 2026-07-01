@@ -7,6 +7,9 @@ one-paragraph pitch, the feature list and the public-vs-private capability matri
 > **Not medical advice.** Sparing Horse is a training tool, not a medical device. Its readiness gate flags
 > stop-the-run / cardiac-type symptoms and tells you to see a doctor — always do. Train at your own risk.
 
+> **Engine under active development.** The plan engine's heuristics, levers and outputs are still evolving
+> and can change between versions. Use its plans as an informed starting point, not a fixed prescription.
+
 ---
 
 ## Contents
