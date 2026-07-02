@@ -1369,13 +1369,14 @@ def _effort_verdict(kind, hrf, te, easy_frac=EASY_HR_FRAC, hard_frac=HARD_HR_FRA
     return ("too_easy" if hrf < easy_frac else "on"), "low"
 
 
-def _effort_verdict_pace(kind, gap_pace, zones):
-    """The PUBLIC, PACE-based easy-discipline verdict — no heart rate (HR stays private). An aerobic
-    (easy/long) run is judged on grade-adjusted pace vs the pace zones: 'on' at/slower than the easy
-    ceiling (a 3% grace for GPS/grade noise), 'too_hard' faster than marathon pace, 'hot' between. A
-    quality run isn't pace-judged here — the honest 'did you hit it' read needs HR — so it's 'unknown'
-    (excluded from the score). gap_pace/zones are sec/km; larger = slower."""
-    easy_ceiling = (zones or {}).get("easy_top")
+def _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="easy_top"):
+    """The PACE-based easy-discipline verdict — no heart rate. An aerobic (easy/long) run is judged on
+    grade-adjusted pace vs the pace zones: 'on' at/slower than the easy ceiling (a 3% grace for GPS/grade
+    noise), 'too_hard' faster than marathon pace, 'hot' between. A quality run isn't pace-judged here — the
+    honest 'did you hit it' read needs HR — so it's 'unknown' (excluded). gap_pace/zones are sec/km; larger
+    = slower. `ceiling_key` selects the easy bar: 'easy_top' (the conservative public ceiling) or 'lt1' (the
+    §3.4 fitness-tracking LT1 = Davis's aerobic-threshold easy bar; used as the private moving anchor)."""
+    easy_ceiling = (zones or {}).get(ceiling_key) or (zones or {}).get("easy_top")
     if not gap_pace or not easy_ceiling or kind not in AEROBIC_KINDS:
         return "unknown"
     if gap_pace >= easy_ceiling * (1 - EASY_PACE_GRACE):
@@ -1480,10 +1481,26 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             if not r["hr_avg"]:                           # HR-judged → needs HR
                 continue
             te = raw.get("fit_training_effect")
-            if use_lthr:                                  # judge on %LTHR (Friel ceilings)
+            # §3.4 verdict switch — the PACE-vs-LT1 cross-check on the MOVING, fitness-tracking LT1 bar
+            # (the §6.3 anchor), computed for every run so the monitor visibly reads against LT1, not a
+            # fixed %HRmax. HR stays the PRIMARY easiness truth WHERE a trustworthy (moving) LTHR exists —
+            # his own data shows HR is the honest read of easiness (low HR = easy whatever the pace) and a
+            # naive flip to pace-primary would over-police a detrained rebuild (the reconciled §3.4 finding).
+            pace_verdict = _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="lt1")
+            if use_lthr:                                  # HR-led on the MOVING LTHR (Friel %LTHR ceilings)
                 verdict, conf = _effort_verdict(kind, r["hr_avg"] / lthr_info["lthr"], te,
                                                 LTHR_EASY_FRAC, LTHR_HARD_FRAC)
-            else:                                         # %HRmax fallback (unchanged)
+            elif pace_verdict != "unknown":               # no trustworthy LTHR ⇒ the moving pace-LT1 bar
+                verdict, conf = pace_verdict, "moderate"   #   (RETIRES the fixed %HRmax fallback, §3.4)
+                # SAFETY CATCH (§3.4 fix 2026-07-01) — pace-easy can NEVER override a genuine HR redline.
+                # Mild cardiac decoupling (easy pace, HR merely elevated 78–85%) is deliberately NOT policed
+                # — the reconciled finding, and why HR isn't primary here. But an easy-PACED run whose HR sat
+                # at THRESHOLD+ effort (≥ the hard bar) was hard on the honest axis (TRIMP already scores it
+                # so), so it can't read easy/hot — else the monitor tells a detrained returner his redline was
+                # fine. Retiring the fixed %HRmax bar dropped this catch; restore it as a one-way escalation.
+                if hrmax and verdict in ("too_easy", "on", "hot") and r["hr_avg"] / hrmax >= HARD_HR_FRAC:
+                    verdict, conf = "too_hard", "moderate"
+            else:                                         # no pace either ⇒ last-resort %HRmax cross-check
                 hrf = (r["hr_avg"] / hrmax) if hrmax else None
                 verdict, conf = _effort_verdict(kind, hrf, te)
             runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
@@ -1491,7 +1508,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                          "hr_pct": round(r["hr_avg"] / hrmax * 100) if hrmax else None,
                          "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
                          "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
-                         "verdict": verdict, "confidence": conf})
+                         "verdict": verdict, "confidence": conf, "pace_verdict": pace_verdict})
     aerobic = [x for x in runs if x["kind"] in AEROBIC_KINDS]
     quality = [x for x in runs if x["kind"] not in AEROBIC_KINDS]
     on = sum(1 for x in aerobic if x["verdict"] == "on")
@@ -1514,9 +1531,18 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             out["lthr"] = lthr_info["lthr"]
             out["lthr_confidence"] = lthr_info["confidence"]
             out["easy_hr_ceiling"] = round(LTHR_EASY_FRAC * lthr_info["lthr"])
+        elif zones.get("lt1"):
+            # §3.4 verdict switch — no trustworthy LTHR but a VO2max snapshot exists ⇒ the PRIMARY easy bar
+            # is the moving pace-LT1 (Davis), NOT the old fixed %HRmax; %HRmax is kept as a context cross-check.
+            out["anchor"] = "lt1_pace"
+            out["easy_pace_ceiling"] = fmt_pace(zones["lt1"])
+            out["easy_hr_ceiling"] = round(EASY_HR_FRAC * hrmax) if hrmax else None
         else:
+            # last resort: no trustworthy LTHR AND no VO2max snapshot for a pace bar ⇒ the %HRmax read
             out["anchor"] = "hrmax"
             out["easy_hr_ceiling"] = round(EASY_HR_FRAC * hrmax) if hrmax else None
+        # §3.4 — the moving, PACE-anchored LT1 the easy bar sits under (Davis; HR above is the cross-check).
+        out["lt1"] = lt1(db)
     return out
 
 
@@ -1588,6 +1614,45 @@ def pace_hr_coherence(db, window_days=EFFORT_WINDOW_DAYS):
     return {"ok": True, "verdict": verdict, "n_easy_paced": n_easy_paced, "n_hr_over": n_hr_over,
             "frac_over": frac_over, "easy_pace_ceiling": easy_top, "easy_hr_ceiling": easy_hr_ceiling,
             "anchor": anchor, "note": note}
+
+
+def lt1(db, today=None):
+    """§3.4 (ENGINE_SCIENCE.md §3.4) — the fitness-tracking LT1 (aerobic threshold): the PACE-anchored easy
+    bar, per the §6.3 decision that pace is the intensity anchor and HR the cross-check. Davis: LT1 ≈ 80% of
+    5k pace, and easy runs must sit BELOW LT1. Two anchors, reconciled:
+      • PACE (primary): LT1 velocity = LT1_5K_FRAC × (V5K_VVO2MAX_FRAC × vVO2max), off the CURRENT effective
+        VO2max — so the bar MOVES with fitness (a detrained rebuild gets a SLOWER LT1, never a stale fast one).
+      • HR (cross-check): the derived-LTHR easy ceiling (LTHR_EASY_FRAC × LTHR) when LTHR is trustworthy.
+    Also flags DETRAINED (pace ahead of HR — cardiac decoupling): on a rebuild his easy runs sit a touch above
+    LT1, which is NORMAL and self-corrects, so we DON'T over-police it (the reconciled §3.4 finding — trust
+    HR/effort on easy days then). Read-only; carries HR ⇒ PRIVATE. Does NOT change any prescription or the
+    effort verdict — it's the surfaced, moving easy-bar reference the monitor reads against."""
+    snap = latest_snapshot(db)
+    zones = pace_zones(snap["effective_vo2max"]) if snap else {}
+    lt1_pace, p5k = zones.get("lt1"), zones.get("p5k")     # sec/km (larger = slower; easy sits BELOW LT1)
+    info = derive_lthr(db, today=today)
+    use_lthr = info.get("source") == "derived" and info.get("confidence") in LTHR_MIN_CONFIDENCE
+    hr_ceiling = round(LTHR_EASY_FRAC * info["lthr"]) if (use_lthr and info.get("lthr")) else None
+    coh = pace_hr_coherence(db)                            # the existing pace-vs-HR consistency diagnostic
+    detrained = coh.get("verdict") == "pace_ahead_of_hr"
+    if not lt1_pace:
+        return {"ok": False, "reason": "no VO2max snapshot to derive an LT1 pace",
+                "hr_easy_ceiling": hr_ceiling}
+    note = ("LT1 (aerobic threshold) is your easy-day ceiling — keep easy runs SLOWER than this. It's "
+            "≈80% of your 5k pace and tracks your current fitness; HR is the cross-check.")
+    if detrained:
+        note += (" Right now your easy pace is a touch faster than LT1 for the heart rate it costs (cardiac "
+                 "decoupling during the rebuild) — normal, and it self-corrects as fitness returns, so trust "
+                 "HR/effort on easy days; we don't police easy pace here.")
+    return {
+        "ok": True,
+        "lt1_pace": lt1_pace, "lt1_pace_fmt": fmt_pace(lt1_pace),
+        "p5k_pace": p5k, "p5k_pace_fmt": fmt_pace(p5k), "lt1_5k_frac": LT1_5K_FRAC,
+        "vo2max": snap["effective_vo2max"] if snap else None,
+        "hr": {"anchor": ("lthr" if use_lthr else None), "easy_ceiling": hr_ceiling,
+               "lthr": info.get("lthr") if use_lthr else None, "confidence": info.get("confidence")},
+        "agreement": coh.get("verdict"), "detrained": detrained, "note": note,
+    }
 
 
 # ── Per-run metrics table + self-re-running analysis (the feel/heat/load data foundation) ────────
@@ -1743,6 +1808,7 @@ def run_metrics_analysis(db):
         "same_temp_noise_floor": noise_floor,
         "controlled_pairs_rho": controlled,           # ← the headline: powered AND valid
         "controlled_pairs_n": len(near),
+        "durability": durability_signal(db),          # §3.3 Davis resilience — MEASURE-FIRST, read-only
         "cross_regime_rho": cross_regime,             # ← invalid for hr_cost; do not headline
         "caveats": [
             "Association, NOT causation — all of this is observational; the controlled test removes terrain "
@@ -1762,6 +1828,71 @@ def run_metrics_analysis(db):
             f"same-temperature noise floor ({noise_floor if noise_floor is not None else 'n/a'} hr_cost).",
             "hr_cost = hr/speed is nonlinear (penalises slow running); compare within a route, not across "
             "pace regimes. Raw hr + speed_kmh are kept for a better metric later.",
+        ],
+    }
+
+
+# §3.3 (Davis durability / resilience — ENGINE_SCIENCE.md §3.3). Durability = how little running economy
+# decays over a long run; the proxy is Runalyze's aerobic decoupling (the pace:HR drift, first half →
+# second half). MEASURE-FIRST (🔵): we SURFACE the signal + a trend and accumulate cases — it governs NO
+# prescription until his corpus shows it predicts his race fade (the heat-coefficient discipline, §0).
+DURABILITY_MIN_KM = 16.0       # a run long enough for economy decay to manifest (durability is a long-run trait)
+DURABILITY_GOOD_RAW = 500.0    # decoupling below this on a long run ≈ durable (economy held); Runalyze raw units
+DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the distance
+# Runalyze stores aerobic_decoupling_pace in raw units ≈ percentage ×100 (his median long-run ≈540 ≈5.4%; his
+# last marathon ≈1740 ≈17.4% w/ feel=1) — the ×100→% is INFERRED (units officially TBD upstream), so the RAW
+# value is the source of truth and % is only a reading aid.
+DURABILITY_PCT_SCALE = 100.0
+
+
+def durability_signal(db, recent_n=6):
+    """§3.3 durability read — MEASURE-FIRST, read-only. Long-run aerobic decoupling as a resilience proxy:
+    low = economy held over the distance (durable); high/rising = economy decaying (a durability limit).
+    It SURFACES + trends + accumulates cases; it does NOT feed any prescription (earn it from his corpus
+    first, like the heat coefficient). Decoupling rises with distance, so the read carries distance and is
+    flagged exploratory. Decoupling/HR-derived → callers must keep it PRIVATE (rides /api/run-metrics)."""
+    import statistics as _st
+    rows = run_metrics(db, with_projection=False)      # newest first; projection not needed for this read
+    longs = [r for r in rows
+             if (r.get("km") or 0) >= DURABILITY_MIN_KM and r.get("decoupling") is not None]
+    def _pct(v): return round(v / DURABILITY_PCT_SCALE, 1)
+    series = [{"date": r["date"], "km": round(r["km"], 1), "decoupling_raw": round(r["decoupling"]),
+               "decoupling_pct": _pct(r["decoupling"]), "hr": r["hr"], "feel": r["feel"]}
+              for r in longs]
+    if not series:
+        return {"ok": False, "min_km": DURABILITY_MIN_KM,
+                "reason": f"no long runs (≥{DURABILITY_MIN_KM:.0f}km) with decoupling yet"}
+    def _med(ss, k): return round(_st.median([s[k] for s in ss]), 1)
+    recent = series[:recent_n]
+    prior = series[recent_n:recent_n * 2]
+    med_recent = _med(recent, "decoupling_raw")
+    med_prior = _med(prior, "decoupling_raw") if prior else None
+    trend = None
+    if med_prior is not None:
+        # improving = decoupling DOWN over time — but only trust it if the distance mix held (decoupling
+        # rises with distance, so a shift in the recent-vs-prior distance mix would masquerade as a trend).
+        d = med_recent - med_prior
+        dist_shift = abs(_med(recent, "km") - _med(prior, "km"))
+        trend = ("distance mix shifted — trend unreliable" if dist_shift > 4
+                 else "improving" if d < -100 else "declining" if d > 100 else "steady")
+    verdict = ("durable" if med_recent < DURABILITY_GOOD_RAW
+               else "high fade" if med_recent >= DURABILITY_HIGH_RAW else "moderate fade")
+    return {
+        "ok": True, "min_km": DURABILITY_MIN_KM, "n_long": len(series),
+        "recent_median_raw": med_recent, "recent_median_pct": _pct(med_recent),
+        "recent_median_km": _med(recent, "km"),
+        "prior_median_raw": med_prior, "trend": trend, "verdict": verdict,
+        "good_below_raw": DURABILITY_GOOD_RAW, "high_above_raw": DURABILITY_HIGH_RAW,
+        "recent": recent,
+        "caveats": [
+            "MEASURE-FIRST: surfaced + accumulating, NOT feeding the plan (durability governs nothing until "
+            "the corpus shows it predicts race fade — the heat-coefficient discipline).",
+            "Durability = economy decay over a long run, proxied by aerobic decoupling (first→second half "
+            "pace:HR drift). Lower = more durable.",
+            "Decoupling RISES with distance, so compare like distances; the trend is void when the distance "
+            "mix shifts. Exploratory.",
+            "Decoupling units are Runalyze-raw (≈ percentage ×100, INFERRED — officially TBD upstream); the "
+            "raw value is the source of truth, the % is a reading aid.",
         ],
     }
 
@@ -1861,7 +1992,14 @@ ACWR_HARD = 1.30   # never exceed (the model has error near the boundary, §6a-b
 # 2026-06-30 (the masters/post-illness acute safety = the raw peak + ramp, both preserved).
 ACWR_SOFT_CTL_FLOOR = 45.0
 EASY_TRIMP_PER_MIN = 1.3   # calibrated from his easy runs (HR≤135 → ~1.1–1.5/min)
-EASY_PACE_FRAC = 0.72      # fraction of vVO2max for easy running
+EASY_PACE_FRAC = 0.72      # fraction of vVO2max for easy running (top of the easy zone; sits just under LT1)
+
+# §3.4 — LT1 (aerobic threshold) as the PACE-anchored easy bar (ENGINE_SCIENCE.md §3.4 + the §6.3 decision:
+# pace is the intensity anchor, HR the cross-check). Davis: LT1 ≈ 80% of 5k PACE (velocity), and easy runs
+# must sit BELOW LT1. We derive it from the CURRENT effective VO2max so the bar MOVES with fitness (a
+# detrained rebuild gets a slower LT1, not a stale fast one — the fix for §3.4's "fitness-tracking" ask).
+V5K_VVO2MAX_FRAC = 0.95    # 5k velocity ≈ this × vVO2max (Daniels; a masters 5k runs a touch under vVO2max)
+LT1_5K_FRAC = 0.80         # Davis: LT1 velocity ≈ 80% of 5k velocity → LT1 ≈ 0.76·vVO2max (easy < LT1 < MP)
 
 # §6e — earned faster exit from Phase 0. Upward responsiveness that NEVER touches the ACWR
 # ceiling or the weekly volumes: demonstrated adaptation lets the block GRADUATE sooner (the
@@ -1953,8 +2091,11 @@ def pace_zones(vo2max):
     if not vo2max:
         return {}
     vv = _v_at_vo2max(vo2max)
-    frac = {"easy": 0.70, "easy_top": EASY_PACE_FRAC, "marathon": 0.81,
-            "threshold": 0.88, "interval": 0.97}
+    # §3.4 — "lt1" = the aerobic-threshold pace (Davis: 80% of 5k pace); "p5k" = the 5k-pace equivalent.
+    # Both are fractions of vVO2max, so they track fitness like the rest of the grid (easy < lt1 < marathon).
+    frac = {"easy": 0.70, "easy_top": EASY_PACE_FRAC,
+            "lt1": V5K_VVO2MAX_FRAC * LT1_5K_FRAC, "p5k": V5K_VVO2MAX_FRAC,
+            "marathon": 0.81, "threshold": 0.88, "interval": 0.97}
     return {k: round(1000.0 / (vv * f) * 60) for k, f in frac.items()}  # sec/km
 
 
@@ -2166,6 +2307,31 @@ CTL_RAMP_MAX = 5.0         # max CTL points/week the plan may add (the assertive
 # catches the pathological long-grind a thinner moderate-ramp margin (CTL_RAMP_MAX=5) can't otherwise see.
 NEAR_CEILING_ACWR = ACWR_SOFT - 0.05   # 1.20 — "near the ceiling" for the consecutive-week count
 MESO_MAX_HARD = 3                      # max consecutive near-ceiling building weeks before a forced deload
+
+# §PRO9 — long-run progression cap (the Davis/Aarhus injury lever, ENGINE_SCIENCE.md §3.2). Aarhus
+# (n≈5000): a sharp jump in the SINGLE longest run vs the longest of the trailing ~4 weeks predicts
+# injury MORE strongly than weekly-mileage jumps — a biomechanical-axis signal ACWR/TRIMP structurally
+# cannot see. HARD cap (owner-chosen): the plan never PRESCRIBES a long run beyond LONG_RUN_STEP_CAP ×
+# the longest run of the trailing LONG_RUN_STEP_WINDOW weeks; the clip only ever REDUCES the long-run
+# day, and the freed volume redistributes to the week's short easy runs, so weekly total TRIMP + the
+# ACWR projection are UNCHANGED (only the single long-run spike shrinks — and a smaller spike can only
+# lower peak transient, never raise it). Assertive-only, caution byte-identical — the §PRO8 template.
+# Magnitude 🟡 LITERATURE (+10% = the 10% rule); earn a looser step from his corpus before widening.
+LONG_RUN_STEP_CAP = 1.10    # max long-run jump vs the trailing-window longest (+10%)
+LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progression baseline
+
+# §3.1 — biomechanical load axis (Davis, ENGINE_SCIENCE.md §3.1 + §6.1). eq_km = a DAMAGE-EQUIVALENT
+# distance: km × f(pace), f rising steeply with speed because tissue damage ≈ loading cycles(steps) ×
+# load-per-step(↑ with speed) — fast running does far more damage per km than easy, a biomechanical axis
+# TRIMP/ACWR structurally CANNOT see. f is the DAVIS LITERATURE grid (owner's call 2026-07-01, eyes open on
+# the exponent risk: fast ≈ 4–6× easy per km). It is UNCALIBRATED to his data, so the governor is heavily
+# contained: SOFT (a ceiling with margin), ASSERTIVE-ONLY, caution byte-identical, and it only ever REDUCES
+# load — and because injury is PROBABILISTIC not deterministic (§6.1) it RESHAPES the week (drops the fast
+# slice to easy, reusing the §H2 mechanism) rather than hard-gating. Magnitude 🟡 — earn a tighter/looser f
+# from his fast-session + injury corpus before it hardens. A biomechanical jump-cap that flanks the ACWR gate.
+EQ_KM_FACTOR = {"easy": 1.0, "long": 1.0, "marathon": 1.8, "threshold": 3.5, "interval": 5.0}
+BIO_EQ_STEP = 1.30          # max weekly eq_km jump vs the trailing-window max (the soft biomechanical ceiling)
+BIO_EQ_WINDOW = 4           # trailing weeks whose MAX eq_km sets the biomechanical (chronic) baseline
 BASE_DOWN_FRAC = 0.75      # down-week volume vs the carried build trajectory
 BASE_LONG_FRAC = 0.42      # long-run target as a fraction of weekly km (capped at LONG_RUN_MAX_FRAC);
                            # raised 0.32→0.42 (2026-06-20) toward the owner's real long-run share
@@ -2380,7 +2546,8 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
     return _session_from_reps(date, "long_mp", zone, zpace, reps, note)
 
 
-def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None):
+def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
+                     long_km_cap=None):
     """Lay `week_trimp` across the week's runs and converting each session's TRIMP back to
     minutes/km. The POLARIZED split (§6f Step C): a `quality` spec carves a small HARD slice of the
     governed weekly TRIMP for structured work (at zone pace), the rest stays easy/long — so total
@@ -2388,10 +2555,12 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     Quality needs zone paces, so with `zones=None` (the re-base path) the week stays PURE EASY,
     byte-identical to before. `days_override` lets the caller place runs on an explicit set of
     week-offsets (e.g. only today-onward days for a partially-elapsed week, §6o) instead of the
-    frequency's default layout; the last offset is still the long-run slot. Returns (sessions,
-    day_trimps)."""
+    frequency's default layout; the last offset is still the long-run slot. `long_km_cap` (§PRO9,
+    default None ⇒ byte-identical) caps the single long run's distance: the long-run SHARE is reduced
+    (never raised) so its km ≤ the cap, and the freed budget flows to the short easy runs via the
+    existing (1−long_w) split — the weekly total is untouched. Returns (sessions, day_trimps)."""
     from datetime import timedelta
-    days = list(days_override) if days_override is not None else _run_days(wk["runs"])
+    days = list(days_override) if days_override is not None else list(_run_days(wk["runs"]))
     n = len(days)                                        # last slot = the long run
     quality = (wk.get("quality") or []) if zones else []
     mid_q = [q for q in quality if q.get("attach") != "long"]
@@ -2426,6 +2595,37 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     long_cap = LONG_RUN_MAX_FRAC if zones else REBASE_LONG_CAP
     long_w = min(wk["long"] / wk["km"], long_cap) if wk["km"] else 0.0
     n_short = len(easy_slots) - 1                        # the long slot is always present
+    # §PRO9 — long-run progression cap. Clip the long-run SHARE so its distance ≤ `long_km_cap`; the
+    # freed budget flows to the short easies through the (1−long_w) split below (weekly total untouched).
+    # Needs somewhere to redistribute (n_short>0) and a positive easy budget; the MP-finish km rides on
+    # top of the easy base, so the base is capped to leave room for it (base + MP ≤ cap). Only ever lowers
+    # long_w — never raises it — so a set cap can only shrink the long run, never inflate it.
+    long_step_capped = False
+    cap_short_trimp = None
+    if long_km_cap and easy_budget > 0 and n_short > 0:
+        mp_km = 0.0
+        if long_q:
+            _per = est_trimp(1, long_q["zone"]) or EASY_TRIMP_PER_MIN
+            _zp = (zones or {}).get(long_q["zone"]) or easy_pace_sec
+            mp_km = round(max(1, round(mp_work / _per)) * 60 / _zp, 1)
+        base_cap_km = max(0.0, long_km_cap - mp_km)
+        w_cap = (base_cap_km * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN) / easy_budget
+        if w_cap < long_w:
+            long_w, long_step_capped = w_cap, True
+            # §PRO9 (fix 2026-07-01) — the freed long-run budget must NOT reappear as an OVER-CAP easy
+            # run: that would breach the +10% single-longest-run promise (the whole biomechanical point)
+            # AND ratchet the trailing baseline off the inflated run. So bound every short easy at the cap
+            # too, spreading the volume over MORE easy days (the durability principle — more frequent,
+            # shorter — not fewer bigger) so the weekly total still lands. `cap_short_trimp` = an easy run
+            # at exactly the cap distance; the easy loop hard-clamps each short to it as the final guarantee.
+            cap_short_trimp = long_km_cap * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
+            short_budget = easy_budget * (1 - long_w)
+            if cap_short_trimp > 0:
+                _need = short_budget / cap_short_trimp
+                need_short = max(n_short, int(_need) + (1 if _need - int(_need) > 1e-9 else 0))
+                free = [d for d in range(7) if d not in set(days)]   # unused weekdays for extra easy runs
+                while n_short < need_short and len(days) < 7 and free:
+                    days.append(free.pop(0)); easy_slots.append(len(days) - 1); n_short += 1
     first_easy = min(easy_slots) if easy_slots else None
     for i in easy_slots:
         is_long = (i == long_idx)
@@ -2433,9 +2633,14 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             tr = round(easy_budget * (long_w if n_short else 1.0), 1)
         else:
             tr = round(easy_budget * (1 - long_w) / n_short, 1) if n_short else 0.0
+            if cap_short_trimp is not None:              # §PRO9 — a short easy may never exceed the cap
+                tr = min(tr, round(cap_short_trimp, 1))
         date = (start_monday + timedelta(days=days[i])).isoformat()
         if is_long and long_q:                          # marathon-pace finish on the long run
             sess = _build_long_mp(date, tr, mp_work, long_q, zones, easy_pace_sec)
+            if long_step_capped:                        # §PRO9 — tell the truth about the cap
+                sess["note"] += " — held to the +10% long-run progression cap (trailing-4wk)"
+                sess["long_step_capped"] = True
             sessions.append(sess)
             day_trimps[date] = day_trimps.get(date, 0.0) + sess["trimp"]
             continue
@@ -2444,9 +2649,14 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         note = "long easy run" if is_long else "easy run"
         if wk["strides"] and not is_long and i == first_easy:
             note += f" + {wk['strides']}×4–6 strides"
-        sessions.append({"date": date, "kind": "long" if is_long else "easy",
-                         "km": km, "minutes": mins, "trimp": tr,
-                         "pace_zone": f"{fmt_pace(easy_pace_sec)}/km easy", "note": note})
+        if is_long and long_step_capped:                # §PRO9
+            note += " — held to the +10% long-run progression cap (trailing-4wk)"
+        sess = {"date": date, "kind": "long" if is_long else "easy",
+                "km": km, "minutes": mins, "trimp": tr,
+                "pace_zone": f"{fmt_pace(easy_pace_sec)}/km easy", "note": note}
+        if is_long and long_step_capped:
+            sess["long_step_capped"] = True
+        sessions.append(sess)
         day_trimps[date] = day_trimps.get(date, 0.0) + tr
     sessions.sort(key=lambda x: x["date"])
     return sessions, day_trimps
@@ -2576,6 +2786,95 @@ def _current_week_actuals(db, today):
     act_km = round(sum(r["distance"] for r in rows if r["id"] not in drop and r["distance"]), 1)
     act_runs = len({r["date"] for r in rows if r["id"] not in drop and r["distance"]})
     return act_runs, act_km
+
+
+def _week_long_km(sessions):
+    """§PRO9 — the longest single run (km) in a finalized week's sessions (long/long_mp/easy all count;
+    the biomechanical lever is the actual longest run, whatever it's labelled). 0.0 if none."""
+    return max((s.get("km") or 0.0) for s in (sessions or [])) if sessions else 0.0
+
+
+def _recent_long_runs(db, before, n_weeks=LONG_RUN_STEP_WINDOW):
+    """§PRO9 — the longest single logged run (km) in each of the `n_weeks` calendar weeks (Mon–Sun)
+    immediately BEFORE `before` (a date), oldest-first, owned data only. Seeds the long-run progression
+    cap's trailing window so the FIRST assertive building weeks are bounded against his real recent long
+    runs — assertive skips the re-base, so the plan's own generated weeks don't seed it. Empty weeks
+    contribute nothing (a gap can't set the baseline; the cap then binds off whatever recent runs exist)."""
+    from datetime import timedelta
+    drop = dropped_ids(db)
+    mon0 = before - timedelta(days=before.weekday())        # Monday of `before`'s week
+    out = []
+    for w in range(n_weeks, 0, -1):                          # oldest → most recent
+        ws = mon0 - timedelta(days=7 * w)
+        we = ws + timedelta(days=6)
+        rows = db.execute(
+            "SELECT id, distance FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+            (ws.isoformat(), we.isoformat())).fetchall()
+        longest = max((r["distance"] for r in rows if r["id"] not in drop and r["distance"]), default=0.0)
+        if longest:
+            out.append(round(longest, 1))
+    return out
+
+
+def _session_eq_km(sess):
+    """§3.1 — damage-equivalent km for ONE session: Σ rep_km × f(rep zone) for a structured session (so a
+    tempo/interval's warm-up/cool-down count as easy and only the work reps carry the fast weight), else
+    km × f(session zone|kind). Fast km count for far more than easy km (Davis f grid)."""
+    reps = sess.get("reps")
+    if reps:
+        return round(sum((r.get("km") or 0.0) * EQ_KM_FACTOR.get(r.get("zone"), 1.0) for r in reps), 2)
+    z = sess.get("zone") or sess.get("kind") or "easy"
+    return round((sess.get("km") or 0.0) * EQ_KM_FACTOR.get(z, 1.0), 2)
+
+
+def _week_eq_km(sessions):
+    """§3.1 — the week's total damage-equivalent km (Σ over its sessions). 0.0 if none."""
+    return round(sum(_session_eq_km(s) for s in (sessions or [])), 2)
+
+
+def _run_eq_km(km, gap_pace_sec, zones):
+    """§3.1 — eq_km for an ACTUAL logged run from its grade-adjusted pace: classify the pace into the
+    fastest training zone it met (interval < threshold < marathon by sec/km) and weight km by that zone's
+    damage factor; slower than marathon pace ⇒ easy (f=1). No pace or no zones ⇒ treat as easy. Used only
+    to SEED the biomechanical baseline from his real recent weeks (assertive skips the re-base)."""
+    if not km:
+        return 0.0
+    if gap_pace_sec and zones:
+        for zone in ("interval", "threshold", "marathon"):    # fastest-first; sec/km, smaller = faster
+            zp = zones.get(zone)
+            if zp and gap_pace_sec <= zp:
+                return round(km * EQ_KM_FACTOR[zone], 2)
+    return round(km * EQ_KM_FACTOR["easy"], 2)
+
+
+def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
+    """§3.1 — the total eq_km logged in each of the `n_weeks` calendar weeks BEFORE `before`, oldest-first,
+    owned data only (each run's eq_km from its grade-adjusted pace via `_run_eq_km`). Seeds the biomechanical
+    jump-cap's trailing window from his real recent load — assertive skips the re-base, so the plan's own
+    weeks don't seed it. Empty weeks contribute nothing."""
+    from datetime import timedelta
+    import json as _json
+    drop = dropped_ids(db)
+    mon0 = before - timedelta(days=before.weekday())
+    out = []
+    for w in range(n_weeks, 0, -1):
+        ws = mon0 - timedelta(days=7 * w)
+        we = ws + timedelta(days=6)
+        rows = db.execute(
+            "SELECT id, distance, duration, raw FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+            (ws.isoformat(), we.isoformat())).fetchall()
+        eq = 0.0
+        for r in rows:
+            if r["id"] in drop or not r["distance"]:
+                continue
+            raw = _json.loads(r["raw"] or "{}")
+            gap = raw.get("gap")                              # grade-adjusted speed (km/h)
+            gap_pace = (round(3600.0 / gap) if gap else
+                        (round(r["duration"] / r["distance"]) if r["duration"] else None))
+            eq += _run_eq_km(r["distance"], gap_pace, zones)
+        if eq:
+            out.append(round(eq, 2))
+    return out
 
 
 def _week_banked(db, ws, we, planned_km, planned_runs, drop):
@@ -2860,7 +3159,8 @@ def _hard_share(sessions, total_trimp):
 
 def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None,
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
-                   consec_hard=0, last_nondown=None, soft_ctl_floor=None):
+                   consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
+                   recent_eq=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -2902,6 +3202,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     # streak) are THREADED IN from the caller, so they carry ACROSS phase boundaries (each phase is a
     # separate generate_block call). Without threading the streak reset every phase and a phase that opened
     # on a down week lost its trough anchor — both fixed by accepting + returning the carry state.
+    # §PRO9 — `recent_longs` seeds the long-run progression window (recent ACTUAL long runs + the caller's
+    # frozen weeks); the accumulating `weeks` extend it in-phase, so the cap sees a continuous trailing max.
+    seed_longs = list(recent_longs or [])
+    seed_eq = list(recent_eq or [])            # §3.1 — trailing weekly eq_km (biomechanical chronic baseline)
     for wk in shape:
         wk_start_d = block_start + timedelta(weeks=wk["wk"] - 1)
         wk_start = wk_start_d.isoformat()
@@ -2985,7 +3289,24 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # §PRO6/E — a forced deload is a genuine recovery week: strip quality (pure easy), so a
         # tissue-protection deload never prescribes the highest-stress interval session.
         wk_zones = None if forced_deload else zones
-        sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, wk_zones)
+        # §PRO9 — long-run progression cap (assertive-only; caution passes None ⇒ byte-identical). The
+        # baseline is the longest run of the trailing LONG_RUN_STEP_WINDOW weeks (recent actuals seeded +
+        # this block's earlier weeks). The cap applies to EVERY week (down/taper included): it only ever
+        # REDUCES, so a deliberately-short recovery/taper long sits below the cap and is untouched — but a
+        # week whose long would JUMP past +10% is clipped even on a down week (exempting them let a
+        # recovery week's naturally-larger long leap past the cap and reset the baseline for the rest).
+        prior_longs = seed_longs + [_week_long_km(w["sessions"]) for w in weeks]
+        trailing = [x for x in prior_longs[-LONG_RUN_STEP_WINDOW:] if x]
+        long_km_cap = (round(LONG_RUN_STEP_CAP * max(trailing), 1)
+                       if (assertive and trailing) else None)
+        # §3.1 — the biomechanical soft ceiling: the week's pace-weighted eq_km may not jump beyond
+        # BIO_EQ_STEP × the MAX eq_km of the trailing BIO_EQ_WINDOW weeks (recent actuals seeded + this
+        # block's earlier weeks). Assertive-only; caution passes no cap ⇒ byte-identical.
+        prior_eq = seed_eq + [_week_eq_km(w["sessions"]) for w in weeks]
+        trailing_eq = [x for x in prior_eq[-BIO_EQ_WINDOW:] if x]
+        bio_cap = (BIO_EQ_STEP * max(trailing_eq)) if (assertive and trailing_eq) else None
+        sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, wk_zones,
+                                        long_km_cap=long_km_cap)
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
         ctl_n, atl_n, eow, peak = _project_week(ctl, atl, wk_start, dt)
@@ -3015,15 +3336,24 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         breach = bool(zones and peak and peak > ACWR_HARD)
         eroded = bool(zones and not breach
                       and _hard_share(sessions, sum(dt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
-        if breach or eroded:
+        # §3.1 — biomechanical spike: the week's pace-weighted eq_km jumped past the soft bio ceiling AND
+        # the excess is from FAST km (its all-easy eq_km = week_km would sit under the cap, so dropping the
+        # quality slice to easy fixes it — otherwise it's a volume issue that ACWR/CTL_RAMP already own).
+        # Reuses the §H2 quality→easy reshape (proven-safe, only ever reduces): remove the high-damage fast
+        # km, keep the aerobic volume. Assertive-only (bio_cap is None otherwise).
+        week_km = sum((s.get("km") or 0.0) for s in sessions)
+        bio_over = bool(zones and bio_cap and not breach and not eroded
+                        and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
+        if breach or eroded or bio_over:
             pre_total = sum(dt.values())
             allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
                                       ramp_max=ramp)
             # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
             chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
-            if eroded:
+            if eroded or bio_over:
                 chosen = min(chosen, pre_total)        # never add volume when suppressing intensity
-            sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, None)
+            sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, None,
+                                            long_km_cap=long_km_cap)   # §PRO9 — keep the cap on re-govern
             adjusted = _apply_adjustment(sessions, dt, adjust)
             sessions, dt = adjusted["sessions"], adjusted["dt"]
             ctl_n, atl_n, eow, peak = _project_week(ctl, atl, wk_start, dt)
@@ -3041,6 +3371,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if clipped:
             clipped_any = True
         week = {**wk, "start": wk_start, "sessions": sessions,
+                "runs": len(sessions),        # §PRO9 — honest count (the cap can add easy days to hold volume)
                 "km": round(sum(s["km"] for s in sessions), 1),
                 "trimp_total": round(sum(dt.values()), 1), "proj_acwr": eow, "peak_acwr": peak,
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
@@ -3048,12 +3379,22 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if forced_deload:                          # §PRO6 — tell the truth: a tissue-protection deload
             week["deload_forced"] = True
             week["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
+        if long_km_cap and any(s.get("long_step_capped") for s in sessions):
+            week["long_step_capped"] = long_km_cap   # §PRO9 — the +10% ceiling that bound this week's long
+        week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
+        if bio_over:                                 # §3.1 — the soft bio ceiling reshaped this week to easy
+            week["bio_capped"] = round(bio_cap, 1)
         weeks.append(week)
     for w in weeks:                       # honesty pass — relabel governor-gutted long runs (§6f Step F)
         _mark_load_integrity(w, zones)
+    # §PRO9/§3.1 carry-out — the trailing long-run + eq_km windows (seed + this block's weeks), tail-trimmed,
+    # so the next phase's caps continue off a continuous history instead of resetting at each phase boundary.
+    out_longs = (seed_longs + [_week_long_km(w["sessions"]) for w in weeks])[-LONG_RUN_STEP_WINDOW:]
+    out_eq = (seed_eq + [_week_eq_km(w["sessions"]) for w in weeks])[-BIO_EQ_WINDOW:]
     return weeks, {"clipped_by_acwr": clipped_any,
                    "end_ctl": round(ctl, 1), "end_atl": round(atl, 1),
-                   "consec_hard": consec_hard, "last_nondown": last_nondown}   # §PRO6 carry-out
+                   "consec_hard": consec_hard, "last_nondown": last_nondown,   # §PRO6 carry-out
+                   "recent_longs": out_longs, "recent_eq": out_eq}             # §PRO9/§3.1 carry-out
 
 
 def generate_rebase(block_start, ctl0, atl0, easy_pace_sec, adjust=None, shape=None):
@@ -3383,7 +3724,8 @@ def _prior_weeks_all(prior_plan):
 
 def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, prior_by_start, today,
                   week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
-                  consec_hard=0, last_nondown=None, soft_ctl_floor=None):
+                  consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
+                  recent_eq=None):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
     start date), so a mid-block regeneration never rewrites weeks already lived. Today-onward weeks
@@ -3416,28 +3758,45 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
             consec_hard = consec_hard + 1 if (a and a >= NEAR_CEILING_ACWR) else 0
             if w.get("trimp_total"):
                 last_nondown = w["trimp_total"]
+    # §PRO9/§3.1 — carry the trailing long-run + eq_km windows across the frozen→generated seam. They thread
+    # out of the last generate_block call; if this phase generates nothing (all frozen), they carry the seed.
+    carried_longs = list(recent_longs or [])
+    carried_eq = list(recent_eq or [])
     backfilled = []
     if missing:                                              # no history — regenerate best-effort
         mweeks, mbound = generate_block(missing, phase_start, end_ctl, end_atl,
                                         easy_pace_sec, adjust, zones, regime=regime, ride_cap=ride_cap,
                                         consec_hard=consec_hard, last_nondown=last_nondown,
-                                        soft_ctl_floor=soft_ctl_floor)
+                                        soft_ctl_floor=soft_ctl_floor, recent_longs=recent_longs,
+                                        recent_eq=recent_eq)
         backfilled = [{**w, "elapsed": True, "frozen": False} for w in mweeks]
         end_ctl, end_atl, generated_any = mbound["end_ctl"], mbound["end_atl"], True
         consec_hard, last_nondown = mbound["consec_hard"], mbound["last_nondown"]
     fresh = []
     if future_sub:                                           # today-onward, seeded from live state
+        # seed the future weeks' caps off the ACTUAL elapsed history: recent actuals + this phase's
+        # frozen/backfilled (already-lived) weeks, in date order, tail-trimmed to each window.
+        elapsed_now = sorted(frozen + backfilled, key=lambda w: w["start"])
+        fresh_seed = (list(recent_longs or [])
+                      + [_week_long_km(w.get("sessions") or []) for w in elapsed_now])[-LONG_RUN_STEP_WINDOW:]
+        fresh_seed_eq = (list(recent_eq or [])
+                         + [_week_eq_km(w.get("sessions") or []) for w in elapsed_now])[-BIO_EQ_WINDOW:]
         fweeks, fbound = generate_block(future_sub, phase_start, end_ctl, end_atl,
                                         easy_pace_sec, adjust, zones, today=today,   # §6o partial week
                                         week_actuals=week_actuals, regime=regime,    # §6e-FREQ + §PRO3 regime
                                         ride_cap=ride_cap,                           # §PRO5 shape-response
                                         consec_hard=consec_hard, last_nondown=last_nondown,  # §PRO6 carry
-                                        soft_ctl_floor=soft_ctl_floor)               # §PRO8 low-CTL soft floor
+                                        soft_ctl_floor=soft_ctl_floor,               # §PRO8 low-CTL soft floor
+                                        recent_longs=fresh_seed, recent_eq=fresh_seed_eq)  # §PRO9/§3.1 caps
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True
         consec_hard, last_nondown = fbound["consec_hard"], fbound["last_nondown"]
+        carried_longs, carried_eq = fbound["recent_longs"], fbound["recent_eq"]
+    elif missing:
+        carried_longs, carried_eq = mbound["recent_longs"], mbound["recent_eq"]
     weeks = sorted(frozen + backfilled + fresh, key=lambda w: w["start"])
-    return weeks, round(end_ctl, 1), round(end_atl, 1), generated_any, consec_hard, last_nondown
+    return (weeks, round(end_ctl, 1), round(end_atl, 1), generated_any, consec_hard, last_nondown,
+            carried_longs, carried_eq)
 
 
 def _trim_post_race(plan, chain, block_start):
@@ -3458,7 +3817,7 @@ def _trim_post_race(plan, chain, block_start):
                                  if not (R < _date(s["date"]) <= wk_end)]
 
 
-def generate_plan(db):
+def generate_plan(db, force_regime=None):
     """Engine entry point (§6b): a pure function of (today, current shape, objectives), with the
     PAST frozen (§6f Step E). Re-periodizes forward to the nearest A-race; falls back to a
     maintenance block when no objective remains. Every call is re-runnable and versioned, so
@@ -3494,6 +3853,8 @@ def generate_plan(db):
     # window is clean); caution keeps the full re-base + min(intent,ceiling). Decided BEFORE the re-base
     # length so assertive can drop it. Everyone starts in caution and earns assertive.
     regime, regime_reason = training_regime(db, today, prior_plan)
+    if force_regime in ("caution", "assertive"):   # §PRO10 — counterfactual regime for the drift overlay
+        regime, regime_reason = force_regime, f"counterfactual ({force_regime})"   # pure: never persisted
     # §PRO5 — self-calibrating ride cap from his measured-vs-projected CTL response (assertive only).
     resp = shape_response(db, today, prior_plan)
     ride_cap = round(1.0 + (ACWR_SOFT - 1.0) * resp["factor"], 3) if regime == "assertive" else ACWR_SOFT
@@ -3526,7 +3887,12 @@ def generate_plan(db):
     # snapshot already embodies the frozen past); `started` flips once any future week is generated,
     # after which later phases chain off the previous phase's projected end.
     live = {"ctl": ctl0, "atl": atl0, "started": False,
-            "consec_hard": 0, "last_nondown": None}   # §PRO6 — tissue streak + trough anchor across phases
+            "consec_hard": 0, "last_nondown": None,   # §PRO6 — tissue streak + trough anchor across phases
+            # §PRO9/§3.1 — trailing long-run + biomechanical eq_km windows, seeded from his real recent weeks
+            # (assertive skips the re-base, so the plan's own weeks won't seed the first building weeks) and
+            # carried across phases.
+            "recent_longs": _recent_long_runs(db, block_start),
+            "recent_eq": _recent_eq_km(db, block_start, zones)}
 
     prior_all = _prior_weeks_all(prior_plan)   # §H6 — freeze elapsed weeks by start across ALL phases,
     # not just the same key, so a week that crossed a phase boundary (calendar drift) is still carried
@@ -3539,14 +3905,17 @@ def generate_plan(db):
     def _gen_phase(key, phase_start, shape_, zones_, regime_="caution", ride_cap_=ACWR_SOFT,
                    soft_floor_=None):
         seed = (live["ctl"], live["atl"])
-        weeks_, ec, ea, gen, ch, ln = _split_freeze(shape_, phase_start, seed, zones["easy_top"],
-                                                     adj_dir, zones_, prior_all, today, week_actuals,
-                                                     regime_, ride_cap_,
-                                                     live["consec_hard"], live["last_nondown"],
-                                                     soft_ctl_floor=soft_floor_)
+        weeks_, ec, ea, gen, ch, ln, rl, req = _split_freeze(shape_, phase_start, seed, zones["easy_top"],
+                                                             adj_dir, zones_, prior_all, today, week_actuals,
+                                                             regime_, ride_cap_,
+                                                             live["consec_hard"], live["last_nondown"],
+                                                             soft_ctl_floor=soft_floor_,
+                                                             recent_longs=live["recent_longs"],   # §PRO9
+                                                             recent_eq=live["recent_eq"])         # §3.1
         if gen:
             live["ctl"], live["atl"], live["started"] = ec, ea, True
         live["consec_hard"], live["last_nondown"] = ch, ln   # §PRO6 carry across phases
+        live["recent_longs"], live["recent_eq"] = rl, req    # §PRO9/§3.1 carry across phases
         return {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": ec, "end_atl": ea,
                 "clipped_by_acwr": any(w.get("clipped") for w in weeks_)}, ec
 
@@ -4971,6 +5340,16 @@ def api_hr_zones():
     return jsonify(hr_zones(get_db()))
 
 
+@app.get("/api/lt1")
+def api_lt1():
+    """Private diagnostic: the fitness-tracking LT1 (§3.4) — the PACE-anchored easy bar (≈80% 5k pace, off
+    current VO2max) + the HR cross-check + a detrained flag. Pure read; bundles the HR cross-check, so
+    private-only (H7)."""
+    if READONLY:
+        return jsonify(ok=False, error="diagnostics are private"), 403
+    return jsonify(lt1(get_db()))
+
+
 @app.get("/api/pace-hr-coherence")
 def api_pace_hr_coherence():
     """Private diagnostic: do the pace-prescription and HR-judgment models agree? (See pace_hr_coherence.)
@@ -5407,6 +5786,41 @@ def api_plandrift():
         "headline": headline,
     }
 
+    # §PRO10 — counterfactual regime overlay (lazy, ?compare=1): the road the OTHER regime would give
+    # from today. generate_plan is PURE (no persist) so this never touches plan history. Forward-only
+    # series in the SAME shape as the `current` projection, sharing today's actual frontier + t0 fitness.
+    counterfactual = None
+    if request.args.get("compare") and modeled:
+        regime_now = (current.get("regime") or {}).get("mode") or "caution"
+        other = "assertive" if regime_now == "caution" else "caution"
+        cf_plan = generate_plan(db, force_regime=other)
+        cfw = _plan_weeks(cf_plan)
+        cf_cum = cur_actual[-1]["cum"] if cur_actual else 0.0     # continue the running total
+        cf_dist = []
+        for w in cfw:
+            if _date(w["start"]) > today_mon:
+                cf_cum += w.get("km") or 0.0
+                cf_dist.append({"date": w["start"], "cum": round(cf_cum, 1)})
+        cf_fwd = _plan_daily_trimps(cf_plan, since=(today_mon + timedelta(days=7)).isoformat())
+        cf_ctl = _weekly_ctl(project_forward(cf_fwd, modeled["ctl"], modeled["atl"],
+                                             (today_mon + timedelta(days=7)).isoformat())) if cf_fwd else []
+        if actual_ctl and cf_ctl:
+            cf_ctl = [actual_ctl[-1]] + cf_ctl                    # stitch so the lines meet at today
+        cf_eff = [{"date": w["start"], "trimp": round(w.get("trimp_total") or 0.0, 1)}
+                  for w in cfw if _date(w["start"]) > today_mon]
+        if actual_eff and cf_eff:
+            cf_eff = [actual_eff[-1]] + cf_eff
+        cf_ft = (cf_plan.get("feasibility") or {}).get("finish_time") or {}
+        counterfactual = {
+            "regime": other, "vs": regime_now, "envelope": True,
+            "reason": None if READONLY else (current.get("regime") or {}).get("reason"),   # public-redacted
+            "distance": cf_dist, "ctl": cf_ctl, "effort": cf_eff,
+            "outcome": {"peak_ctl": cf_ft.get("at_ctl"), "finish": cf_ft.get("hms"),
+                        "curve": cf_ft.get("curve"),
+                        "now_peak_ctl": (current.get("feasibility") or {}).get("finish_time", {}).get("at_ctl"),
+                        "now_finish": (current.get("feasibility") or {}).get("finish_time", {}).get("hms")},
+        }
+
     return jsonify(
         ok=True,
         today=today.isoformat(),
@@ -5419,6 +5833,7 @@ def api_plandrift():
         effort={"initial": init_eff, "actual": actual_eff, "current": cur_eff},
         outcome=outcome,
         scorecard=scorecard,
+        counterfactual=counterfactual,
         duplicate_count=dup_count,
     )
 
@@ -6404,8 +6819,8 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 
   .section{margin-top:30px}
   .section h2{font-family:var(--serif);font-weight:600;font-size:19px;margin:0 0 14px}
-  /* Collapsible sections (Plan drift, Fitness & fatigue, Weekly volume) load collapsed — the runner
-     deliberately opens them; the chevron rotates on [open] */
+  /* Collapsible sections (Plan drift, Fitness & fatigue, Weekly volume) load EXPANDED (`open`) by
+     default; the runner can still collapse them and the chevron rotates on [open] */
   details.section > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px}
   details.section > summary::-webkit-details-marker{display:none}
   details.section > summary h2{margin:0}
@@ -6799,6 +7214,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .driftblock .note{font-size:11.5px;color:var(--muted);margin:0 0 9px;max-width:62ch}
   .driftwrap{position:relative}
   .drift{width:100%;height:170px;display:block;overflow:visible;cursor:crosshair}
+  .driftseg{display:inline-flex;gap:2px;margin:0 0 14px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .driftseg button{font:inherit;font-size:12px;padding:5px 12px;background:transparent;color:var(--muted);border:0;cursor:pointer}
+  .driftseg button.on{background:var(--accent);color:#fff}
+  .driftcaveat{background:color-mix(in oklab,var(--accent2),transparent 90%);border-left:3px solid var(--accent2);padding:8px 12px;border-radius:6px;margin-bottom:18px}
+  .cfout{font-size:13px;line-height:1.9}.cfout .k{font-weight:600}
+  .drift .dl.cf{stroke:var(--accent2)}
   .drift .dl{fill:none;stroke-width:2}
   .drift .dl.init{stroke:var(--muted);stroke-width:1.5}
   .drift .dl.actual{stroke:var(--accent)}
@@ -7075,7 +7496,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       <div class="panel" id="plan"><div class="empty">No plan yet — hit <b>Generate plan</b>.</div></div>
     </div>
 
-    <details class="section" id="sec-drift" data-mtab="plan">
+    <details class="section" id="sec-drift" data-mtab="plan" open>
       <summary><h2>Plan drift <span class="muted mono" style="font-size:12px">— how far the road has moved from its founding statement</span></h2></summary>
       <div class="panel" id="drift"><div class="empty">Loading…</div></div>
     </details>
@@ -7090,7 +7511,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       <div class="panel" id="effort"><div class="empty">Loading…</div></div>
     </div>
 
-    <details class="section" id="sec-ff" data-mtab="fitness">
+    <details class="section" id="sec-ff" data-mtab="fitness" open>
       <summary><h2>Fitness &amp; fatigue <span class="muted mono" style="font-size:12px">— reconstructed from your training load (CTL/ATL model)</span></h2></summary>
       <div class="panel">
         <div class="legend">
@@ -7102,7 +7523,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       </div>
     </details>
 
-    <details class="section" id="sec-vol" data-mtab="fitness">
+    <details class="section" id="sec-vol" data-mtab="fitness" open>
       <summary><h2>Weekly running volume <span class="muted mono" id="wkrange" style="font-size:12px">— last 26 weeks</span></h2></summary>
       <div class="panel"><div class="chart" id="chart"><div class="empty">No activities synced yet.</div></div></div>
     </details>
@@ -8170,12 +8591,17 @@ function weekHtml(w,p,today){
   const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>':'',
                w.fatigue_capped?'<span class="down" title="A building week, but recent fatigue left no ACWR headroom — the long run was held back. Load capped for safety, not silently degraded.">⚠ build intent capped by recent fatigue</span>'
                  :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
+               // §PRO9 — long-run progression cap (Aarhus injury lever); §3.1 — biomechanical (eq_km) load ease
+               w.long_step_capped?`<span class="wfz" title="Long-run progression cap: this week's long run was held to +10% over your longest run of the last 4 weeks — the strongest single injury lever (a sharp long-run jump predicts injury more than mileage jumps). Freed volume went to easy runs; weekly load unchanged.">long-run held (+10%)</span>`:'',
+               w.bio_capped?`<span class="wfz" title="Biomechanical load ease: this week's pace-weighted 'damage-equivalent' load (fast km count for more) jumped too far above your recent weeks, so the fast work was eased to easy — aerobic volume kept, only the high-damage fast km reduced. The biomechanical/tissue-damage axis (informed by John Davis), invisible to heart-rate load.">fast load eased</span>`:'',
                w.adjusted?'<span class="eased">eased</span>':'',
                w.frozen?'<span class="wfz">✓ done</span>':''].filter(Boolean).join(" · ");
+  // §3.1 — surface the biomechanical eq_km on quality weeks (where it exceeds raw km); calm/muted.
+  const eqkm=(w.eq_km&&w.eq_km>w.km+0.5)?` · <span class="muted mono" title="Biomechanical load: pace-weighted damage-equivalent km (fast running does several times more tissue damage per km than easy). The biomechanical/tissue-damage axis (informed by John Davis), which heart-rate load can't see.">${w.eq_km} eq-km</span>`:'';
   return `<div class="wk ${down?'wdown':''} ${w.frozen?'wfrozen':''} ${cur?'wcur':''}">
       <div class="wn">${w.wk}${w.frozen?'<span class="wlock" title="completed — carried verbatim">🔒</span>':''}</div>
       <div class="wbody">
-        <div><span class="wkm">${w.km} km</span> · ${w.runs} runs${flags?' · '+flags:''}</div>
+        <div><span class="wkm">${w.km} km</span>${eqkm} · ${w.runs} runs${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
         <div class="wsesslog">${sess}${w.strides?`<div class="muted mono" style="margin-top:2px">strides×${w.strides}</div>`:''}</div>
       </div>
@@ -8745,8 +9171,12 @@ async function loadEffort(){
       `<th class="col-sec">TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>`+
       `<th class="col-sec">feel</th>`+
       `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th>`;
-    const basis = d.anchor==="lthr" ? `(85% of LTHR ${d.lthr})` : `(78% of HRmax ${d.hrmax})`;
-    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm ${basis}.${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
+    const basis = d.anchor==="lthr" ? `(85% of LTHR ${d.lthr})`
+                : d.anchor==="lt1_pace" ? `(pace-anchored LT1)` : `(78% of HRmax ${d.hrmax})`;
+    const ceil = d.anchor==="lt1_pace"
+      ? `easy-pace ceiling ≈ <b>${esc(d.easy_pace_ceiling||"—")}</b>/km ${basis}`
+      : `easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm ${basis}`;
+    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · ${ceil}.${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
     note=`Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Each run is matched to its nearest prescribed session within a couple of days, so an anticipated or postponed session is judged against its real prescription, not the day it landed on; a run with no session in range falls back to the easy default. One mismatch is an observation, not a verdict.`;
   }
   let cohLine="";   // pace↔HR coherence — private diagnostic; surfaces the two-model divergence, never the plan
@@ -8759,6 +9189,15 @@ async function loadEffort(){
       }
     }catch(e){}
   }
+  // §3.4 — the fitness-tracking LT1 (aerobic-threshold pace = the easy bar). Private (bundles the HR cross-check).
+  let lt1Line="";
+  const L=d.lt1;
+  if(!d.public && L && L.ok){
+    lt1Line=`<div class="muted" style="font-size:11px;margin-top:4px${L.detrained?";color:var(--warn)":""}">`+
+      `LT1 ${qhint("Your aerobic-threshold pace, which we set at ≈80% of your 5k pace (a pace-first anchor informed by John Davis) — the ceiling your easy days should stay under. It's derived from your CURRENT fitness, so it moves as you get fitter or detrain, and heart rate is the cross-check.")}: easy ceiling ≈ <b>${esc(L.lt1_pace_fmt)}</b>/km`+
+      `${(L.hr&&L.hr.easy_ceiling)?` · HR cross-check ≤ <b>${L.hr.easy_ceiling}</b> bpm`:""}.`+
+      `${L.detrained?" You're running easy a touch faster than LT1 for the heart rate it costs right now — normal on a rebuild, it self-corrects, so we don't police easy pace here.":""}</div>`;
+  }
   host.innerHTML=`
     <div class="effort-head">
       <div class="effort-score" style="color:${tone}">${score}<span class="pct">%</span></div>
@@ -8766,6 +9205,7 @@ async function loadEffort(){
         <div class="big">Easy discipline ${scoreHint} — <b style="color:${tone}">${verdict}</b></div>
         <div class="muted">${capLine}</div>
         <div class="muted" style="font-size:11px;margin-top:4px">${note}</div>
+        ${lt1Line}
         ${cohLine}
       </div>
     </div>
@@ -8806,22 +9246,82 @@ async function loadDrift(){
     (r.label?` · ${esc(r.label)}${r.weeks_away!=null?` (${r.weeks_away}w out)`:""}`:"");
   if(d.duplicate_count>0) cap+=`<br><span class="warn">⚠ ${d.duplicate_count} duplicate activity is inflating the snapshot the plan seeds from — fix it in Runalyze to clean the projection (actuals here already ignore it; if you already removed it on Runalyze, use 🗑 Delete from local copy to drop the leftover row).</span>`;
   host.innerHTML=`${scorecardHTML(d.scorecard, r)}<div class="driftcap">${cap}</div>
+    <div class="driftseg" role="tablist">
+      <button type="button" data-dm="founding" class="on" title="Your original plan for this goal vs where it stands now — how the road has moved over time">Original → Now</button>
+      <button type="button" data-dm="compare" title="Your current (conservative) road vs the assertive build your data could unlock">Conservative vs Assertive</button></div>
+    <div id="drift-caveat" class="note driftcaveat" style="display:none"></div>
     <div class="driftblock"><h3>Cumulative distance</h3>
       <p class="note">The founding road versus what you've actually run plus the current plan's projection forward. The widening gap is volume drift — ahead of, or behind, the original plan.</p>
-      ${driftLegend(distLines)}<div id="drift-dist"></div></div>
+      <span id="lg-dist">${driftLegend(distLines)}</span><div id="drift-dist"></div></div>
     <div class="driftblock"><h3>Weekly training load · effort</h3>
       <p class="note">The intensity half of the road: each week's prescribed load (TRIMP), original versus now, against what you actually did. When the plan eases — sickness, missed weeks, low readiness — this line drops below the founding plan; when results earn it, it rises.</p>
-      ${driftLegend(effLines)}<div id="drift-eff"></div></div>
+      <span id="lg-eff">${driftLegend(effLines)}</span><div id="drift-eff"></div></div>
     <div class="driftblock"><h3>Fitness trajectory · CTL</h3>
       <p class="note">What the original plan projected your fitness would do, against your real reconstructed CTL continued by today's projection. The engine's true currency — distance is the volume view, this is the fitness view.</p>
-      ${driftLegend(ctlLines)}<div id="drift-ctl"></div></div>
-    <div class="driftblock"><h3>Projected race-day fitness</h3>
-      <p class="note">The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?</p>
-      ${driftLegend(outLines)}<div id="drift-out"></div></div>`;
-  mkChart($("#drift-dist"), distLines, {zeroBase:true, fmt:v=>v.toFixed(0)+" km", nowT:ISO2T(d.today)});
-  mkChart($("#drift-eff"), effLines, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
-  mkChart($("#drift-ctl"), ctlLines, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
-  mkChart($("#drift-out"), outLines, {fmt:v=>v.toFixed(0), dots:true});
+      <span id="lg-ctl">${driftLegend(ctlLines)}</span><div id="drift-ctl"></div></div>
+    <div class="driftblock"><h3 id="h-out">Projected race-day fitness</h3>
+      <p class="note" id="note-out">The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?</p>
+      <span id="lg-out">${driftLegend(outLines)}</span><div id="drift-out"></div></div>`;
+  const setLg=(id,lines)=>{const e=$(id); if(e) e.innerHTML=driftLegend(lines);};
+  const FOUND_OUT_NOTE="The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?";
+  const drawFounding=()=>{
+    setLg("#lg-dist",distLines); setLg("#lg-eff",effLines); setLg("#lg-ctl",ctlLines); setLg("#lg-out",outLines);
+    const nout=$("#note-out"); if(nout) nout.textContent=FOUND_OUT_NOTE;
+    const hout=$("#h-out"); if(hout) hout.textContent="Projected race-day fitness";
+    const ob=$("#drift-out"); if(ob) ob.innerHTML="";
+    mkChart($("#drift-dist"), distLines, {zeroBase:true, fmt:v=>v.toFixed(0)+" km", nowT:ISO2T(d.today)});
+    mkChart($("#drift-eff"), effLines, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
+    mkChart($("#drift-ctl"), ctlLines, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
+    mkChart($("#drift-out"), outLines, {fmt:v=>v.toFixed(0), dots:true});
+    const cav=$("#drift-caveat"); if(cav) cav.style.display="none";
+  };
+  let cfData=null, cfTried=false;
+  const REGNAME={caution:"Conservative",assertive:"Assertive"};   // one word per regime, matches the plan badge
+  const rn=s=>REGNAME[s]||(s?s.charAt(0).toUpperCase()+s.slice(1):s);
+  const drawCompare=async()=>{
+    if(!cfTried){ cfTried=true; try{ cfData=(await getJSON("/api/plandrift?compare=1")).counterfactual; }catch(e){} }
+    const cf=cfData, cav=$("#drift-caveat");
+    if(!cf){ if(cav){ cav.textContent="Comparison needs an objective set."; cav.style.display=""; } return; }
+    const ACC2="var(--accent2)", ACC="var(--accent)";
+    const lbl=rn(cf.regime), nlbl=rn(cf.vs);
+    const aEff=(d.effort.actual||[]).map(p=>({date:p.date,val:p.trimp})), aCtl=(d.ctl.actual||[]).map(p=>({date:p.date,val:p.ctl}));
+    const cfDist=(cf.distance||[]).map(p=>({date:p.date,val:p.cum}));
+    const dl=[
+      {pts:act, cls:"actual", color:ACC, label:"Run so far"},
+      {pts:act.length?[act[act.length-1],...prj]:prj, cls:"proj", dash:true, color:ACC, label:nlbl+" — your road now"},
+      {pts:act.length&&cfDist.length?[act[act.length-1],...cfDist]:cfDist, cls:"cf", dash:true, color:ACC2, label:lbl+" — what earning it unlocks"},
+    ];
+    const el=[
+      {pts:aEff, cls:"actual", color:ACC, label:"Done so far"},
+      {pts:(d.effort.current||[]).map(p=>({date:p.date,val:p.trimp})), cls:"proj", dash:true, color:ACC, label:nlbl+" — now"},
+      {pts:(cf.effort||[]).map(p=>({date:p.date,val:p.trimp})), cls:"cf", dash:true, color:ACC2, label:lbl},
+    ];
+    const cl=[
+      {pts:aCtl, cls:"actual", color:ACC, label:"Actual fitness"},
+      {pts:(d.ctl.current||[]).map(p=>({date:p.date,val:p.ctl})), cls:"proj", dash:true, color:ACC, label:nlbl+" — now"},
+      {pts:(cf.ctl||[]).map(p=>({date:p.date,val:p.ctl})), cls:"cf", dash:true, color:ACC2, label:lbl},
+    ];
+    setLg("#lg-dist",dl); setLg("#lg-eff",el); setLg("#lg-ctl",cl); setLg("#lg-out",[]);
+    mkChart($("#drift-dist"), dl, {zeroBase:true, fmt:v=>v.toFixed(0)+" km", nowT:ISO2T(d.today)});
+    mkChart($("#drift-eff"), el, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
+    mkChart($("#drift-ctl"), cl, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
+    const o=cf.outcome||{};
+    const hout=$("#h-out"); if(hout) hout.textContent="Projected race outcome";
+    const nout=$("#note-out"); if(nout) nout.textContent="Race-day fitness and projected finish: the road you're on vs the road the other regime would give.";
+    const ob=$("#drift-out");
+    if(ob) ob.innerHTML=`<div class="cfout">`+
+      `<div><span class="k">${nlbl} now</span> — peak CTL <b>${o.now_peak_ctl==null?"–":o.now_peak_ctl}</b>, finish <b>${o.now_finish||"–"}</b></div>`+
+      `<div><span class="k" style="color:var(--accent2)">${lbl}</span> — peak CTL <b>${o.peak_ctl==null?"–":o.peak_ctl}</b>, finish <b>${o.finish||"–"}</b></div>`+
+      (o.curve&&o.curve.length?`<div class="note">With more runway: ${o.curve.map(c=>"+"+c.plus_weeks+"w → "+c.hms).join(" · ")}</div>`:"")+
+      `</div>`;
+    if(cav){ cav.innerHTML=`<b>What earning ${esc(lbl.toLowerCase())} unlocks.</b> Upper envelope — assumes you clear the gate${cf.reason?" ("+esc(cf.reason)+")":""} and absorb the load; the engine re-reads it every block.`; cav.style.display=""; }
+  };
+  const paint=(mode)=>{
+    host.querySelectorAll(".driftseg button").forEach(b=>b.classList.toggle("on", b.dataset.dm===mode));
+    if(mode==="compare") drawCompare(); else drawFounding();
+  };
+  host.querySelectorAll(".driftseg button").forEach(b=>b.addEventListener("click",()=>paint(b.dataset.dm)));
+  drawFounding();
 }
 
 // ── Health markers ──────────────────────────────────────────────────────────
@@ -10396,6 +10896,122 @@ def _stc_pace_hr_coherence():
                got={"violations": fails or "none"})
 
 
+def _stc_lt1():
+    """§3.4 — the fitness-tracking, PACE-anchored LT1 (aerobic threshold = the easy bar). Locks: (a) the
+    pace math — LT1 = 80% of 5k velocity = round off vVO2max × V5K_VVO2MAX_FRAC × LT1_5K_FRAC; (b) the zone
+    ORDERING easy < LT1 < marathon (in sec/km: easy slowest); (c) FITNESS-TRACKING — a higher VO2max yields a
+    FASTER LT1 (the whole point: the bar moves, never stale); (d) lt1(db) carries the HR cross-check (derived
+    LTHR) + a DETRAINED flag wired to pace↔HR coherence, with the 'don't over-police, self-corrects' note;
+    (e) READ-ONLY (never writes the DB). Reuses the coherence fixture pattern; in-memory."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    fails = []
+    # (a)/(b) — pure pace math + ordering (no DB)
+    vv = _v_at_vo2max(50.0)
+    z = pace_zones(50.0)
+    exp_lt1 = round(1000.0 / (vv * V5K_VVO2MAX_FRAC * LT1_5K_FRAC) * 60)
+    if z.get("lt1") != exp_lt1:
+        fails.append(f"LT1 pace math off: {z.get('lt1')} != {exp_lt1}")
+    if not (z["easy"] > z["easy_top"] > z["lt1"] > z["marathon"]):   # sec/km strictly decreasing
+        fails.append(f"zone ordering wrong (easy<LT1<marathon): {[z['easy'],z['easy_top'],z['lt1'],z['marathon']]}")
+    # (c) — fitness-tracking: fitter ⇒ faster (smaller sec/km) LT1
+    if not (pace_zones(55.0)["lt1"] < pace_zones(45.0)["lt1"]):
+        fails.append("LT1 does not track fitness (higher VO2max must give a faster LT1)")
+
+    # (d)/(e) — lt1(db) integration on controlled data (mirrors the coherence fixture)
+    tdy = date.today()
+    def ago(n): return (tdy - _td(days=n)).isoformat()
+    VO2 = 50.0
+    easy_top = pace_zones(VO2)["easy_top"]
+    easy_kmh = round(3600.0 / easy_top, 2)               # a gap landing exactly on the easy ceiling
+    fast_kmh = round(3600.0 / (easy_top * 0.8), 2)
+    def mkdb(easy_hrs, qualifiers=True, hmax=None):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+                  "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
+        m.execute("CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
+        m.execute("CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);")
+        m.execute("CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+        m.execute("INSERT INTO shape_snapshots VALUES(?,?,?,?)", (ago(1), VO2, 30.0, 28.0))
+        i = 0
+        for k in range(6 if qualifiers else 0):          # 6 LTHR qualifiers ⇒ confident LTHR (else thin)
+            i += 1
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
+                      (i, ago(k * 5 + 1) + "T19:00:00", ago(k * 5 + 1), "Running", 8.0, 30 * 60, 166, 189,
+                       json.dumps({"gap": fast_kmh})))
+        # easy-PACED runs; SHORT (< LTHR_MIN_SEC) when thin so they can't themselves qualify as LTHR efforts.
+        # `hmax` pins a realistic HRmax (else hr+18) so the HR-redline safety-catch can be tested honestly.
+        edur = 2700 if qualifiers else 900
+        for k, hr in enumerate(easy_hrs):
+            i += 1
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
+                      (i, ago(k + 1) + "T07:00:00", ago(k + 1), "Running", 9.0, edur, hr, hmax or hr + 18,
+                       json.dumps({"gap": easy_kmh})))
+        return m
+    # HR under the easy ceiling (~143) ⇒ coherent, not detrained
+    fit = lt1(mkdb([135, 134, 136, 138]))
+    if not fit.get("ok"):
+        fails.append(f"lt1(db) not ok on the fit fixture: {fit.get('reason')}")
+    else:
+        if not fit.get("lt1_pace") or fit["hr"]["anchor"] != "lthr" or not fit["hr"]["easy_ceiling"]:
+            fails.append(f"lt1 missing pace-primary or HR cross-check: {fit}")
+        if fit["detrained"] or fit["agreement"] != "coherent":
+            fails.append(f"fit fixture should read coherent/not-detrained: {fit['agreement']}/{fit['detrained']}")
+    # HR over the easy ceiling ⇒ detrained (pace ahead of HR), with the don't-over-police note
+    det = lt1(mkdb([150, 152, 149, 151]))
+    if not det.get("detrained") or "self-correct" not in det.get("note", ""):
+        fails.append(f"detrained (pace-ahead) not flagged / missing the don't-over-police note: {det.get('agreement')}")
+    # (e) read-only — lt1() must not write
+    db2 = mkdb([150, 152, 149, 151]); lt1(db2)
+    if db2.execute("SELECT COUNT(*) c FROM plans").fetchone()["c"] != 0:
+        fails.append("lt1 WROTE to the DB (must be read-only)")
+
+    # (f) THE VERDICT SWITCH — thin LTHR but a fitness snapshot ⇒ the effort monitor's PRIMARY easy bar is
+    # the MOVING pace-LT1 (anchor 'lt1_pace'), retiring the fixed %HRmax fallback. Every run carries a
+    # pace_verdict, and the PER-RUN aerobic verdict must ACTUALLY follow it (a revert to %HRmax must fail
+    # here). hmax=185 pins a realistic HRmax so the redline catch below is honest.
+    thin = effort_discipline(mkdb([135, 134, 136, 138], qualifiers=False, hmax=185))
+    thin_aero = [r for r in thin.get("runs", []) if r["kind"] in AEROBIC_KINDS]
+    if thin.get("anchor") != "lt1_pace" or not thin.get("easy_pace_ceiling"):
+        fails.append(f"verdict switch: thin-LTHR+snapshot should anchor on the moving pace-LT1: {thin.get('anchor')}")
+    if not all("pace_verdict" in r for r in thin.get("runs", [])):
+        fails.append("verdict switch: every private run should carry a pace_verdict cross-check")
+    if not thin_aero or not all(r["verdict"] == r["pace_verdict"] for r in thin_aero):
+        fails.append("verdict switch: aerobic verdict didn't FOLLOW the moving pace-LT1 (could be a stale %HRmax read)")
+    if thin.get("easy_score") != 100:               # easy pace + merely-elevated HR (73–75%) is NOT over-policed
+        fails.append(f"verdict switch OVER-policed easy-paced sub-redline runs: score {thin.get('easy_score')}")
+
+    # (g) THE HR-REDLINE SAFETY CATCH — retiring the fixed %HRmax bar must NOT drop the redline catch: an
+    # easy-PACED run whose HR sat at THRESHOLD+ effort (≥ HARD_HR_FRAC of a real HRmax) can never read easy,
+    # even though pace alone says "on". Mild decoupling (the 73–75% runs above) stays unpoliced; a 90% redline
+    # does not. This is the defect the safety review caught: pace under-reads a hot run.
+    red = effort_discipline(mkdb([135, 134, 167], qualifiers=False, hmax=185))   # 167/185 ≈ 90%
+    redrun = next((r for r in red.get("runs", []) if r["hr_avg"] == 167), None)
+    if not redrun or redrun["verdict"] != "too_hard":
+        fails.append(f"safety catch: an easy-paced HR-redline run must read too_hard: {redrun}")
+    elif redrun["pace_verdict"] == "too_hard":
+        fails.append("safety catch is untested — pace alone already flagged it (need pace='on', HR redlines)")
+
+    conf = effort_discipline(mkdb([135, 134, 136, 138], qualifiers=True))
+    if conf.get("anchor") != "lthr":            # trustworthy LTHR ⇒ HR-led (evidence-backed) is preserved
+        fails.append(f"trustworthy LTHR must stay HR-led: {conf.get('anchor')}")
+
+    return _st("det", "lt1",
+               "§3.4 fitness-tracking LT1 (pace-anchored easy bar): LT1=80% of 5k pace; ordering easy<LT1<"
+               "marathon; fitter⇒faster LT1 (moving, never stale); lt1(db) carries the HR cross-check + a "
+               "detrained flag (don't over-police, self-corrects); read-only. VERDICT SWITCH: thin-LTHR+"
+               "snapshot ⇒ monitor anchors on the moving pace-LT1 (retires fixed %HRmax); the per-run aerobic "
+               "verdict FOLLOWS pace-LT1 and doesn't over-police merely-elevated HR; HR-REDLINE SAFETY CATCH "
+               "still flags an easy-paced run whose HR hit threshold+; trustworthy LTHR stays HR-led",
+               passed=not fails,
+               expect="LT1 math/ordering/fitness-tracking + HR cross-check + detrained + read-only + pace-LT1 verdict switch + redline catch",
+               got={"lt1_50": z.get("lt1"), "lt1_fit_fixture": fit.get("lt1_pace_fmt"),
+                    "detrained_case": det.get("detrained"), "thin_anchor": thin.get("anchor"),
+                    "thin_score": thin.get("easy_score"),
+                    "redline_verdict": (redrun or {}).get("verdict"),
+                    "conf_anchor": conf.get("anchor"), "violations": fails or "none"})
+
+
 def _stc_health_sync():
     """Watch-metric sync maps Runalyze trend items → health_markers rows: HRV keeps RMSSD only, weight +
     resting HR map their value fields, source='runalyze', upsert on (marker,date). MCP stubbed (token-free)."""
@@ -10791,6 +11407,98 @@ def _stc_run_metrics():
                     "proj_cover": an["n_with_load_proj"], "failures": fail or "none"})
 
 
+def _stc_durability():
+    """§3.3 durability signal (Davis resilience via long-run aerobic decoupling) — MEASURE-FIRST, read-only.
+    Locks: (a) ONLY long runs (≥ DURABILITY_MIN_KM) with a decoupling value count — short runs + null-decoupling
+    long runs excluded; (b) raw→% is /100; (c) verdict thresholds (durable/moderate/high); (d) trend = recent
+    vs prior median, but VOIDED when the distance mix shifts (the distance confound is not read as durability);
+    (e) empty ⇒ ok:False; (f) it stays MEASURE-FIRST — carries the 'NOT feeding the plan' caveat. In-memory."""
+    import sqlite3 as _sq, json as _j
+    def mkdb(runs):                          # runs = list of (date, km, decoupling|None)
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(
+            "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+            "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, training_effect REAL, raw TEXT);"
+            "CREATE TABLE shape_snapshots(snapshot_date TEXT PRIMARY KEY, captured_at TEXT, effective_vo2max REAL, "
+            "effective_vo2max_progress REAL, fitness REAL, fatigue REAL, performance REAL, fitness_pct REAL, "
+            "acwr REAL, marathon_shape REAL, hrv_baseline REAL, monotony REAL, training_strain REAL, raw TEXT);"
+            "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
+            "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
+        for i, (d, km, dec) in enumerate(runs, start=1):
+            raw = {} if dec is None else {"aerobic_decoupling_pace": dec}
+            mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,duration,hr_avg,raw) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (i, d + "T18:00", d, RUNNING_SPORT, km, int(km * 360), 150, _j.dumps(raw)))
+        mem.executescript(RUN_METRICS_VIEW)
+        mem.commit(); return mem
+    fail = []
+
+    # (a)/(b)/(c)/(d) — 6 recent low-decoupling long runs (durable, improving) + 6 prior higher, distance held.
+    # Plus a SHORT run and a NULL-decoupling long run that must both be excluded.
+    recent = [(f"2026-06-{12-2*i:02d}", 20.0, 300.0) for i in range(6)]   # newest, med 300 (~3.0%)
+    prior = [(f"2026-05-{31-2*i:02d}", 20.0, 600.0) for i in range(6)]    # older,  med 600
+    excl = [("2026-06-13", 10.0, 300.0),          # short → excluded (below MIN_KM)
+            ("2026-06-11", 20.0, None)]           # long but no decoupling → excluded
+    d = durability_signal(mkdb(recent + prior + excl))
+    if not d.get("ok"):
+        fail.append(f"durable case returned not-ok: {d.get('reason')}")
+    else:
+        if d["n_long"] != 12:
+            fail.append(f"filter wrong: n_long={d['n_long']} (short + null-decoupling must be excluded)")
+        if d["recent_median_raw"] != 300.0 or d["recent_median_pct"] != 3.0:
+            fail.append(f"recent median / % off: {d['recent_median_raw']} / {d['recent_median_pct']}")
+        if d["verdict"] != "durable":
+            fail.append(f"verdict should be 'durable' at med 300: {d['verdict']}")
+        if d["trend"] != "improving":
+            fail.append(f"trend should be 'improving' (recent 300 < prior 600, distance held): {d['trend']}")
+        if not any("NOT feeding the plan" in c for c in d["caveats"]):
+            fail.append("measure-first caveat ('NOT feeding the plan') missing")
+
+    # (c) — high-fade verdict at the top threshold
+    hi = durability_signal(mkdb([(f"2026-06-{12-2*i:02d}", 20.0, 1100.0) for i in range(6)]))
+    if hi.get("verdict") != "high fade":
+        fail.append(f"verdict should be 'high fade' at med 1100: {hi.get('verdict')}")
+    # (c') — the MIDDLE 'moderate fade' band (between GOOD 500 and HIGH 1000) — an off-by-one on a
+    # threshold would slip past (a)/(c), so pin the middle explicitly.
+    mid = durability_signal(mkdb([(f"2026-06-{12-2*i:02d}", 20.0, 700.0) for i in range(6)]))
+    if mid.get("verdict") != "moderate fade":
+        fail.append(f"verdict should be 'moderate fade' at med 700: {mid.get('verdict')}")
+    # (c'') — the 'declining' trend branch (recent WORSE than prior, distance held) — the mirror of
+    # 'improving', and the 'steady' band (|Δ| ≤ 100) — neither exercised by the durable case above.
+    decl = durability_signal(mkdb(
+        [(f"2026-06-{12-2*i:02d}", 20.0, 700.0) for i in range(6)]
+        + [(f"2026-05-{31-2*i:02d}", 20.0, 350.0) for i in range(6)]))     # recent 700 > prior 350 ⇒ declining
+    if decl.get("trend") != "declining":
+        fail.append(f"trend should be 'declining' (recent 700 > prior 350, distance held): {decl.get('trend')}")
+    steady = durability_signal(mkdb(
+        [(f"2026-06-{12-2*i:02d}", 20.0, 380.0) for i in range(6)]
+        + [(f"2026-05-{31-2*i:02d}", 20.0, 320.0) for i in range(6)]))     # Δ=60 (≤100) ⇒ steady
+    if steady.get("trend") != "steady":
+        fail.append(f"trend should be 'steady' (|Δ|≤100, distance held): {steady.get('trend')}")
+
+    # (d) — distance mix shift VOIDS the trend (recent 30km vs prior 20km ⇒ not read as durability change)
+    shift = durability_signal(mkdb(
+        [(f"2026-06-{12-2*i:02d}", 30.0, 300.0) for i in range(6)]
+        + [(f"2026-05-{31-2*i:02d}", 20.0, 600.0) for i in range(6)]))
+    if shift.get("trend") != "distance mix shifted — trend unreliable":
+        fail.append(f"distance-shift must void the trend: {shift.get('trend')}")
+
+    # (e) — no long runs ⇒ ok:False (a short-only DB)
+    empty = durability_signal(mkdb([("2026-06-10", 8.0, 300.0)]))
+    if empty.get("ok") is not False:
+        fail.append("no-long-runs case must return ok:False")
+
+    return _st("det", "durability",
+               "§3.3 durability signal (long-run aerobic decoupling): only long runs w/ decoupling counted "
+               "(short + null excluded); raw→%/100; verdict thresholds; trend voided on a distance-mix shift; "
+               "empty⇒ok:False; MEASURE-FIRST (carries the 'NOT feeding the plan' caveat)",
+               passed=not fail,
+               expect="filters long+decoupling; verdicts durable/high; trend improving; distance-shift voids trend; empty ok:False",
+               got={"n_long": d.get("n_long"), "recent_med": d.get("recent_median_raw"),
+                    "verdict": d.get("verdict"), "trend": d.get("trend"),
+                    "shift_trend": shift.get("trend"), "failures": fail or "none"})
+
+
 def _stc_worked_example():
     """The auto-generated controlled worked example: same-route deltas vs the nearest peer + the FACT of
     feel/objective divergence — and crucially NO per-case verdict (the n=1 trap this session disproved).
@@ -10964,6 +11672,196 @@ def _stc_soft_ctl_floor():
                expect=f"None≡default; floor raises @CTL30; peak≤{ACWR_HARD}; dormant @CTL≥{F}",
                got={"none_lo": round(none_lo, 1), "floored_lo": round(flr_lo, 1),
                     "floored_peak": round(peak, 3), "high_ctl_identical": flr_hi == none_hi,
+                    "failures": fail or "none"})
+
+
+def _stc_long_run_step():
+    """§PRO9 — long-run progression cap (Davis/Aarhus, ENGINE_SCIENCE.md §3.2): the plan never PRESCRIBES
+    a long run beyond LONG_RUN_STEP_CAP × the trailing-window longest. Locks: (a) `_distribute_week` with
+    `long_km_cap` clips the long run to the cap (within minute-rounding) and REDISTRIBUTES the freed
+    volume to the short easy runs (weekly total preserved, never shed — a smaller long spike can only
+    lower peak transient); (b) None ⇒ byte-identical (no cap); (c) CAUTION never caps (assertive-only —
+    seeding recent_longs leaves caution long runs untouched); (d) ASSERTIVE holds every non-down/taper
+    week's long run to ≤ +10% of the rolling trailing-4wk max (the safety property), and the cap actually
+    binds + is surfaced; (e) `_recent_long_runs` reads the trailing weekly maxima from owned data."""
+    from datetime import date, timedelta
+    import sqlite3 as _sq
+    easy = 360.0
+    zones = {"easy": 360.0, "marathon": 330.0, "threshold": 300.0, "interval": 270.0}
+    bs = date(2026, 8, 3)   # a Monday
+    fail = []
+
+    # (a)/(b) — within-week: identical inputs, cap vs no-cap. Total preserved (never shed), long ≤ cap,
+    # freed volume lands on the easy runs.
+    wk = {"wk": 1, "km": 60, "runs": 5, "long": 25, "strides": 0,
+          "quality": [{"kind": "long_mp", "zone": "marathon", "frac": 0.07,
+                       "attach": "long", "label": "MP long"}]}
+    un_s, un_dt = _distribute_week(wk, bs, 330.0, easy, zones)
+    cp_s, cp_dt = _distribute_week(wk, bs, 330.0, easy, zones, long_km_cap=11.0)
+    none_s, _ = _distribute_week(wk, bs, 330.0, easy, zones, long_km_cap=None)
+    un_long, cp_long = _week_long_km(un_s), _week_long_km(cp_s)
+    un_easy = sum(s["km"] for s in un_s if s.get("kind") == "easy")
+    cp_easy = sum(s["km"] for s in cp_s if s.get("kind") == "easy")
+    if [s["km"] for s in none_s] != [s["km"] for s in un_s]:
+        fail.append("long_km_cap=None must be byte-identical to no-arg")
+    if not (cp_long <= 11.0 + 0.3):
+        fail.append(f"cap must clip the long run: {cp_long} !≤ 11.0")
+    if not (cp_long < un_long):
+        fail.append(f"cap must REDUCE the long run: {cp_long} !< {un_long}")
+    if not (cp_easy > un_easy):
+        fail.append(f"freed volume must go to easy runs: {round(cp_easy,1)} !> {round(un_easy,1)}")
+    if abs(sum(cp_dt.values()) - sum(un_dt.values())) > 2.0:
+        fail.append(f"weekly total not preserved: {round(sum(cp_dt.values()),1)} vs {round(sum(un_dt.values()),1)}")
+
+    # (c) — CAUTION never caps: seeding recent_longs leaves the caution block byte-identical.
+    cshape = build_shape(6, 30)
+    c_seed, _ = generate_block(cshape, bs, 45.0, 42.0, easy, zones=zones,
+                               regime="caution", recent_longs=[8.0])
+    c_none, _ = generate_block(cshape, bs, 45.0, 42.0, easy, zones=zones,
+                               regime="caution", recent_longs=None)
+    if [_week_long_km(w["sessions"]) for w in c_seed] != [_week_long_km(w["sessions"]) for w in c_none]:
+        fail.append("CAUTION must ignore the cap (assertive-only) — seeding changed caution long runs")
+
+    # (d) — ASSERTIVE: seed a small trailing long so the +10% cap bites; EVERY week's long run (down &
+    # taper included — the cap only reduces, so a genuinely-short recovery long is untouched, but a
+    # recovery week can't LEAP past the cap and reset the baseline) must stay ≤ 1.10 × the rolling
+    # trailing-4wk max, and the cap must actually bind + surface.
+    ashape = build_shape(8, 30)
+    a_weeks, _ = generate_block(ashape, bs, 45.0, 42.0, easy, zones=zones,
+                                regime="assertive", recent_longs=[10.0])
+    longs, bound_any, breach = [10.0], False, None
+    for w in a_weeks:
+        lk = _week_long_km(w["sessions"])
+        cap = LONG_RUN_STEP_CAP * max(longs[-LONG_RUN_STEP_WINDOW:])
+        if lk > cap + 0.3:
+            breach = f"wk{w['wk']} long {round(lk,1)} > cap {round(cap,1)}"
+        if w.get("long_step_capped"):
+            bound_any = True
+        longs.append(lk)
+    if breach:
+        fail.append(f"ASSERTIVE long-run step exceeded +10%: {breach}")
+    if not bound_any:
+        fail.append("cap never bound on the assertive block — test is not exercising the path")
+
+    # (e) — _recent_long_runs reads trailing weekly maxima from owned data (longest run each week).
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(SCHEMA)
+    ref = date(2026, 8, 3)                      # Monday; seed the two weeks before it
+    for wback, kms in ((1, [6.0, 12.0]), (2, [8.0, 5.0])):   # wk-1 longest 12, wk-2 longest 8
+        wsmon = ref - timedelta(days=7 * wback)
+        for j, km in enumerate(kms):
+            d = (wsmon + timedelta(days=2 * j)).isoformat()
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration) VALUES(?,?,?,?,?)",
+                      (d, d + "T18:00", RUNNING_SPORT, km, int(km * 360)))
+    rl = _recent_long_runs(m, ref, n_weeks=2)
+    if rl != [8.0, 12.0]:                       # oldest-first: wk-2 max then wk-1 max
+        fail.append(f"_recent_long_runs wrong trailing maxima: {rl} != [8.0, 12.0]")
+
+    # (f) — THE REDISTRIBUTION BUG (fixed 2026-07-01): when the cap falls BELOW the natural even-split
+    # short-run length (a tiny recent-longest + a ramping volume week — the detrained-returner profile),
+    # the freed long-run budget must NOT reappear as an over-cap easy run. NO single session may exceed
+    # the cap (else the longest run breaches +10% AND ratchets the trailing baseline); the week spreads
+    # onto MORE, shorter easy days instead, and the weekly total is still preserved.
+    pwk = {"wk": 1, "km": 28, "runs": 4, "long": 12, "strides": 0, "quality": []}
+    p_trimp = 28.0 * (easy / 60.0) * EASY_TRIMP_PER_MIN   # ~28 easy km of load
+    p_s, p_dt = _distribute_week(pwk, bs, p_trimp, easy, zones, long_km_cap=5.5)
+    p_max = max(s["km"] for s in p_s)
+    if p_max > 5.5 + 0.05:
+        fail.append(f"redistribution breached the cap: a session ran {p_max}km > 5.5 cap ({[s['km'] for s in p_s]})")
+    if len(p_s) <= pwk["runs"]:
+        fail.append(f"cap didn't add easy days to hold volume under the cap: {len(p_s)} runs ≤ {pwk['runs']}")
+    if abs(sum(p_dt.values()) - p_trimp) > 3.0:
+        fail.append(f"pathological cap shed volume instead of spreading it: {round(sum(p_dt.values()),1)} vs {round(p_trimp,1)}")
+    # and it must NOT fire when the cap sits above the even-split (byte-identical to no-cap)
+    q_s, _ = _distribute_week(pwk, bs, p_trimp, easy, zones, long_km_cap=16.5)
+    q_none, _ = _distribute_week(pwk, bs, p_trimp, easy, zones, long_km_cap=None)
+    if [s["km"] for s in q_s] != [s["km"] for s in q_none]:
+        fail.append("non-binding cap (above even-split) must be byte-identical to no-cap")
+
+    return _st("det", "long-run-step",
+               "§PRO9 long-run progression cap: within-week clip redistributes (total preserved); "
+               "None≡default; caution never caps; assertive holds every week's long ≤ +10% of the "
+               "trailing-4wk max (binds + surfaced); NO single session exceeds the cap even when the freed "
+               "budget would inflate the shorts (spreads onto more easy days, baseline can't ratchet); "
+               "_recent_long_runs reads trailing maxima",
+               passed=not fail,
+               expect="cap clips+redistributes; None≡default; caution byte-identical; assertive ≤ +10% rolling; seed reads maxima",
+               got={"cap_long": round(cp_long, 1), "uncap_long": round(un_long, 1),
+                    "easy_km_gain": round(cp_easy - un_easy, 1), "cap_bound": bound_any,
+                    "recent_longs": rl, "failures": fail or "none"})
+
+
+def _stc_eq_km():
+    """§3.1 — the biomechanical load axis (eq_km) + its soft governor. Locks: (a) eq_km MATH — a structured
+    session weights each rep's km by its zone's Davis f (easy wu/cd stay 1×, the fast work reps carry the
+    weight); a plain run = km × f(kind); an ACTUAL run classifies its pace into the fastest zone it met;
+    (b) CAUTION byte-identical (the governor is assertive-only — seeding recent_eq changes nothing in
+    caution); (c) ASSERTIVE FIRES on a fast-driven eq_km spike (a quality week jumping >+30% over the
+    trailing eq baseline while its VOLUME stays under the cap) and RESHAPES it to easy — fast slice removed
+    (hard_share→0), load only ever REDUCED (never raised); (d) the VOLUME guard — a pure-volume jump
+    (week_km itself over the cap) does NOT fire (that's ACWR/CTL_RAMP's axis, not eq_km's)."""
+    from datetime import date
+    easy = 360.0
+    zones = {"easy": 360.0, "marathon": 330.0, "threshold": 300.0, "interval": 270.0}
+    bs = date(2026, 8, 3)
+    fail = []
+
+    # (a) eq_km math
+    tempo = {"reps": [{"zone": "easy", "km": 2.0}, {"zone": "threshold", "km": 5.0},
+                      {"zone": "easy", "km": 2.0}]}
+    if _session_eq_km(tempo) != 21.5:                       # 2 + 5×3.5 + 2
+        fail.append(f"structured eq_km wrong: {_session_eq_km(tempo)} != 21.5")
+    if _session_eq_km({"kind": "easy", "km": 10.0}) != 10.0:
+        fail.append("plain easy eq_km should be km×1")
+    # actual-run classification: at threshold pace (300 s/km) ⇒ f=3.5; slower than marathon ⇒ easy
+    if _run_eq_km(10.0, 300, zones) != 35.0:
+        fail.append(f"_run_eq_km at threshold pace wrong: {_run_eq_km(10.0,300,zones)} != 35.0")
+    if _run_eq_km(10.0, 400, zones) != 10.0:               # slower than marathon (330) ⇒ easy
+        fail.append(f"_run_eq_km at easy pace should be km×1: {_run_eq_km(10.0,400,zones)}")
+
+    # (b) CAUTION never caps — seeding recent_eq leaves the caution block byte-identical
+    cshape = build_shape(6, 30)
+    c_seed, _ = generate_block(cshape, bs, 45.0, 42.0, easy, zones=zones, regime="caution",
+                               recent_eq=[40.0], recent_longs=[6.0])
+    c_none, _ = generate_block(cshape, bs, 45.0, 42.0, easy, zones=zones, regime="caution",
+                               recent_eq=None, recent_longs=[6.0])
+    if [w["trimp_total"] for w in c_seed] != [w["trimp_total"] for w in c_none] or \
+       [w.get("bio_capped") for w in c_seed] != [None] * len(c_seed):
+        fail.append("CAUTION must ignore the bio governor (assertive-only)")
+
+    # (c) ASSERTIVE fires on a fast-driven eq_km spike + reshapes to easy (only reduces)
+    ashape = build_shape(6, 30)
+    base, bbnd = generate_block(ashape, bs, 45.0, 42.0, easy, zones=zones, regime="assertive",
+                                recent_longs=[6.0], recent_eq=None)
+    capd, _ = generate_block(ashape, bs, 45.0, 42.0, easy, zones=zones, regime="assertive",
+                             recent_longs=[6.0], recent_eq=[40.0])   # cap = 52; wk1 eq ~53 (fast), km ~40
+    w1b, w1c = base[0], capd[0]
+    if not w1c.get("bio_capped"):
+        fail.append("assertive bio governor did not fire on the fast-driven eq_km spike")
+    else:
+        if w1c["eq_km"] > w1c["bio_capped"] + 0.3:
+            fail.append(f"reshaped week eq_km still over the cap: {w1c['eq_km']} > {w1c['bio_capped']}")
+        if _hard_share(w1c["sessions"], w1c["trimp_total"]) != 0.0:
+            fail.append("bio reshape did not drop the fast slice to easy (hard_share≠0)")
+        if w1c["trimp_total"] > w1b["trimp_total"] + 0.6:
+            fail.append(f"bio reshape RAISED load (must only reduce): {w1c['trimp_total']} > {w1b['trimp_total']}")
+    if "recent_eq" not in bbnd:
+        fail.append("generate_block did not carry out recent_eq")
+
+    # (d) VOLUME guard — a pure-volume jump (baseline far below the week's km) must NOT fire the bio axis
+    vol, _ = generate_block(ashape, bs, 45.0, 42.0, easy, zones=zones, regime="assertive",
+                            recent_longs=[6.0], recent_eq=[10.0])   # cap 13 < week_km ~40 ⇒ volume, not fast
+    if any(w.get("bio_capped") for w in vol):
+        fail.append("bio governor fired on a pure-VOLUME jump (should defer to ACWR/CTL_RAMP)")
+
+    return _st("det", "eq-km",
+               "§3.1 biomechanical eq_km axis: structured/plain/actual eq_km math (Davis f grid); CAUTION "
+               "byte-identical (assertive-only); ASSERTIVE reshapes a fast-driven eq_km spike to easy "
+               "(hard_share→0, load only reduced); VOLUME jumps don't fire it (that's ACWR's axis)",
+               passed=not fail,
+               expect="eq_km math + caution byte-identical + assertive fast-spike reshape (only reduces) + volume-guard",
+               got={"tempo_eq": _session_eq_km(tempo), "wk1_base_eq": w1b["eq_km"],
+                    "wk1_capped_eq": w1c["eq_km"], "bio_fired": bool(w1c.get("bio_capped")),
                     "failures": fail or "none"})
 
 
@@ -12524,6 +13422,53 @@ def _stc_post_race_reckoning():
                got={"failures": fail or "none"})
 
 
+def _stc_regime_compare():
+    """§PRO10 — the caution↔assertive counterfactual that powers the plan-drift overlay. Locks:
+    (a) generate_plan(force_regime=…) OVERRIDES the earned regime to the forced posture; (b) PURITY —
+    a forced-regime generate NEVER writes to `plans` (the anti-pollution invariant the founding-road
+    anchor depends on); (c) an invalid force_regime is IGNORED (falls back to the earned regime);
+    (d) the two roads' FUTURE weeks align 1:1 by calendar week (same runway ⇒ a clean overlay).
+    Self-contained; never touches the real DB."""
+    import sqlite3 as _sq
+    from datetime import timedelta, date
+    today = date(2026, 6, 1)
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (today.isoformat(), 50.0, 30.0, 30.0))    # low CTL, no banked weeks ⇒ naturally caution
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                ("marathon", "Goal", (today + timedelta(weeks=24)).isoformat(), "finish", "A", "upcoming", _now_iso()))
+    for off in range(0, 21):                              # recent runs so reconstruct/shape_response have data
+        d = (today - timedelta(days=off)).isoformat()
+        mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?)",
+                    (d, d + "T18:00", RUNNING_SPORT, 6.0, 2100, 40.0))
+    mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                (_now_iso(), today.isoformat(), "{}", json.dumps({"base": {"weeks": []}})))
+    mem.commit()
+    fail = []
+    nplans = lambda: mem.execute("SELECT COUNT(*) c FROM plans").fetchone()["c"]
+    n0 = nplans()
+    p_nat = generate_plan(mem)
+    nat_mode = (p_nat.get("regime") or {}).get("mode")
+    p_cau = generate_plan(mem, force_regime="caution")
+    p_asr = generate_plan(mem, force_regime="assertive")
+    p_bad = generate_plan(mem, force_regime="turbo")
+    if (p_cau.get("regime") or {}).get("mode") != "caution":
+        fail.append("force_regime='caution' did not take")
+    if (p_asr.get("regime") or {}).get("mode") != "assertive":
+        fail.append("force_regime='assertive' did not take")
+    if nplans() != n0:
+        fail.append(f"forced generate polluted plans table: {n0} -> {nplans()}")
+    if (p_bad.get("regime") or {}).get("mode") != nat_mode:
+        fail.append(f"invalid force_regime not ignored: got {(p_bad.get('regime') or {}).get('mode')} != {nat_mode}")
+    fut = lambda pl: sorted(w["start"] for w in _plan_weeks(pl) if _date(w["start"]) > today)
+    if fut(p_cau) != fut(p_asr):
+        fail.append("caution/assertive roads do not align 1:1 by week")
+    return _st("det", "regime-compare",
+               "force_regime overrides the earned regime, stays pure (no persist), ignores junk, roads align 1:1",
+               passed=not fail, got={"failures": fail or "none", "natural_regime": nat_mode})
+
+
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_day_spacing(),
@@ -12536,20 +13481,21 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
+                 lambda: _stc_lt1(),
                  lambda: _stc_health_sync(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(), lambda: _stc_building_load_integrity(),
                  lambda: _stc_frequency_met(),
-                 lambda: _stc_run_metrics(), lambda: _stc_worked_example(),
+                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
                  lambda: _stc_cross_phase_freeze_integration(),
                  lambda: _stc_feasibility_floor(),
                  lambda: _stc_rebase_runway_clamp(), lambda: _stc_sync_refresh(),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(),
                  lambda: _stc_caution_baseline(), lambda: _stc_ramp_rate(),
-                 lambda: _stc_soft_ctl_floor(),
-                 lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(),
+                 lambda: _stc_soft_ctl_floor(), lambda: _stc_long_run_step(), lambda: _stc_eq_km(),
+                 lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_ctl_floor_removed(),

@@ -32,16 +32,24 @@ showcase deliberately shows a slice; the real console has the full set.
 **The engine (deterministic, no AI required)**
 - **Current shape** — VO₂max, CTL/ATL (fitness/fatigue) and ACWR, read from your Runalyze data.
 - **Objective-driven plan** — reverse-periodized Re-base → Base → Build → Peak → Taper toward a goal
-  race, with a hard ACWR safety ceiling on every week.
+  race, safety-governed every week: a hard ACWR ceiling always, plus further injury brakes once you've
+  earned the assertive build (see *How the plan is governed*).
 - **Two-direction replanning** — the road moves as results come in: eases toward an honest goal after a
   rough patch, expands to exploit fitness you've earned. Diff-able week to week.
 - **Combined multi-A periodization** — chain several A-races into one continuous build (intermediate
   peaks/tapers + re-build bridges), each race's role set by how far apart they are.
 - **CTL-responsive volume + earned levers** — volume tracks measured fitness; opt-in "earned" faster
   build / 6th weekly run / faster Phase-0 exit, all ACWR-capped, recovery weeks protected.
+- **Earned progression (conservative → assertive)** — a conservative rebuild by default; the engine only
+  graduates you to a ceiling-riding **assertive** build when your data shows it's safe (see *How the plan
+  is governed*). No "train harder" button — the safety is in the inference.
+- **Injury brakes beyond ACWR** — long-run-jump cap, a biomechanical damage-equivalent lens, a tissue
+  limiter and a chronic-growth cap, so the ACWR ceiling isn't the only guardrail.
 - **Plan drift** — distance / effort / CTL / race-outcome charts comparing your founding road to where
   it stands now, plus a settle-the-score verdict.
-- **Effort discipline** — grades whether your easy days are actually easy (HR-led, Runalyze-native).
+- **Effort discipline** — grades whether your easy days are actually easy against a *moving*,
+  fitness-tracking threshold: HR-led on a derived lactate-threshold HR where that's trustworthy, otherwise
+  your grade-adjusted pace vs an aerobic-threshold (LT1) bar — with an HR-redline backstop either way.
 - **Readiness gate** — a daily green/amber/red verdict that flags stop-the-run / cardiac-type symptoms.
 - **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation), an HR-zone band, and a route map.
 
@@ -131,20 +139,86 @@ Effort lives in two places, on two different physiological anchors:
 
 - **Prescription — pace, from VO₂max.** What the plan *tells you to run*. Daniels VDOT zones (fractions of
   velocity-at-VO₂max), validated to reproduce Runalyze's 5 k prognosis. Session load is TRIMP from the zone.
-- **Judgment — heart rate, from LTHR.** How a completed run is *graded* (the effort-discipline monitor) and
-  how the activity chart colours HR. Run zones anchor on a **data-derived lactate-threshold HR** (Friel's
-  %LTHR grid: Z1<0.85, Z2 0.85–0.89, Z3 0.90–0.94, Z4 0.95–0.99, Z5 ≥1.00·LTHR), because %HRmax is loosest
-  exactly at the easy↔threshold turnpoint the app cares about. LTHR is estimated streamlessly from the
-  whole-run average HR of your sustained hard efforts (20–70 min at ≥85 % robust HRmax), with a confidence
-  flag; below confidence it falls back to a %HRmax grid, flagged provisional. The monitor's easy/hard
-  ceilings *are* the chart's zone boundaries — one definition, so they can never disagree.
+- **Judgment — a *moving*, fitness-tracking easy bar.** How a completed run is *graded* (the
+  effort-discipline monitor). The primary anchor depends on what your data supports (the run's `anchor` field
+  says which):
+  - **`lthr` — heart rate, where a trustworthy lactate-threshold HR exists.** HR is the honest read of how
+    easy a run really was, so where a confident *moving* LTHR is available it leads (Friel %LTHR grid:
+    Z1<0.85, Z2 0.85–0.89, Z3 0.90–0.94, Z4 0.95–0.99, Z5 ≥1.00·LTHR).
+  - **`lt1_pace` — grade-adjusted pace vs a moving LT1 bar, when LTHR isn't trustworthy.** The easy ceiling
+    is LT1 (aerobic threshold), which we operationalize as ≈80 % of 5 k pace — a pace-first anchor informed
+    by John Davis's intensity model — and it *moves* as you get fitter or detrain, with an **HR-redline
+    backstop** so an easy-*paced* run whose HR sat at threshold+ can never read easy.
+  - **`hrmax` — a %HRmax grid** only as a last resort (no confident LTHR *and* no pace).
+
+  LTHR is estimated streamlessly from the whole-run average HR of your sustained hard efforts (20–70 min at
+  ≥85 % robust HRmax), with a confidence flag. The activity chart's HR-zone band uses the same LTHR when
+  confident, %HRmax otherwise.
 
 These are **independent fitness estimates that should agree**: running at the easy *pace* ceiling should keep
 HR under the easy *HR* ceiling. They diverge most under cardiac decoupling (when detrained, a given easy pace
-drives a higher HR than VDOT predicts). A **pace↔HR coherence check** surfaces that divergence as a
-diagnostic — it does **not** alter the prescription. Caveat worth knowing: the streamless LTHR understates the
-true value for *structured* tempos (warm-up/cool-down dilute the whole-run average), so the easy HR ceiling is
-deliberately set at the conservative (lower) Friel boundary.
+drives a higher HR than VDOT predicts) — which the engine *deliberately doesn't police* on the pace bar (a
+merely-elevated easy-run HR is normal in a rebuild), reserving the HR-redline backstop for a genuine
+threshold+ effort. A **pace↔HR coherence check** surfaces that divergence as a diagnostic — it does **not**
+alter the prescription. Caveat worth knowing: the streamless LTHR understates the true value for *structured*
+tempos (warm-up/cool-down dilute the whole-run average), so the easy HR ceiling is deliberately set at the
+conservative (lower) Friel boundary.
+
+## How the plan is governed — safety & progression
+The plan isn't a fixed template with a ceiling bolted on; it's the output of a few interacting governors.
+This is what decides how much you run and how fast that grows.
+
+### Two regimes, *earned* from your data
+Everyone starts **conservative** — a Re-base plus a gentle fixed ramp, the right posture after a
+layoff, illness, or a fresh start. The engine graduates you to an **assertive** build — one that *rides* the
+safe load ceiling instead of a timid fixed ramp — only when your own data says the conservative posture is no longer
+needed. Assertive requires **all** of:
+
+- a **clean window** — no medical flag and no stop-the-run symptom in the last **56 days**;
+- **demonstrated tolerance** — at least **2 well-absorbed training weeks banked** (you actually did the
+  volume and recovered from it, not just planned it);
+- **green readiness** now.
+
+Miss any one and it stays cautious — and it says *which* one in plain language ("building tolerance — 1 of 2
+weeks banked"). There is deliberately **no manual override**: the safety comes from the inference, not a
+setting you can flip. In assertive it further self-calibrates the ride to how you're actually absorbing load
+— riding the full ceiling while your measured fitness tracks the projection, easing automatically when you
+fall behind.
+
+### The ACWR ceiling — useful, and *not trusted alone*
+Every week is bounded so projected **ACWR** (acute:chronic workload ratio — this week's load vs. your rolling
+chronic load) stays under a hard **1.30** ceiling, with **1.25** as the planning target that leaves margin.
+1.30 sits at the top of Gabbett's widely-cited training-load "sweet spot." It's also a **contested** metric —
+it can be unstable when your chronic load is low — so the engine treats it as one guardrail among several,
+never the whole safety story.
+
+### Load lenses beyond ACWR (the injury brakes)
+Informed by John Davis's writing on multi-lens injury risk, the assertive engine also guards the axes a
+single mileage ratio can't see. Each brake only ever *reduces* a week; the conservative regime is
+byte-identical with them dormant.
+
+- **Long-run-jump cap** — the single longest run never grows more than **+10 %** over your longest of the
+  previous four weeks. (In the Aarhus/Nielsen cohort, n≈5000, sharp *long-run* jumps predicted injury where
+  weekly-mileage jumps did not; the +10 % figure is our own conservative operationalization.)
+- **Biomechanical load (`eq_km`)** — a pace-weighted "damage-equivalent" distance (fast kilometres count for
+  several easy ones), following the tissue-damage axis Davis's biomechanical-load work highlights; a soft
+  brake trims a week's fast work when that damage proxy spikes, even if mileage looks fine. The pace→damage
+  weighting is our own, deliberately uncalibrated to you until your fast-session and injury history tune it.
+- **Tissue limiter** — forces a recovery week after too many consecutive near-ceiling weeks.
+- **Chronic-growth cap** — bounds how fast chronic load itself may climb, week over week.
+
+> **Scientific basis.** The safety model is *informed by* John Davis (*Marathon Excellence for Everyone*;
+> runningwritings.com) and builds on primary work by Gabbett (ACWR), Nielsen et al. (the Aarhus load-change
+> injury cohort), Friel (%LTHR zones) and Daniels (VDOT pacing). The specific thresholds — the `eq_km`
+> damage weighting, the ≈80 %-of-5k LT1, the +10 % long-run cap — are our own operationalization, tuned to
+> the athlete's data, not prescriptions issued by any of these authors.
+
+### Honest about the *goal*, not just the week
+For a marathon the engine projects a **finish time** from the fitness you're on track to carry *into* the
+race, with a short runway curve (now / +4 / +8 weeks). If the timeline makes the objective a survival-shuffle
+rather than a race, it tells you — and shows what a bigger, still safety-governed build would buy — instead of
+quietly prescribing a plan that leaves you under-built. It never refuses the goal; it makes the trade-off
+visible, so the choice is yours.
 
 ## Self-test
 `python SparingHorse.py selftest` runs the deterministic engine battery (and the key-gated LLM checks where a

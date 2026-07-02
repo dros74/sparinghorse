@@ -7,6 +7,9 @@ document*.pdf
 *blood*
 *.pdf
 
+# copyrighted reference material (John Davis articles/book) — local research only, NEVER commit/mirror
+JDavis/
+
 # locally-owned data copy (your training history)
 *.db
 *.db-shm

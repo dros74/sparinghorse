@@ -40,8 +40,11 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
   the re-base block from your recent training. Nothing is assumed.
 - **The road moves in both directions.** Run well and earn fitness → the plan expands to use it. Run poorly
   or miss sessions → it eases toward an honest goal. Every regeneration is diff-able against the last.
-- **Safety is a hard ceiling, not a suggestion.** Every planned week is bounded by an ACWR cap (acute:chronic
-  workload ratio ≤ 1.25). Earned "faster build" levers raise *volume targets*, never the ceiling.
+- **Safety is a hard ceiling, not a suggestion.** Every planned week is bounded by a hard ACWR cap
+  (acute:chronic workload ratio) of **1.30**, with **1.25** the conservative planning target the rebuild
+  sticks to. Once your data *earns* the assertive build (see §6) the week rides between the two, and further
+  injury brakes beyond ACWR engage (long-run-jump cap, a biomechanical load lens, a tissue limiter). Earned
+  levers raise *volume targets*, never the ceiling.
 
 You operate it by keeping your data synced and your objectives current. The engine does the rest; the AI
 layer (optional) only narrates and parses — it never overrides the deterministic safety logic.
@@ -165,7 +168,10 @@ A-races impossibly close, the engine clamps the phases so they can't overrun a r
 Enter a target like `3:30` (marathon/half, `H:MM`) or `21:00` (5k/10k, `MM:SS`), or just `finish`. The
 feasibility verdict reads your target honestly: it separates **finish healthy** (realistic off a rebuild)
 from a **time target** that the runway's chronic load won't support, and it re-reads this every block as
-real fitness returns.
+real fitness returns. For a marathon it also shows a **projected finish time** from the fitness you're on
+track to carry into the race, with a short **runway curve** (now / +4 / +8 weeks) — a short runway isn't a
+refusal, it's a slower projected time that improves with more weeks, and the plan says so rather than
+quietly leaving you under-built.
 
 ---
 
@@ -174,13 +180,22 @@ real fitness returns.
 ### Current shape
 VO₂max, **CTL** (chronic load ≈ your fitness, a slow ~42-day average), **ATL** (acute load ≈ recent fatigue,
 a fast ~7-day average), and **ACWR** (ATL ÷ CTL — how hard recent load is relative to your base). ACWR near
-1.0 is balanced; the plan keeps every week ≤ 1.25.
+1.0 is balanced; the plan holds every week under a hard **1.30** ceiling — targeting **1.25** on the
+conservative rebuild, riding toward 1.30 on the earned assertive build.
 
 ### The plan
 A phase bar (Re-base → Base → Build → Peak → Taper, plus any chain bridges) over a "weeks to race day" count.
 Tap a phase to open its weeks; tap a week to open its sessions. Each week shows planned km, run count, the
 projected end-of-week ACWR badge, and — once lived — what you actually ran. Watch for:
 
+- **Regime badge (conservative → assertive)** — the plan tile shows which posture it's in, with the reason.
+  *Conservative* is the rebuild posture (a Re-base plus a gentle fixed ramp); *assertive* rides the safe
+  ACWR ceiling instead. Assertive is **earned automatically from your data** — a clean 56-day
+  medical/symptom window, at least **2 well-absorbed weeks banked**, and green readiness — and the badge
+  names whichever one is still missing ("building tolerance — 1 of 2 weeks banked"). There is no manual
+  override; the safety is in the inference. In the assertive regime the extra injury brakes engage and a
+  week can be flagged **`long-run held (+10%)`** (the long-run-jump cap) or **`fast load eased`** (the
+  biomechanical brake trimming a fast-load spike to easy).
 - **`clipped to fit ACWR`** — the safety ceiling trimmed that week's volume. Expected on aggressive weeks.
 - **Re-base graduation** — bank enough solid weeks and Phase 0 exits a week early (the reward is *time*;
   volumes and the ceiling are unchanged).
@@ -205,22 +220,32 @@ three axes: **volume**, **fitness**, and the **race-day projection**.
   **private-only** (your finish time is more than the public "shape + plan" line shows).
 
 ### Effort discipline
-*Are your easy days actually easy?* HR-led (Runalyze's HR model already internalizes terrain and heat), with
-training-effect as corroboration only. A 0–100 easy-discipline score plus per-run verdicts (on / hot / too
-hard). Prescribed quality sessions are matched to your runs within ±2 days and excluded from the easy score,
-so an anticipated or postponed session isn't misread. The **public** view is sanitized to a pace-based score
-with no HR, no critique.
+*Are your easy days actually easy?* Graded against a *moving*, fitness-tracking easy bar — HR-led on a
+derived lactate-threshold HR where that's trustworthy, otherwise your grade-adjusted pace vs an
+aerobic-threshold (LT1) bar (with an HR-redline backstop either way). A 0–100 easy-discipline score plus per-run verdicts (on / hot / too
+hard); each run's `anchor` names the basis it used. Prescribed quality sessions are matched to your runs
+within ±2 days and excluded from the easy score, so an anticipated or postponed session isn't misread. The
+**public** view is sanitized to a pace-based score with no HR, no critique.
 
 **How "effort" is actually computed.** The app keeps the *prescription* and the *judgment* on different
 anchors, on purpose:
 
 - The **plan prescribes pace** (Daniels VDOT zones from your VO₂max). That is what feeds the engine — volume,
   TRIMP load, taper, the ACWR ceiling. None of the HR machinery below touches the plan numbers.
-- The **monitor judges heart rate**, anchored on a **derived lactate-threshold HR (LTHR)**, not %HRmax —
-  because two runners with the same HRmax can have thresholds 15+ bpm apart, and %HRmax is loosest exactly at
-  the easy↔threshold line this score is about. Run zones use Friel's %LTHR grid (Z1 < 0.85 · Z2 0.85–0.89 ·
-  Z3 0.90–0.94 · Z4 0.95–0.99 · Z5 ≥ 1.00 · LTHR). An easy run averaging above the Z1/Z2 boundary reads
-  *hot*; at/above Z4 (threshold) it reads *too hard*.
+- The **monitor judges the completed run against a moving easy bar**, on whichever basis your data supports
+  (the run's `anchor` field names it):
+  - **Heart rate vs a derived LTHR** (`lthr`) — the primary read where a confident, *moving* lactate-threshold
+    HR exists, because HR is the honest signal of how easy a run really was. Two runners with the same HRmax
+    can have thresholds 15+ bpm apart, and %HRmax is loosest exactly at the easy↔threshold line this score is
+    about. Run zones use Friel's %LTHR grid (Z1 < 0.85 · Z2 0.85–0.89 · Z3 0.90–0.94 · Z4 0.95–0.99 · Z5 ≥
+    1.00 · LTHR): an easy run averaging above the Z1/Z2 boundary reads *hot*, at/above Z4 (threshold) *too hard*.
+  - **Grade-adjusted pace vs a moving LT1 bar** (`lt1_pace`) — when there's no trustworthy LTHR. LT1 (≈80 %
+    of 5 k pace) is your aerobic-threshold easy ceiling and *moves* as fitness changes. A merely-elevated HR
+    on an easy-*paced* run is deliberately **not** policed (normal decoupling in a rebuild), but an
+    **HR-redline backstop** keeps an easy-paced run whose HR sat at threshold+ from ever reading easy.
+  - **%HRmax grid** (`hrmax`) — a last-resort read only when there's neither a confident LTHR nor a pace.
+
+  None of this touches the plan numbers — it only grades what you already ran.
 
 **Where the LTHR comes from.** It is estimated from runs you already did — no field test. For a continuous
 hard effort (a race, or a tempo with little warm-up/cool-down) the whole-run average HR ≈ LTHR; the app pools
@@ -354,9 +379,15 @@ Anything you'd rather set via environment still works — see the env table in t
 
 - **CTL** — Chronic Training Load. A slow (~42-day) average of training load; the app's proxy for *fitness*.
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.
-- **ACWR** — Acute:Chronic Workload Ratio (ATL ÷ CTL). The injury-risk lever; the plan caps every week ≤ 1.25.
+- **ACWR** — Acute:Chronic Workload Ratio (ATL ÷ CTL). A widely-used (and contested) training-load lever;
+  the plan holds every week under a hard **1.30** ceiling, targeting **1.25** on the conservative rebuild.
 - **TRIMP** — TRaining IMPulse. A single number for a session's load (intensity × duration), the input to CTL/ATL.
 - **VO₂max** — Aerobic ceiling, read from Runalyze; drives the prescribed pace zones (Daniels VDOT).
+- **LT1** — Aerobic-threshold *pace* (≈ 80 % of 5 k pace), derived from your current fitness so it *moves* as
+  you get fitter or detrain. The effort monitor's easy-pace ceiling when a trustworthy LTHR isn't available.
+- **Regime (conservative / assertive)** — the plan's safety posture: *conservative* is the rebuild;
+  *assertive* rides the safe ACWR ceiling, earned automatically from your data (clean medical/symptom window +
+  banked well-absorbed weeks + green readiness). No manual override.
 - **LTHR** — Lactate-Threshold Heart Rate. The HR you can hold at the aerobic/anaerobic turnpoint; anchors the
   HR zones and the effort monitor (Friel's run zones are all %LTHR). Derived from your sustained hard efforts,
   with a confidence flag; a %HRmax estimate stands in (provisional) until there's enough data.

@@ -12,6 +12,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-02
+
+New injury brakes on load axes the acute:chronic ratio structurally can't see — a pace-weighted
+biomechanical lens and a long-run progression cap — plus a fitness-tracking easy-pace ceiling (LT1),
+a read-only durability signal, and a side-by-side view of the assertive build your data could unlock.
+
+### Added
+- **Conservative-vs-assertive overlay on the plan-drift charts.** A toggle turns the drift view into a
+  side-by-side of the road you're on versus the assertive build your data could unlock — distance, load,
+  fitness and projected finish, on the same axes. It's a lazy, read-only projection (never persisted, so it
+  can't pollute your plan history) and honestly labelled an upper envelope. Locked by `det/regime-compare`.
+- **Biomechanical load axis (eq_km).** A second load lens — the tissue-damage axis John Davis's
+  biomechanical-load writing highlights — one that heart-rate load (TRIMP/ACWR) structurally can't see. `eq_km` is a *damage-equivalent* distance
+  (km weighted by pace, since fast running does several times more tissue damage per km than easy). On the
+  assertive build it adds a **soft biomechanical brake**: if a week's pace-weighted load would jump too far
+  above your recent weeks *because of fast running* (not just more volume), the engine eases that week's fast
+  work back to easy — keeping the aerobic volume, only ever reducing load, and never hard-refusing (injury is
+  probabilistic, so it shapes the odds). The conservative rebuild is byte-for-byte identical, and the damage
+  weighting is deliberately uncalibrated-to-you for now, so it's contained and will be tuned to your own fast
+  sessions and injury history before it tightens. Each plan week now shows its biomechanical `eq-km` (on
+  quality weeks, where it exceeds raw km), and a week the brake eased is flagged *"fast load eased"*; locked
+  by `det/eq-km`.
+- **LT1 — your fitness-tracking easy-pace ceiling.** Making pace the intensity anchor (informed by John
+  Davis's pace-first intensity model), the app now derives **LT1 (your aerobic threshold)** from your current
+  fitness — operationalized as ≈80% of 5k pace — so the easy-day ceiling *moves as you get fitter or detrain*
+  instead of sitting at a fixed heart-rate percentage. The effort monitor now reads against this moving LT1 (with a pace cross-check on
+  every run) and no longer falls back to a fixed heart-rate percentage when it lacks a threshold estimate —
+  though where a trustworthy, moving heart-rate threshold exists it stays the primary easiness read, because
+  your own data shows heart rate is the honest signal of how easy a run really was (and pace alone would
+  over-flag a rebuild). When you're rebuilding and your easy pace runs a little ahead of the heart rate it
+  costs (normal cardiac decoupling), it says so and explicitly *doesn't* police your easy pace. Surfaced on
+  the private effort panel and `/api/lt1`. Locked by `det/lt1`.
+- **Durability signal (read-only).** A resilience read from your long-run *aerobic decoupling* — how
+  much your pace-to-heart-rate efficiency drifts over the back half of a long run. Low = your economy
+  holds over the distance (durable); high or rising = it's decaying — the durability/resilience limit
+  John Davis's marathon framework emphasizes. It's computed with a legible verdict and a distance-aware trend
+  and accumulating cases on your private run-metrics data, but deliberately *governs nothing yet* — it
+  earns its way into race projection only once your corpus shows it predicts your actual race fade
+  (the same evidence discipline that walked back the heat coefficient). Locked by `det/durability`.
+- **Long-run progression cap (the strongest single injury lever).** Informed by John Davis's writing on
+  the Aarhus/Nielsen injury cohort (n≈5000), the plan now never *prescribes* a long run that jumps more
+  than +10% beyond your longest run of the previous four weeks — in that cohort a sharp long-run jump
+  predicted injury where weekly-mileage jumps did not, and it lives on a biomechanical axis that
+  load/ACWR can't see (the +10% figure is our own conservative operationalization). The freed volume is redistributed to your easy runs, so
+  the week's total load and its ACWR are unchanged — only the single long-run spike is held back. It
+  applies in the assertive build (where the plan grows fast enough to risk such a jump); the
+  conservative rebuild is byte-for-byte identical. A week the cap held is flagged *"long-run held (+10%)"*.
+  Locked by a new `det/long-run-step` self-test.
+
+### Fixed (pre-release, from an adversarial multi-angle review of the above)
+- **Long-run cap could be defeated by its own redistribution.** When the cap fell below a week's natural
+  even-run length (a small recent-longest run + a growing week — the returner profile), the freed long-run
+  volume made the *easy* runs longer than the capped long, so the true longest run quietly exceeded +10%.
+  Now no single run may exceed the cap: the volume spreads over more (shorter) easy days instead, holding
+  the promise the cap exists to make.
+- **Effort monitor could call a redlined run "easy" when it lacked a reliable heart-rate threshold.** After
+  the LT1 change, a run at easy *pace* but with the heart rate sitting at hard-effort level could read "on
+  target". It now still won't over-police a merely-elevated heart rate on an easy run (that's normal when
+  you're rebuilding), but a genuine redline can no longer read as easy.
+
+### Safety
+- Every brake is preserved and was adversarially reviewed: the ACWR ceiling is never breached, a
+  recovery trough and periodic deloads bound the connective-tissue load the ratio can't see, readiness
+  and symptom halts still dominate, and a recent medical hold keeps the conservative regime in force.
+
 ## [0.7.0] - 2026-06-30
 
 The plan now *uses the safe headroom your own metrics reveal* instead of always playing it timid —
