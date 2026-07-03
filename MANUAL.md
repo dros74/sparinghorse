@@ -262,6 +262,23 @@ them: if your runs done *at* the prescribed easy pace keep landing *above* the e
 is ahead of your current aerobic fitness (classic cardiac decoupling in a rebuild) — the check says so and
 tells you to trust HR on easy days. It is a **diagnostic only**; it never silently rewrites the plan.
 
+### Current zones
+One table of your training-intent zones — easy / marathon / threshold / interval — with a **pace** window
+and an **HR** band per row, both tracking your *current* fitness (private view only; it carries HR). The
+two columns are deliberately independent estimators:
+
+- **Pace** comes from your effective VO₂max via the Daniels–Gilbert oxygen-cost curve: zone paces are fixed
+  fractions of vVO₂max (marathon 0.81 · threshold 0.88 · interval 0.97), and the easy bar is **LT1** ≈ 80%
+  of 5k pace. As your VO₂max moves, every pace moves — the zones are never stale.
+- **HR** bands are cut from the same unified zone grid the effort monitor and the activity chart band read
+  (Friel %LTHR when a trustworthy LTHR exists — derived or your manual entry — else a %HRmax fallback), so
+  the table can never disagree with the effort verdicts: the easy row's top *is* the monitor's easy ceiling,
+  and LTHR sits at the top of the threshold band.
+
+Because pace derives from VDOT and HR from LTHR, the columns can visibly disagree while you rebuild
+(cardiac decoupling) — the Pace↔HR coherence line above tracks exactly that; on easy days HR is the honest
+read. On short intervals the opposite caveat applies: HR lags the effort, so pace leads.
+
 ### Readiness
 A daily **green / amber / red** verdict. It flags stop-the-run / cardiac-type symptoms deterministically (no
 AI needed to catch them) and, on red, halts the plan and tells you to see a doctor. The public view shows the
@@ -351,6 +368,29 @@ The **Settings** window (private container only) is where you configure the app 
   but never echoes the secret back. The Claude key check uses a zero-token metadata call.
 - **Personalization** — athlete context (one line injected into AI prompts), weather cities for the header
   widget, an optional house back-link, and the timezone. These are non-secret and stored in the DB.
+- **Manual LTHR (bpm)** — your lactate-threshold heart rate from a field test. When set, it overrides the
+  data-derived estimate everywhere the app anchors on LTHR (the effort monitor's ceilings, the HR-zone
+  band, the LT1 cross-check). It **ages out**: a fresh entry (≤6 weeks) outranks the derived read, then
+  decays — LTHR moves with fitness, so an old number from a fitter or less-fit you would mis-anchor your
+  easy ceiling. Re-test rather than re-typing the same value (re-saving the same number deliberately does
+  not re-freshen it). Empty = derive from your runs (the default).
+
+### The 30-minute field test (LTHR)
+
+The canonical no-lab way to measure LTHR (Friel):
+
+1. Warm up ~10–15 min easy.
+2. Run **30 minutes all-out, alone, on flat ground** — a solo time trial, paced like a race (don't start
+   too fast; a group or race situation reads ~5 bpm high).
+3. Your **average HR over the final 20 minutes** is your LTHR. Enter it under **Settings → Manual LTHR**.
+
+⚠️ **This is a near-maximal effort.** The app only *suggests* the test (a line on the effort panel) when
+every clearance holds: your plan is on the assertive regime (fitness established — never during a
+conservative rebuild), your latest check-in is green (no stop-symptom, not heavy-legged), there is no
+medical hold, and the current threshold estimate is actually improvable. If you have any cardiovascular
+history, clear max-effort testing with your doctor first — the derived estimate needs no test at all and
+self-corrects as you train. Re-test roughly every 6–8 weeks in a building block if you want to keep the
+manual anchor fresh; otherwise clear the field and let the data lead.
 
 > **Deploy note for the Docker split:** the secrets store adds a `./secrets` volume on the **private**
 > service. If you adopt it on an existing deployment, recreate the container (`docker compose up -d`, not just

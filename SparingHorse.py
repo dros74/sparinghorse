@@ -577,6 +577,10 @@ SETTINGS_SPEC = [
      "help": "The 'Log in' link shown on the PUBLIC page, pointing back to this private console. "
              "Stored here (read from the shared DB) so it survives redeploys; the public container "
              "picks up a change on its next restart."},
+    {"key": "manual_lthr", "env": "SH_MANUAL_LTHR", "label": "Manual LTHR (bpm)", "kind": "line",
+     "help": "Your lactate-threshold heart rate from a field test (30-min TT: average HR of the final "
+             "20 minutes — see the manual). Overrides the data-derived estimate while fresh; it ages "
+             "out over weeks because LTHR moves with fitness. Empty = derive from your runs."},
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
 MAX_WEATHER_CITIES = 5   # header widget cap (mirrored client-side as MAX_CITIES in the picker JS)
@@ -627,6 +631,11 @@ def validate_setting(key, value):
             ZoneInfo(value.strip())
         except Exception:
             return False, "not a valid IANA timezone (e.g. Europe/Luxembourg)"
+    if key == "manual_lthr" and value.strip():
+        v = value.strip()
+        if not v.isdigit() or not (MANUAL_LTHR_RANGE[0] <= int(v) <= MANUAL_LTHR_RANGE[1]):
+            return False, (f"a whole number {MANUAL_LTHR_RANGE[0]}–{MANUAL_LTHR_RANGE[1]} bpm "
+                           "(or empty to derive from your runs)")
     return True, None
 
 
@@ -651,6 +660,14 @@ def apply_settings_overrides(db):
         print(f"[settings] ignoring unresolvable tz {tzname!r}; keeping {SYNC_TZ.key}")
 
 
+def _stamp_manual_lthr(db, val):
+    """Stamp the manual-LTHR entry date — its confidence DECAYS with age (guardrail #2: LTHR moves
+    with fitness). Only a CHANGED value re-stamps: re-saving the same number doesn't re-freshen it
+    (re-test, don't re-type)."""
+    if val.strip() and val.strip() != (get_meta(db, "set:manual_lthr") or "").strip():
+        set_meta(db, "manual_lthr_set_on", datetime.now().date().isoformat())
+
+
 def save_settings(db, updates):
     """Validate + persist a {key: raw_string} map to meta, then re-apply the globals. Unknown keys
     are ignored; secrets can't be set (they aren't in SETTINGS_SPEC). All-or-nothing: if ANY value
@@ -668,6 +685,8 @@ def save_settings(db, updates):
     if errors:
         return False, errors
     for key, val in valid.items():
+        if key == "manual_lthr":
+            _stamp_manual_lthr(db, val)
         set_meta(db, "set:" + key, val)
     db.commit()
     apply_settings_overrides(db)
@@ -1183,6 +1202,15 @@ LTHR_EASY_FRAC = LTHR_ZONE_FRACS[0]   # Z1/Z2 boundary (Friel easy/recovery ceil
 LTHR_HARD_FRAC = LTHR_ZONE_FRACS[2]   # Z3/Z4 boundary: at/above threshold ⇒ an 'easy' run was threshold+
 LTHR_MIN_CONFIDENCE = {"moderate", "high"}   # only ANCHOR on a derived LTHR this trustworthy (else %HRmax)
 HRMAX_ZONE_FRACS = (0.60, 0.70, 0.80, 0.90)  # %HRmax fallback grid — the values the reconstruction confirmed
+LTHR_TRUSTED = ("derived", "manual")         # sources the zone/monitor anchor may trust (gate ∧ confidence)
+# Manual LTHR (slice #2): a field-tested number the owner typed in. It goes STALE as fitness moves
+# (guardrail #2 — LTHR drifts UP through a rebuild, so an old manual value can mis-anchor either way):
+# confidence decays with the age of the entry, and the derived estimate takes back over once it out-ranks
+# the decayed manual one. An UNDATED manual value (env-provided) is capped at moderate.
+MANUAL_LTHR_FRESH_DAYS = 42   # ≤ this old ⇒ high confidence (a recent field test beats the streamless read)
+MANUAL_LTHR_OK_DAYS = 84      # ≤ this old ⇒ moderate; older ⇒ low (re-test or clear it)
+MANUAL_LTHR_RANGE = (100, 220)  # plausible human LTHR band (bpm) — validation for the setting
+_CONF_RANK = {"high": 3, "moderate": 2, "low": 1, "none": 0}
 
 
 def _robust_hrmax(db):
@@ -1204,6 +1232,35 @@ def _pctile(xs, q):
     return xs[min(len(xs) - 1, round(q * (len(xs) - 1)))]
 
 
+def _manual_lthr(db, today):
+    """The owner's manual LTHR entry (Settings → 'Manual LTHR'), age-decayed per guardrail #2.
+    Returns (bpm, confidence, set_on, age_days) or (None, None, None, None) when unset/invalid.
+    Tolerates a DB without the meta table (det fixtures) — absent means unset. The set-date is
+    stamped by save_settings; an undated value (env-provided) is capped at moderate."""
+    try:
+        raw, _src = _resolve_setting(db, SETTINGS_BY_KEY["manual_lthr"])
+    except sqlite3.OperationalError:
+        return None, None, None, None
+    raw = (raw or "").strip()
+    if not raw or not raw.isdigit() or not (MANUAL_LTHR_RANGE[0] <= int(raw) <= MANUAL_LTHR_RANGE[1]):
+        return None, None, None, None
+    try:
+        set_on = get_meta(db, "manual_lthr_set_on")
+    except sqlite3.OperationalError:
+        set_on = None
+    age = None
+    if set_on:
+        from datetime import date as _d
+        try:
+            age = (today - _d.fromisoformat(set_on)).days
+        except (TypeError, ValueError):
+            age = None
+    conf = ("moderate" if age is None else
+            "high" if age <= MANUAL_LTHR_FRESH_DAYS else
+            "moderate" if age <= MANUAL_LTHR_OK_DAYS else "low")
+    return int(raw), conf, set_on, age
+
+
 def derive_lthr(db, today=None):
     """Estimate LTHR (lactate-threshold HR) from sustained hard efforts the athlete already ran — no
     field test, self-calibrating. For a CONTINUOUS hard effort (a race, or a tempo with little
@@ -1215,41 +1272,54 @@ def derive_lthr(db, today=None):
     STRUCTURED tempos (warmup/cooldown dilute the whole-run avg) — fine for a confidence-flagged v1.
 
     Returns {lthr, source, confidence, n, n_recent, hrmax, pct_hrmax, provisional}:
-      • source: 'derived' (from efforts) | 'hrmax_proxy' (fallback) | None (no HRmax at all)
+      • source: 'manual' (owner's field-tested entry, age-decayed) | 'derived' (from efforts) |
+        'hrmax_proxy' (fallback) | None (no HRmax at all)
       • confidence: 'high' | 'moderate' | 'low' | 'none'
-      • lthr is None only when there's no robust HRmax to even proxy from."""
+      • a MANUAL entry (slice #2) wins while its age-decayed confidence out-ranks (or ties) the
+        automatic read — a fresh field test beats the streamless estimate, then hands back as it
+        goes stale; ties go to the human's number. Manual works even with no HR data at all.
+      • lthr is None only when there's no manual entry AND no robust HRmax to even proxy from."""
     from datetime import date as _d
+    today = today or _d.today()
     rmax = _robust_hrmax(db)
     base = {"hrmax": rmax, "n": 0, "n_recent": 0, "provisional": False}
     if not rmax:
-        return {**base, "lthr": None, "source": None, "confidence": "none", "pct_hrmax": None}
-    today = today or _d.today()
-    floor = int(rmax * LTHR_QUAL_FRAC)
-    rows = db.execute(
-        "SELECT date, hr_avg, duration FROM activities WHERE " + RUN_FAMILY_SQL +
-        " AND hr_avg IS NOT NULL AND duration IS NOT NULL AND duration BETWEEN ? AND ? AND hr_avg>=?",
-        (LTHR_MIN_SEC, LTHR_MAX_SEC, floor)).fetchall()
-    quals = []   # (days_ago, hr_avg) for every qualifying sustained hard effort
-    for r in rows:
-        try:
-            days_ago = (today - _d.fromisoformat(r["date"][:10])).days
-        except (TypeError, ValueError):
-            days_ago = None
-        quals.append((days_ago, int(r["hr_avg"])))
-    n = len(quals)
-    n_recent = sum(1 for d, _ in quals if d is not None and 0 <= d <= LTHR_RECENT_DAYS)
-    if n == 0:
-        # No sustained hard effort to read — proxy off HRmax, honestly flagged provisional/low.
-        return {**base, "lthr": round(rmax * LTHR_HRMAX_PROXY), "source": "hrmax_proxy",
-                "confidence": "low", "pct_hrmax": LTHR_HRMAX_PROXY, "provisional": True}
-    # Prefer the RECENT pool when it's substantial (LTHR drifts up as fitness returns); otherwise read
-    # all qualifiers but let confidence reflect the staleness.
-    recent_hrs = [hr for d, hr in quals if d is not None and 0 <= d <= LTHR_RECENT_DAYS]
-    pool = recent_hrs if len(recent_hrs) >= 3 else [hr for _, hr in quals]
-    lthr = _pctile(pool, LTHR_PCTL)
-    confidence = ("high" if n_recent >= 5 else "moderate" if n_recent >= 2 else "low")
-    return {**base, "lthr": lthr, "source": "derived", "confidence": confidence,
-            "n": n, "n_recent": n_recent, "pct_hrmax": round(lthr / rmax, 3)}
+        auto = {**base, "lthr": None, "source": None, "confidence": "none", "pct_hrmax": None}
+    else:
+        floor = int(rmax * LTHR_QUAL_FRAC)
+        rows = db.execute(
+            "SELECT date, hr_avg, duration FROM activities WHERE " + RUN_FAMILY_SQL +
+            " AND hr_avg IS NOT NULL AND duration IS NOT NULL AND duration BETWEEN ? AND ? AND hr_avg>=?",
+            (LTHR_MIN_SEC, LTHR_MAX_SEC, floor)).fetchall()
+        quals = []   # (days_ago, hr_avg) for every qualifying sustained hard effort
+        for r in rows:
+            try:
+                days_ago = (today - _d.fromisoformat(r["date"][:10])).days
+            except (TypeError, ValueError):
+                days_ago = None
+            quals.append((days_ago, int(r["hr_avg"])))
+        n = len(quals)
+        n_recent = sum(1 for d, _ in quals if d is not None and 0 <= d <= LTHR_RECENT_DAYS)
+        if n == 0:
+            # No sustained hard effort to read — proxy off HRmax, honestly flagged provisional/low.
+            auto = {**base, "lthr": round(rmax * LTHR_HRMAX_PROXY), "source": "hrmax_proxy",
+                    "confidence": "low", "pct_hrmax": LTHR_HRMAX_PROXY, "provisional": True}
+        else:
+            # Prefer the RECENT pool when it's substantial (LTHR drifts up as fitness returns);
+            # otherwise read all qualifiers but let confidence reflect the staleness.
+            recent_hrs = [hr for d, hr in quals if d is not None and 0 <= d <= LTHR_RECENT_DAYS]
+            pool = recent_hrs if len(recent_hrs) >= 3 else [hr for _, hr in quals]
+            lthr = _pctile(pool, LTHR_PCTL)
+            confidence = ("high" if n_recent >= 5 else "moderate" if n_recent >= 2 else "low")
+            auto = {**base, "lthr": lthr, "source": "derived", "confidence": confidence,
+                    "n": n, "n_recent": n_recent, "pct_hrmax": round(lthr / rmax, 3)}
+    mv, mconf, set_on, age = _manual_lthr(db, today)
+    if mv and _CONF_RANK[mconf] >= _CONF_RANK[auto["confidence"]]:
+        return {**base, "n": auto["n"], "n_recent": auto["n_recent"], "lthr": mv,
+                "source": "manual", "confidence": mconf, "set_on": set_on, "age_days": age,
+                "alt_derived": auto["lthr"] if auto["source"] == "derived" else None,
+                "pct_hrmax": round(mv / rmax, 3) if rmax else None}
+    return auto
 
 
 def hr_zones(db, today=None):
@@ -1269,7 +1339,7 @@ def hr_zones(db, today=None):
       • lthr_confidence: carried through so the caller/UI can gate how much to trust the anchor."""
     info = derive_lthr(db, today=today)
     labels = ["Z1", "Z2", "Z3", "Z4", "Z5"]
-    if info.get("source") == "derived" and info.get("confidence") in LTHR_MIN_CONFIDENCE:
+    if info.get("source") in LTHR_TRUSTED and info.get("confidence") in LTHR_MIN_CONFIDENCE:
         anchor, ref, fracs = "lthr", info["lthr"], LTHR_ZONE_FRACS
     elif info.get("hrmax"):
         anchor, ref, fracs = "hrmax", info["hrmax"], HRMAX_ZONE_FRACS
@@ -1281,6 +1351,48 @@ def hr_zones(db, today=None):
     zones = [(labels[i], bounds[i], bounds[i + 1]) for i in range(5)]
     return {"anchor": anchor, "ref": ref, "cutoffs": cutoffs, "zones": zones,
             "lthr_confidence": info.get("confidence")}
+
+
+def training_zones(db, today=None):
+    """The 'Current zones' card payload — one table of training-INTENT rows (easy / marathon /
+    threshold / interval, the vocabulary the plan prescribes in), each with its PACE window and its
+    HR band, both tracking CURRENT fitness:
+      • PACE (the prescription anchor, §6.3): fixed fractions of vVO2max from the CURRENT effective
+        VO2max (Daniels grid); the easy bar is LT1 ≈ 80% of 5k pace (Davis) — run easy SLOWER than it.
+      • HR (the monitoring cross-check): bands cut from the SAME unified hr_zones cutoffs the effort
+        monitor + the activity chart band use (easy top = the Z1/Z2 boundary = the monitor's easy
+        ceiling; threshold = Z4) — derived from ONE grid, so this card can't drift from the verdicts.
+    The two columns are INDEPENDENT estimators of the same fitness (VDOT vs LTHR) and may visibly
+    disagree under cardiac decoupling — that's surfaced by pace_hr_coherence, never averaged away
+    here. Pure read; carries HR + fitness ⇒ PRIVATE (H7)."""
+    snap = latest_snapshot(db)
+    pz = pace_zones(snap["effective_vo2max"]) if snap else {}
+    hz = hr_zones(db, today=today)
+    info = derive_lthr(db, today=today)
+    cut = hz.get("cutoffs")            # 4 ascending bpm boundaries (Z1/Z2 … Z4/Z5) or None
+    def hr_band(i, j):                 # bpm band between cutoff i and j (None = open end)
+        return {"lo": cut[i] if (cut and i is not None) else None,
+                "hi": cut[j] if (cut and j is not None) else None}
+    def pace(key):
+        p = pz.get(key)
+        return {"sec_km": p, "fmt": fmt_pace(p) if p else None}
+    rows = [
+        {"key": "easy", "label": "Easy / recovery", "zone_idx": 0,
+         "pace_slower_than": pace("lt1"), "hr": hr_band(None, 0)},          # ≤ Z1/Z2 = monitor ceiling
+        {"key": "marathon", "label": "Marathon", "zone_idx": 2,
+         "pace_target": pace("marathon"), "hr": hr_band(1, 2)},             # Z3
+        {"key": "threshold", "label": "Threshold", "zone_idx": 3,
+         "pace_target": pace("threshold"), "hr": hr_band(2, 3)},            # Z4 (LTHR = its top)
+        {"key": "interval", "label": "Interval / VO₂max", "zone_idx": 4,
+         "pace_target": pace("interval"), "hr": hr_band(3, None)},          # Z5 (HR lags short reps)
+    ]
+    return {"ok": bool(pz or cut), "rows": rows,
+            "pace_anchor": {"vo2max": snap["effective_vo2max"] if snap else None,
+                            "p5k": pz.get("p5k"), "p5k_fmt": fmt_pace(pz.get("p5k")),
+                            "lt1_5k_frac": LT1_5K_FRAC},
+            "hr_anchor": {"anchor": hz.get("anchor"), "ref": hz.get("ref"),
+                          "source": info.get("source"), "confidence": info.get("confidence"),
+                          "age_days": info.get("age_days"), "hrmax": info.get("hrmax")}}
 
 
 def derive_hr_zones(db, sample=12):
@@ -1445,7 +1557,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     # Anchor the easy/hard ceilings on a DERIVED LTHR when it's trustworthy (sharper at the
     # easy↔threshold turnpoint); otherwise fall back byte-for-byte to today's %HRmax read.
     lthr_info = None if public else derive_lthr(db)
-    use_lthr = bool(lthr_info and lthr_info.get("source") == "derived"
+    use_lthr = bool(lthr_info and lthr_info.get("source") in LTHR_TRUSTED
                     and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
     snap = latest_snapshot(db)
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
@@ -1568,7 +1680,7 @@ def pace_hr_coherence(db, window_days=EFFORT_WINDOW_DAYS):
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     easy_top = zones.get("easy_top")                       # sec/km (larger = slower)
     lthr_info = derive_lthr(db)
-    use_lthr = (lthr_info.get("source") == "derived" and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
+    use_lthr = (lthr_info.get("source") in LTHR_TRUSTED and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
     hrmax = _robust_hrmax(db)
     if use_lthr:
         easy_hr_ceiling, anchor = round(LTHR_EASY_FRAC * lthr_info["lthr"]), "lthr"
@@ -1631,7 +1743,7 @@ def lt1(db, today=None):
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     lt1_pace, p5k = zones.get("lt1"), zones.get("p5k")     # sec/km (larger = slower; easy sits BELOW LT1)
     info = derive_lthr(db, today=today)
-    use_lthr = info.get("source") == "derived" and info.get("confidence") in LTHR_MIN_CONFIDENCE
+    use_lthr = info.get("source") in LTHR_TRUSTED and info.get("confidence") in LTHR_MIN_CONFIDENCE
     hr_ceiling = round(LTHR_EASY_FRAC * info["lthr"]) if (use_lthr and info.get("lthr")) else None
     coh = pace_hr_coherence(db)                            # the existing pace-vs-HR consistency diagnostic
     detrained = coh.get("verdict") == "pace_ahead_of_hr"
@@ -1650,9 +1762,44 @@ def lt1(db, today=None):
         "p5k_pace": p5k, "p5k_pace_fmt": fmt_pace(p5k), "lt1_5k_frac": LT1_5K_FRAC,
         "vo2max": snap["effective_vo2max"] if snap else None,
         "hr": {"anchor": ("lthr" if use_lthr else None), "easy_ceiling": hr_ceiling,
-               "lthr": info.get("lthr") if use_lthr else None, "confidence": info.get("confidence")},
+               "lthr": info.get("lthr") if use_lthr else None, "confidence": info.get("confidence"),
+               "source": info.get("source"), "age_days": info.get("age_days")},
         "agreement": coh.get("verdict"), "detrained": detrained, "note": note,
+        "tt_offer": lthr_tt_offer(db, today=today, _lthr_info=info),
     }
+
+
+def lthr_tt_offer(db, today=None, _lthr_info=None):
+    """§HR slice #2, guardrail #1 — may the app SUGGEST the 30-min LTHR field test? A TT is a
+    near-maximal effort; the whole safety arch (readiness gate, conservative restart) exists because
+    of a real exertional event, so the suggestion is gated on EVERY clearance holding:
+      • the regime is ASSERTIVE (fitness established — never prompt a max test during the restart;
+        read from the STORED plan, the regime the dashboard actually shows);
+      • no active medical hold, and the latest check-in is clean (no stop-symptom, not heavy);
+      • the current threshold anchor is actually improvable (confidence below high).
+    Pure read; returns {offer, held_because, confidence, source}. `held_because` names every failed
+    clearance so the UI/manual can say WHY it isn't being offered (never a silent gate)."""
+    info = _lthr_info or derive_lthr(db, today=today)
+    held = []
+    if info.get("confidence") == "high":
+        held.append("threshold anchor is already high-confidence")
+    try:
+        row = db.execute("SELECT plan FROM plans ORDER BY created_at DESC LIMIT 1").fetchone()
+        mode = ((json.loads(row["plan"]) or {}).get("regime") or {}).get("mode") if row else None
+    except (sqlite3.OperationalError, ValueError, TypeError):
+        mode = None
+    if mode != "assertive":
+        held.append("regime is conservative — no max-effort test during the restart")
+    try:
+        if active_medical_halt(db):
+            held.append("medical hold in force")
+        rd = db.execute("SELECT energy, stop_symptom FROM readiness ORDER BY date DESC LIMIT 1").fetchone()
+        if rd and (rd["stop_symptom"] or rd["energy"] == "heavy"):
+            held.append("readiness is not green")
+    except sqlite3.OperationalError:
+        held.append("readiness unknown")
+    return {"offer": not held, "held_because": held or None,
+            "confidence": info.get("confidence"), "source": info.get("source")}
 
 
 # ── Per-run metrics table + self-re-running analysis (the feel/heat/load data foundation) ────────
@@ -2323,13 +2470,16 @@ LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progress
 # §3.1 — biomechanical load axis (Davis, ENGINE_SCIENCE.md §3.1 + §6.1). eq_km = a DAMAGE-EQUIVALENT
 # distance: km × f(pace), f rising steeply with speed because tissue damage ≈ loading cycles(steps) ×
 # load-per-step(↑ with speed) — fast running does far more damage per km than easy, a biomechanical axis
-# TRIMP/ACWR structurally CANNOT see. f is the DAVIS LITERATURE grid (owner's call 2026-07-01, eyes open on
-# the exponent risk: fast ≈ 4–6× easy per km). It is UNCALIBRATED to his data, so the governor is heavily
+# TRIMP/ACWR structurally CANNOT see. f is CALIBRATED TO HIS DATA (2026-07-02, full 4.7yr/1078-run corpus
+# replay): the original Davis-literature grid (1.8/3.5/5.0) kept the one true biomechanical catch (the
+# 2022-03 calf/hip escalation week, eq-ratio 1.44 — invisible to volume brakes at km-ratio 1.16) but
+# falsely braked 7 quality weeks he demonstrably absorbed (CTL-138 era); this softer grid keeps the catch
+# (ratio 1.40 > 1.30) and cuts the false brakes to 3. Harsher grids were strictly worse. The governor stays
 # contained: SOFT (a ceiling with margin), ASSERTIVE-ONLY, caution byte-identical, and it only ever REDUCES
 # load — and because injury is PROBABILISTIC not deterministic (§6.1) it RESHAPES the week (drops the fast
-# slice to easy, reusing the §H2 mechanism) rather than hard-gating. Magnitude 🟡 — earn a tighter/looser f
-# from his fast-session + injury corpus before it hardens. A biomechanical jump-cap that flanks the ACWR gate.
-EQ_KM_FACTOR = {"easy": 1.0, "long": 1.0, "marathon": 1.8, "threshold": 3.5, "interval": 5.0}
+# slice to easy, reusing the §H2 mechanism) rather than hard-gating. Re-calibrate when the corpus grows a
+# real fast-session/injury history. A biomechanical jump-cap that flanks the ACWR gate.
+EQ_KM_FACTOR = {"easy": 1.0, "long": 1.0, "marathon": 1.4, "threshold": 2.5, "interval": 3.5}
 BIO_EQ_STEP = 1.30          # max weekly eq_km jump vs the trailing-window max (the soft biomechanical ceiling)
 BIO_EQ_WINDOW = 4           # trailing weeks whose MAX eq_km sets the biomechanical (chronic) baseline
 BASE_DOWN_FRAC = 0.75      # down-week volume vs the carried build trajectory
@@ -2877,11 +3027,30 @@ def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
     return out
 
 
+def _material_ease(row):
+    """§6e — did this adjustment MATERIALLY ease the plan? A positive check-in ("run felt good")
+    persists a NO-OP directive (×1.0, not easy-only, nothing clamped, no medical): that's engagement,
+    not an ease, and must not void a week's banked evidence (live 2026-07 case: a feel-good note
+    silently delayed a real graduation). Anything unreadable or unrecognized stays conservative
+    (counts as an ease); a superseded material ease still voids its week — it was trained under."""
+    if row["medical"]:
+        return True
+    try:
+        d = json.loads(row["directive"] or "")
+    except (TypeError, ValueError):
+        return True
+    if not isinstance(d, dict) or "volume_multiplier" not in d:
+        return True                                     # unknown shape — stay conservative
+    return bool(d.get("medical_flag") or d.get("easy_only") or d.get("clamp")
+                or (d["volume_multiplier"] or 0) < 1.0)
+
+
 def _week_banked(db, ws, we, planned_km, planned_runs, drop):
     """Shared §6e per-week test: was one fully-elapsed week well-absorbed, from owned data only?
       • adherence — ran ≥ BANK_ADHERENCE of the week's planned km AND within one of its planned runs;
       • recovery intact — no stop-symptom and ≤1 'heavy-legs' check-in that week;
-      • the engine wasn't already easing it — no ease/medical adjustment overlapped the week.
+      • the engine wasn't already easing it — no MATERIAL ease/medical adjustment overlapped the
+        week (`_material_ease`; a no-op feel-good check-in doesn't void it).
     Single source of truth for BOTH the re-base graduation and the earned volume lift, so the two
     gates judge a week identically. Returns (banked, act_km, act_runs)."""
     rows = db.execute(
@@ -2894,9 +3063,10 @@ def _week_banked(db, ws, we, planned_km, planned_runs, drop):
                     (ws.isoformat(), we.isoformat())).fetchall()
     recovery = not any(r["stop_symptom"] for r in rd) and \
         sum(1 for r in rd if r["energy"] == "heavy") <= 1
-    eased = db.execute(   # ANY adjustment that overlapped — even one later superseded — means
-        "SELECT 1 FROM adjustments WHERE applies_from<=? AND applies_until>=?",  # the week was eased
-        (we.isoformat(), ws.isoformat())).fetchone() is not None
+    eased = any(_material_ease(r) for r in db.execute(  # a MATERIAL overlap — even one later
+        "SELECT directive, medical FROM adjustments "    # superseded — means the week was eased;
+        "WHERE applies_from<=? AND applies_until>=?",    # a no-op check-in row does NOT void it
+        (we.isoformat(), ws.isoformat())).fetchall())
     return (adh and recovery and not eased), round(act_km, 1), act_runs
 
 
@@ -5350,6 +5520,16 @@ def api_lt1():
     return jsonify(lt1(get_db()))
 
 
+@app.get("/api/zones")
+def api_zones():
+    """Private: the 'Current zones' card — training-intent rows with fitness-tracking pace windows
+    (VDOT) + HR bands (unified hr_zones grid). Carries HR + the LTHR anchor ⇒ private-only (H7),
+    same guard as /api/lt1."""
+    if READONLY:
+        return jsonify(ok=False, error="diagnostics are private"), 403
+    return jsonify(training_zones(get_db()))
+
+
 @app.get("/api/pace-hr-coherence")
 def api_pace_hr_coherence():
     """Private diagnostic: do the pace-prescription and HR-judgment models agree? (See pace_hr_coherence.)
@@ -7511,6 +7691,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       <div class="panel" id="effort"><div class="empty">Loading…</div></div>
     </div>
 
+    <div class="section" id="sec-zones" data-mtab="fitness">
+      <h2>Current zones <span class="muted mono" style="font-size:12px">— today's pace &amp; HR targets, tracking your fitness</span></h2>
+      <div class="panel" id="zones"><div class="empty">Loading…</div></div>
+    </div>
+
     <details class="section" id="sec-ff" data-mtab="fitness" open>
       <summary><h2>Fitness &amp; fatigue <span class="muted mono" style="font-size:12px">— reconstructed from your training load (CTL/ATL model)</span></h2></summary>
       <div class="panel">
@@ -7842,7 +8027,7 @@ $("#syncBtn").addEventListener("click", async ()=>{
   try{
     const d=await postSync("/api/sync");
     if(!d.ok) alert("Sync failed: "+(d.error||"unknown"));
-    await loadShape(); await loadRecent(); await loadProjector(); await loadWeekly(); loadDrift(); loadEffort();
+    await loadShape(); await loadRecent(); await loadProjector(); await loadWeekly(); loadDrift(); loadEffort(); loadZones();
   }finally{ b.disabled=false; b.textContent=t; }
 });
 $("#backfillBtn").addEventListener("click", async ()=>{
@@ -7852,7 +8037,7 @@ $("#backfillBtn").addEventListener("click", async ()=>{
     const d=await postSync("/api/sync?backfill=1");
     if(!d.ok) alert("Backfill didn't complete: "+(d.error||"unknown"));
     else alert(`Backfill done — added ${d.activities?.added ?? 0} activities across ${d.activities?.pages_fetched ?? 0} pages.`);
-    await loadShape(); await loadRecent(); await loadProjector(); await loadWeekly(); loadDrift(); loadEffort();
+    await loadShape(); await loadRecent(); await loadProjector(); await loadWeekly(); loadDrift(); loadEffort(); loadZones();
   }finally{ b.disabled=false; b.textContent=t; }
 });
 
@@ -8242,7 +8427,7 @@ async function touchSync(){
   try{
     const d = await getJSON("/api/sync?auto=1",{method:"POST"});
     if(d && d.ok && d.activities && d.activities.added>0){
-      loadReadiness(); loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort();
+      loadReadiness(); loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones();
     }
   }catch(e){ /* offline / token issue — the tile just keeps its last-known state */ }
 }
@@ -9193,10 +9378,18 @@ async function loadEffort(){
   let lt1Line="";
   const L=d.lt1;
   if(!d.public && L && L.ok){
+    const manualBadge=(L.hr&&L.hr.source==="manual")?` <span class="muted">(manual LTHR${L.hr.age_days!=null?`, set ${Math.round(L.hr.age_days/7)}wk ago`:""})</span>`:"";
     lt1Line=`<div class="muted" style="font-size:11px;margin-top:4px${L.detrained?";color:var(--warn)":""}">`+
       `LT1 ${qhint("Your aerobic-threshold pace, which we set at ≈80% of your 5k pace (a pace-first anchor informed by John Davis) — the ceiling your easy days should stay under. It's derived from your CURRENT fitness, so it moves as you get fitter or detrain, and heart rate is the cross-check.")}: easy ceiling ≈ <b>${esc(L.lt1_pace_fmt)}</b>/km`+
-      `${(L.hr&&L.hr.easy_ceiling)?` · HR cross-check ≤ <b>${L.hr.easy_ceiling}</b> bpm`:""}.`+
+      `${(L.hr&&L.hr.easy_ceiling)?` · HR cross-check ≤ <b>${L.hr.easy_ceiling}</b> bpm${manualBadge}`:""}.`+
       `${L.detrained?" You're running easy a touch faster than LT1 for the heart rate it costs right now — normal on a rebuild, it self-corrects, so we don't police easy pace here.":""}</div>`;
+    // §HR slice #2 — the 30-min-TT suggestion, shown ONLY when every clearance holds (assertive regime,
+    // green readiness, no medical hold, anchor actually improvable). The gate lives server-side.
+    if(L.tt_offer && L.tt_offer.offer){
+      lt1Line+=`<div class="muted" style="font-size:11px;margin-top:4px">Your threshold anchor is `+
+        `${esc(L.tt_offer.confidence)}-confidence and you're cleared to push ${qhint("A 30-minute solo time trial sharpens your LTHR: run 30 min all-out alone on flat ground; your average HR over the FINAL 20 minutes is your LTHR. Enter it in Settings → Manual LTHR. The app only suggests this when your plan is assertive, readiness is green and there's no medical hold — never during a rebuild. Details in the manual (Settings section).")} — `+
+        `a 30-min field test would sharpen it (see the manual).</div>`;
+    }
   }
   host.innerHTML=`
     <div class="effort-head">
@@ -9567,7 +9760,46 @@ async function saveSecret(key, clear){
 
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
-loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort();
+loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones();
+// §HR — the 'Current zones' card: training-intent rows, pace (VDOT, prescription anchor) + HR
+// (unified hr_zones grid, monitoring cross-check), both fitness-tracking. Private-only (section is
+// removed on the public view; the endpoint 403s there too).
+async function loadZones(){
+  const host=$("#zones"); if(!host || SH_READONLY) return;
+  let d; try{ d=await getJSON("/api/zones"); }catch(e){ host.innerHTML=`<div class="empty">Zones unavailable.</div>`; return; }
+  if(!d || !d.ok){ host.innerHTML=`<div class="empty">Not enough data yet — zones appear once a fitness (VO₂max) snapshot or heart-rate history is in.</div>`; return; }
+  const paceHint=qhint("Pace targets are fixed fractions of vVO₂max — the velocity at VO₂max, solved from the Daniels–Gilbert oxygen-cost curve VO₂(v) = −4.60 + 0.182258·v + 0.000104·v² — using your CURRENT effective VO₂max: marathon 0.81, threshold 0.88, interval 0.97 of vVO₂max. The easy bar is LT1 (aerobic threshold), operationalized as 80% of 5k pace with v5k ≈ 0.95·vVO₂max (a pace-first anchor informed by John Davis). Every value moves as your VO₂max moves — zones are never stale.");
+  const hrHint=qhint("HR bands are the Friel run grid as fractions of LTHR: Z1 <0.85, Z2 0.85–0.90, Z3 0.90–0.95, Z4 0.95–1.00, Z5 ≥ LTHR. LTHR is estimated streamlessly — the whole-run average HR of your sustained hard efforts (20–70 min at ≥85% of robust HRmax), robust-high percentile, recency-weighted confidence — or taken from your manual field-test entry while fresh (Settings → Manual LTHR). Without a trustworthy LTHR the grid falls back to %HRmax (60/70/80/90). These are the SAME cutoffs the effort monitor and the activity chart band read — one grid, so the card can't disagree with the verdicts.");
+  const noteHint=qhint("Pace and HR are two INDEPENDENT estimators of the same fitness (VDOT from VO₂max vs the LTHR grid), deliberately not averaged into one number. On a rebuild they can visibly disagree — cardiac decoupling: a given easy pace costs more HR than VDOT predicts. The Pace↔HR line under Effort discipline tracks that divergence; when they disagree on an easy day, heart rate is the honest read of how easy it really was. On short intervals the opposite caveat applies: HR lags the effort, so pace leads there.");
+  const paceCell=r=>{
+    const st=r.pace_slower_than, tg=r.pace_target;
+    if(st && st.fmt) return `slower than <b>${esc(st.fmt)}</b>/km`;
+    if(tg && tg.fmt) return `≈ <b>${esc(tg.fmt)}</b>/km`;
+    return "—"; };
+  const hrCell=r=>{
+    const h=r.hr||{};
+    if(h.lo!=null && h.hi!=null) return `${h.lo}–${h.hi} bpm`;
+    if(h.hi!=null) return `≤ ${h.hi} bpm`;
+    if(h.lo!=null) return `≥ ${h.lo} bpm`;
+    return "—"; };
+  const dot=i=>`<i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${HRZONE_COLORS[i]};margin-right:6px;vertical-align:baseline"></i>`;
+  const rows=(d.rows||[]).map(r=>
+    `<tr><td style="white-space:nowrap">${dot(r.zone_idx)}${esc(r.label)}</td>`+
+    `<td>${paceCell(r)}</td><td style="white-space:nowrap">${hrCell(r)}</td></tr>`).join("");
+  const pa=d.pace_anchor||{}, ha=d.hr_anchor||{};
+  const hrAnchorTxt = ha.anchor==="lthr"
+    ? `LTHR <b>${ha.ref}</b> (${ha.source==="manual"?`manual${ha.age_days!=null?`, set ${Math.round(ha.age_days/7)}wk ago`:""}`:`derived, ${esc(ha.confidence||"")} confidence`})`
+    : ha.anchor==="hrmax" ? `%HRmax of <b>${ha.ref}</b> (no trustworthy LTHR yet)` : "no HR model yet";
+  const paceAnchorTxt = pa.vo2max!=null
+    ? `VO₂max <b>${pa.vo2max}</b>${pa.p5k_fmt?` (5k-equiv ${esc(pa.p5k_fmt)}/km)`:""}` : "no VO₂max snapshot";
+  host.innerHTML=`
+    <div class="efftbl-wrap"><table class="efftbl">
+      <thead><tr><th>Intent</th><th>Pace ${paceHint}</th><th>HR ${hrHint}</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="muted" style="font-size:11px;margin-top:6px">Pace from ${paceAnchorTxt} · HR from ${hrAnchorTxt}.
+      Two independent reads of the same fitness ${noteHint} — both move as you train.</div>`;
+}
+
 // Settings modal open/close (private only — the button is removed on the public view below).
 const _setBtn=$("#settingsBtn"), _setDlg=$("#settingsDialog");
 if(_setBtn && _setDlg){
@@ -9578,7 +9810,7 @@ if(_setBtn && _setDlg){
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
-  ["sec-health","settingsDialog","firstrun"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["sec-health","sec-zones","settingsDialog","firstrun"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
@@ -10754,6 +10986,160 @@ def _stc_lthr():
                got={"violations": fails or "none"})
 
 
+def _stc_lthr_manual():
+    """§HR slice #2 — manual LTHR override + the readiness-gated 30-min-TT offer. Locks: (a) a FRESH
+    manual entry out-ranks the derived read (ties → the human's number) and hr_zones anchors on it;
+    (b) it AGES OUT (guardrail #2) — a stale or undated entry hands back to a stronger derived read;
+    (c) manual works with no HR data at all; junk is rejected; the date-stamp refreshes only on a
+    CHANGED value; (d) guardrail #1 — the TT suggestion needs EVERY clearance (assertive regime +
+    green readiness + no medical + improvable anchor); each single miss holds it, with the reason."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    tdy = date.today()
+    def ago(n): return (tdy - _td(days=n)).isoformat()
+    def mkdb(acts=(), manual=None, set_days_ago=None, plan_mode=None, energy="ok", stop=0, medical=0):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(SCHEMA)
+        for i, (d, hra, hrm, dur) in enumerate(acts):
+            m.execute("INSERT INTO activities(id,date,sport,hr_avg,hr_max,duration) VALUES(?,?,?,?,?,?)",
+                      (i + 1, d, "Running", hra, hrm, dur))
+        if manual is not None:
+            m.execute("INSERT INTO meta(key,value) VALUES('set:manual_lthr',?)", (manual,))
+        if set_days_ago is not None:
+            m.execute("INSERT INTO meta(key,value) VALUES('manual_lthr_set_on',?)", (ago(set_days_ago),))
+        if plan_mode:
+            m.execute("INSERT INTO plans(created_at,plan) VALUES('now',?)",
+                      (json.dumps({"regime": {"mode": plan_mode}}),))
+        m.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,?)",
+                  (tdy.isoformat(), energy, stop))
+        if medical:
+            m.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,"
+                      "active,medical) VALUES('now','hold','{}',?,?,1,1)", (ago(5), ago(0)))
+        return m
+    quals = [(ago(i * 5 + 1), 166, 189, 30 * 60) for i in range(6)]        # derived HIGH (n_recent 6)
+    low_quals = [(ago(200 + i * 5), 166, 189, 30 * 60) for i in range(6)]  # derived LOW ⇒ improvable
+    fails = []
+    # (a) fresh manual beats (ties) derived-high; hr_zones anchors on the human's number
+    m = mkdb(quals, manual="172", set_days_ago=3)
+    r = derive_lthr(m, today=tdy)
+    if not (r["source"] == "manual" and r["lthr"] == 172 and r["confidence"] == "high"
+            and r.get("alt_derived")):
+        fails.append(f"fresh manual should win with alt_derived carried: {r}")
+    z = hr_zones(m, today=tdy)
+    if not (z["anchor"] == "lthr" and z["ref"] == 172):
+        fails.append(f"hr_zones should anchor on the manual LTHR: {z}")
+    # (b) stale (low) and undated (capped moderate) manual both hand back to derived-high
+    for label, kw in (("stale", {"set_days_ago": 100}), ("undated", {})):
+        r = derive_lthr(mkdb(quals, manual="172", **kw), today=tdy)
+        if r["source"] != "derived":
+            fails.append(f"{label} manual must hand back to derived-high: {r}")
+    # (c) manual with NO HR data at all still anchors
+    r = derive_lthr(mkdb((), manual="165", set_days_ago=1), today=tdy)
+    if not (r["source"] == "manual" and r["lthr"] == 165):
+        fails.append(f"manual should work with no HR data: {r}")
+    for bad in ("abc", "300", "12", "17 2"):
+        if validate_setting("manual_lthr", bad)[0]:
+            fails.append(f"validation accepted junk {bad!r}")
+    for good in ("", "172", " 165 "):
+        if not validate_setting("manual_lthr", good)[0]:
+            fails.append(f"validation rejected {good!r}")
+    # date-stamp: only a CHANGED value re-freshens (re-test, don't re-type)
+    m = mkdb()
+    _stamp_manual_lthr(m, "170"); set_meta(m, "set:manual_lthr", "170")
+    set_meta(m, "manual_lthr_set_on", ago(50))            # backdate, then re-save the SAME number
+    _stamp_manual_lthr(m, "170")
+    if get_meta(m, "manual_lthr_set_on") != ago(50):
+        fails.append("re-saving the same value must NOT re-freshen the stamp")
+    _stamp_manual_lthr(m, "171")
+    if get_meta(m, "manual_lthr_set_on") == ago(50):
+        fails.append("a changed value must re-stamp")
+    # (d) the TT gate — all-clear offers; EACH single miss holds it
+    if not lthr_tt_offer(mkdb(low_quals, plan_mode="assertive"), today=tdy)["offer"]:
+        fails.append("all-clear should offer the TT")
+    for label, kw in (("caution regime", {"plan_mode": "caution"}),
+                      ("no plan", {}),
+                      ("heavy readiness", {"plan_mode": "assertive", "energy": "heavy"}),
+                      ("stop-symptom", {"plan_mode": "assertive", "stop": 1}),
+                      ("medical hold", {"plan_mode": "assertive", "medical": 1})):
+        o = lthr_tt_offer(mkdb(low_quals, **kw), today=tdy)
+        if o["offer"] or not o["held_because"]:
+            fails.append(f"TT must be held (with a reason) on {label}: {o}")
+    if lthr_tt_offer(mkdb(quals, plan_mode="assertive"), today=tdy)["offer"]:
+        fails.append("TT offered when the anchor is already high-confidence")
+    return _st("det", "lthr-manual",
+               "HR slice #2: fresh manual LTHR out-ranks derived (ties→human) + anchors hr_zones; stale/"
+               "undated hands back; works with no HR data; junk rejected; stamp refreshes only on change; "
+               "30-min-TT offer needs EVERY clearance (assertive+green+no-medical+improvable), each miss "
+               "holds it with a reason",
+               passed=not fails, expect="manual override ladder + guardrail-gated TT offer hold",
+               got={"violations": fails or "none"})
+
+
+def _stc_zones():
+    """§HR — the 'Current zones' card model (training_zones): COHERENCE is the whole point of the lock.
+    (a) the pace column IS pace_zones(current VO2max) (no re-derivation that could drift) with the easy
+    bar = LT1, and paces strictly speed-ordered; (b) the HR bands are cut from the SAME hr_zones cutoffs
+    the effort monitor reads — easy top == Z1/Z2 == the monitor's easy ceiling (LTHR_EASY_FRAC·LTHR),
+    threshold band == Z4 == [monitor hard bar, LTHR]; (c) degrades honestly — no HR ⇒ pace-only rows,
+    no snapshot AND no HR ⇒ ok=False (never an invented zone)."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    tdy = date.today()
+    def ago(n): return (tdy - _td(days=n)).isoformat()
+    def mkdb(acts=(), vo2=None):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(SCHEMA)
+        for i, (d, hra, hrm, dur) in enumerate(acts):
+            m.execute("INSERT INTO activities(id,date,sport,hr_avg,hr_max,duration) VALUES(?,?,?,?,?,?)",
+                      (i + 1, d, "Running", hra, hrm, dur))
+        if vo2:
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max) VALUES(?,?)",
+                      (tdy.isoformat(), vo2))
+        return m
+    quals = [(ago(i * 5 + 1), 166, 189, 30 * 60) for i in range(6)]   # derived LTHR, high confidence
+    fails = []
+    m = mkdb(quals, vo2=50.0)
+    tz = training_zones(m, today=tdy)
+    hz = hr_zones(m, today=tdy)
+    pz = pace_zones(50.0)
+    rows = {r["key"]: r for r in tz["rows"]}
+    # (a) pace column == pace_zones, easy bar == LT1, strictly speed-ordered
+    if rows["easy"]["pace_slower_than"]["sec_km"] != pz["lt1"]:
+        fails.append(f"easy bar must be LT1: {rows['easy']}")
+    for k in ("marathon", "threshold", "interval"):
+        if rows[k]["pace_target"]["sec_km"] != pz[k]:
+            fails.append(f"{k} pace must be pace_zones[{k}]: {rows[k]}")
+    seq = [pz["lt1"], pz["marathon"], pz["threshold"], pz["interval"]]
+    if seq != sorted(seq, reverse=True):
+        fails.append(f"paces not speed-ordered (sec/km must strictly fall): {seq}")
+    # (b) HR bands cut from the SAME hr_zones grid the monitor reads
+    cut = hz["cutoffs"]
+    lthr = derive_lthr(m, today=tdy)["lthr"]
+    if rows["easy"]["hr"]["hi"] != cut[0] or cut[0] != round(LTHR_EASY_FRAC * lthr):
+        fails.append(f"easy HR top must be the monitor's easy ceiling (Z1/Z2 = {round(LTHR_EASY_FRAC*lthr)}): "
+                     f"{rows['easy']['hr']} vs cutoffs {cut}")
+    if [rows["threshold"]["hr"]["lo"], rows["threshold"]["hr"]["hi"]] != [cut[2], cut[3]]:
+        fails.append(f"threshold band must be Z4 [{cut[2]},{cut[3]}]: {rows['threshold']['hr']}")
+    if cut[2] != round(LTHR_HARD_FRAC * lthr):
+        fails.append("Z3/Z4 cutoff drifted from the monitor's hard bar")
+    if rows["interval"]["hr"]["lo"] != cut[3] or rows["interval"]["hr"]["hi"] is not None:
+        fails.append(f"interval must be open-ended ≥Z4/Z5: {rows['interval']['hr']}")
+    # (c) honest degradation
+    t2 = training_zones(mkdb((), vo2=50.0), today=tdy)   # no HR at all ⇒ pace-only
+    r2 = {r["key"]: r for r in t2["rows"]}
+    if not (t2["ok"] and r2["threshold"]["pace_target"]["sec_km"] == pz["threshold"]
+            and r2["threshold"]["hr"]["lo"] is None and r2["easy"]["hr"]["hi"] is None):
+        fails.append(f"no-HR must degrade to pace-only rows: {t2['ok']}, {r2['threshold']}")
+    if training_zones(mkdb(), today=tdy)["ok"]:
+        fails.append("no snapshot AND no HR must be ok=False (never invent zones)")
+    return _st("det", "zones",
+               "Current-zones card: pace column IS pace_zones (easy bar = LT1, speed-ordered); HR bands cut "
+               "from the SAME hr_zones cutoffs the monitor reads (easy top = monitor ceiling, threshold = Z4); "
+               "degrades honestly (pace-only without HR; ok=False with nothing)",
+               passed=not fails, expect="pace/HR coherence with the prescribing + judging models",
+               got={"violations": fails or "none"})
+
+
 def _stc_hr_zones():
     """§ HR-zone model (slice #3) — assert the ANCHOR-SELECTION + grid shape, NOT 'recovered the right
     zones' (flat synthetic HR can't tell a right LTHR from a wrong one). The ladder: a trustworthy
@@ -11809,13 +12195,13 @@ def _stc_eq_km():
     # (a) eq_km math
     tempo = {"reps": [{"zone": "easy", "km": 2.0}, {"zone": "threshold", "km": 5.0},
                       {"zone": "easy", "km": 2.0}]}
-    if _session_eq_km(tempo) != 21.5:                       # 2 + 5×3.5 + 2
-        fail.append(f"structured eq_km wrong: {_session_eq_km(tempo)} != 21.5")
+    if _session_eq_km(tempo) != 16.5:                       # 2 + 5×2.5 + 2
+        fail.append(f"structured eq_km wrong: {_session_eq_km(tempo)} != 16.5")
     if _session_eq_km({"kind": "easy", "km": 10.0}) != 10.0:
         fail.append("plain easy eq_km should be km×1")
-    # actual-run classification: at threshold pace (300 s/km) ⇒ f=3.5; slower than marathon ⇒ easy
-    if _run_eq_km(10.0, 300, zones) != 35.0:
-        fail.append(f"_run_eq_km at threshold pace wrong: {_run_eq_km(10.0,300,zones)} != 35.0")
+    # actual-run classification: at threshold pace (300 s/km) ⇒ f=2.5; slower than marathon ⇒ easy
+    if _run_eq_km(10.0, 300, zones) != 25.0:
+        fail.append(f"_run_eq_km at threshold pace wrong: {_run_eq_km(10.0,300,zones)} != 25.0")
     if _run_eq_km(10.0, 400, zones) != 10.0:               # slower than marathon (330) ⇒ easy
         fail.append(f"_run_eq_km at easy pace should be km×1: {_run_eq_km(10.0,400,zones)}")
 
@@ -11834,7 +12220,7 @@ def _stc_eq_km():
     base, bbnd = generate_block(ashape, bs, 45.0, 42.0, easy, zones=zones, regime="assertive",
                                 recent_longs=[6.0], recent_eq=None)
     capd, _ = generate_block(ashape, bs, 45.0, 42.0, easy, zones=zones, regime="assertive",
-                             recent_longs=[6.0], recent_eq=[40.0])   # cap = 52; wk1 eq ~53 (fast), km ~40
+                             recent_longs=[6.0], recent_eq=[34.0])   # cap = 44.2; wk1 eq ~48 (fast), km ~40.5
     w1b, w1c = base[0], capd[0]
     if not w1c.get("bio_capped"):
         fail.append("assertive bio governor did not fire on the fast-driven eq_km spike")
@@ -11921,8 +12307,28 @@ def _stc_regime_gate():
     m = fresh(); log_adherence(m, at)
     m.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,0)", (today.isoformat(), "heavy"))
     r_heavy = training_regime(m, today, pp)[0]
+    # 6 — a NO-OP check-in ("felt good" → ×1.0, not easy-only, nothing clamped) overlapping a banked
+    # week must NOT void it (live 2026-07 case: a positive note silently delayed a real graduation)
+    noop = ('{"situation":"feeling_good","volume_multiplier":1.0,"easy_only":false,'
+            '"medical_flag":false,"clamp":null}')
+    m = fresh(); log_adherence(m, at)
+    m.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,active,medical)"
+              " VALUES('now','felt good',?,?,?,0,0)",
+              (noop, (today - timedelta(days=4)).isoformat(), (today - timedelta(days=4)).isoformat()))
+    r_noop = training_regime(m, today, pp)[0]
+    # 6b — a MATERIAL ease (×0.6/easy-only) on the same day still voids the week ⇒ caution
+    m = fresh(); log_adherence(m, at)
+    m.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,active,medical)"
+              " VALUES('now','tired',?,?,?,0,0)",
+              ('{"volume_multiplier":0.6,"easy_only":true,"medical_flag":false,"clamp":null}',
+               (today - timedelta(days=4)).isoformat(), (today - timedelta(days=4)).isoformat()))
+    r_ease = training_regime(m, today, pp)[0]
 
     fail = []
+    if r_noop != "assertive":
+        fail.append(f"a no-op feel-good check-in must not void banking: got {r_noop}")
+    if r_ease != "caution":
+        fail.append(f"a material ease must still void the week: got {r_ease}")
     if r_clear != "assertive":
         fail.append(f"{at}-banked+cleared should be assertive, got {r_clear}")
     if r_heavy != "assertive":
@@ -11940,10 +12346,13 @@ def _stc_regime_gate():
         fail.append("phantom regime flip on unchanged regime")
     return _st("det", "regime-gate",
                f"regime gate: {at} banked + clean window ⇒ assertive (amber/heavy still assertive — only "
-               "red blocks); one-below-bar / medical event / stop-symptom / no-bank ⇒ caution; flip diffed",
-               passed=not fail, expect=f"assertive at ≥{at} banked & cleared; red/bank miss ⇒ caution; flip diffed",
+               "red blocks); one-below-bar / medical event / stop-symptom / no-bank ⇒ caution; a NO-OP "
+               "feel-good check-in doesn't void a banked week (a material ease still does); flip diffed",
+               passed=not fail, expect=f"assertive at ≥{at} banked & cleared; red/bank miss ⇒ caution; "
+               "no-op check-in banks, material ease voids; flip diffed",
                got={"at_bar": r_clear, "below_bar": r_below, "medical": r_med, "symptom": r_sym,
-                    "heavy": r_heavy, "fresh": r_fresh, "failures": fail or "none"})
+                    "heavy": r_heavy, "fresh": r_fresh, "noop_checkin": r_noop, "material_ease": r_ease,
+                    "failures": fail or "none"})
 
 
 def _stc_shape_response():
@@ -13480,7 +13889,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
                  lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
-                 lambda: _stc_lthr(), lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
+                 lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
+                 lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_lt1(),
                  lambda: _stc_health_sync(),
                  lambda: _stc_rebase_anchor_derive(),

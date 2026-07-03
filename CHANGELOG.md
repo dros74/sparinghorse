@@ -12,6 +12,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-03
+
+Zones you can see, a threshold you can set, damage weights tuned to real history — and a fix that
+stops a cheerful check-in from slowing your graduation.
+
+### Added
+- **A "Current zones" table on the Fitness tab (private).** Your training-intent zones — easy, marathon,
+  threshold, interval — each with a pace window and an HR band, both tracking *current* fitness: paces are
+  fractions of vVO₂max off your live VO₂max (easy bar = LT1 ≈ 80% of 5k pace), and HR bands are cut from
+  the same unified zone grid the effort monitor and chart band read, so the table can't disagree with the
+  verdicts (the easy row's top *is* the monitor's easy ceiling). The two columns are deliberately
+  independent estimators (VDOT vs LTHR) and their divergence is the decoupling diagnostic, not an error.
+  Every cell carries a "?" explaining exactly how it was computed. Locked by `det/zones`.
+- **Manual LTHR override + a readiness-gated field-test suggestion.** You can now enter a field-tested
+  lactate-threshold HR (Settings → Manual LTHR); a fresh entry outranks the data-derived estimate
+  everywhere the app anchors on LTHR (effort ceilings, the HR-zone band, the LT1 cross-check), then
+  **ages out over weeks** — LTHR moves with fitness, so the derived estimate takes back over rather than
+  trusting a stale number, and re-saving the same value deliberately doesn't re-freshen it. The manual
+  documents the 30-minute test protocol, and the app only *suggests* the test when every clearance
+  holds — assertive regime, green readiness, no medical hold, and an anchor that's actually improvable —
+  never during a conservative rebuild (it's a near-maximal effort; the safety gate is the point). Locked
+  by a new `det/lthr-manual` self-test.
+
+### Fixed
+- **A positive check-in could silently delay your graduation to the assertive build.** Telling the app
+  a run *felt good* records a "no change" note — but the week-banking rule counted *any* recorded
+  note-with-dates as "the engine eased this week" and threw the week's evidence out. So a week you
+  fully absorbed (plan met, recovery clean) could fail to bank purely because you engaged positively —
+  the opposite of the design's intent, and it kept a real training block on the conservative regime
+  longer than earned. Banking now distinguishes a genuine ease (reduced volume, easy-only, a clamp, a
+  medical hold — any of these still voids the week, even if later superseded) from a no-op check-in,
+  which no longer costs anything. Locked into the regime-gate self-test with both cases.
+
+### Changed
+- **Biomechanical damage weights calibrated to the owner's own history.** The eq_km damage-per-km
+  multipliers shipped in 0.8.0 as a literature starting point, with the promise they'd be tuned to real
+  data before hardening. A full-history replay (4.7 years, ~1,100 runs, zones tracking fitness at the
+  time) kept its promise pointing the other way: the one week in the whole record where a fast-load spike
+  coincided with an escalating overuse symptom is caught by this axis (and only this axis — volume
+  brakes pass it), but the literature weights would also have falsely eased seven quality weeks the
+  owner demonstrably absorbed at his fittest. The weights are now softened (marathon ×1.4, threshold
+  ×2.5, interval ×3.5) — the true catch is kept, false brakes on proven-absorbable training drop by
+  more than half, and the jump threshold is unchanged. Harsher weights were strictly worse on the same
+  data. With a single true positive on record this remains a false-positive-rate calibration, not a
+  validated injury model; it will be re-calibrated as the corpus grows.
+
 ## [0.8.0] - 2026-07-02
 
 New injury brakes on load axes the acute:chronic ratio structurally can't see — a pace-weighted

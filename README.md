@@ -153,7 +153,10 @@ Effort lives in two places, on two different physiological anchors:
 
   LTHR is estimated streamlessly from the whole-run average HR of your sustained hard efforts (20–70 min at
   ≥85 % robust HRmax), with a confidence flag. The activity chart's HR-zone band uses the same LTHR when
-  confident, %HRmax otherwise.
+  confident, %HRmax otherwise. A **field-tested LTHR can be entered manually** (Settings → Manual LTHR):
+  a fresh entry outranks the derived estimate, then ages out over weeks — LTHR moves with fitness, so the
+  data takes back over rather than trusting a stale number. The 30-min test protocol is in the manual, and
+  the app only *suggests* it when every readiness clearance holds (never during a conservative rebuild).
 
 These are **independent fitness estimates that should agree**: running at the easy *pace* ceiling should keep
 HR under the easy *HR* ceiling. They diverge most under cardiac decoupling (when detrained, a given easy pace
