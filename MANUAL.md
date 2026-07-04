@@ -202,6 +202,18 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
 - **Earned levers** (opt-in, private): *faster build* (a small ACWR-capped volume bump on hard weeks),
   *earned 6th run* (same volume spread over one more day), and the *CTL volume floor* (volume tracks
   measured fitness once it outruns the default ramp). All protect recovery weeks and hold the ceiling.
+- **Component chips + the "builds" line** — every quality session carries a small chip naming which of the
+  four fitness components it chiefly builds (**VO₂max**, **SSmax/LT2**, **economy**, **resilience** — hover
+  a chip for the science), and each phase header sums what the phase is *for*, derived from the sessions
+  themselves. On the **assertive** regime the quality mix is periodized by component: a short VO₂ touch
+  appears already in Base (develop it early — it's cheap to hold later; the touch is deliberately small so
+  it fits the biomechanical budget of a volume rebuild), the mid-week interval session then keeps its full
+  size in a *maintenance role* through Build and Peak (it never grows — but shrinking it turned out to
+  lower the whole week's safe load, so it stays), while the marathon-pace long-run segment **grows week
+  over week at constant speed** (longer, not faster) and Peak pivots to resilience — the long-fast run is
+  the workout. The conservative regime keeps its gentler classic mix; you'll just see the tags. An eased
+  or fatigue-capped session loses its chip — a session that no longer happens builds nothing, and the app
+  won't claim otherwise.
 
 ### Race chain strip (multi-A only)
 When you chain ≥ 2 A-races, a strip shows each race with its **role**, date, **projected race-day CTL**, and

@@ -12,6 +12,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-04
+
+Every session now says what it's *for* — and the assertive plan sequences fitness by component,
+with the quality mix calibrated against real training history.
+
+### Added
+- **Component-aware training plan (the four-component model).** Marathon fitness decomposes into
+  VO₂max × running economy × SSmax/LT2 plus physiological resilience — how little the first three decay
+  over the race distance. Every quality session now carries a chip naming the component it chiefly
+  builds (hover for the science), and each phase header sums what the phase is *for*, derived from the
+  sessions themselves so the label can never drift from the prescription. An eased or fatigue-capped
+  session loses its chip — a session that won't happen builds nothing.
+- **Component periodization on the assertive regime ("VO₂max early, maintain late").** The earned
+  assertive build now sequences quality by component: a short VO₂ touch appears already in the Base
+  phase (developed early, it's cheap to hold — and deliberately small, sized to fit the biomechanical
+  damage budget of a steep volume rebuild), the mid-week interval session then shifts to a
+  *maintenance role* through Build and Peak while the marathon-pace long-run segment grows week over
+  week **at constant speed** (longer, not faster), and the Peak pivots to resilience — the long-fast
+  run becomes the workout. Calibration note (verified by replay on real data): the maintenance
+  session keeps its full *size* — a smaller mid-week session concentrates the week's load into fewer
+  hard days, and under the per-day safety cap that lowered the whole plan's safe volume with no
+  offsetting benefit. All existing safety governors (ACWR ceiling, polarized easy floor, phase
+  hard-caps, long-run jump cap, the biomechanical brake) bound the new mix unchanged; the
+  conservative regime's plan is untouched. Locked by a new `det/components` self-test.
+
+### Fixed
+- **An assertive plan looked half-missing: no training-log overlay, and a "No active plan"
+  readiness tile.** Three readers of the plan looked only at the re-base phase's weeks — and the
+  assertive regime *skips* the re-base, so once a plan graduated: elapsed weeks lost their
+  done/missed marks, actual km + pace, unplanned-run entries and journal reflections; the Today's
+  Readiness tile claimed there was no active plan at all; and the AI plan explainer was handed an
+  empty week list. All three now read the whole road through one shared reader (every phase's
+  weeks, each tagged to its phase — multi-race chain segments included), so past/current weeks in
+  any phase carry the full overlay and today's session always resolves. Locked by a new
+  `det/log-phases` self-test.
+
 ## [0.9.0] - 2026-07-03
 
 Zones you can see, a threshold you can set, damage weights tuned to real history — and a fix that

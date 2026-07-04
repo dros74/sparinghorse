@@ -2500,6 +2500,56 @@ PHASE_HARD_CAP = {         # invariant ceiling on the hard (threshold+interval) 
     "rebase": 0.0, "base": 0.15, "build": 0.25, "peak": 0.25, "taper": 0.20}
 HARD_ZONES = ("threshold", "interval")  # zones that count toward the "hard" (polarized) share
 
+# §T2 — the four-component fitness model (Tier-2). Marathon fitness decomposes into VO₂max ×
+# running economy × SSmax/LT2 (the Mayo three-factor model) + physiological RESILIENCE — how little
+# the first three decay over 42 km (Jones 2024; the framing follows John Davis). Every quality
+# session is TAGGED by the component it chiefly builds (metadata, both regimes — surfaced, never
+# steering on its own), and the ASSERTIVE regime re-periodizes the quality mix around the components:
+# VO₂max is developed EARLY and then merely maintained (red-cell persistence makes it cheap to hold),
+# marathon-pace work GROWS through the build (SSmax + near-MP economy), and the Peak pivots to
+# resilience — the MP segment of the long run extends week-over-week at CONSTANT speed ("longer, not
+# faster"). Caution keeps the legacy shapes byte-identical: the component periodization is earned the
+# same way every other assertive lever is.
+COMPONENT_BY_KIND = {      # primary component per session kind (quality + the plain long run)
+    "interval": "vo2max", "tempo": "ssmax", "long_mp": "resilience", "long": "economy"}
+DAVIS_BASE_VO2_FRAC = 0.05   # Base (assertive): the quality slot becomes a SHORT VO₂ touch. Halved
+                             # from the tempo slot's .10 (calibrated 2026-07-04 on his live corpus):
+                             # during the steep post-restart volume rebuild the ramp-back week's plain
+                             # km already sits ~98% of the eq_km step, so a .10 touch self-tripped the
+                             # §3.1 brake; at .05 the touch fits the biomech budget (zero fires) and
+                             # the projection is unchanged — the dose was never the fitness lever.
+DAVIS_BASE_VO2_REP_MIN = 2   # ≥2-min reps develop VO₂max; short reps keep the on-ramp touch gentle
+DAVIS_INT_FRAC = 0.12        # Build+Peak mid-week interval session — FULL size, matching the legacy
+                             # dev dose. "Maintain late" was tried at .06 and REVISED by evidence
+                             # (2026-07-04, live replay): under the peak-day-capped governor the
+                             # mid-week session FLATTENS the week, so shrinking it made every week
+                             # peakier and cost ~8% of total safe load (race CTL 42→36) with no
+                             # offsetting benefit. The session's ROLE still shifts dev→maintenance
+                             # (it never grows); only its size stays. Excess VO₂ stimulus is benign.
+DAVIS_BUILD_MP_START, DAVIS_BUILD_MP_END = 0.07, 0.10   # MP finish grows across Build's non-down weeks
+DAVIS_PEAK_MP_START, DAVIS_PEAK_MP_END = 0.10, 0.13     # …and keeps extending through Peak (resilience).
+                             # Work tops at .12+.13=.25 — fine: the polarized easy floor is MP-EXEMPT
+                             # by design (hard = thr+int only, .12 ≤ PHASE_HARD_CAP), and the MP slice
+                             # is bounded by the load cap, not the polarization floor.
+
+
+def _mp_prog(i, n, lo, hi):
+    """MP-finish frac for progression step i of n (constant-speed duration extension, §T2)."""
+    return round(lo + (hi - lo) * (i / (n - 1)), 3) if n > 1 else round(hi, 3)
+
+
+def _phase_builds(weeks):
+    """§T2 — the distinct fitness components a generated phase's sessions build, in first-seen
+    order (derived from the session tags, so the surface can never drift from the prescription).
+    Empty for untagged phases (the re-base)."""
+    comps = []
+    for w in weeks:
+        for s in (w.get("sessions") or []):
+            c = s.get("component")
+            if c and c not in comps:
+                comps.append(c)
+    return comps
+
 # Base on-ramp quality (§6f Step C): a single short *light tempo* per build week, introduced after
 # the first couple of weeks (neuromuscular on-ramp, after strides) and never on a down week. Kept
 # deliberately light — a small hard fraction at threshold ("cruise") — the conservative masters /
@@ -2509,13 +2559,16 @@ BASE_TEMPO_ZONE = "threshold"
 BASE_TEMPO_FROM_WEEK = 3   # no tempo in the first 2 Base weeks (ease into quality after strides)
 
 
-def base_shape(n_weeks, start_km, runs=BASE_RUNS):
+def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     """Parametric Base-phase shape (§6f Step B/C): easy-aerobic volume growth launched from the
     re-base end volume, with a 3:1 down-week cadence. INTENT only — `generate_block` clips any week
     the ACWR ceiling won't allow, so this is the target trajectory, not the guaranteed one. The
     build trajectory advances only on build weeks (a down week absorbs, it doesn't regress the
-    trend). Strides carry over from the re-base on-ramp; Step C layers a single light tempo per build
-    week (from BASE_TEMPO_FROM_WEEK) as the quality on-ramp — easy-dominant, polarized (~90/10)."""
+    trend). Strides carry over from the re-base on-ramp; Step C layers a single quality session per
+    build week (from BASE_TEMPO_FROM_WEEK) as the on-ramp — easy-dominant, polarized (~90/10).
+    `davis` (§T2, assertive-only — caution byte-identical): the quality slot becomes a SHORT VO₂
+    touch instead of the cruise tempo — develop VO₂max early while mileage rises (it's cheap to hold
+    later), same hard frac, still under PHASE_HARD_CAP["base"]; the eq_km governor watches the km."""
     shape, km = [], float(start_km)
     for i in range(n_weeks):
         wk = i + 1
@@ -2527,13 +2580,18 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS):
             km *= (1 + BASE_WEEKLY_RAMP)
         quality = []
         if not down and wk >= BASE_TEMPO_FROM_WEEK:
-            quality = [{"kind": "tempo", "zone": BASE_TEMPO_ZONE, "frac": BASE_TEMPO_FRAC,
-                        "structure": "continuous", "label": "light cruise tempo"}]
+            quality = ([{"kind": "interval", "zone": "interval", "frac": DAVIS_BASE_VO2_FRAC,
+                         "structure": "intervals", "rep_min": DAVIS_BASE_VO2_REP_MIN, "rec_min": 2,
+                         "label": "short VO₂ touch", "component": "vo2max"}] if davis else
+                       [{"kind": "tempo", "zone": BASE_TEMPO_ZONE, "frac": BASE_TEMPO_FRAC,
+                         "structure": "continuous", "label": "light cruise tempo",
+                         "component": "ssmax"}])
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * BASE_LONG_FRAC), "strides": 0 if down else 2,
                       "quality": quality,
                       "intent": "Down week — absorb the block" if down
-                      else "Easy aerobic base — build durable volume"})
+                      else ("General — aerobic volume + early VO₂ (build it now, hold it cheap)"
+                            if davis else "Easy aerobic base — build durable volume")})
     return shape
 
 
@@ -2564,12 +2622,19 @@ TAPER_SHARP_FRAC = 0.06      # short race-pace touch (threshold), neuromuscular 
 TAPER_TOP, TAPER_BOTTOM = 0.75, 0.40   # week-1 vs race-week volume as a fraction of the peak end
 
 
-def build_shape(n_weeks, start_km, runs=BASE_RUNS):
+def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     """Parametric Build-phase shape (§6f Step D): lightly-growing specific work off the Base end
     volume, with a 3:1 down-week cadence. Each build week carries two quality sessions — VO₂
     intervals (mid-week) and a marathon-pace finish on the long run — as a small polarized slice;
-    down weeks drop quality to absorb. INTENT only — `generate_block` clips to the ACWR ceiling."""
+    down weeks drop quality to absorb. INTENT only — `generate_block` clips to the ACWR ceiling.
+    `davis` (§T2, assertive-only — caution byte-identical): VO₂max was developed back in Base, so
+    the interval slot shifts to a MAINTENANCE role — same full session size (shrinking it made the
+    week peakier and cost total safe load; see DAVIS_INT_FRAC), it just never grows — while the MP
+    finish GROWS across the phase's non-down weeks (SSmax + near-MP economy) — more minutes at the
+    same pace, never a faster pace."""
     shape, km = [], float(start_km)
+    nd_total = sum(1 for i in range(n_weeks) if (i + 1) % BUILD_DOWN_EVERY != 0)
+    nd_seen = 0
     for i in range(n_weeks):
         wk = i + 1
         down = (wk % BUILD_DOWN_EVERY == 0)
@@ -2578,36 +2643,70 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS):
         else:
             this_km = max(1, round(km))
             km *= (1 + BUILD_WEEKLY_RAMP)
-        quality = [] if down else [
-            {"kind": "interval", "zone": "interval", "frac": BUILD_INTERVAL_FRAC,
-             "structure": "intervals", "rep_min": 3, "rec_min": 2, "label": "VO₂ intervals"},
-            {"kind": "long_mp", "zone": "marathon", "frac": BUILD_MP_FRAC,
-             "attach": "long", "label": "marathon-pace long run"}]
+        if down:
+            quality = []
+        elif davis:
+            mp = _mp_prog(nd_seen, nd_total, DAVIS_BUILD_MP_START, DAVIS_BUILD_MP_END)
+            nd_seen += 1
+            quality = [
+                {"kind": "interval", "zone": "interval", "frac": DAVIS_INT_FRAC,
+                 "structure": "intervals", "rep_min": 3, "rec_min": 2,
+                 "label": "VO₂ intervals", "component": "vo2max"},
+                {"kind": "long_mp", "zone": "marathon", "frac": mp,
+                 "attach": "long", "label": "marathon-pace long run (progressive)",
+                 "component": "resilience"}]
+        else:
+            quality = [
+                {"kind": "interval", "zone": "interval", "frac": BUILD_INTERVAL_FRAC,
+                 "structure": "intervals", "rep_min": 3, "rec_min": 2, "label": "VO₂ intervals",
+                 "component": "vo2max"},
+                {"kind": "long_mp", "zone": "marathon", "frac": BUILD_MP_FRAC,
+                 "attach": "long", "label": "marathon-pace long run", "component": "resilience"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * BUILD_LONG_FRAC), "strides": 0, "quality": quality,
                       "intent": "Down week — absorb the block" if down
-                      else "Build — specific: VO₂ intervals + marathon-pace long run"})
+                      else ("Supportive — growing MP work + VO₂ maintenance" if davis
+                            else "Build — specific: VO₂ intervals + marathon-pace long run")})
     return shape
 
 
-def peak_shape(n_weeks, start_km, runs=BASE_RUNS):
+def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     """Parametric Peak-phase shape (§6f Step D): trim volume into race specificity. Volume eases each
     week; the long run carries a race-pace finish and there's a light interval touch for sharpness.
     The long run is bounded by LONG_RUN_MAX_FRAC + the ACWR ceiling — the runway, not a textbook
-    peak-long-run number, decides its length."""
+    peak-long-run number, decides its length. `davis` (§T2, assertive-only — caution byte-identical):
+    the phase pivots to RESILIENCE — the long run's MP segment keeps extending at constant speed
+    while the interval slot stays a maintenance touch."""
     shape, km = [], float(start_km)
     for i in range(n_weeks):
         wk = i + 1
         this_km = max(1, round(km))
         km *= (1 + PEAK_WEEKLY_RAMP)
-        quality = [
-            {"kind": "interval", "zone": "interval", "frac": PEAK_INTERVAL_FRAC,
-             "structure": "intervals", "rep_min": 3, "rec_min": 2, "label": "sharpening intervals"},
-            {"kind": "long_mp", "zone": "marathon", "frac": PEAK_MP_FRAC,
-             "attach": "long", "label": "race-pace long run"}]
+        if davis:
+            # §T2 marathon-specific: the long-fast run IS the workout — the MP segment keeps
+            # extending at constant speed (resilience: economy decay resistance). The mid-week
+            # interval session keeps its FULL size in a maintenance ROLE: shrinking it made the
+            # week peakier and cost total safe load (see DAVIS_INT_FRAC), verified on his corpus.
+            quality = [
+                {"kind": "interval", "zone": "interval", "frac": DAVIS_INT_FRAC,
+                 "structure": "intervals", "rep_min": 3, "rec_min": 2,
+                 "label": "VO₂ intervals — maintenance", "component": "vo2max"},
+                {"kind": "long_mp", "zone": "marathon",
+                 "frac": _mp_prog(i, n_weeks, DAVIS_PEAK_MP_START, DAVIS_PEAK_MP_END),
+                 "attach": "long", "label": "long-fast resilience run", "component": "resilience"}]
+        else:
+            quality = [
+                {"kind": "interval", "zone": "interval", "frac": PEAK_INTERVAL_FRAC,
+                 "structure": "intervals", "rep_min": 3, "rec_min": 2,
+                 "label": "sharpening intervals", "component": "vo2max"},
+                {"kind": "long_mp", "zone": "marathon", "frac": PEAK_MP_FRAC,
+                 "attach": "long", "label": "race-pace long run", "component": "resilience"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * PEAK_LONG_FRAC), "strides": 0, "quality": quality,
-                      "intent": "Peak — race specificity: race-pace long run + sharpening"})
+                      # the "Peak" prefix is LOAD-BEARING: generate_block's §PRO6 deload exemption
+                      # sniffs it (is_peak) — the peak rides into the taper, its recovery
+                      "intent": ("Peak — marathon-specific: long-fast resilience + VO₂ maintenance" if davis
+                                 else "Peak — race specificity: race-pace long run + sharpening")})
     return shape
 
 
@@ -2623,7 +2722,8 @@ def taper_shape(n_weeks, start_km, runs=BASE_RUNS):
         race_week = (wk == n_weeks)
         quality = [] if race_week else [
             {"kind": "tempo", "zone": "threshold", "frac": TAPER_SHARP_FRAC,
-             "structure": "intervals", "rep_min": 2, "rec_min": 2, "label": "short race-pace touch"}]
+             "structure": "intervals", "rep_min": 2, "rec_min": 2, "label": "short race-pace touch",
+             "component": "ssmax"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * TAPER_LONG_FRAC), "strides": 0 if race_week else 2,
                       "quality": quality,
@@ -2677,7 +2777,11 @@ def _build_quality(spec, work_trimp, start_date, dow, zones, easy_pace_sec):
     reps.append(_qblock("cooldown", "easy", QUALITY_CD_MIN, easy_pace_sec, "easy cool-down"))
     date = (start_date + timedelta(days=dow)).isoformat()
     note = f"{spec.get('label', spec['kind'])} — {QUALITY_WU_MIN}min easy wu + {desc} + {QUALITY_CD_MIN}min easy cd"
-    return _session_from_reps(date, spec["kind"], zone, zpace, reps, note)
+    sess = _session_from_reps(date, spec["kind"], zone, zpace, reps, note)
+    comp = spec.get("component") or COMPONENT_BY_KIND.get(spec["kind"])   # §T2 component tag
+    if comp:
+        sess["component"] = comp
+    return sess
 
 
 def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
@@ -2693,7 +2797,9 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
     reps = [_qblock("easy_base", "easy", base_min, easy_pace_sec, "easy aerobic base"),
             _qblock("work", zone, mp_min, zpace, f"{mp_min}min @ marathon pace finish")]
     note = f"{spec.get('label', 'long run')} — {base_min}min easy base + {mp_min}min @ MP finish"
-    return _session_from_reps(date, "long_mp", zone, zpace, reps, note)
+    sess = _session_from_reps(date, "long_mp", zone, zpace, reps, note)
+    sess["component"] = spec.get("component") or COMPONENT_BY_KIND["long_mp"]   # §T2 component tag
+    return sess
 
 
 def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
@@ -2804,6 +2910,8 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         sess = {"date": date, "kind": "long" if is_long else "easy",
                 "km": km, "minutes": mins, "trimp": tr,
                 "pace_zone": f"{fmt_pace(easy_pace_sec)}/km easy", "note": note}
+        if is_long and zones:                           # §T2 — the building-phase long run builds economy
+            sess["component"] = COMPONENT_BY_KIND["long"]   # (mileage is the economy lever; re-base untagged)
         if is_long and long_step_capped:
             sess["long_step_capped"] = True
         sessions.append(sess)
@@ -2900,8 +3008,10 @@ def _apply_adjustment(sessions, dt, adj):
                 s["reps"], s["zone"] = None, None
             if m == 0:
                 s["kind"], s["note"] = "rest", "rest — eased by your check-in"
+                s.pop("component", None)   # §T2 — an eased-away session builds nothing; don't claim it
             elif easy_only and s["kind"] not in ("easy", "rest", "long"):
                 s["kind"], s["note"] = "easy", "easy only — eased by your check-in"
+                s.pop("component", None)   # §T2 — no longer the component-building session
             else:
                 s["note"] = "eased — " + s.get("note", "")
         out_s.append(s)
@@ -3307,6 +3417,7 @@ def _mark_load_integrity(w, zones):
     if longs and (longs[0].get("km") or 0) < LONG_RUN_MIN_KM:
         s = longs[0]
         s["kind"] = "easy"
+        s.pop("component", None)   # §T2 — a shakeout builds no component; don't claim economy
         s["note"] = "shakeout — long run held back by recent fatigue (ACWR ceiling)"
         w["long_capped"] = True
         if zones is not None:                  # building phase (re-base is the pure-easy zones=None block)
@@ -4086,8 +4197,12 @@ def generate_plan(db, force_regime=None):
             live["ctl"], live["atl"], live["started"] = ec, ea, True
         live["consec_hard"], live["last_nondown"] = ch, ln   # §PRO6 carry across phases
         live["recent_longs"], live["recent_eq"] = rl, req    # §PRO9/§3.1 carry across phases
-        return {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": ec, "end_atl": ea,
-                "clipped_by_acwr": any(w.get("clipped") for w in weeks_)}, ec
+        blk = {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": ec, "end_atl": ea,
+               "clipped_by_acwr": any(w.get("clipped") for w in weeks_)}
+        comps = _phase_builds(weeks_)                 # §T2 — what this phase builds (from the tags)
+        if comps:
+            blk["builds"] = comps
+        return blk, ec
 
     # re-base is the conservative pure-easy block — always caution, never ridden (skipped in assertive)
     rb, _rb_end = _gen_phase("rebase", block_start, shape, None)
@@ -4154,7 +4269,11 @@ def generate_plan(db, force_regime=None):
             if kind == "rebase" or n_wk <= 0:
                 continue   # the re-base block is already generated above as `rb`
             building = kind in ("base", "build", "bridge")   # the volume-building phases
-            sh = SHAPERS[kind](n_wk, cur_km)
+            # §T2 — the Davis component periodization rides the ASSERTIVE regime only (earned, like
+            # every other assertive lever); caution keeps the legacy shapes byte-identical. Taper is
+            # regime-agnostic (freshening is freshening).
+            sh = (SHAPERS[kind](n_wk, cur_km) if kind == "taper"
+                  else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive")))
             # (§6h CTL-responsive floor removed 2026-06-30 — it was a dormant follower: the re-base decay
             # kept it below its activation band in real plans, and the §PRO assertive ride is the proper
             # fitness-tracker now. Caution is a clean conservative ramp; assertive rides the ceiling.)
@@ -4728,11 +4847,12 @@ def _phase_block_summary(block):
 def _plan_summary_for_llm(plan, diff):
     """Compact, grounded view of the engine's plan for the explainer — numbers only, no prose to
     parrot, so the model explains rather than invents."""
-    rb = plan.get("rebase", {})
-    weeks = [f"wk{w['wk']}: {w['km']}km/{w['runs']} runs, end-ACWR~{w.get('proj_acwr')}"
+    # whole-road weeks (every phase, pk-tagged) — an assertive plan has NO re-base weeks, and the
+    # explainer must narrate the road that exists, not an empty Phase 0
+    weeks = [f"{w.get('pk','?')} wk{w['wk']}: {w['km']}km/{w['runs']} runs, end-ACWR~{w.get('proj_acwr')}"
              + (" [eased]" if w.get("adjusted") else "") + (" [clipped-to-ACWR]" if w.get("clipped") else "")
              + (" [frozen/done]" if w.get("frozen") else "")
-             for w in rb.get("weeks", [])]
+             for w in _plan_all_weeks(plan)]
     return {
         "mode": plan.get("mode"),
         "objective": plan.get("objective"),
@@ -5026,19 +5146,35 @@ def runs_on_date(db, date):
             "pace": (f"{int(pace)}:{int((pace*60) % 60):02d}" if pace else None)}
 
 
+def _plan_all_weeks(plan):
+    """Every generated week across EVERY phase block of a plan, pk-tagged with its phase key, in
+    calendar order (re-base first, then the phases walk — chain segments included via their own
+    keys). THE single reader for 'the plan's weeks': the assertive regime skips the re-base, so
+    any rebase-only read silently drops the whole road — the 2026-07-04 family of bugs (the log
+    overlay, the readiness tile's phantom 'No active plan', the explainer's empty week list)."""
+    weeks = [{**w, "pk": "rebase"} for w in (plan.get("rebase") or {}).get("weeks", [])]
+    for ph in plan.get("phases", []):
+        key = ph.get("key")
+        if key and key != "rebase":
+            weeks += [{**w, "pk": key} for w in (plan.get(key) or {}).get("weeks", [])]
+    return weeks
+
+
 def todays_session(db, today):
     """Today's prescription from the latest plan. Returns a session, a rest day, or a
     block-state marker so the readiness tile can tell apart 'no plan at all' (None) from
     'a plan exists but the block hasn't started / has finished' — the latter must NOT read
-    as "no active plan". A run already logged for today marks the session `done`."""
+    as "no active plan". A run already logged for today marks the session `done`. Reads the
+    WHOLE road (every phase), not just the re-base — an assertive plan has no re-base, and a
+    caution plan's Base/Build days are just as much 'today's session' as Phase-0 days."""
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return None  # genuinely no plan generated yet
     plan = json.loads(row["plan"])
-    weeks = plan.get("rebase", {}).get("weeks", [])
+    weeks = _plan_all_weeks(plan)
     if not weeks:
         return None
-    if today < weeks[0]["start"]:  # plan active, but the re-base hasn't begun yet
+    if today < weeks[0]["start"]:  # plan active, but the road hasn't begun yet
         return {"kind": "pre", "start": weeks[0]["start"]}
     for wk in weeks:
         for s in wk.get("sessions", []):
@@ -5046,11 +5182,11 @@ def todays_session(db, today):
                 actual = runs_on_date(db, today)
                 return {**s, "week": wk["wk"], "easy_pace": plan["pace_zones"].get("easy_top"),
                         "done": bool(actual), "actual": actual}
-    # inside the block window but nothing scheduled → rest day
-    last_end = max((s["date"] for w in weeks for s in w["sessions"]), default="")
+    # inside the plan window but nothing scheduled → rest day
+    last_end = max((s["date"] for w in weeks for s in w.get("sessions", [])), default="")
     if today <= last_end:
         return {"kind": "rest", "note": "Rest day — recovery is part of the plan."}
-    return {"kind": "post"}  # block complete — time to periodize the next phase
+    return {"kind": "post"}  # the road is complete — time to periodize the next phase
 
 
 def latest_easy_pace(db):
@@ -5067,15 +5203,18 @@ def latest_easy_pace(db):
 
 
 def block_log(db):
-    """The training log for the live re-base block: each planned session enriched with whether
-    a matching run was actually done (by date), the actual km/pace, and any reflection note.
-    'Done' and actual-vs-planned are DERIVED from synced `activities` — the journal only stores
-    the free-text note. Returns {weeks, adherence, start, end} or None when there's no plan."""
+    """The training log for the live plan: each planned session enriched with whether a matching
+    run was actually done (by date), the actual km/pace, and any reflection note. 'Done' and
+    actual-vs-planned are DERIVED from synced `activities` — the journal only stores the free-text
+    note. Covers EVERY phase block (each week tagged with its phase key `pk`), not just the
+    re-base — the assertive regime SKIPS the re-base, so an assertive plan's elapsed weeks live in
+    Base/Build and would otherwise lose their actuals overlay entirely (the bug Duarte caught
+    2026-07-04). Returns {weeks, adherence, start, end} or None when there's no plan."""
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return None
     plan = json.loads(row["plan"])
-    weeks = plan.get("rebase", {}).get("weeks", [])
+    weeks = _plan_all_weeks(plan)
     if not weeks:
         return None
     start = weeks[0]["start"]
@@ -7216,6 +7355,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .sline .splan{color:var(--muted)} .sline.stoday .splan{color:var(--text)}
   .sline .sact{color:var(--accent)}
   .sline .sdate{color:var(--muted);opacity:.85;min-width:104px;display:inline-block}
+  /* §T2 — component chip: which of the four fitness components a session chiefly builds */
+  .scomp{font-family:var(--sans);font-size:9px;letter-spacing:.02em;color:var(--muted);
+    border:1px solid var(--line);border-radius:8px;padding:0 5px;line-height:14px;
+    white-space:nowrap;cursor:help}
+  .sline:hover .scomp,.wcur .scomp{color:var(--text);
+    border-color:color-mix(in oklab,var(--accent),transparent 60%)}
   .srefl{flex-basis:100%;margin-left:1.4em;color:var(--muted);font-family:var(--sans);
     font-size:11px;font-style:italic}
   /* a double's per-run breakdown (the combined actual split into AM/PM, each map-linkable) */
@@ -8753,6 +8898,37 @@ function wireAdjust(){
     finally{ prop.disabled=false; prop.textContent=t; }
   });
 }
+// §T2 — the four-component fitness model: display names + the science tooltip per component.
+const COMPL={vo2max:"VO₂max",ssmax:"SSmax/LT2",economy:"economy",resilience:"resilience"};
+const COMPT={
+  vo2max:"Builds VO₂max — central aerobic power (blood volume + cardiac output drive most of the variance). Developed by ≥2-min reps near 5k pace; red-cell persistence keeps it for months once built, so the plan develops it EARLY and then merely maintains it.",
+  ssmax:"Builds SSmax/LT2 — the steady-state ceiling (mitochondrial respiratory power, capillaries, lactate shuttling), raised by threshold and high-end aerobic work.",
+  economy:"Builds running economy — the energy-per-km skill. Grows with accumulated mileage and race-pace specificity over years; the long easy run is its main lever here.",
+  resilience:"Builds physiological resilience — how little your VO₂max, SSmax and economy decay over 42 km (the marathon's modern fourth component). Built by long runs with marathon-pace segments, which the assertive plan extends at CONSTANT speed — longer, not faster."};
+function compChip(s){
+  return s.component?` <span class="scomp" title="${COMPT[s.component]||''}">${COMPL[s.component]||s.component}</span>`:"";
+}
+// One LOG-enriched session line — planned label + done/missed mark, actual km@pace, reflection,
+// doubles breakdown. Shared by the re-base journal renderer and (via weekHtml) every other phase's
+// elapsed weeks: the assertive regime skips the re-base, so the log overlay must not live only there.
+function logLine(s,today,planLabel){
+  const mark = s.unplanned ? '<span class="smk extra" title="unplanned — bonus volume">+</span>'
+    : s.done ? '<span class="smk done">✓</span>'
+    : s.missed ? '<span class="smk missed">✕</span>'
+    : (s.date===today ? '<span class="smk today">•</span>' : '<span class="smk">○</span>');
+  const act = s.actual ? `<span class="sact">${s.actual.km}k${s.actual.pace?` @ ${s.actual.pace}`:''}</span>` : "";
+  const refl = s.reflection ? `<div class="srefl">📓 ${esc(s.reflection)}</div>` : "";
+  const clk = !SH_READONLY && (s.done||s.unplanned) && s.activity_id;   // a completed/extra run → view its run + map
+  const plan = s.unplanned ? '<span class="splan exu">unplanned</span>' : planLabel;
+  // a DOUBLE (≥2 runs that day): break the combined actual into its per-run halves, each map-linkable
+  const brk = (s.runs && s.runs.length>1)
+    ? `<div class="srun" title="${s.runs.length} runs this day">↳ ${s.runs.map(r=>{
+          const rc = !SH_READONLY && r.activity_id;
+          return `<span class="brkrun"${rc?` data-act-id="${r.activity_id}" title="View this run on the map"`:''}>${r.km}k${r.pace?` @ ${r.pace}`:''}</span>`;
+        }).join(" · ")}</div>`
+    : "";
+  return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
+}
 // §6f Step F — compact label for a planned session. Structured quality sessions (intervals / MP
 // long run / tempo, carried as `reps`) read their structure; plain runs show distance.
 function sessSummary(s){
@@ -8772,7 +8948,13 @@ function weekHtml(w,p,today){
   let cur=false;
   if(w.start){ const we=new Date(w.start); we.setDate(we.getDate()+6);
     cur=!w.frozen && w.start<=today && today<=we.toISOString().slice(0,10); }
-  const sess=w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="wsi${(s.reps&&s.reps.length)?' qs':''}">${sessSummary(s)}</span></div>`).join("");
+  // LOG-enriched sessions (merged in by renderPlan for elapsed/current weeks) get the journal line
+  // (done/missed mark, actual, reflection, doubles); plain future weeks keep the compact summary.
+  const sess=w.sessions.map(s=>{
+    const label=`<span class="wsi${(s.reps&&s.reps.length)?' qs':''}">${sessSummary(s)}</span>${compChip(s)}`;
+    return ('done' in s) ? logLine(s,today,label)
+      : `<div class="sline"><span class="sdate">${sessDate(s.date)}</span>${label}</div>`;
+  }).join("");
   const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>':'',
                w.fatigue_capped?'<span class="down" title="A building week, but recent fatigue left no ACWR headroom — the long run was held back. Load capped for safety, not silently degraded.">⚠ build intent capped by recent fatigue</span>'
                  :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
@@ -8832,8 +9014,13 @@ function phaseSection(title,block,p,today,pk){
   const froz=block.weeks.filter(w=>w.frozen).length;
   const fz=froz?` · <span class="wfz">${froz} done</span>`:"";
   const sel=defaultWeek(block.weeks,today);
+  // §T2 — what this phase builds, summed from the session component tags (can't drift from the plan)
+  const builds=(block.builds&&block.builds.length)
+    ?` · <span class="muted" style="font-size:11px">builds ${block.builds.map(c=>COMPL[c]||c).join(" + ")}</span>`+
+      qhint("Marathon fitness decomposes into four components: VO₂max × running economy × SSmax/LT2 (the classic three-factor model) plus physiological resilience — how little the first three decay over 42 km. Each quality session is tagged with the component it chiefly builds (hover a session's chip); this line sums what the phase is FOR. The assertive plan periodizes them: VO₂max developed early then merely maintained (red-cell persistence makes it cheap to hold), marathon-pace work growing through the build, and the peak pivoting to resilience — the long run's MP segment extends at constant speed. Framing follows John Davis; the fractions are our operationalization.")
+    :"";
   return `<h3 class="phasehdr">
-      <span>${title} <span class="muted mono" style="font-size:11px">(${block.weeks.length}w · start ${block.start} · ends CTL ${block.end_ctl}/ATL ${block.end_atl})${fz}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}</span>
+      <span>${title} <span class="muted mono" style="font-size:11px">(${block.weeks.length}w · start ${block.start} · ends CTL ${block.end_ctl}/ATL ${block.end_atl})${fz}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}${builds}</span>
       <span class="muted mono" style="font-size:12px;font-weight:600;white-space:nowrap" title="Total planned distance across the phase">Σ ${km.toFixed(0)} km</span>
     </h3>
     ${weekStrip(block.weeks,pk,sel)}
@@ -8857,7 +9044,15 @@ function renderPlan(p){
   // Prefer the log's weeks (sessions enriched with done/actual/reflection); fall back to the
   // raw plan weeks when the log isn't loaded yet. The log weeks are a superset of plan weeks.
   const today = (LOG&&LOG.today) || new Date().toISOString().slice(0,10);
-  const planWeeks = (LOG&&LOG.weeks) || rb.weeks;
+  // Log weeks are pk-tagged per phase: the re-base group keeps its dedicated journal renderer;
+  // every other phase's weeks get the enriched sessions merged into its block (assertive skips the
+  // re-base entirely, so elapsed weeks must carry their actuals wherever they live).
+  const planWeeks = (LOG&&LOG.weeks&&LOG.weeks.filter(w=>!w.pk||w.pk==="rebase")) || rb.weeks;
+  const LOGW={};
+  ((LOG&&LOG.weeks)||[]).forEach(w=>{ if(w.pk&&w.pk!=="rebase"){ (LOGW[w.pk]=LOGW[w.pk]||{})[w.wk]=w; } });
+  const enrich=(k,blk)=>(blk&&blk.weeks&&LOGW[k])
+    ? {...blk, weeks: blk.weeks.map(w=>LOGW[k][w.wk]?{...w,sessions:LOGW[k][w.wk].sessions}:w)}
+    : blk;
   // Which phase owns "today" — the one whose weeks bracket it. Default selection for the Plan tile:
   // the bar shows the whole road, but only the live phase's weeks are open underneath. Fallbacks:
   // before the plan starts → the first phase; after it ends → the last.
@@ -8891,24 +9086,9 @@ function renderPlan(p){
   // recomputed from that snapshot's VO₂max, so this is how fresh the pills below are).
   const refreshed = p.generated_at
     ? `<div class="legend" style="margin-top:6px;opacity:.85">↻ Last refreshed ${new Date(p.generated_at).toLocaleString()}</div>` : "";
-  const sessHtml=s=>{
-    const mark = s.unplanned ? '<span class="smk extra" title="unplanned — bonus volume">+</span>'
-      : s.done ? '<span class="smk done">✓</span>'
-      : s.missed ? '<span class="smk missed">✕</span>'
-      : (s.date===today ? '<span class="smk today">•</span>' : '<span class="smk">○</span>');
-    const act = s.actual ? `<span class="sact">${s.actual.km}k${s.actual.pace?` @ ${s.actual.pace}`:''}</span>` : "";
-    const refl = s.reflection ? `<div class="srefl">📓 ${esc(s.reflection)}</div>` : "";
-    const clk = !SH_READONLY && (s.done||s.unplanned) && s.activity_id;   // a completed/extra run → view its run + map
-    const plan = s.unplanned ? '<span class="splan exu">unplanned</span>' : `<span class="splan">${s.km}k</span>`;
-    // a DOUBLE (≥2 runs that day): break the combined actual into its per-run halves, each map-linkable
-    const brk = (s.runs && s.runs.length>1)
-      ? `<div class="srun" title="${s.runs.length} runs this day">↳ ${s.runs.map(r=>{
-            const rc = !SH_READONLY && r.activity_id;
-            return `<span class="brkrun"${rc?` data-act-id="${r.activity_id}" title="View this run on the map"`:''}>${r.km}k${r.pace?` @ ${r.pace}`:''}</span>`;
-          }).join(" · ")}</div>`
-      : "";
-    return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
-  };
+  // The re-base journal line = the shared logLine with a plain-distance plan label (Phase 0 is
+  // pure easy running; quality summaries only matter in the later phases' weekHtml path).
+  const sessHtml=s=>logLine(s,today,`<span class="splan">${s.km}k</span>`);
   // Re-base weeks are LOG-enriched (done/missed/unplanned/doubles via sessHtml) — kept as their own
   // renderer; we only wrap each in a week-detail and front it with the shared strip (selector below).
   const rbSel=defaultWeek(planWeeks,today);
@@ -9019,7 +9199,7 @@ function renderPlan(p){
   // its bridge/peak/taper segments), keyed by the phase's own key so segments never collide.
   const panel=(k,inner)=>inner?`<div class="phasepanel${k===curPhase?' active':''}" data-pk="${k}">${inner}</div>`:'';
   const phasePanels = o ? (p.phases||[]).filter(x=>x.key&&x.key!=="rebase")
-      .map(x=>panel(x.key, phaseSection(x.phase, p[x.key], p, today, x.key))).join("") : '';
+      .map(x=>panel(x.key, phaseSection(x.phase, enrich(x.key, p[x.key]), p, today, x.key))).join("") : '';
   const rebaseInner=`
     <h3 style="font-family:var(--serif);font-weight:600;font-size:16px;margin:18px 0 2px;display:flex;justify-content:space-between;align-items:baseline;gap:12px">
       <span>Phase 0 — the re-base block <span class="muted mono" style="font-size:11px">(start ${rb.start}, ends CTL ${rb.end_ctl}/ATL ${rb.end_atl})${adh}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}</span>
@@ -10201,6 +10381,84 @@ def _stc_day_spacing():
                "weekend; no double-rest at any week BOUNDARY; long run on the true calendar weekend",
                passed=not bad, expect="≤2 consec · 6: no hard adjacent · boundary gap ≤2d · long Sat/Sun",
                got="ok" if not bad else f"fails: {bad}", output=detail)
+
+
+def _stc_log_phases():
+    """§ log-all-phases (2026-07-04, Duarte's catch) — block_log must cover EVERY phase block, not
+    just the re-base: the assertive regime SKIPS the re-base, so an assertive plan's elapsed weeks
+    live in Base/Build and previously lost the whole done/actual/journal overlay. Locks: (a) a plan
+    with an EMPTY re-base still yields a log, weeks pk-tagged to their phase, actuals + unplanned
+    enrichment intact; (b) a plan with BOTH re-base and base yields both pk groups in calendar
+    order (re-base first) so the UI can split them. Throwaway in-memory DB."""
+    import sqlite3 as _sq
+    fails = []
+
+    def mkdb(plan, acts):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(
+            "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+            " distance REAL, duration REAL);"
+            "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE session_log(date TEXT PRIMARY KEY, note TEXT);"
+            "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+        m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now','2026-06-08','{}',?)",
+                  (json.dumps(plan),))
+        for i, (d, dist) in enumerate(acts):
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?)",
+                      (i + 1, d, d + "T18:00:00", RUNNING_SPORT, dist, 1800))
+        return m
+
+    base_wk = {"wk": 1, "start": "2026-06-08", "km": 20, "runs": 3, "intent": "Base",
+               "sessions": [{"date": "2026-06-09", "km": 6, "kind": "easy"},
+                            {"date": "2026-06-11", "km": 6, "kind": "easy"},
+                            {"date": "2026-06-14", "km": 8, "kind": "long"}]}
+    # (a) assertive-shaped plan: NO re-base weeks — the log must still exist, keyed to base
+    plan_a = {"rebase": {"weeks": []}, "pace_zones": {"easy_top": "7:05/km"},
+              "phases": [{"key": "base", "kind": "base", "weeks": 1}],
+              "base": {"weeks": [base_wk]}}
+    db_a = mkdb(plan_a, [("2026-06-09", 6.2), ("2026-06-10", 4.0)])
+    # the readiness tile's reader: a re-base-less plan must still surface today's session / a rest
+    # marker — returning None here is the 'No active plan' phantom (same 2026-07-04 family)
+    ts = todays_session(db_a, "2026-06-11")
+    if not (ts and ts.get("kind") == "easy" and ts.get("km") == 6):
+        fails.append(f"todays_session lost the base-week prescription (the 'No active plan' phantom): {ts}")
+    tr = todays_session(db_a, "2026-06-10")
+    if not (tr and tr.get("kind") == "rest"):
+        fails.append(f"in-window empty day should be a rest marker, not {tr}")
+    log = block_log(db_a)
+    if not log:
+        fails.append("no log for a re-base-less (assertive) plan — the 2026-07-04 bug")
+    else:
+        w = log["weeks"][0]
+        by = {s["date"]: s for s in w["sessions"]}
+        if w.get("pk") != "base":
+            fails.append(f"week not pk-tagged to its phase: {w.get('pk')}")
+        if not (by.get("2026-06-09", {}).get("done")
+                and (by["2026-06-09"].get("actual") or {}).get("km") == 6.2):
+            fails.append(f"base-week actuals missing: {by.get('2026-06-09')}")
+        if not by.get("2026-06-10", {}).get("unplanned"):
+            fails.append("unplanned run not surfaced on a base week")
+        if not by.get("2026-06-11", {}).get("missed"):
+            fails.append("missed session not flagged on a base week")
+    # (b) re-base + base together: both groups present, calendar order (re-base first)
+    rb_wk = {"wk": 1, "start": "2026-06-01", "km": 10, "runs": 2, "intent": "Re-base",
+             "sessions": [{"date": "2026-06-02", "km": 5, "kind": "easy"},
+                          {"date": "2026-06-07", "km": 5, "kind": "long"}]}
+    plan_b = {"rebase": {"weeks": [rb_wk]},
+              "phases": [{"key": "base", "kind": "base", "weeks": 1}],
+              "base": {"weeks": [base_wk]}}
+    log_b = block_log(mkdb(plan_b, [("2026-06-02", 5.0)]))
+    pks = [w.get("pk") for w in (log_b or {}).get("weeks", [])]
+    if pks != ["rebase", "base"]:
+        fails.append(f"pk groups wrong/misordered: {pks}")
+    if log_b and log_b["start"] != "2026-06-01":
+        fails.append(f"window start should be the earliest block: {log_b['start']}")
+    return _st("det", "log-phases",
+               "whole-road readers on a re-base-less (assertive) plan: block_log covers every phase "
+               "block (pk-tagged) with actuals/unplanned/missed intact; todays_session still finds "
+               "the day's prescription (no 'No active plan' phantom); re-base + base coexist in order",
+               passed=not fails, expect="log + today's session exist w/o rebase; pk=base; overlay intact; order rebase→base",
+               got={"failures": fails or "none"})
 
 
 def _stc_rebase_anchor():
@@ -12543,8 +12801,11 @@ def _stc_regime_plan():
         a = w.get("proj_acwr") or 0
         c = w.get("proj_ctl")
         return a * min(1.0, c / ACWR_SOFT_CTL_FLOOR) if c else a
+    # tolerance 0.005: feow here is RECONSTRUCTED from rounded surfaces (proj_acwr 3dp · proj_ctl 1dp,
+    # worst-case ±0.004 — same artifact the eased-cap check below absorbs at 0.01); the engine governs
+    # on the unrounded value. A real breach is 0.02+; sub-0.005 is arithmetic fog, not load.
     overs = [round(feow(w), 3) for w in all_weeks(p)
-             if w.get("proj_acwr") and feow(w) > ACWR_SOFT + 1e-6]
+             if w.get("proj_acwr") and feow(w) > ACWR_SOFT + 0.005]
     if overs:
         fails.append(f"ACWR ceiling breached (floored): {overs[:4]}")
     # §PRO6 — the tissue limiter holds ACROSS phase boundaries on the BASE/BUILD grind (NOT just one
@@ -12809,6 +13070,108 @@ def _stc_polarization_floor():
                output={"low": {"eroded": low_eroded or "none", "over_cap": low_over or "none",
                                "quality_suppressed": not low_interval},
                        "fit": {"eroded": fit_eroded or "none", "interval_present": fit_interval}})
+
+
+def _stc_components():
+    """§T2 — Davis Tier-2 component tagging + periodization [[davis-scientific-guide]]. Locks:
+    (a) CAUTION BYTE-IDENTITY — davis=False (and the no-arg default) keeps the legacy quality
+    literals: Base cruise tempo @ BASE_TEMPO_FRAC, Build flat interval .12 / MP .07, Peak flat
+    .06/.10 — the component tag is the ONLY addition. (b) DAVIS SHAPES (the assertive mix) —
+    Base wk≥BASE_TEMPO_FROM_WEEK non-down carries the short VO₂ touch (interval zone,
+    DAVIS_BASE_VO2_FRAC); Build/Peak intervals keep the FULL session size (DAVIS_INT_FRAC — the
+    maintenance ROLE, calibrated: shrinking the session made weeks peakier and cost safe load) and
+    the MP finish GROWS monotonically START→END across non-down weeks (constant-speed extension);
+    down weeks stay quality-free. SAFETY on every davis week: total work frac ≤ .25 sanity bound
+    (polarized floor is MP-exempt) and the threshold+interval slice ≤ PHASE_HARD_CAP.
+    (c) SESSIONS + SURFACE — a generated davis Build block tags interval→vo2max,
+    long_mp→resilience, the down-week plain long→economy; _phase_builds derives the distinct
+    list; the polarized invariant holds on the generated davis weeks. Constructed fixture."""
+    from datetime import date
+    fails = []
+    # (a) caution byte-identity — the davis=False code path == the no-arg default, and the legacy literals
+    if base_shape(6, 19) != base_shape(6, 19, davis=False) or \
+       build_shape(7, 24) != build_shape(7, 24, davis=False) or \
+       peak_shape(3, 26) != peak_shape(3, 26, davis=False):
+        fails.append("davis=False must equal the no-arg default (byte-identity)")
+    for w in base_shape(6, 19):
+        q = w["quality"]
+        if _is_down(w["intent"]) or w["wk"] < BASE_TEMPO_FROM_WEEK:
+            if q:
+                fails.append(f"caution base wk{w['wk']} unexpectedly has quality")
+        elif not (len(q) == 1 and q[0]["kind"] == "tempo" and q[0]["zone"] == BASE_TEMPO_ZONE
+                  and q[0]["frac"] == BASE_TEMPO_FRAC and q[0].get("component") == "ssmax"):
+            fails.append(f"caution base wk{w['wk']} quality drifted: {q}")
+    for w in build_shape(7, 24):
+        q = w["quality"]
+        if not _is_down(w["intent"]) and \
+           [(s["kind"], s["frac"]) for s in q] != [("interval", BUILD_INTERVAL_FRAC),
+                                                   ("long_mp", BUILD_MP_FRAC)]:
+            fails.append(f"caution build wk{w['wk']} quality drifted: {q}")
+    # (b) the davis shapes
+    for w in base_shape(6, 19, davis=True):
+        q = w["quality"]
+        if _is_down(w["intent"]) or w["wk"] < BASE_TEMPO_FROM_WEEK:
+            if q:
+                fails.append(f"davis base wk{w['wk']} should carry no quality")
+        elif not (len(q) == 1 and q[0]["kind"] == "interval" and q[0]["frac"] == DAVIS_BASE_VO2_FRAC
+                  and q[0].get("component") == "vo2max"):
+            fails.append(f"davis base wk{w['wk']} should be the VO₂ touch: {q}")
+    db_shape = build_shape(7, 24, davis=True)
+    mp_fracs = [q["frac"] for w in db_shape if not _is_down(w["intent"])
+                for q in w["quality"] if q["kind"] == "long_mp"]
+    int_fracs = [q["frac"] for w in db_shape if not _is_down(w["intent"])
+                 for q in w["quality"] if q["kind"] == "interval"]
+    if not (mp_fracs and mp_fracs[0] == DAVIS_BUILD_MP_START and mp_fracs[-1] == DAVIS_BUILD_MP_END
+            and all(a <= b for a, b in zip(mp_fracs, mp_fracs[1:]))):
+        fails.append(f"davis build MP must grow {DAVIS_BUILD_MP_START}→{DAVIS_BUILD_MP_END}: {mp_fracs}")
+    if any(f != DAVIS_INT_FRAC for f in int_fracs):
+        fails.append(f"davis build intervals must keep the full session size: {int_fracs}")
+    if any(w["quality"] for w in db_shape if _is_down(w["intent"])):
+        fails.append("davis build down weeks must stay quality-free")
+    dp_shape = peak_shape(3, 26, davis=True)
+    pk_fracs = [q["frac"] for w in dp_shape for q in w["quality"] if q["kind"] == "long_mp"]
+    if not (pk_fracs[0] == DAVIS_PEAK_MP_START and pk_fracs[-1] == DAVIS_PEAK_MP_END
+            and all(a <= b for a, b in zip(pk_fracs, pk_fracs[1:]))):
+        fails.append(f"davis peak MP must grow {DAVIS_PEAK_MP_START}→{DAVIS_PEAK_MP_END}: {pk_fracs}")
+    for name, shp in (("base", base_shape(6, 19, davis=True)), ("build", db_shape), ("peak", dp_shape)):
+        for w in shp:
+            work = sum(q["frac"] for q in w["quality"])
+            hard = sum(q["frac"] for q in w["quality"] if q["zone"] in HARD_ZONES)
+            # the engine's polarized floor is MP-EXEMPT (hard = thr+int only; the MP slice is bounded
+            # by the load cap) — so the spec-level locks are the hard cap + a total-work sanity bound
+            if work > 0.25 + 1e-9:
+                fails.append(f"davis {name} wk{w['wk']} total work frac {work} > 0.25 sanity bound")
+            if hard > PHASE_HARD_CAP[name] + 1e-9:
+                fails.append(f"davis {name} wk{w['wk']} hard frac {hard} > cap {PHASE_HARD_CAP[name]}")
+    # (c) generated sessions carry the tags; the surface derives from them; polarized holds
+    easy = 425
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    weeks, _ = generate_block(build_shape(5, 24, davis=True), date(2026, 8, 1), 45.0, 42.0,
+                              easy, zones=zones)
+    tags = {s.get("kind"): s.get("component") for w in weeks for s in w["sessions"]
+            if s.get("component")}
+    if tags.get("interval") != "vo2max" or tags.get("long_mp") != "resilience" \
+       or tags.get("long") != "economy":
+        fails.append(f"generated session tags wrong: {tags}")
+    builds = _phase_builds(weeks)
+    if not {"vo2max", "resilience", "economy"} <= set(builds):
+        fails.append(f"_phase_builds missed components: {builds}")
+    for w in weeks:
+        total = w["trimp_total"] or 0.0
+        hard = sum(r["trimp"] for s in w["sessions"] for r in (s.get("reps") or [])
+                   if r["effort"] == "work" and r["zone"] in HARD_ZONES)
+        if total and (1 - hard / total) < POLARIZED_EASY_MIN - 0.005:
+            fails.append(f"davis generated wk{w['wk']} eroded the easy floor")
+        if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
+            fails.append(f"davis generated wk{w['wk']} breached the governor")
+    return _st("det", "components",
+               "§T2 component model: caution shapes byte-identical (tags only); davis mix = VO₂ "
+               "early/maintain late + growing constant-speed MP; work/hard caps held; session tags "
+               "+ _phase_builds derived, polarized + governor invariants intact",
+               passed=not fails,
+               expect="caution literals locked; davis VO₂ .10 base / .06 maint; MP .07→.10, .10→.13; caps held; tags derived",
+               got={"build_mp_fracs": mp_fracs, "peak_mp_fracs": pk_fracs,
+                    "builds": builds, "failures": fails or "none"})
 
 
 def _stc_taper():
@@ -13881,7 +14244,7 @@ def _stc_regime_compare():
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_day_spacing(),
-                 lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(),
+                 lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
@@ -13908,7 +14271,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_polarized(),
-                 lambda: _stc_polarization_floor(), lambda: _stc_ctl_floor_removed(),
+                 lambda: _stc_polarization_floor(), lambda: _stc_components(),
+                 lambda: _stc_ctl_floor_removed(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),
                  lambda: _stc_long_run(),
                  lambda: _stc_earned_lift(), lambda: _stc_earned_gate(db),

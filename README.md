@@ -210,11 +210,27 @@ byte-identical with them dormant.
 - **Tissue limiter** — forces a recovery week after too many consecutive near-ceiling weeks.
 - **Chronic-growth cap** — bounds how fast chronic load itself may climb, week over week.
 
+### What each session is *for* (the four fitness components)
+Marathon fitness decomposes into four components: **VO₂max** × **running economy** × **SSmax/LT2** (the
+classic three-factor model) plus **physiological resilience** — how little the first three decay over
+42 km, the marathon's modern fourth component. Every quality session in the plan carries a chip naming
+the component it chiefly builds, and each phase header sums what that phase is *for* — derived from the
+sessions themselves, so the label can never drift from the prescription.
+
+On the assertive regime the plan also *periodizes by component*: VO₂max is developed **early** (a short
+interval touch already in the base phase, sized to fit the biomechanical budget of a volume rebuild) and
+then held in a maintenance *role* — the session never grows, but it keeps its size, because verification
+showed a smaller mid-week session concentrates the week and lowers its total safe load. Marathon-pace
+work **grows** through the build (SSmax plus near-race-pace economy), and the peak pivots to
+**resilience** — the long run's marathon-pace segment extends week over week at *constant speed*: longer,
+not faster. The conservative regime keeps its gentler classic mix unchanged; only the tags show there.
+
 > **Scientific basis.** The safety model is *informed by* John Davis (*Marathon Excellence for Everyone*;
 > runningwritings.com) and builds on primary work by Gabbett (ACWR), Nielsen et al. (the Aarhus load-change
-> injury cohort), Friel (%LTHR zones) and Daniels (VDOT pacing). The specific thresholds — the `eq_km`
-> damage weighting, the ≈80 %-of-5k LT1, the +10 % long-run cap — are our own operationalization, tuned to
-> the athlete's data, not prescriptions issued by any of these authors.
+> injury cohort), Friel (%LTHR zones), Daniels (VDOT pacing) and Jones (physiological resilience). The
+> specific thresholds — the `eq_km` damage weighting, the ≈80 %-of-5k LT1, the +10 % long-run cap, and the
+> maintenance/progression fractions of the component periodization — are our own operationalization, tuned
+> to the athlete's data, not prescriptions issued by any of these authors.
 
 ### Honest about the *goal*, not just the week
 For a marathon the engine projects a **finish time** from the fitness you're on track to carry *into* the
