@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, jsonify, redirect, request
 from requests.adapters import HTTPAdapter, Retry
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -2903,13 +2903,16 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         mins = round(tr / EASY_TRIMP_PER_MIN)
         km = round(mins * 60 / easy_pace_sec, 1)
         note = "long easy run" if is_long else "easy run"
-        if wk["strides"] and not is_long and i == first_easy:
+        carries_strides = bool(wk["strides"]) and not is_long and i == first_easy
+        if carries_strides:
             note += f" + {wk['strides']}×4–6 strides"
         if is_long and long_step_capped:                # §PRO9
             note += " — held to the +10% long-run progression cap (trailing-4wk)"
         sess = {"date": date, "kind": "long" if is_long else "easy",
                 "km": km, "minutes": mins, "trimp": tr,
                 "pace_zone": f"{fmt_pace(easy_pace_sec)}/km easy", "note": note}
+        if carries_strides:   # structured, so the UI can pin the strides to THIS run's line
+            sess["strides"] = wk["strides"]
         if is_long and zones:                           # §T2 — the building-phase long run builds economy
             sess["component"] = COMPONENT_BY_KIND["long"]   # (mileage is the economy lever; re-base untagged)
         if is_long and long_step_capped:
@@ -5180,7 +5183,8 @@ def todays_session(db, today):
         for s in wk.get("sessions", []):
             if s.get("date") == today:
                 actual = runs_on_date(db, today)
-                return {**s, "week": wk["wk"], "easy_pace": plan["pace_zones"].get("easy_top"),
+                return {**s, "week": wk["wk"], "pk": wk.get("pk"),
+                        "easy_pace": plan["pace_zones"].get("easy_top"),
                         "done": bool(actual), "actual": actual}
     # inside the plan window but nothing scheduled → rest day
     last_end = max((s["date"] for w in weeks for s in w.get("sessions", [])), default="")
@@ -5485,7 +5489,7 @@ def _private_only_path(p):
     sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
     so the score is public while the HR-led critique stays private."""
     return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
-                  "/api/secrets/validate")
+                  "/api/secrets/validate", "/api/runs")   # §RB — calendar carries HR-zone grades
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -6131,7 +6135,9 @@ def api_plandrift():
             cf_eff = [actual_eff[-1]] + cf_eff
         cf_ft = (cf_plan.get("feasibility") or {}).get("finish_time") or {}
         counterfactual = {
-            "regime": other, "vs": regime_now, "envelope": True,
+            # envelope: only the assertive counterfactual is an UPPER envelope ("what earning it
+            # unlocks"); from an assertive plan the caution road is a FLOOR, not an envelope.
+            "regime": other, "vs": regime_now, "envelope": other == "assertive",
             "reason": None if READONLY else (current.get("regime") or {}).get("reason"),   # public-redacted
             "distance": cf_dist, "ctl": cf_ctl, "effort": cf_eff,
             "outcome": {"peak_ctl": cf_ft.get("at_ctl"), "finish": cf_ft.get("hms"),
@@ -6347,6 +6353,11 @@ def api_readiness():
             assess["done"] = True
         data = {"date": data.get("date"), "assessment": assess,
                 "session": data.get("session")}
+    else:
+        # §W1 — current pace/HR zones ride along so the workout instruction card can't render
+        # from stale numbers (same det-locked grid as the effort monitor + zones card). Private
+        # only: the public projection above never carries HR (H7).
+        data["zones"] = training_zones(get_db())
     return jsonify(data)
 
 
@@ -6536,6 +6547,73 @@ def _strip_geo(prof):
     """Route geo (the lat/long `path`) must only ever leave via the private /map endpoint — never the
     shared, public-served /profile. Returns the profile without the path."""
     return {k: v for k, v in prof.items() if k != "path"}
+
+
+def _zone_idx(hr, cutoffs):
+    """Zone index (0–4) of an average HR against the unified hr_zones cutoffs — colours the run
+    browser's calendar dots with the SAME grid the chart band/effort monitor read. None without an
+    HR value or a usable model (the dot degrades to neutral, never guesses)."""
+    if not hr or not cutoffs:
+        return None
+    return sum(1 for c in cutoffs if hr >= c)
+
+
+def _runs_month(db, month):
+    """§RB — one calendar month of activity for the /runs explorer: every non-dropped run grouped
+    per day (time-ordered, so a double shows both), each with the id the profile/map pipeline needs
+    plus a dot colour (dominant-intensity proxy = zone of avg HR; None degrades to neutral). Days
+    with only non-run activity are listed separately (faint tick, not clickable — the tile is
+    run-centric). `first`/`last` bound the month navigation to where data actually exists."""
+    drop = dropped_ids(db)
+    cut = (hr_zones(db) or {}).get("cutoffs")
+    days, other = {}, set()
+    dist = sec = trimp = longest = 0.0
+    hr_wsum = hr_wsec = 0.0            # duration-weighted avg HR (a long easy hour outweighs a short blast)
+    for r in db.execute(
+        "SELECT id, date, date_time, sport, distance, duration, hr_avg, trimp FROM activities "
+        "WHERE date LIKE ? ORDER BY date_time", (month + "-%",)
+    ).fetchall():
+        if r["id"] in drop:
+            continue
+        if not (_is_run_family(r["sport"]) and (r["distance"] or 0) > 0):
+            other.add(r["date"])
+            continue
+        pace = (r["duration"] / (r["distance"] * 60)) if (r["duration"] and r["distance"]) else None
+        days.setdefault(r["date"], []).append({
+            "id": r["id"], "t": (r["date_time"] or "")[11:16], "km": round(r["distance"], 1),
+            "pace": f"{int(pace)}:{int((pace * 60) % 60):02d}" if pace else None,
+            "z": _zone_idx(r["hr_avg"], cut)})
+        dist += r["distance"]
+        sec += r["duration"] or 0.0
+        trimp += r["trimp"] or 0.0
+        longest = max(longest, r["distance"])
+        if r["hr_avg"] and r["duration"]:
+            hr_wsum += r["hr_avg"] * r["duration"]; hr_wsec += r["duration"]
+    n = sum(len(v) for v in days.values())
+    mpace = sec / (dist * 60) if (sec and dist) else None
+    stats = {"runs": n, "km": round(dist, 1),
+             "hms": f"{int(sec // 3600)}h {int((sec % 3600) // 60):02d}m" if sec else None,
+             "pace": f"{int(mpace)}:{int((mpace * 60) % 60):02d}" if mpace else None,
+             "hr_avg": round(hr_wsum / hr_wsec) if hr_wsec else None,
+             "trimp": round(trimp) if trimp else None,
+             "longest_km": round(longest, 1) if longest else None} if n else {"runs": 0}
+    b = db.execute("SELECT MIN(date) AS lo, MAX(date) AS hi FROM activities WHERE "
+                   + RUN_FAMILY_SQL).fetchone()
+    return {"ok": True, "month": month, "days": days, "stats": stats,
+            "other": sorted(other - set(days)),
+            "first": (b["lo"] or "")[:7] or None, "last": (b["hi"] or "")[:7] or None}
+
+
+@app.get("/api/runs")
+def api_runs():
+    """§RB — the run browser's calendar month. Carries HR-zone classification and feeds the
+    route-map viewer ⇒ private-only (H7), same guard as /api/zones."""
+    if READONLY:
+        return jsonify(ok=False, error="not available on the public view"), 403
+    month = request.args.get("month") or datetime.now().strftime("%Y-%m")
+    if not re.fullmatch(r"\d{4}-\d{2}", month):
+        return jsonify(ok=False, error="month must be YYYY-MM"), 400
+    return jsonify(_runs_month(get_db(), month))
 
 
 @app.get("/api/activity/<int:aid>/profile")
@@ -6864,8 +6942,7 @@ def api_secrets_validate():
     return jsonify(ok=True, results=results)
 
 
-@app.get("/")
-def index():
+def _render_app(page="dash"):
     # inject the mode flag + private-console URL synchronously so the UI gates with no round-trip
     # HOUSE_URL/NAME can now be set via the Settings panel (validated) OR raw env (unvalidated), and
     # are injected into header HTML — so escape at the render site regardless of source (defence in
@@ -6873,13 +6950,17 @@ def index():
     hublink = (f'<a class="hublink" href="{html.escape(HOUSE_URL, quote=True)}">'
                f'← {html.escape(HOUSE_NAME or HOUSE_URL)}</a>'
                if HOUSE_URL else "")
-    page = html_page(INDEX_HTML
+    doc = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
             # json.dumps escapes quotes/backslashes but NOT "/", so neutralise "</" → a value with
             # "</script>" (e.g. a raw env SH_PRIVATE_URL that bypassed validate_setting) can't close
             # the inline <script> and inject markup into the (public) page.
             .replace("__SH_PRIVATE_URL__", json.dumps(PRIVATE_URL).replace("</", "<\\/"))
             .replace("__RUNALYZE_LOGO__", RUNALYZE_LOGO_SVG)
+            # §RB — one document, two pages: <body data-page> selects the dashboard (status) or the
+            # /runs explorer (look-up); CSS shows each page's sections, JS gates its loaders. Keeps
+            # the single-file SPA while the explorer surfaces get their own URL.
+            .replace("__SH_PAGE__", page)
             # The public read-only box removes the health section, so its Body tab would open empty —
             # drop the Body nav button there (private keeps all four). The mobile grid auto-sizes to the
             # button count, and the nav wiring derives its tab list from the buttons actually present.
@@ -6887,11 +6968,32 @@ def index():
                      '<button class="mnav-btn" type="button" data-goto="body" aria-current="false" '
                      'aria-label="Body"><svg viewBox="0 0 24 24" aria-hidden="true">'
                      '<path d="M12 3s6 6.4 6 11a6 6 0 0 1-12 0c0-4.6 6-11 6-11z"/></svg><span>Body</span></button>')
+            # §RB — the Runs explorer is PRIVATE-ONLY (route geo + HR), so the public shell gets no
+            # Runs tab at all (same reasoning as the Body drop above: never a dead/empty destination).
+            .replace("__MOBNAV_RUNS__", "" if READONLY else
+                     '<a class="mnav-btn" id="mnavruns" href="/runs" aria-current="false" '
+                     'aria-label="Runs"><svg viewBox="0 0 24 24" aria-hidden="true">'
+                     '<circle cx="5.5" cy="18.5" r="2.3"/><circle cx="18.5" cy="5.5" r="2.3"/>'
+                     '<path d="M7.5 17C14 15.5 10.5 8 16.5 6.5"/></svg><span>Runs</span></a>')
             .replace("__SH_HUBLINK__", hublink))
     # The whole SPA — markup + inline JS — is this one document. Tell the browser to revalidate it
     # every load so a deploy takes effect on an ordinary reload (no hard-refresh needed): browsers
     # otherwise heuristically cache an un-headered HTML doc and serve stale JS after a release.
-    return (page, 200, {"Cache-Control": "no-cache"})
+    return (doc, 200, {"Cache-Control": "no-cache"})
+
+
+@app.get("/")
+def index():
+    return _render_app("dash")
+
+
+@app.get("/runs")
+def runs_page():
+    """§RB — the run-browser explorer page. PRIVATE-ONLY: it exists to browse route maps + HR-graded
+    history (the H7 surface), so the public container redirects home rather than serving a husk."""
+    if READONLY:
+        return redirect("/")
+    return _render_app("runs")
 
 
 # ── The SPA (house terracotta theme + daylight light mode) ───────────────────
@@ -6986,6 +7088,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   button.primary{background:var(--accent);border-color:var(--accent);color:var(--onacc)}
   button.ghost{background:transparent;color:var(--muted);font-size:12px;padding:8px 12px}
   button.ghost:hover{color:var(--text)}
+  /* §RB — the header Runs/Dashboard link is an <a> wearing the ghost-button clothes */
+  a.ghost{font-family:var(--sans);font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;
+    background:transparent;border:1px solid var(--line);border-radius:9px;padding:8px 12px;
+    text-decoration:none;display:inline-block;transition:border-color .15s}
+  a.ghost:hover{color:var(--text);border-color:var(--accent)}
+  a.mnav-btn{text-decoration:none}
   button.danger{background:var(--danger);border-color:var(--danger);color:var(--onacc)}
   button.danger:hover{border-color:var(--danger);filter:brightness(1.08)}
   /* Consequence-explaining confirm dialog (destructive actions) — reuses dialog.modal chrome */
@@ -7346,6 +7454,76 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .sline.sclick:hover{background:color-mix(in oklab,var(--accent),transparent 88%);color:var(--text)}
   .sline.sclick::after{content:"🗺";font-size:9px;opacity:0;margin-left:2px;transition:opacity .12s}
   .sline.sclick:hover::after{opacity:.7}
+  /* §W1 — structured-workout instruction card (Today tile: always open; week rows: click the
+     session label to expand). Rides inside the flex .sline, wrapping onto its own full row. */
+  .strid{color:var(--accent);border-bottom:1px dotted var(--muted);cursor:help}
+  .wsi.wsx{cursor:pointer;border-bottom:1px dotted var(--muted)}
+  .wsi.wsx:hover,.wsi.wsx:focus{color:var(--text);outline:none}
+  .wsxc{display:inline-block;font-size:8px;opacity:.7;transition:transform .12s}
+  .wsi.wsx.open .wsxc{transform:rotate(90deg)}
+  .wcard{display:none;flex-basis:100%;margin:3px 0 5px 1.6em;padding:7px 9px;overflow-x:auto;
+    border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:10.5px;
+    color:var(--muted);background:color-mix(in oklab,var(--accent),transparent 96%)}
+  @media (max-width:760px){ .wcard{margin-left:0} }   /* phones: the week-row gutter is dead weight — the cue line carries the how-to; the table swipes */
+  .wcard.open{display:block}
+  .planned .wcard{margin-left:0;background:color-mix(in oklab,var(--card),transparent 20%)}
+  .wcue{color:var(--text);font-weight:600;margin-bottom:5px;line-height:1.5}
+  .wctbl-wrap{overflow-x:auto}
+  .wctbl{border-collapse:collapse;width:100%;white-space:nowrap}
+  .wctbl th{text-align:left;font-weight:600;color:var(--muted);padding:0 12px 3px 0;
+    font-size:9px;text-transform:uppercase;letter-spacing:.05em}
+  .wctbl td{padding:2px 12px 2px 0}
+  .wctbl td:first-child{color:var(--text)}
+  .wctot{margin-top:5px;border-top:1px solid var(--line);padding-top:4px}
+  /* §RB — the /runs explorer page: one document, two pages. The dashboard hides the run-browser
+     section; the runs page keeps ONLY the calendar + the activity tile (the shared viewer). */
+  #sec-runs{display:none}
+  body[data-page="runs"] #sec-runs{display:block}
+  body[data-page="runs"] .section:not(#sec-runs):not(#sec-recent),
+  body[data-page="runs"] #objbar, body[data-page="runs"] #firstrun, body[data-page="runs"] #dqbanner,
+  body[data-page="runs"] #syncBtn, body[data-page="runs"] #settingsBtn, body[data-page="runs"] #backfillBtn{display:none!important}
+  /* on phones the runs page is its own tab-less scroll — every section visible regardless of data-mtab */
+  body[data-page="runs"] #sec-recent{display:block!important}
+  .rcal-wrap{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
+  .rcal{flex:1 1 460px;max-width:560px}
+  .rcal-stats{flex:1 1 210px;min-width:210px;border-left:1px solid var(--line);padding-left:26px}
+  @media (max-width:820px){ .rcal-stats{border-left:0;padding-left:0} }
+  .rst-title{font-family:var(--serif);font-size:15px;font-weight:600;margin-bottom:8px}
+  .rst{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:5px 0;
+    border-bottom:1px solid color-mix(in oklab,var(--line),transparent 45%);font-size:12px;color:var(--muted)}
+  .rst:last-child{border-bottom:0}
+  .rst b{font-size:15px;color:var(--text);font-weight:600;white-space:nowrap}
+  .rst b small{font-size:10px;color:var(--muted);font-weight:400}
+  .rcal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .rcal-head b{font-family:var(--serif);font-size:16px;font-weight:600}
+  .rcal-nav{font:inherit;font-size:15px;line-height:1;padding:3px 11px;background:none;color:var(--muted);
+    border:1px solid var(--line);border-radius:8px;cursor:pointer}
+  .rcal-nav:hover:not(:disabled){color:var(--text);border-color:var(--muted)}
+  .rcal-nav:disabled{opacity:.35;cursor:default}
+  .rcal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+  .rcal-dow{font-family:var(--mono);font-size:9px;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.05em;text-align:center;padding-bottom:1px}
+  .rcal-day{position:relative;min-height:40px;border:1px solid var(--line);border-radius:7px;
+    padding:3px 0 0 6px;font-family:var(--mono);font-size:10.5px;color:var(--muted);background:var(--surface)}
+  .rcal-day.blank{border:0;background:none}
+  .rcal-day.today{border-color:var(--accent)}
+  .rcal-day.has{cursor:pointer}
+  .rcal-day.has:hover{border-color:var(--muted);color:var(--text)}
+  .rcal-day.sel{background:color-mix(in oklab,var(--accent),transparent 90%);border-color:var(--accent);color:var(--text)}
+  .rcal-dots{position:absolute;left:6px;bottom:3px;display:flex;gap:3px;align-items:center}
+  .rcal-dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+  .rcal-tick{width:5px;height:5px;border-radius:2px;background:var(--line)}
+  .rcal-more{font-size:9px;color:var(--muted)}
+  .rcal-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-family:var(--mono);
+    font-size:10px;color:var(--muted);align-items:center}
+  .rcal-legend .rcal-dot,.rcal-legend .rcal-tick{margin-right:4px;vertical-align:middle;display:inline-block}
+  .rcal-pop{position:absolute;z-index:40;top:100%;left:0;margin-top:4px;background:var(--surface);
+    border:1px solid var(--line);border-radius:10px;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);
+    display:flex;flex-direction:column;gap:5px;min-width:180px}
+  .rcal-day:nth-child(7n) .rcal-pop,.rcal-day:nth-child(7n-1) .rcal-pop{left:auto;right:0}
+  .rcal-chip{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;
+    color:var(--text);padding:5px 9px;border:1px solid var(--line);border-radius:999px;cursor:pointer;background:none}
+  .rcal-chip:hover{border-color:var(--accent)}
   .backlatest{font-family:var(--sans);text-transform:none;letter-spacing:0;font-size:11px;
     margin-left:4px;color:var(--accent)}
   .smk{width:1em;display:inline-block;text-align:center;color:var(--line)}
@@ -7765,7 +7943,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .fftip .t-atl{ color: var(--accent3); }
   /* ====================================================================== */
 </style></head>
-<body data-mtab="today">
+<body data-mtab="today" data-page="__SH_PAGE__">
   <div class="topbar">
     __SH_HUBLINK__
     <div class="topctl">
@@ -7787,6 +7965,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
         </div>
       </div>
       <div class="bar">
+        <a class="ghost" id="runsLink" href="/runs" title="Run browser — a calendar of your whole training history; open any past run on the activity tile">🗓 Runs</a>
         <button class="primary" id="syncBtn">Sync now</button>
         <button class="primary" id="settingsBtn" title="Personalization — athlete context, weather cities, links, sync timezone">⚙ Settings</button>
         <button class="ghost" id="backfillBtn" title="One-time full-history pull — walks every page back to your first activity. Use on a fresh machine or if old history is missing.">Backfill all</button>
@@ -7811,7 +7990,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       </div>
     </div>
 
-    <div class="section" data-mtab="today">
+    <div class="section" id="sec-runs">
+      <h2>Run browser <span class="muted mono" style="font-size:12px">— pick a day, the run opens below</span></h2>
+      <div class="panel" id="runscal"><div class="empty">Loading calendar…</div></div>
+    </div>
+
+    <div class="section" id="sec-recent" data-mtab="today">
       <div class="panel" id="recent"><div class="empty">Loading latest activity…</div></div>
     </div>
 
@@ -7910,11 +8094,13 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     <button class="mnav-btn" type="button" data-goto="fitness" aria-current="false" aria-label="Fitness">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg><span>Fitness</span></button>
     __MOBNAV_BODY__
+    __MOBNAV_RUNS__
   </nav>
 
 <script>
 const SH_READONLY = __SH_READONLY__;   // public read-only mode (server-injected)
 const SH_PRIVATE_URL = __SH_PRIVATE_URL__;   // public→private console link (optional, JSON-injected)
+const SH_PAGE = document.body.dataset.page || "dash";   // §RB — "dash" (status) or "runs" (explorer)
 const $ = s => document.querySelector(s);
 const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
 // Per-workout calendar date, e.g. "Jun 23 - Tue" — so the runner can schedule life around the plan.
@@ -8416,6 +8602,94 @@ async function loadActivity(aid){
   if(bl) bl.addEventListener("click", ev=>{ ev.preventDefault(); loadActivity(); });
   if(!SH_READONLY && a.id) showActivityMap(a.id);
 }
+// ── §RB Run browser (the /runs page, private only) ──────────────────────────
+// A month calendar where each day with runs carries dots coloured by the run's avg-HR zone (the
+// SAME unified grid as the chart band/zones card — the calendar doubles as an intensity map of the
+// month). Click a day: one run loads straight into the activity tile below (the existing
+// loadActivity pipeline — profile, hover traces, route map); a multi-run day opens a chip popover.
+let RCAL={month:null, sel:null};
+function rcalDot(z){ return `<span class="rcal-dot" style="${z!=null?`background:${HRZONE_COLORS[z]}`:""}"></span>`; }
+function rcalPick(id, date, cell){
+  RCAL.sel=date;
+  document.querySelectorAll(".rcal-day.sel").forEach(c=>c.classList.remove("sel"));
+  if(cell) cell.classList.add("sel");
+  loadActivity(id);
+  const t=$("#sec-recent"); if(t) t.scrollIntoView({behavior:"smooth", block:"start"});
+}
+function rcalCloseAllPops(){ document.querySelectorAll(".rcal-pop").forEach(p=>p.remove()); }
+async function loadRunsCal(month){
+  const host=$("#runscal"); if(!host) return;
+  let d; try{ d=await getJSON("/api/runs"+(month?`?month=${encodeURIComponent(month)}`:"")); }
+  catch(e){ host.innerHTML=`<div class="empty">Calendar unavailable.</div>`; return; }
+  if(!d || !d.ok){ host.innerHTML=`<div class="empty">${esc((d&&d.error)||"Calendar unavailable.")}</div>`; return; }
+  RCAL.month=d.month;
+  const [y,m]=d.month.split("-").map(Number);
+  const firstDow=(new Date(y,m-1,1).getDay()+6)%7;              // Monday-first grid
+  const dim=new Date(y,m,0).getDate();
+  const now=new Date(), pad=n=>String(n).padStart(2,"0");
+  const todayIso=`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  const other=new Set(d.other||[]);
+  const title=new Date(y,m-1,1).toLocaleDateString(undefined,{month:"long",year:"numeric"});
+  const mAdd=k=>{ const t=new Date(y,m-1+k,1); return `${t.getFullYear()}-${pad(t.getMonth()+1)}`; };
+  const dows=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map(w=>`<div class="rcal-dow">${w}</div>`).join("");
+  let cells="";
+  for(let i=0;i<firstDow;i++) cells+=`<div class="rcal-day blank"></div>`;
+  for(let day=1;day<=dim;day++){
+    const date=`${d.month}-${pad(day)}`, runs=d.days[date]||[];
+    const dots=runs.slice(0,3).map(r=>rcalDot(r.z)).join("")+(runs.length>3?`<span class="rcal-more">+${runs.length-3}</span>`:"")
+      +(!runs.length&&other.has(date)?`<span class="rcal-tick" title="Activity, but not a run (counts toward load; the viewer below is run-centric)"></span>`:"");
+    const cls=["rcal-day", runs.length?"has":"", date===todayIso?"today":"", date===RCAL.sel?"sel":""].filter(Boolean).join(" ");
+    const tip=runs.length?` title="${runs.length===1?`${runs[0].km} km${runs[0].pace?` @ ${runs[0].pace}/km`:""} — view this run`:`${runs.length} runs — pick one`}"`:"";
+    cells+=`<div class="${cls}" data-date="${date}"${tip}>${day}<div class="rcal-dots">${dots}</div></div>`;
+  }
+  const zl=["Z1","Z2","Z3","Z4","Z5"].map((z,i)=>`<span><span class="rcal-dot" style="background:${HRZONE_COLORS[i]}"></span>${z}</span>`).join("");
+  // month roll-up rail (server-computed over the same non-dropped run set the calendar shows)
+  const st=d.stats||{};
+  const srow=(k,v,u,tip)=>v==null?"":`<div class="rst"${tip?` title="${tip}"`:""}><span>${k}</span><b>${v}${u?`<small> ${u}</small>`:""}</b></div>`;
+  const statsHtml = st.runs
+    ? `<div class="rcal-stats"><div class="rst-title">Month totals</div>`+
+      srow("Runs", st.runs)+
+      srow("Distance", st.km, "km")+
+      srow("Time on feet", st.hms)+
+      srow("Avg pace", st.pace, "/km")+
+      srow("Avg heart rate", st.hr_avg, "bpm", "Duration-weighted across the month's runs — a long easy hour counts for more than a short blast")+
+      srow("Training load", st.trimp, "TRIMP")+
+      srow("Longest run", st.longest_km, "km")+
+      `</div>`
+    : `<div class="rcal-stats"><div class="rst-title">Month totals</div><div class="muted" style="font-size:12px">No runs this month.</div></div>`;
+  host.innerHTML=`<div class="rcal-wrap"><div class="rcal">
+      <div class="rcal-head">
+        <button class="rcal-nav" id="rcprev" ${d.first&&d.month<=d.first?"disabled":""} aria-label="Previous month">‹</button>
+        <b>${esc(title)}</b>
+        <button class="rcal-nav" id="rcnext" ${d.last&&d.month>=d.last?"disabled":""} aria-label="Next month">›</button>
+      </div>
+      <div class="rcal-grid">${dows}${cells}</div>
+      <div class="rcal-legend">${zl}<span><span class="rcal-dot"></span>no HR</span><span><span class="rcal-tick"></span>other sport</span>
+        <span style="margin-left:auto">dot colour = the run's average-HR zone${qhint("Each dot is one run, coloured by which heart-rate zone its average HR falls in — the same unified zone grid the activity chart band and the zones card use (Friel %LTHR when a trustworthy LTHR exists, %HRmax otherwise). A glanceable intensity map: a healthy polarized month is mostly Z1/Z2 dots with the odd Z4. Grey = no heart-rate data. Faint square = a non-run activity (its load still counts; this viewer is run-centric).")}</span></div>
+    </div>${statsHtml}</div>`;
+  $("#rcprev").addEventListener("click", ()=>loadRunsCal(mAdd(-1)));
+  $("#rcnext").addEventListener("click", ()=>loadRunsCal(mAdd(1)));
+  host.querySelectorAll(".rcal-day.has").forEach(cell=>{
+    cell.addEventListener("click", ev=>{
+      if(ev.target.closest(".rcal-pop")) return;               // clicks inside an open popover: the chips handle it
+      rcalCloseAllPops();
+      const runs=d.days[cell.dataset.date]||[];
+      if(runs.length===1){ rcalPick(runs[0].id, cell.dataset.date, cell); return; }
+      const pop=document.createElement("div");
+      pop.className="rcal-pop";
+      pop.innerHTML=runs.map(r=>`<button type="button" class="rcal-chip" data-id="${r.id}">${rcalDot(r.z)}${esc(r.t||"—")} · ${r.km} km${r.pace?` · ${esc(r.pace)}/km`:""}</button>`).join("");
+      pop.addEventListener("click", ev2=>{
+        const c=ev2.target.closest(".rcal-chip"); if(!c) return;
+        ev2.stopPropagation(); rcalCloseAllPops();
+        rcalPick(+c.dataset.id, cell.dataset.date, cell);
+      });
+      cell.appendChild(pop);
+      ev.stopPropagation();
+    });
+  });
+}
+document.addEventListener("click", e=>{ if(!e.target.closest(".rcal-day")) rcalCloseAllPops(); });
+
 // ── Workout route map (private only) ────────────────────────────────────────
 // Leaflet is loaded lazily from a CDN and ONLY on the private instance — the public read-only
 // container never fetches it, and its /map endpoint 403s, because the routes reveal where the owner
@@ -8475,34 +8749,44 @@ async function toggleIgnore(id, on){
 }
 
 // ── Readiness gate ──────────────────────────────────────────────────────────
+// Phase label for the tile kicker — the plan is no longer re-base-only (an assertive road has no
+// re-base at all), so the week tag names its actual phase (same caution-era family as the log fix).
+const PHASEN={rebase:"re-base", base:"Base", build:"Build", peak:"Peak", taper:"Taper"};
+const KINDT={easy:"Easy run", long:"Long run", long_mp:"Long run · MP finish",
+             interval:"Interval session", tempo:"Tempo run"};
 function plannedSession(s, easyPace){
   if(!s) return `<div class="planned muted" style="font-size:13px">No active plan — generate one below in Training plan.</div>`;
   if(s.kind==="pre"){
     const d=new Date(s.start+"T00:00:00");
     const fmt=d.toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"});
     return `<div class="planned"><div class="rkick">Training plan active</div>
-      <div class="mrow"><span class="ttl">Re-base starts ${fmt}</span><span class="muted" style="font-size:13px">Keep it easy until then — readiness check-ins still count.</span></div></div>`;
+      <div class="mrow"><span class="ttl">Training starts ${fmt}</span><span class="muted" style="font-size:13px">Keep it easy until then — readiness check-ins still count.</span></div></div>`;
   }
   if(s.kind==="post") return `<div class="planned"><div class="rkick">Today's session</div>
-    <div class="mrow"><span class="ttl">Re-base complete</span><span class="muted" style="font-size:13px">Regenerate to periodize the next phase.</span></div></div>`;
+    <div class="mrow"><span class="ttl">Road complete</span><span class="muted" style="font-size:13px">Regenerate to periodize the next phase.</span></div></div>`;
   if(s.kind==="rest") return `<div class="planned"><div class="rkick">Today's session</div>
     <div class="mrow"><span class="ttl">${s.optional?"Optional — week complete":"Rest day"}</span><span class="muted" style="font-size:13px">${esc(s.note)}</span></div></div>`;
   const act=s.actual||{};
-  const kick=`Today's session · re-base week ${s.week}`+
+  const q=s.reps&&s.reps.length;
+  const kick=`Today's session · ${PHASEN[s.pk]||"plan"} week ${s.week}`+
     (s.done?` · <span style="color:var(--ok);font-weight:600">done ✓</span>`:"");
   const actLine=s.done
     ? `<div style="font-size:12px;margin-top:6px;color:var(--ok)">✓ Ran ${act.km}k${act.pace?` @ ${act.pace}/km`:""} today — session complete.</div>`
     : "";
+  // a structured session carries its own per-segment paces in the card — the single easy pace
+  // metric would misprescribe the day, so it only renders for plain easy/long runs.
+  const noteParts=(s.note||"").split(" — ");
+  const noteTxt=(q&&noteParts.length>1)?noteParts.slice(0,-1).join(" — "):s.note;   // card replaces the cramped structure string
   return `<div class="planned"${s.done?' style="opacity:.85"':''}><div class="rkick">${kick}</div>
     <div class="mrow">
-      <span class="ttl" style="text-transform:capitalize">${s.kind} run</span>
+      <span class="ttl">${KINDT[s.kind]||esc(s.kind)+" run"}</span>
       ${metric("Distance", s.km, "km")}
       ${metric("Duration", `~${s.minutes}`, "min")}
-      ${metric("Pace", (s.easy_pace||easyPace||"").replace("/km",""), "/km easy")}
+      ${q?"":metric("Pace", (s.easy_pace||easyPace||"").replace("/km",""), "/km easy")}
       ${metric("Target load", s.trimp!=null?Math.round(s.trimp):"—", "TRIMP")}
     </div>
     ${actLine}
-    <div class="muted" style="font-size:12px;margin-top:6px">${esc(s.note)}</div></div>`;
+    <div class="muted" style="font-size:12px;margin-top:6px">${esc(noteTxt)}</div>${q?workoutCard(s,true):""}</div>`;
 }
 // the configured cities' forecast, folded into the readiness card footer (white on the gradient)
 function wxFootHtml(){
@@ -8528,6 +8812,7 @@ function statusCard(a, foot, wx){
 }
 function renderReadiness(d){
   RDY=d;                                   // cache so loadWeather can re-render with the forecast folded in
+  if(d.zones) ZONESD=d.zones;              // §W1 — current zones ride along (private), so the card never races the zones fetch
   const a=d.assessment||{};
   if(SH_READONLY || a.public){   // public view: verdict card + planned session only
     $("#readiness").innerHTML = statusCard(a, "", wxFootHtml()) + plannedSession(d.session);
@@ -8632,8 +8917,19 @@ document.addEventListener("click", e=>{
 document.addEventListener("keydown", e=>{
   if(e.key==="Escape"){ document.querySelectorAll(".qhint.open").forEach(n=>n.classList.remove("open")); return; }
   if((e.key==="Enter"||e.key===" ") && e.target.classList && e.target.classList.contains("qhint")){ e.preventDefault(); e.target.click(); }
+  if((e.key==="Enter"||e.key===" ") && e.target.classList && e.target.classList.contains("wsx")){ e.preventDefault(); e.target.click(); }
 });
-let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null;
+// §W1 — toggle a quality session's instruction card (delegated: week rows re-render). Cards ride
+// only NOT-done lines, which never carry the click-to-map affordance, so the two can't collide.
+document.addEventListener("click", e=>{
+  const t=e.target.closest(".wsx"); if(!t) return;
+  const sl=t.closest(".sline"), c=sl&&sl.querySelector(".wcard");
+  if(!c) return;
+  e.stopPropagation();
+  t.classList.toggle("open", c.classList.toggle("open"));
+});
+let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null,
+    ZONESD=null;   // §W1 — current training_zones payload (rides /api/readiness + /api/zones); null on public
 let TOKEN_OK=false, HAS_SHAPE=false;   // first-run signals (from /healthz + /api/shape)
 const _frSeen={tok:false, shape:false, obj:false};   // gate the card until all 3 report once
 // First-run guided setup: walks a brand-new instance from nothing to a first plan. Three
@@ -8929,6 +9225,57 @@ function logLine(s,today,planLabel){
     : "";
   return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
 }
+// §W1 — structured-workout instruction card: the execution plan for a quality session, one row per
+// segment (interval reps grouped), each with duration, ~distance, the pace window and the HR band.
+// Pace/HR read the CURRENT unified zones (training_zones — the same det-locked grid the effort
+// monitor, chart band and zones card share, so this card can't disagree with the verdicts); without
+// them (public view, or zones not loaded yet) it falls back to the plan's own generation-time pace
+// strings and shows no HR (H7 — heart-rate data never reaches the public read).
+function zrow(zone){ return ((ZONESD&&ZONESD.rows)||[]).find(r=>r.key===zone)||null; }
+function segPace(zone, rep){
+  const r=zrow(zone);
+  if(r&&r.pace_slower_than&&r.pace_slower_than.fmt) return `slower than ${r.pace_slower_than.fmt}/km`;
+  if(r&&r.pace_target&&r.pace_target.fmt) return `≈ ${r.pace_target.fmt}/km`;
+  const p=((rep&&rep.pace_zone)||"").split("/km")[0];   // fallback: the plan's own pace at generation time
+  return p?`≈ ${p}/km`:"—";
+}
+function segHR(zone){
+  const h=(zrow(zone)||{}).hr;
+  if(!h) return "";
+  if(h.lo!=null&&h.hi!=null) return `${h.lo}–${h.hi} bpm`;
+  if(h.hi!=null) return `≤ ${h.hi} bpm`;
+  if(h.lo!=null) return `≥ ${h.lo} bpm`;
+  return "";
+}
+function workoutCard(s, open){
+  const reps=s.reps||[]; if(!reps.length) return "";
+  const sum=(a,k)=>a.reduce((t,r)=>t+(r[k]||0),0);
+  const grp=e=>reps.filter(r=>r.effort===e);
+  const wu=grp("warmup"), cd=grp("cooldown"), base=grp("easy_base"),
+        work=grp("work"), rec=grp("recovery");
+  const rows=[], cue=[];
+  const row=(what,zone,min,km,rep)=>rows.push(
+    `<tr><td>${esc(what)}</td><td>${min}′</td><td>${km?`~${km.toFixed(1)}k`:"—"}</td>`+
+    `<td>${esc(segPace(zone,rep))}</td><td>${esc(segHR(zone))||"—"}</td></tr>`);
+  if(wu.length){ row("Warm-up · easy","easy",sum(wu,"minutes"),sum(wu,"km"),wu[0]); cue.push(`${sum(wu,"minutes")}′ easy`); }
+  if(base.length){ row("Easy aerobic base","easy",sum(base,"minutes"),sum(base,"km"),base[0]); cue.push(`${sum(base,"minutes")}′ easy base`); }
+  if(work.length>1){
+    const rm=work[0].minutes, rz=work[0].zone, rcm=rec.length?rec[0].minutes:0;
+    row(`${work.length} × ${rm}′ @ ${rz}`,rz,sum(work,"minutes"),sum(work,"km"),work[0]);
+    if(rec.length) row(`${rec.length} × ${rcm}′ jog between reps`,"easy",sum(rec,"minutes"),sum(rec,"km"),rec[0]);
+    cue.push(`${work.length} × ${rm}′ @ ${rz} pace${rcm?` (${rcm}′ easy jog between)`:""}`);
+  }else if(work.length===1){
+    const w0=work[0];
+    row(s.kind==="long_mp"?`${w0.minutes}′ @ marathon pace to finish`:`${w0.minutes}′ steady @ ${w0.zone}`,
+        w0.zone,w0.minutes,w0.km,w0);
+    cue.push(s.kind==="long_mp"?`finish with ${w0.minutes}′ @ marathon pace`:`${w0.minutes}′ steady @ ${w0.zone} pace`);
+  }
+  if(cd.length){ row("Cool-down · easy","easy",sum(cd,"minutes"),sum(cd,"km"),cd[0]); cue.push(`${sum(cd,"minutes")}′ easy`); }
+  return `<div class="wcard${open?" open":""}"><div class="wcue">${esc(cue.join("  →  "))}</div>
+    <div class="wctbl-wrap"><table class="wctbl"><thead><tr><th>Segment</th><th>Time</th><th>Dist</th><th>Pace</th><th>HR</th></tr></thead>
+    <tbody>${rows.join("")}</tbody></table></div>
+    <div class="wctot">Total ${s.km} km · ~${s.minutes}′ · load ${s.trimp!=null?Math.round(s.trimp):"—"} TRIMP${ZONESD?"":" · paces from plan"+(SH_READONLY?"":"; HR bands load with zones")}</div></div>`;
+}
 // §6f Step F — compact label for a planned session. Structured quality sessions (intervals / MP
 // long run / tempo, carried as `reps`) read their structure; plain runs show distance.
 function sessSummary(s){
@@ -8938,6 +9285,12 @@ function sessSummary(s){
     if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${s.km}k +${mp?mp.minutes:0}′ MP`; }
     if(s.kind==='tempo'&&work.length) return `${s.km}k · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
   }
+  // strides ride a specific run (the week's first short easy one) — say so on THAT line, where
+  // they're executed, instead of the old orphaned "strides×2" note floating under the week.
+  // Plans stored before the s.strides flag carry the fact only in the engine-authored note text,
+  // so fall back to that until the nightly re-plan refreshes the JSON.
+  const st = s.strides || +(((s.note||"").match(/(\d+)×4–6 strides/)||[])[1]||0);
+  if(st) return `${s.km}k <span class="strid" title="Finish this run with ${st} × 4–6 strides: ~20-second relaxed-fast accelerations with full walk-back recovery. A neuromuscular touch-up, not a workout — it adds no training load.">+ ${st}× strides</span>`;
   return `${s.km}k`;
 }
 // One plan week (used for every phase but the re-base, which carries the journal/actuals overlay).
@@ -8951,7 +9304,10 @@ function weekHtml(w,p,today){
   // LOG-enriched sessions (merged in by renderPlan for elapsed/current weeks) get the journal line
   // (done/missed mark, actual, reflection, doubles); plain future weeks keep the compact summary.
   const sess=w.sessions.map(s=>{
-    const label=`<span class="wsi${(s.reps&&s.reps.length)?' qs':''}">${sessSummary(s)}</span>${compChip(s)}`;
+    // §W1 — a quality session expands to its instruction card on click (skip done sessions:
+    // their line is already the click-to-map affordance, and the prescription moment is past)
+    const q=s.reps&&s.reps.length, card=(q&&!s.done)?workoutCard(s):"";
+    const label=`<span class="wsi${q?' qs':''}${card?' wsx':''}"${card?' tabindex="0" role="button" title="Show the workout instructions"':''}>${sessSummary(s)}${card?' <span class="wsxc" aria-hidden="true">▸</span>':''}</span>${compChip(s)}${card}`;
     return ('done' in s) ? logLine(s,today,label)
       : `<div class="sline"><span class="sdate">${sessDate(s.date)}</span>${label}</div>`;
   }).join("");
@@ -8970,7 +9326,7 @@ function weekHtml(w,p,today){
       <div class="wbody">
         <div><span class="wkm">${w.km} km</span>${eqkm} · ${w.runs} runs${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
-        <div class="wsesslog">${sess}${w.strides?`<div class="muted mono" style="margin-top:2px">strides×${w.strides}</div>`:''}</div>
+        <div class="wsesslog">${sess}</div>
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
     </div>`;
@@ -9088,14 +9444,14 @@ function renderPlan(p){
     ? `<div class="legend" style="margin-top:6px;opacity:.85">↻ Last refreshed ${new Date(p.generated_at).toLocaleString()}</div>` : "";
   // The re-base journal line = the shared logLine with a plain-distance plan label (Phase 0 is
   // pure easy running; quality summaries only matter in the later phases' weekHtml path).
-  const sessHtml=s=>logLine(s,today,`<span class="splan">${s.km}k</span>`);
+  const sessHtml=s=>logLine(s,today,`<span class="splan">${sessSummary(s)}</span>`);
   // Re-base weeks are LOG-enriched (done/missed/unplanned/doubles via sessHtml) — kept as their own
   // renderer; we only wrap each in a week-detail and front it with the shared strip (selector below).
   const rbSel=defaultWeek(planWeeks,today);
   const weeks=weekStrip(planWeeks,'rebase',rbSel)+`<div class="weekdetails">`+planWeeks.map(w=>{
     const hasLog = w.sessions.some(s=>'done' in s);
     const sess = hasLog ? `<div class="wsesslog">${w.sessions.map(sessHtml).join("")}</div>`
-      : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${s.km}k</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">${w.strides?`strides×${w.strides} · `:''}@ easy ${p.pace_zones.easy_top}</div></div>`;
+      : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${sessSummary(s)}</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">@ easy ${p.pace_zones.easy_top}</div></div>`;
     const inner = `<div class="wk ${w.wk===4?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
@@ -9522,7 +9878,9 @@ async function loadEffort(){
     // private read — full HR-led detail
     rows=(d.runs||[]).map(r=>{
       const [col,lbl]=EFFV[r.verdict]||EFFV.unknown;
-      const tag = r.confidence==="high"?"":r.confidence==="low"?` <span class="muted" style="font-weight:400">·low conf</span>`:"";
+      // "low" confidence is the VERDICT's own trust level (a structured session's whole-run avg HR
+      // blends reps with recovery), NOT the runner's compliance — say so, don't abbreviate to ambiguity
+      const tag = r.confidence==="low"?` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Low confidence in this VERDICT — not in your effort: a structured session's whole-run average heart rate blends work reps with warm-up, recovery jogs and cool-down, so the 'did you hit it' read is approximate. Quality sessions never count toward the easy-run discipline score.">·rough read</span>`:"";
       return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
         `<td class="mono">${r.km}k</td><td class="mono col-sec">${EFFP(r.gap_pace)}</td>`+
         `<td class="mono">${r.hr_avg}<span class="muted hrpct"> ${r.hr_pct}%</span></td>`+
@@ -9535,7 +9893,7 @@ async function loadEffort(){
       `<th>avg HR</th>`+
       `<th class="col-sec">TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>`+
       `<th class="col-sec">feel</th>`+
-      `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace.")}</th>`;
+      `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace. A '·rough read' tag means the verdict itself is low-confidence — a structured session's whole-run average HR blends reps with recovery — never a judgment of your compliance; those sessions are excluded from the easy-discipline score.")}</th>`;
     const basis = d.anchor==="lthr" ? `(85% of LTHR ${d.lthr})`
                 : d.anchor==="lt1_pace" ? `(pace-anchored LT1)` : `(78% of HRmax ${d.hrmax})`;
     const ceil = d.anchor==="lt1_pace"
@@ -9621,7 +9979,7 @@ async function loadDrift(){
   host.innerHTML=`${scorecardHTML(d.scorecard, r)}<div class="driftcap">${cap}</div>
     <div class="driftseg" role="tablist">
       <button type="button" data-dm="founding" class="on" title="Your original plan for this goal vs where it stands now — how the road has moved over time">Original → Now</button>
-      <button type="button" data-dm="compare" title="Your current (conservative) road vs the assertive build your data could unlock">Conservative vs Assertive</button></div>
+      <button type="button" data-dm="compare" title="Your current road vs the road the other regime would prescribe from today — the assertive build your data could unlock, or the conservative floor the engine would fall back to">Conservative vs Assertive</button></div>
     <div id="drift-caveat" class="note driftcaveat" style="display:none"></div>
     <div class="driftblock"><h3>Cumulative distance</h3>
       <p class="note">The founding road versus what you've actually run plus the current plan's projection forward. The widening gap is volume drift — ahead of, or behind, the original plan.</p>
@@ -9657,12 +10015,16 @@ async function loadDrift(){
     if(!cf){ if(cav){ cav.textContent="Comparison needs an objective set."; cav.style.display=""; } return; }
     const ACC2="var(--accent2)", ACC="var(--accent)";
     const lbl=rn(cf.regime), nlbl=rn(cf.vs);
+    // direction matters (Duarte's 2026-07-04 catch): from a CONSERVATIVE plan the assertive road is
+    // the upper envelope you can EARN; from an ASSERTIVE plan the conservative road is the FLOOR the
+    // engine would hold you to if the gate re-closed — "what earning it unlocks" reads as nonsense there.
+    const upside=cf.regime==="assertive";
     const aEff=(d.effort.actual||[]).map(p=>({date:p.date,val:p.trimp})), aCtl=(d.ctl.actual||[]).map(p=>({date:p.date,val:p.ctl}));
     const cfDist=(cf.distance||[]).map(p=>({date:p.date,val:p.cum}));
     const dl=[
       {pts:act, cls:"actual", color:ACC, label:"Run so far"},
       {pts:act.length?[act[act.length-1],...prj]:prj, cls:"proj", dash:true, color:ACC, label:nlbl+" — your road now"},
-      {pts:act.length&&cfDist.length?[act[act.length-1],...cfDist]:cfDist, cls:"cf", dash:true, color:ACC2, label:lbl+" — what earning it unlocks"},
+      {pts:act.length&&cfDist.length?[act[act.length-1],...cfDist]:cfDist, cls:"cf", dash:true, color:ACC2, label:lbl+(upside?" — what earning it unlocks":" — the floor if the gate re-closes")},
     ];
     const el=[
       {pts:aEff, cls:"actual", color:ACC, label:"Done so far"},
@@ -9687,7 +10049,10 @@ async function loadDrift(){
       `<div><span class="k" style="color:var(--accent2)">${lbl}</span> — peak CTL <b>${o.peak_ctl==null?"–":o.peak_ctl}</b>, finish <b>${o.finish||"–"}</b></div>`+
       (o.curve&&o.curve.length?`<div class="note">With more runway: ${o.curve.map(c=>"+"+c.plus_weeks+"w → "+c.hms).join(" · ")}</div>`:"")+
       `</div>`;
-    if(cav){ cav.innerHTML=`<b>What earning ${esc(lbl.toLowerCase())} unlocks.</b> Upper envelope — assumes you clear the gate${cf.reason?" ("+esc(cf.reason)+")":""} and absorb the load; the engine re-reads it every block.`; cav.style.display=""; }
+    if(cav){ cav.innerHTML=upside
+      ? `<b>What earning ${esc(lbl.toLowerCase())} unlocks.</b> Upper envelope — assumes you clear the gate${cf.reason?" ("+esc(cf.reason)+")":""} and absorb the load; the engine re-reads it every block.`
+      : `<b>What ${esc(nlbl.toLowerCase())} is buying you.</b> The ${esc(lbl.toLowerCase())} line is the floor the engine would hold you to if the gate re-closed — low readiness, symptoms or unabsorbed weeks can re-close it${cf.reason?" ("+esc(cf.reason)+")":""}; the engine re-reads it every block.`;
+      cav.style.display=""; }
   };
   const paint=(mode)=>{
     host.querySelectorAll(".driftseg button").forEach(b=>b.classList.toggle("on", b.dataset.dm===mode));
@@ -9938,9 +10303,15 @@ async function saveSecret(key, clear){
   fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; TOKEN_OK=!!h.token_configured; refreshFirstRun(); }).catch(()=>{});
 }
 
-// learn whether the LLM layer is configured (§6c) before the plan/objectives render
+// learn whether the LLM layer is configured (§6c) before the plan/objectives render.
+// §RB — the /runs explorer boots only what it shows: the calendar + the activity tile; the
+// dashboard's status loaders (plan, drift, shape, health…) stay dashboard-only.
+if(SH_PAGE==="runs"){
+  loadRunsCal(); loadRecent();
+}else{
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
 loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones();
+}
 // §HR — the 'Current zones' card: training-intent rows, pace (VDOT, prescription anchor) + HR
 // (unified hr_zones grid, monitoring cross-check), both fitness-tracking. Private-only (section is
 // removed on the public view; the endpoint 403s there too).
@@ -9948,6 +10319,7 @@ async function loadZones(){
   const host=$("#zones"); if(!host || SH_READONLY) return;
   let d; try{ d=await getJSON("/api/zones"); }catch(e){ host.innerHTML=`<div class="empty">Zones unavailable.</div>`; return; }
   if(!d || !d.ok){ host.innerHTML=`<div class="empty">Not enough data yet — zones appear once a fitness (VO₂max) snapshot or heart-rate history is in.</div>`; return; }
+  ZONESD=d;   // §W1 — same payload shape as the readiness rider; workout cards read it
   const paceHint=qhint("Pace targets are fixed fractions of vVO₂max — the velocity at VO₂max, solved from the Daniels–Gilbert oxygen-cost curve VO₂(v) = −4.60 + 0.182258·v + 0.000104·v² — using your CURRENT effective VO₂max: marathon 0.81, threshold 0.88, interval 0.97 of vVO₂max. The easy bar is LT1 (aerobic threshold), operationalized as 80% of 5k pace with v5k ≈ 0.95·vVO₂max (a pace-first anchor informed by John Davis). Every value moves as your VO₂max moves — zones are never stale.");
   const hrHint=qhint("HR bands are the Friel run grid as fractions of LTHR: Z1 <0.85, Z2 0.85–0.90, Z3 0.90–0.95, Z4 0.95–1.00, Z5 ≥ LTHR. LTHR is estimated streamlessly — the whole-run average HR of your sustained hard efforts (20–70 min at ≥85% of robust HRmax), robust-high percentile, recency-weighted confidence — or taken from your manual field-test entry while fresh (Settings → Manual LTHR). Without a trustworthy LTHR the grid falls back to %HRmax (60/70/80/90). These are the SAME cutoffs the effort monitor and the activity chart band read — one grid, so the card can't disagree with the verdicts.");
   const noteHint=qhint("Pace and HR are two INDEPENDENT estimators of the same fitness (VDOT from VO₂max vs the LTHR grid), deliberately not averaged into one number. On a rebuild they can visibly disagree — cardiac decoupling: a given easy pace costs more HR than VDOT predicts. The Pace↔HR line under Effort discipline tracks that divergence; when they disagree on an easy day, heart rate is the honest read of how easy it really was. On short intervals the opposite caveat applies: HR lags the effort, so pace leads there.");
@@ -9990,7 +10362,8 @@ if(_setBtn && _setDlg){
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
-  ["sec-health","sec-zones","settingsDialog","firstrun"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  // §RB — the run browser (route geo + HR calendar) is private-only: drop its section + links too.
+  ["sec-health","sec-zones","settingsDialog","firstrun","sec-runs","runsLink"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
@@ -9999,6 +10372,11 @@ if(SH_READONLY){
     if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${esc(SH_PRIVATE_URL)}" title="Private console">🔒 Log in</a>`;
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
+}else if(SH_PAGE==="runs"){
+  // §RB — explorer chrome: the header link points back home; the mobile Runs tab reads active.
+  document.title="Sparing Horse — run browser";
+  const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
+  const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
 }else{
   loadReadiness(); loadHealth(); loadSettings(); loadSecrets();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
@@ -10021,9 +10399,11 @@ if(SH_READONLY){
   }
   nav.addEventListener("click", e => {
     const b = e.target.closest(".mnav-btn");
-    if(b) go(b.dataset.goto, true);
+    if(!b || !b.dataset.goto) return;                   // the Runs tab is a real <a> — let it navigate
+    if(SH_PAGE==="runs"){ location.href = "/#"+b.dataset.goto; return; }   // §RB — tabs live on the dashboard
+    go(b.dataset.goto, true);
   });
-  go((location.hash || "").replace("#",""), false);     // restore tab from the URL (defaults to today)
+  if(SH_PAGE!=="runs") go((location.hash || "").replace("#",""), false);   // restore tab from the URL (defaults to today)
 })();
 </script>
 </body></html>"""
@@ -10236,6 +10616,12 @@ def _stc_mobile_nav():
                 fail.append(f"{tg}: default tab not seeded on <body>")
             if ro and 'data-goto="body"' in doc:
                 fail.append(f"{tg}: public still exposes a Body tab (health is private — it would open empty)")
+            # §RB — the Runs explorer tab (an <a href="/runs">, not a data-goto tab): private-only,
+            # same never-a-dead-destination rule as Body (the public box redirects /runs away).
+            if ro and 'id="mnavruns"' in doc:
+                fail.append(f"{tg}: public still exposes the Runs tab (/runs is private-only)")
+            if not ro and 'id="mnavruns"' not in doc:
+                fail.append(f"{tg}: private is missing the Runs tab")
             for t in tabs:
                 if f'data-goto="{t}"' not in doc:
                     fail.append(f"{tg}: nav button '{t}' missing")
@@ -10250,6 +10636,82 @@ def _stc_mobile_nav():
                "mobile bottom-tab shell: <body> default tab + a button per tab, every tab owns content, deep-links; public drops the (empty) Body tab",
                passed=not fail, expect="both modes: nav + seed + deep-link present, every button owns content; public has no Body tab",
                got={"violations": fail or "none"})
+
+
+def _stc_runs_browser():
+    """§RB — the /runs explorer, three invariants on a throwaway fixture + the live routes:
+    (a) `_runs_month` groups a month's runs per day time-ordered (a double keeps both halves),
+    excludes dropped ids, lists non-run days separately (faint tick), degrades the dot colour to
+    None without an HR model, and bounds the month nav to where data exists; (b) `_zone_idx` cuts
+    an avg HR against the unified cutoffs (the calendar shares the chart-band grid); (c) gating:
+    the public container redirects /runs away and 403s /api/runs (H7 — route geo + HR grades),
+    the private one serves the page as data-page="runs" with the calendar section in it."""
+    import sqlite3 as _sq
+    global READONLY
+    fails = []
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+        " distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
+    for row in [
+        (1, "2026-06-02", "2026-06-02T07:12:00", RUNNING_SPORT, 8.2, 2952, 132, None, 50),   # a DOUBLE, part 1
+        (2, "2026-06-02", "2026-06-02T18:30:00", RUNNING_SPORT, 4.0, 1440, 128, None, 20),   # a DOUBLE, part 2
+        (3, "2026-06-03", "2026-06-03T18:00:00", "Cycling", 25.0, 3600, 120, None, 40),      # non-run day
+        (4, "2026-06-05", "2026-06-05T18:00:00", RUNNING_SPORT, 6.0, 2160, 130, None, 30),   # manually ignored
+        (5, "2026-06-07", "2026-06-07T09:00:00", RUNNING_SPORT, 12.0, 4680, 141, None, 80),  # plain long
+    ]:
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)", row)
+    m.execute("INSERT INTO ignored_activities VALUES (4)")
+    d = _runs_month(m, "2026-06")
+    if sorted(d["days"]) != ["2026-06-02", "2026-06-07"]:
+        fails.append(f"run days wrong (ignored id leaked, or a run day lost): {sorted(d['days'])}")
+    dbl = d["days"].get("2026-06-02", [])
+    if [r["id"] for r in dbl] != [1, 2]:
+        fails.append(f"double not time-ordered/complete: {dbl}")
+    if dbl and not (dbl[0]["t"] == "07:12" and dbl[0]["km"] == 8.2 and dbl[0]["pace"] == "6:00"):
+        fails.append(f"run summary fields wrong: {dbl[0]}")
+    if d["other"] != ["2026-06-03"]:
+        fails.append(f"non-run day not surfaced as 'other': {d['other']}")
+    if any(r["z"] is not None for rs in d["days"].values() for r in rs):
+        fails.append("dot colour invented without an HR model (must degrade to None)")
+    if not (d["first"] == "2026-06" and d["last"] == "2026-06"):
+        fails.append(f"nav bounds wrong: {d['first']}..{d['last']}")
+    # month roll-up: runs only, dropped excluded; avg HR duration-WEIGHTED (not a run-mean)
+    want = {"runs": 3, "km": 24.2, "hms": "2h 31m", "pace": "6:14",
+            "hr_avg": 136, "trimp": 150, "longest_km": 12.0}
+    if d.get("stats") != want:
+        fails.append(f"month stats wrong: {d.get('stats')} != {want}")
+    cuts = [117, 131, 145, 158]
+    for hr, want in ((None, None), (110, 0), (117, 1), (150, 3), (170, 4)):
+        if _zone_idx(hr, cuts) != want:
+            fails.append(f"_zone_idx({hr}) != {want}")
+    if _zone_idx(150, None) is not None:
+        fails.append("_zone_idx must be None without cutoffs")
+    saved = READONLY
+    try:
+        c = app.test_client()
+        READONLY = True
+        if c.get("/runs").status_code not in (301, 302, 303, 307, 308):
+            fails.append("public /runs did not redirect away")
+        if c.get("/api/runs").status_code != 403:
+            fails.append("public /api/runs not 403")
+        READONLY = False
+        doc = c.get("/runs").get_data(as_text=True)
+        if 'data-page="runs"' not in doc or 'id="runscal"' not in doc:
+            fails.append("private /runs page missing the explorer shell")
+        if 'data-page="dash"' not in c.get("/").get_data(as_text=True):
+            fails.append("dashboard lost its page tag")
+        if c.get("/api/runs?month=20xx-13").status_code != 400:
+            fails.append("junk month accepted")
+    finally:
+        READONLY = saved
+    return _st("det", "runs-browser",
+               "the /runs explorer: month grouping (doubles time-ordered, drops excluded, non-run "
+               "days ticked, dot colour honest without HR), _zone_idx vs unified cutoffs, and "
+               "public redirect/403 vs private page+API",
+               passed=not fails, expect="grouping + zone cuts exact; public blocked; private serves the shell",
+               got={"violations": fails or "none"})
 
 
 def _stc_map_privacy(db):
@@ -10422,6 +10884,8 @@ def _stc_log_phases():
     ts = todays_session(db_a, "2026-06-11")
     if not (ts and ts.get("kind") == "easy" and ts.get("km") == 6):
         fails.append(f"todays_session lost the base-week prescription (the 'No active plan' phantom): {ts}")
+    if ts and ts.get("pk") != "base":   # §W1 — the tile kicker names the phase, not a hardcoded "re-base"
+        fails.append(f"todays_session not pk-tagged to its phase: {ts.get('pk')}")
     tr = todays_session(db_a, "2026-06-10")
     if not (tr and tr.get("kind") == "rest"):
         fails.append(f"in-window empty day should be a rest marker, not {tr}")
@@ -14243,7 +14707,7 @@ def _stc_regime_compare():
 
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),

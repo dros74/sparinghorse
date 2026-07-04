@@ -12,6 +12,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-04
+
+Quality sessions now hand you their execution plan, and a new run-browser page turns your whole
+training history into a clickable, zone-coloured calendar.
+
+### Added
+- **Run browser — a new `/runs` page.** The first "explorer" page beside the status dashboard: a
+  month calendar of your whole training history where every day with runs carries dots coloured by
+  the run's average-HR zone — the same unified zone grid the activity chart band uses — so a month
+  reads as an intensity map at a glance (a healthy polarized block is mostly Z1/Z2 dots). Click a
+  day and the run opens below in the full activity tile you already know: metrics, hoverable
+  pace/HR/cadence/climb traces, route map. Days with several runs open a picker; non-run activity
+  shows as a faint tick (its load still counts — the viewer is run-centric). Beside the calendar,
+  a month-totals rail sums the month at a glance: runs, distance, time on feet, average pace,
+  duration-weighted average heart rate, training load, longest run. Navigation is bounded
+  to where your data actually exists. Desktop gets a header link, the phone's bottom bar gains a
+  Runs tab. Private-only: the calendar grades intensity by heart rate and the tile carries route
+  maps, so the public container serves neither the page nor its API.
+- **Workout instruction cards.** A structured quality session (tempo, VO₂ intervals, the long run's
+  marathon-pace finish) now presents a clear execution plan instead of a cramped note string: a
+  one-line "how to run it" cue plus a per-segment table — duration, approximate distance, the pace
+  window and the heart-rate band for every segment, with totals. Pace and HR are cut from the
+  *current* unified training zones (the same grid the effort monitor, the activity-chart band and
+  the zones card share), so the card always prescribes today's fitness, never the plan's birthday.
+  The card sits open on the Today readiness tile when the day's session is structured, and expands
+  from any quality-session row in the plan's week panels. The public read-only view shows paces
+  only — heart-rate data stays private.
+- **Phase-aware Today tile.** The readiness tile's session kicker now names the week's actual phase
+  ("Base week 3", "Build week 5") instead of the hardcoded "re-base week" caption left over from
+  the caution-era plan shape, and structured sessions get honest titles ("Interval session",
+  "Long run · MP finish").
+
+### Fixed
+- **Strides pinned to the run that carries them.** The plan's weekly "strides×2" note floated
+  under the week's session list, disconnected from any run and silent about when to do them. The
+  marker now sits on the session line of the run that actually carries the strides (the week's
+  first short easy run — where the engine has always scheduled them), with a hover explaining
+  what a stride is and that it adds no training load.
+- **Effort-table "low conf" tag was ambiguous.** It read like a compliance judgment; it actually
+  flags the verdict's own confidence (a structured session's whole-run average HR blends work
+  reps with recovery, so its "did you hit it" read is approximate). Now rendered as "·rough read"
+  with a hover spelling that out, and the verdict column's help covers it too.
+- **Regime-comparison overlay copy was written one-way.** With the plan now assertive, the
+  "Conservative vs Assertive" drift view still framed the other road as "what earning conservative
+  unlocks — upper envelope", which is nonsense in that direction. The copy is now direction-aware:
+  from a conservative plan the assertive line remains "what earning it unlocks"; from an assertive
+  plan the conservative line is presented as what it is — the floor the engine would hold you to
+  if the readiness gate re-closed.
+
 ## [0.10.0] - 2026-07-04
 
 Every session now says what it's *for* — and the assertive plan sequences fitness by component,
