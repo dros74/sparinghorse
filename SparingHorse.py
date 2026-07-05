@@ -233,6 +233,552 @@ def activity_profile(activity_id, n=120):
             "has_gps": len({tuple(p) for p in out_path}) >= 2}   # ≥2 distinct points = a real route
 
 
+# ── §RD — workout-structure classifier ("read the run back") ─────────────────
+# Decode a recorded run's pace profile into the plan's OWN session vocabulary (easy/long/tempo/
+# interval/long_mp). Two deliberately separate passes: STRUCTURE first by CONTRAST — a sustained
+# relative pace shift opens a block, no pace table involved, so straddling a zone boundary can't
+# split a rep — then NAMING, each block labeled against the runner's pace zones AS OF that date
+# (zones move with fitness, so "what counts as tempo" tracks the athlete, not a constant).
+# Pace-only structure (grade-adjusted where the elevation stream exists — hills must not fake
+# intervals); HR rides along per segment for the private effort monitor but is never a structure
+# input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
+# first view for old ones.
+STRUCT_VERSION = 4   # v4 (2026-07-05): fused stride clusters counted by INTERNAL peaks (a wide
+#                      episode was discarded whole — 6 of his real 11 counted at full streams),
+#                      dedicated "Strides" kind + set grouping "(5+6)" + strides-only pace, per the
+#                      owner's spec. v3: cadence corroboration (GPS spikes). v2: honest pace.
+RD_FRAME_S = 15            # analysis frame: one pace sample per 15s slab
+RD_CONTRAST = 0.08         # relative sustained pace shift that opens a new block
+RD_SUSTAIN_FRAMES = 3      # the shift must hold ~45s — GPS jitter and a 10s surge don't cut
+RD_MIN_BLOCK_S = 45        # shorter blocks are absorbed into the nearer-pace neighbour
+# Strides are counted the way the owner reads the chart (his 2026-07-05 framing): a GLOBAL peak
+# pass — short, prominent speed peaks over the local valley floor, width judged on the time axis,
+# cadence countersigning. (The earlier incremental burst state leaked half a real session's
+# strides through merges/voids/resets, then pace-only bars counted GPS spikes.)
+RD_STRIDE_PEAK = 0.22      # a stride peak rides ≥22% over the local floor (raw grade-adjusted
+#                            speed) — genuine strides run 25–40% over easy; 10–20% texture doesn't.
+RD_STRIDE_MAX_S = 60       # a peak wider than this is a REP, not a stride — the block grammar owns
+#                            it (plan vocabulary: reps ≥ ~2min; strides ≈ 15–30s + frame smear)
+RD_STRIDE_FLOOR_WIN = 10   # ± frames (≈ ±2.5min) for the rolling-median valley floor — strides are
+#                            short, so the local median sits on the easy/recovery floor around them
+RD_STRIDE_CAD = 0.06       # cadence must corroborate: a stride is legs turning over faster
+#                            (typically +10–20% spm), a GPS speed spike leaves cadence flat — pace
+#                            alone counted 4 spikes on his no-strides 2026-07-04 run even at the
+#                            22% bar. Applied only when the cadence stream is present; ratio-based,
+#                            so one-leg (halved) cadence sources compare cleanly.
+RD_STRIDE_DIP = 0.10       # inside a FUSED fast episode (strides bridged by a quick recovery),
+#                            consecutive speed maxima separated by a ≥10% dip count individually —
+#                            you can't run two strides without slowing between; a wide episode was
+#                            previously discarded whole (6 of his real 11 counted, 2026-07-05)
+RD_STRIDES_SESSION_MIN = 4 # ≥ this many strides over a NON-easy base (slower than the easy zone's
+#                            slow edge = walking/standing recovery, not an easy run) ⇒ the run IS
+#                            a strides session — his spec: "Strides — 18min @7:53/km · 11× strides
+#                            (5+6) @4:20/km". Strides sprinkled on a genuine easy run stay "Easy
+#                            run · N× strides".
+RD_STRIDE_SET_GAP = 1.4    # a gap between strides > 1.4× the median gap (and >90s) starts a new
+#                            SET — the "(5+6)" grouping; uniform gaps read as one set
+RD_MIN_RUN_S = 600         # under 10 minutes there's no structure worth reading
+RD_LONG_MIN = 85           # a uniform easy run at/over this many minutes is a "long" run
+RD_MP_BASE_MIN = 30        # long_mp needs at least this much easy base before the MP finish
+RD_PAUSE_PACE = 1200       # slower than 20:00/km = standing/pause frame (breaks blocks)
+RD_GOOD_VALID = 0.9        # ≥ this share of readable frames ⇒ "good" read; ≥0.7 ⇒ "rough"
+RD_WORK_ZONES = ("marathon", "threshold", "interval")   # the zones a work block can be named
+RD_WORK_CONTRAST = 0.10    # a WORK block must be ≥10% faster than the run's own easy baseline —
+#                            a zone label alone is NOT work: at low fitness his ordinary easy-pace
+#                            drift crosses easy_top (the easy-days-run-hard pattern the effort
+#                            monitor owns), and calling that "intervals" misreads a plain easy run.
+#                            Structure is what you SEE in the pace chart: contrast. Zones only name it.
+RD_BASE_MIN_SHARE = 0.25   # the baseline = the SLOWEST pace level carrying ≥ this share of the run
+#                            (or ≥10min) — so a 15min wu + 30min tempo still baselines on the wu side
+RD_MIN_WORK_S = 100        # a work REP is ≥ ~2min in the plan's vocabulary (DAVIS_BASE_VO2_REP_MIN);
+#                            margin under 120 for frame quantization. Shorter fast blocks = surges/
+#                            smeared strides, never session elements.
+RD_MIN_TEMPO_S = 480       # a LONE continuous work block must be ≥ ~8min (the plan's smallest tempo/
+#                            MP element) — a single 3min surge is not a tempo session
+
+
+def _rd_median(xs):
+    s = sorted(xs)
+    n = len(s)
+    return None if not n else (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0)
+
+
+def _rd_frames(streams):
+    """Raw MCP streams → 15s frames of grade-adjusted pace (sec/km) + hr + km, by INTERPOLATING the
+    cumulative distance/elevation/HR at the frame edges — so any sampling density works (1Hz Suunto,
+    battery-save every 25s, whatever). A frame across a recording gap where the runner stood still
+    reads slower than RD_PAUSE_PACE ⇒ None (pauses break blocks, never join them). Distance
+    normalised with the same >100 ⇒ metres heuristic as activity_profile; grade adjustment is a
+    Minetti-lite cost factor (1 + 0.029g + 0.0015g², g clamped ±15%) so a hill reads as its flat-
+    equivalent effort pace. Returns (frames, valid_share)."""
+    dist, tim, hr = streams.get("distance") or [], streams.get("time") or [], streams.get("heart_rate") or []
+    cad = streams.get("cadence") or []
+    elev = next((a for a in (streams.get("elevation_corrected"), streams.get("elevation_original"))
+                 if a and any(v is not None for v in a)), [])
+    pts = [(tim[i], dist[i],
+            hr[i] if i < len(hr) else None,
+            elev[i] if i < len(elev) else None,
+            cad[i] if i < len(cad) else None)
+           for i in range(min(len(dist), len(tim)))
+           if tim[i] is not None and dist[i] is not None]
+    pts = [p for i, p in enumerate(pts) if i == 0 or p[0] > pts[i - 1][0]]   # strictly increasing t
+    if len(pts) < 2:
+        return [], 0.0
+    t0, total_t = pts[0][0], pts[-1][0] - pts[0][0]
+    if not total_t or total_t < RD_MIN_RUN_S:
+        return [], 0.0
+    m_scale = 1.0 if (pts[-1][1] or 0) > 100 else 1000.0     # metres already, or km → metres
+    nf = int(total_t // RD_FRAME_S)
+    import bisect
+    times = [p[0] for p in pts]
+
+    def interp(t, chan):
+        i = max(0, min(len(pts) - 2, bisect.bisect_right(times, t) - 1))
+        a, b = pts[i], pts[i + 1]
+        va, vb = a[chan], b[chan]
+        if va is None or vb is None:
+            return va if vb is None else vb
+        if b[0] == a[0]:
+            return va
+        w = (t - a[0]) / (b[0] - a[0])
+        return va + (vb - va) * max(0.0, min(1.0, w))
+
+    frames, valid = [], 0
+    for k in range(nf):
+        ta, tb = t0 + k * RD_FRAME_S, t0 + (k + 1) * RD_FRAME_S
+        da = interp(ta, 1)
+        db_ = interp(tb, 1)
+        ea, eb = interp(ta, 3), interp(tb, 3)
+        hm = interp((ta + tb) / 2.0, 2)
+        cm = interp((ta + tb) / 2.0, 4)
+        f = {"pace": None, "hr": round(hm) if hm else None,
+             "cad": round(cm, 1) if cm else None, "km": 0.0}
+        if da is not None and db_ is not None:
+            dd = max(0.0, (db_ - da) * m_scale)
+            f["km"] = dd / 1000.0
+            if dd > 0:
+                pace = RD_FRAME_S / dd * 1000.0              # sec/km, raw
+                if ea is not None and eb is not None and dd > 5:
+                    g = max(-15.0, min(15.0, (eb - ea) / dd * 100.0))
+                    cost = max(0.6, min(1.6, 1 + 0.029 * g + 0.0015 * g * g))
+                    pace /= cost                             # uphill ⇒ faster flat-equivalent
+                if pace < RD_PAUSE_PACE:
+                    f["pace"] = pace
+                    valid += 1
+        frames.append(f)
+    for f in frames:
+        f["raw"] = f["pace"]           # pre-smooth pace: STRIDE detection reads this — the median
+    #                                    smooth below would flatten a genuine 1–2-frame burst into
+    #                                    its neighbour mixture and cap its peak under any honest bar
+    if len(frames) >= 3:                                     # 3-point median smooth (jitter, not shape)
+        sm = [f["pace"] for f in frames]
+        for i in range(1, len(frames) - 1):
+            trio = [p for p in (sm[i - 1], sm[i], sm[i + 1]) if p is not None]
+            if frames[i]["pace"] is not None and len(trio) == 3:
+                frames[i] = {**frames[i], "pace": _rd_median(trio)}
+    return frames, (valid / nf if nf else 0.0)
+
+
+def _rd_strides(frames):
+    """Strides counted the way the owner reads the chart (his 2026-07-05 framing: 'count the
+    peaks, look at the time axis'): a GLOBAL peak pass over the RAW grade-adjusted speed, not
+    incremental burst state (which leaked half a real session's strides through merges and
+    resets). Per frame the valley FLOOR is the rolling ±RD_STRIDE_FLOOR_WIN median — strides are
+    short, so the local median sits on the easy/recovery floor. A maximal run of frames riding
+    ≥ RD_STRIDE_PEAK over the floor, no wider than RD_STRIDE_MAX_S (wider = a rep, the block
+    grammar owns it), countersigned by a cadence rise over the surrounding frames (GPS spikes
+    leave cadence flat), counts as ONE stride — and a WIDER episode is a fused cluster whose
+    internal dip-separated peaks each count (his real 5+6 session fused at full resolution).
+    Returns {"n", "sets", "pace"}: the count, the set grouping by gap pattern, and the
+    strides-only time-over-distance pace."""
+    spd = [(1000.0 / f["raw"]) if f.get("raw") else None for f in frames]
+    cads = [f.get("cad") for f in frames]
+    n, W = len(frames), RD_STRIDE_FLOOR_WIN
+    fast = [False] * n
+    for i in range(n):
+        if spd[i] is None:
+            continue
+        loc = [s for s in spd[max(0, i - W):i + W + 1] if s is not None]
+        floor = _rd_median(loc)
+        if floor and spd[i] >= floor * (1 + RD_STRIDE_PEAK):
+            fast[i] = True
+    centers, ep_frames = [], []           # one center per counted stride + all counted fast frames
+    i = 0
+    while i < n:
+        if not fast[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and fast[j + 1]:
+            j += 1
+        # cadence countersign at EPISODE level (GPS spikes don't come as dipped clusters)
+        cref = [c for c in (cads[max(0, i - W):i] + cads[j + 1:j + W + 1]) if c]
+        cpk = max((c for c in cads[i:j + 1] if c), default=None)
+        if (cref and cpk) and cpk < _rd_median(cref) * (1 + RD_STRIDE_CAD):
+            i = j + 1
+            continue
+        if (j - i + 1) * RD_FRAME_S <= RD_STRIDE_MAX_S:
+            centers.append((i + j) / 2.0)
+        else:
+            # a FUSED cluster (strides bridged by a quick recovery): count the INTERNAL peaks —
+            # local speed maxima separated by a ≥RD_STRIDE_DIP dip, the chart-read inside the blob
+            maxima = [k for k in range(i, j + 1)
+                      if spd[k] is not None
+                      and (k == i or (spd[k - 1] or 0) <= spd[k])
+                      and (k == j or spd[k] >= (spd[k + 1] or 0))]
+            kept = []
+            for m in maxima:
+                if not kept:
+                    kept.append(m)
+                    continue
+                between = [s for s in spd[kept[-1]:m + 1] if s is not None]
+                dip_ok = between and min(between) <= min(spd[kept[-1]], spd[m]) * (1 - RD_STRIDE_DIP)
+                if dip_ok:
+                    kept.append(m)
+                elif spd[m] > spd[kept[-1]]:
+                    kept[-1] = m                             # same peak, better summit
+            centers.extend(float(m) for m in kept)
+        ep_frames.extend(range(i, j + 1))
+        i = j + 1
+    if not centers:
+        return {"n": 0, "sets": [], "pace": None}
+    # set grouping: a gap clearly longer than the typical stride cadence starts a new set
+    sets, cur_set = [], 1
+    gaps = [(centers[k + 1] - centers[k]) * RD_FRAME_S for k in range(len(centers) - 1)]
+    med_gap = _rd_median(gaps) if gaps else None
+    for g in gaps:
+        if med_gap and g > max(RD_STRIDE_SET_GAP * med_gap, 90):
+            sets.append(cur_set)
+            cur_set = 1
+        else:
+            cur_set += 1
+    sets.append(cur_set)
+    # strides-only pace: time over distance across the counted fast frames
+    sec = len(ep_frames) * RD_FRAME_S
+    km = sum(frames[k]["km"] for k in ep_frames)
+    return {"n": len(centers), "sets": sets, "pace": round(sec / km) if km > 0 else None}
+
+
+def _rd_blocks(frames):
+    """Contrast segmentation: walk the frames keeping a running block; a pace shift beyond
+    RD_CONTRAST vs the block median that HOLDS for RD_SUSTAIN_FRAMES (same direction) cuts a new
+    block. A non-sustained outlier is kept out of the median (strides are counted separately by
+    the _rd_strides global peak pass). Pause frames break blocks. Then a settle pass: merge
+    adjacent same-pace blocks and absorb sub-minimum slivers into the nearer-pace neighbour.
+    Returns blocks; each = {sec, km, pace, cad, hr, i0, i1}."""
+    thr = math.log1p(RD_CONTRAST)
+    raw, cur, outl = [], [], set()
+
+    def flush():
+        if cur:
+            paces = [frames[j]["pace"] for j in cur if j not in outl and frames[j]["pace"]]
+            if paces:
+                lo, hi = cur[0], cur[-1] + 1
+                hrs = [frames[j]["hr"] for j in range(lo, hi) if frames[j]["hr"]]
+                cads = [frames[j]["cad"] for j in cur if j not in outl and frames[j].get("cad")]
+                raw.append({"i0": lo, "i1": hi, "sec": (hi - lo) * RD_FRAME_S,
+                            "km": round(sum(frames[j]["km"] for j in range(lo, hi)), 3),
+                            "pace": _rd_median(paces),
+                            "cad": _rd_median(cads) if cads else None,
+                            "hr": round(sum(hrs) / len(hrs)) if hrs else None})
+        del cur[:]
+        outl.clear()
+
+    i = 0
+    while i < len(frames):
+        p = frames[i]["pace"]
+        if p is None:
+            flush()                                          # a pause breaks the block
+            i += 1
+            continue
+        if not cur:
+            cur.append(i)
+            i += 1
+            continue
+        med = _rd_median([frames[j]["pace"] for j in cur if j not in outl])
+        dev = math.log(p / med)
+        if abs(dev) > thr:
+            k = 0                                            # does the shift sustain?
+            while i + k < len(frames) and k < RD_SUSTAIN_FRAMES:
+                pk = frames[i + k]["pace"]
+                if pk is None or abs(math.log(pk / med)) <= thr or (pk > med) != (p > med):
+                    break
+                k += 1
+            if k >= RD_SUSTAIN_FRAMES or (k >= 1 and i + k >= len(frames)):
+                flush()
+                continue                                     # this frame opens the next block
+            outl.add(i)                                      # transient: out of the block median
+            cur.append(i)
+            i += 1
+            continue
+        cur.append(i)
+        i += 1
+    flush()
+
+    def merged(a, b):
+        sec = a["sec"] + b["sec"]
+        return {"i0": a["i0"], "i1": b["i1"], "sec": sec,
+                "km": round(a["km"] + b["km"], 3),
+                "pace": (a["pace"] * a["sec"] + b["pace"] * b["sec"]) / sec,
+                "hr": (round((a["hr"] * a["sec"] + b["hr"] * b["sec"]) / sec)
+                       if a["hr"] and b["hr"] else a["hr"] or b["hr"])}
+
+    blocks = raw
+    for _ in range(len(raw) + 1):                            # settle to a fixed point (bounded)
+        changed = False
+        out = []
+        for b in blocks:                                     # 1 — re-merge same-pace neighbours
+            if out and abs(math.log(b["pace"] / out[-1]["pace"])) <= thr:
+                out[-1] = merged(out[-1], b)
+                changed = True
+            else:
+                out.append(b)
+        blocks = out
+        if len(blocks) > 1:                                  # 2 — absorb sub-minimum slivers
+            j = min(range(len(blocks)), key=lambda k: blocks[k]["sec"])
+            if blocks[j]["sec"] < RD_MIN_BLOCK_S:
+                nb = [k for k in (j - 1, j + 1) if 0 <= k < len(blocks)]
+                k = min(nb, key=lambda q: abs(math.log(blocks[q]["pace"] / blocks[j]["pace"])))
+                a, b = sorted((j, k))
+                blocks[a:b + 1] = [merged(blocks[a], blocks[b])]
+                changed = True
+        if not changed:
+            break
+    return blocks
+
+
+def _rd_zone(pace, zones):
+    """Name a block by the NEAREST plan-zone pace target in log-speed space (easy_top / marathon /
+    threshold / interval — exactly the vocabulary sessions prescribe in). Slower than the easy
+    target is easy by definition."""
+    targets = [("easy", zones.get("easy_top")), ("marathon", zones.get("marathon")),
+               ("threshold", zones.get("threshold")), ("interval", zones.get("interval"))]
+    targets = [(z, p) for z, p in targets if p]
+    if not targets:
+        return "easy"
+    easy_t = dict(targets).get("easy")
+    if easy_t and pace >= easy_t:
+        return "easy"
+    return min(targets, key=lambda zp: abs(math.log(pace / zp[1])))[0]
+
+
+def _rd_fmt_dur(sec):
+    return f"{round(sec)}s" if sec < 120 else f"{round(sec / 60)}min"
+
+
+def _rd_fmt_range(vals, fmt):
+    lo, hi = min(vals), max(vals)
+    a, b = fmt(lo), fmt(hi)
+    return a if a == b else f"{a}–{b}"
+
+
+def classify_structure(streams, zones):
+    """§RD entry point: raw activity streams + that-date pace zones → the detected workout.
+    Returns {"v", "ok", "kind", "kind_label", "summary", "segments", "n_work", "strides",
+    "confidence"} — or ok=False with a reason when the run is honestly unreadable (never force a
+    label). Kinds are the PLAN vocabulary: easy / long / tempo / interval / long_mp."""
+    frames, valid = _rd_frames(streams)
+    if not frames:
+        return {"v": STRUCT_VERSION, "ok": False, "reason": "no usable pace/distance streams"}
+    if valid < 0.7:
+        return {"v": STRUCT_VERSION, "ok": False,
+                "reason": f"pace unreadable ({round(valid * 100)}% of frames usable)"}
+    blocks = _rd_blocks(frames)
+    sinfo = _rd_strides(frames)                              # the global peak pass (chart-read)
+    strides = sinfo["n"]
+
+    def stride_note():
+        # "11× strides (5+6) @4:20/km" — count, the set grouping when the gaps show one, and the
+        # strides-only pace (the overall pace already covers the rest of the run — his spec)
+        note = f"{strides}× strides"
+        if len(sinfo["sets"]) > 1:
+            note += f" ({'+'.join(str(x) for x in sinfo['sets'])})"
+        if sinfo.get("pace"):
+            note += f" @{fmt_pace(sinfo['pace'])}/km"
+        return note
+    if not blocks:
+        return {"v": STRUCT_VERSION, "ok": False, "reason": "no coherent pace blocks"}
+    segs = [{**b, "zone": _rd_zone(b["pace"], zones)} for b in blocks]
+    for s in segs:
+        s["pace"] = round(s["pace"])
+        s.pop("i0"), s.pop("i1")
+    conf = "good" if valid >= RD_GOOD_VALID else "rough"
+    total_sec = sum(s["sec"] for s in segs)
+    # The run's own easy BASELINE: cluster blocks by pace (within the segmentation contrast) and
+    # take the SLOWEST level that carries real time (≥ RD_BASE_MIN_SHARE of the run, or ≥10min).
+    # WORK then requires BOTH a work-zone name AND ≥ RD_WORK_CONTRAST vs that baseline — structure
+    # is the contrast a human sees in the pace chart; the zone grid only supplies the name.
+    thr = math.log1p(RD_CONTRAST)
+
+    def level_sec(b):
+        return sum(s["sec"] for s in segs if abs(math.log(s["pace"] / b["pace"])) <= thr)
+
+    major = [b for b in segs if level_sec(b) >= min(max(RD_BASE_MIN_SHARE * total_sec, 600),
+                                                    0.5 * total_sec)]
+    base_blk = max(major or segs, key=lambda b: (b["pace"], level_sec(b)))   # slowest qualifying level
+    baseline = base_blk["pace"]
+    fast_ix = [i for i, s in enumerate(segs)
+               if s["zone"] in RD_WORK_ZONES
+               and math.log(baseline / s["pace"]) >= math.log1p(RD_WORK_CONTRAST)]
+    work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
+    # (fast blocks too short to be reps — e.g. strides that segmented out on their own — are
+    #  simply not work; the _rd_strides peak pass already counts them from the whole-run signal)
+    if len(work_ix) == 1 and segs[work_ix[0]]["sec"] < RD_MIN_TEMPO_S:
+        work_ix = []                                         # a lone short surge isn't a session
+
+    def seg_roles():
+        for i, s in enumerate(segs):
+            if i in work_ix:
+                s["role"] = "work"
+            elif work_ix and i < work_ix[0]:
+                s["role"] = "warmup"
+            elif work_ix and i > work_ix[-1]:
+                s["role"] = "cooldown"
+            elif work_ix:
+                s["role"] = "float"
+            else:
+                s["role"] = "easy"
+
+    seg_roles()
+    p = fmt_pace                                             # sec/km → "M:SS"
+    if not work_ix:                                          # no contrast = one sustained effort
+        total_km = sum(s["km"] for s in segs)
+        # honest overall pace = time over distance — a time-weighted mean of BLOCK paces overweights
+        # slow walking blocks (the strides session read @10:46 while the tile said 7:58)
+        pace_all = round(total_sec / total_km) if total_km else segs[0]["pace"]
+        z_all = _rd_zone(pace_all, zones)
+        if z_all in ("threshold", "interval"):               # wall-to-wall HARD (race / straight tempo)
+            return {"v": STRUCT_VERSION, "ok": True, "kind": "tempo", "kind_label": "Sustained effort",
+                    "summary": f"{_rd_fmt_dur(total_sec)} @{p(pace_all)}/km {z_all}, no easy bracket",
+                    "segments": segs, "n_work": 0, "strides": strides, "confidence": conf}
+        # a STRIDES SESSION: enough strides over a base too slow to be easy RUNNING (walking/
+        # standing recovery) — his spec. Strides on a genuine easy run stay "Easy run · N× strides".
+        if strides >= RD_STRIDES_SESSION_MIN and zones.get("easy") and baseline > zones["easy"]:
+            return {"v": STRUCT_VERSION, "ok": True, "kind": "strides", "kind_label": "Strides",
+                    "summary": f"{_rd_fmt_dur(total_sec)} @{p(pace_all)}/km · {stride_note()}",
+                    "segments": segs, "n_work": 0, "strides": strides,
+                    "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
+                    "confidence": conf}
+        # aerobic throughout — marathon-zone drift stays "easy" here BY DESIGN: whether an easy day
+        # ran too hot is the effort monitor's verdict, not a structure claim
+        kind = "long" if total_sec >= RD_LONG_MIN * 60 else "easy"
+        summary = f"{_rd_fmt_dur(total_sec)} @{p(pace_all)}/km" + \
+                  (f" · {stride_note()}" if strides else "")
+        return {"v": STRUCT_VERSION, "ok": True, "kind": kind,
+                "kind_label": "Long run" if kind == "long" else "Easy run",
+                "summary": summary, "segments": segs, "n_work": 0, "strides": strides,
+                "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
+                "confidence": conf}
+
+    works = [segs[i] for i in work_ix]
+    wu = [s for s in segs if s["role"] == "warmup"]
+    cd = [s for s in segs if s["role"] == "cooldown"]
+    floats = [s for s in segs if s["role"] == "float"]
+    parts = []
+    if wu:
+        parts.append(f"{_rd_fmt_dur(sum(s['sec'] for s in wu))} wu "
+                     f"@{_rd_fmt_range([s['pace'] for s in wu], p)}")
+    modal_zone = max(set(s["zone"] for s in works),
+                     key=lambda z: sum(s["sec"] for s in works if s["zone"] == z))
+    if len(works) >= 2:                                      # alternating reps ⇒ intervals
+        kind, kind_label = "interval", "Intervals"
+        rep = f"{len(works)}× {_rd_fmt_range([s['sec'] for s in works], _rd_fmt_dur)} " \
+              f"@{_rd_fmt_range([s['pace'] for s in works], p)} {modal_zone}"
+        if floats:
+            rep += f" w/ {_rd_fmt_range([s['sec'] for s in floats], _rd_fmt_dur)} floats"
+        parts.append(rep)
+    else:
+        w = works[0]
+        easy_before = sum(s["sec"] for s in segs[:work_ix[0]])
+        if w["zone"] == "marathon" and easy_before >= RD_MP_BASE_MIN * 60 and \
+                sum(s["sec"] for s in segs[work_ix[0] + 1:]) <= max(900, 0.2 * total_sec):
+            kind, kind_label = "long_mp", "Long run + MP finish"
+            for s in segs[:work_ix[0]]:
+                s["role"] = "easy_base"                      # the base IS the run, not a warm-up
+            parts = [f"{_rd_fmt_dur(easy_before)} easy "
+                     f"@{_rd_fmt_range([s['pace'] for s in segs[:work_ix[0]]], p)}",
+                     f"{_rd_fmt_dur(w['sec'])} @{p(w['pace'])} MP finish"]
+        else:
+            kind, kind_label = "tempo", "Tempo"
+            parts.append(f"{_rd_fmt_dur(w['sec'])} @{p(w['pace'])} {w['zone']}")
+    if cd:
+        parts.append(f"{_rd_fmt_dur(sum(s['sec'] for s in cd))} cd "
+                     f"@{_rd_fmt_range([s['pace'] for s in cd], p)}")
+    if strides:
+        parts.append(stride_note())
+    return {"v": STRUCT_VERSION, "ok": True, "kind": kind, "kind_label": kind_label,
+            "summary": " · ".join(parts), "segments": segs, "n_work": len(works),
+            "strides": strides, "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
+            "confidence": conf}
+
+
+def _zones_asof(db, date_iso=None):
+    """Pace zones AS OF a date — the snapshot VO2max on/just before it, so an old run is read
+    against the fitness the runner HAD, not today's. Falls back forward (earliest snapshot) for
+    runs predating the history, then to the latest snapshot."""
+    row = None
+    if date_iso:
+        row = db.execute("SELECT effective_vo2max FROM shape_snapshots WHERE snapshot_date<=? "
+                         "AND effective_vo2max IS NOT NULL ORDER BY snapshot_date DESC LIMIT 1",
+                         (date_iso[:10],)).fetchone()
+        if not row:
+            row = db.execute("SELECT effective_vo2max FROM shape_snapshots WHERE effective_vo2max "
+                             "IS NOT NULL ORDER BY snapshot_date ASC LIMIT 1").fetchone()
+    if not row:
+        snap = latest_snapshot(db)
+        return pace_zones(snap["effective_vo2max"]) if snap else {}
+    return pace_zones(row["effective_vo2max"])
+
+
+def _structure_cached(db, aid, date_iso=None, fetch=True):
+    """§RD — the current-version detected structure for an activity: from structcache, else (when
+    `fetch` allows) classified from freshly-pulled streams + stored. Mirrors _profile_cached:
+    re-classifies on a VERSION mismatch, and on a fetch failure returns (stale_or_None, err).
+    `fetch=False` = cached-only, for the public container (tokenless) and the effort monitor's
+    bulk read (a panel load must never fan out into stream fetches). Tolerates a DB without the
+    structcache table (minimal det fixtures) — absent reads as unclassified."""
+    try:
+        row = db.execute("SELECT structure FROM structcache WHERE activity_id=?", (aid,)).fetchone()
+    except sqlite3.OperationalError:
+        return None, None
+    cached = json.loads(row["structure"]) if row else None
+    if cached and cached.get("v") == STRUCT_VERSION:
+        return cached, None
+    if not fetch:
+        return cached, None
+    try:
+        det = mcp_call("get_activity_details", {"activity_id": int(aid)})
+        streams = (det.get("activity", det)).get("streams") or {}
+        st = classify_structure(streams, _zones_asof(db, date_iso))
+    except (RunalyzeError, requests.RequestException, KeyError, ValueError) as e:
+        return cached, e
+    db.execute("INSERT OR REPLACE INTO structcache (activity_id, structure, cached_at) "
+               "VALUES (?,?,?)", (aid, json.dumps(st), _now_iso()))
+    db.commit()
+    return st, None
+
+
+def classify_recent(db, days=14, cap=12):
+    """§RD sync hook — classify any still-unclassified recent run (idempotent, so a failed attempt
+    self-heals next sync). Recent-window only: history stays lazy (classified on first view), per
+    the from-now-on rollout. Best-effort by design — a classification failure must never fail a
+    sync. Returns the number classified."""
+    from datetime import timedelta
+    since = (datetime.now().date() - timedelta(days=days)).isoformat()
+    rows = db.execute(
+        "SELECT a.id, a.date FROM activities a LEFT JOIN structcache s ON s.activity_id=a.id "
+        "WHERE " + RUN_FAMILY_SQL.replace("sport", "a.sport") + " AND a.date>=? AND a.distance>=2 "
+        "AND s.activity_id IS NULL ORDER BY a.date DESC LIMIT ?", (since, cap)).fetchall()
+    n = 0
+    for i, r in enumerate(rows):
+        if i:
+            time.sleep(PAGE_DELAY)                           # WAF politeness between stream pulls
+        st, err = _structure_cached(db, r["id"], date_iso=r["date"])
+        if st is not None and not err:
+            n += 1
+    return n
+
+
 def fetch_activities_page(page=1):
     """One page (100) of activities, newest first. Returns a list."""
     data = _get("activity", {"page": page})
@@ -327,6 +873,15 @@ CREATE TABLE IF NOT EXISTS readiness (
 CREATE TABLE IF NOT EXISTS trackcache (
     activity_id INTEGER PRIMARY KEY,
     profile     TEXT,
+    cached_at   TEXT
+);
+
+-- §RD — cached detected workout structure per activity (versioned JSON from classify_structure).
+-- Written at sync for new runs, lazily on first view for older ones; the effort monitor reads it
+-- cached-only (never fetches mid-panel).
+CREATE TABLE IF NOT EXISTS structcache (
+    activity_id INTEGER PRIMARY KEY,
+    structure   TEXT,
     cached_at   TEXT
 );
 
@@ -985,9 +1540,13 @@ def run_sync(backfill=False):
             health = sync_health_metrics(db, backfill=backfill)
         except Exception:
             health = None
+        try:                                    # §RD — read new runs back; never fail the sync over it
+            structures = classify_recent(db)
+        except Exception:
+            structures = None
         set_meta(db, "last_sync", _now_iso())
         db.commit()
-        return {"ok": True, "activities": act, "health": health,
+        return {"ok": True, "activities": act, "health": health, "structures": structures,
                 "last_sync": get_meta(db, "last_sync"), "backfill": backfill}
     finally:
         db.close()
@@ -1084,6 +1643,10 @@ def delete_activity_local(db, aid):
         return False
     db.execute("DELETE FROM activities WHERE id=?", (aid,))
     db.execute("DELETE FROM trackcache WHERE activity_id=?", (aid,))
+    try:
+        db.execute("DELETE FROM structcache WHERE activity_id=?", (aid,))   # §RD — no orphan structure
+    except sqlite3.OperationalError:
+        pass                                       # minimal det fixture without the table
     db.commit()
     return True
 
@@ -1460,6 +2023,28 @@ def derive_hr_zones(db, sample=12):
             "activities": per}
 
 
+# §RD × §6m — the rep-based quality read. When a quality run's detected structure is cached, the
+# monitor grades the WORK reps against the prescribed zone instead of the whole-run average (which
+# blends reps with warm-up/recovery — why the old quality verdict was capped at 'low' confidence).
+EFFORT_SEG_TOL = 3          # bpm tolerance around the prescribed HR band
+EFFORT_SEG_PACE_TOL = 0.04  # ±4% (log) around the zone pace target when reps carry no HR
+EFFORT_SEG_HR_MIN_S = 180   # reps SHORTER than this are judged on PACE even when HR exists: a
+#                             short rep starts rested, HR climbs through it and PEAKS INTO the
+#                             recovery (the owner's 2026-07-05 observation — pace and HR peaks are
+#                             out of phase), so a within-rep average systematically under-reads
+#                             and would call every 2-min VO₂ rep 'sandbagged'. The zones card's
+#                             own caveat ('Z5 — HR lags short reps'), applied to the verdict.
+KIND_ZONE = {"interval": "interval", "tempo": "threshold", "long_mp": "marathon"}  # prescription zone
+
+
+def _seg_band(cutoffs, zone):
+    """The bpm band a prescribed zone maps to on the unified hr_zones cutoffs — the SAME Z3/Z4/Z5
+    rows the Current-zones card shows (training_zones), so the rep verdict can't drift from it."""
+    i, j = {"marathon": (1, 2), "threshold": (2, 3), "interval": (3, None)}[zone]
+    return (cutoffs[i] if i is not None else None,
+            cutoffs[j] if j is not None else None)
+
+
 def _effort_verdict(kind, hrf, te, easy_frac=EASY_HR_FRAC, hard_frac=HARD_HR_FRAC):
     """Pure per-run verdict — HR-LED, TE corroborates (returns (verdict, confidence)). `hrf` is the
     run's avg HR as a fraction of an anchor; `easy_frac`/`hard_frac` are the ceilings ON THAT SAME
@@ -1559,6 +2144,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     lthr_info = None if public else derive_lthr(db)
     use_lthr = bool(lthr_info and lthr_info.get("source") in LTHR_TRUSTED
                     and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
+    hz_cut = None if public else (hr_zones(db) or {}).get("cutoffs")   # §RD — rep-band grid
     snap = latest_snapshot(db)
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     since = (datetime.now().date() - timedelta(days=window_days)).isoformat()
@@ -1566,11 +2152,10 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     plan = json.loads(row["plan"]) if row else {}
     prescribed = []                                       # [(date, kind)] across all phases
-    for ph in ("rebase", "base", "build", "peak", "taper"):
-        for w in (plan.get(ph) or {}).get("weeks", []):
-            for s in w.get("sessions", []):
-                if s.get("date") and s.get("kind"):
-                    prescribed.append((s["date"], s["kind"]))
+    for w in _plan_all_weeks(plan):   # the whole road — chain bridge/peak/taper segments included
+        for s in w.get("sessions", []):
+            if s.get("date") and s.get("kind"):
+                prescribed.append((s["date"], s["kind"]))
     rows = [r for r in db.execute(
         "SELECT id, date, distance, duration, hr_avg, raw FROM activities "
         "WHERE " + RUN_FAMILY_SQL + " AND date>=? ORDER BY date DESC", (since,)).fetchall()
@@ -1615,12 +2200,49 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             else:                                         # no pace either ⇒ last-resort %HRmax cross-check
                 hrf = (r["hr_avg"] / hrmax) if hrmax else None
                 verdict, conf = _effort_verdict(kind, hrf, te)
-            runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
-                         "hr_avg": r["hr_avg"],
-                         "hr_pct": round(r["hr_avg"] / hrmax * 100) if hrmax else None,
-                         "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
-                         "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
-                         "verdict": verdict, "confidence": conf, "pace_verdict": pace_verdict})
+            # §RD — per-rep quality read: with the detected structure cached (sync/tile already
+            # classified it — CACHED-ONLY here, a panel load never fans out into stream fetches),
+            # grade the work reps against the prescribed zone. HR-led on the unified hr_zones grid;
+            # pace vs the zone target when the segments carry no HR. Replaces the whole-run 'low'
+            # read with a 'moderate' one that actually isolates the reps.
+            seg = None
+            if kind not in AEROBIC_KINDS:
+                st, _e = _structure_cached(db, r["id"], fetch=False)
+                works = ([s for s in st.get("segments", []) if s.get("role") == "work"]
+                         if st and st.get("ok") else [])
+                if works:
+                    zone = KIND_ZONE.get(kind, "threshold")
+                    wsec = sum(s["sec"] for s in works)
+                    wpace = round(sum(s["pace"] * s["sec"] for s in works) / wsec)
+                    whr_s = [s for s in works if s.get("hr")]
+                    v2 = whr = None
+                    if whr_s:                                 # reported either way (context)
+                        whr = sum(s["hr"] * s["sec"] for s in whr_s) / sum(s["sec"] for s in whr_s)
+                    # HR judges only reps long enough for HR to be IN PHASE: a short rep starts
+                    # rested and its HR peak lands in the recovery, so the within-rep average
+                    # under-reads — short reps are judged on pace (EFFORT_SEG_HR_MIN_S).
+                    if whr and hz_cut and wsec / len(works) >= EFFORT_SEG_HR_MIN_S:
+                        lo, hi = _seg_band(hz_cut, zone)
+                        v2 = ("too_easy" if (lo and whr < lo - EFFORT_SEG_TOL) else
+                              "too_hard" if (hi and whr > hi + EFFORT_SEG_TOL) else "on")
+                    elif zones.get(zone):
+                        dev = math.log(wpace / zones[zone])
+                        v2 = ("on" if abs(dev) <= EFFORT_SEG_PACE_TOL else
+                              "too_easy" if dev > 0 else "too_hard")
+                    if v2:
+                        verdict, conf = v2, "moderate"
+                        seg = {"n_work": len(works), "work_hr": round(whr) if whr else None,
+                               "work_pace": fmt_pace(wpace), "zone": zone}
+            row_out = {"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
+                       "hr_avg": r["hr_avg"],
+                       "hr_pct": round(r["hr_avg"] / hrmax * 100) if hrmax else None,
+                       "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
+                       "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
+                       "verdict": verdict, "confidence": conf, "pace_verdict": pace_verdict}
+            if seg:
+                row_out["seg_read"] = True
+                row_out["seg"] = seg
+            runs.append(row_out)
     aerobic = [x for x in runs if x["kind"] in AEROBIC_KINDS]
     quality = [x for x in runs if x["kind"] not in AEROBIC_KINDS]
     on = sum(1 for x in aerobic if x["verdict"] == "on")
@@ -2195,6 +2817,13 @@ EARNED_MAX_TIERS = 2                # cap the lift at ~+16% — bounded; applied
 # more); Peak/Taper are untouched.
 FREQ_KEY = "freq_advance"           # meta toggle — owner opt-in for the 6th run, default off
 FREQ_BANK_AT = 4                    # banked elapsed weeks to UNLOCK (stricter than the volume lift's 3)
+RUN_MIN_KM = 2.5   # §JR — no prescribed run below this (owner call 2026-07-05, after the ACWR brake
+#                    crushed a week into 0.3–1.4km stubs): a governed budget too thin for the
+#                    template's run count sheds DAYS instead. Mild by design — it fires only on
+#                    sub-floor stubs, never grows a normal week's runs (the min-dose consolidation
+#                    experiment stays REVERTED), and the ACWR/peak governors still project whatever
+#                    layout results. Sits at his historical junk bar (~2.6km); the stricter 4.0
+#                    FREQ_MIN_EASY_KM below stays the bar for ADDING a 6th run.
 FREQ_MIN_EASY_KM = 4.0              # min-distance FLOOR (owner-chosen 2026-06-21): don't add the 6th run
                                     # to a week unless its non-long runs would still clear this — i.e.
                                     # frequency is earned by VOLUME too, so the 6th run is real training,
@@ -2882,6 +3511,22 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                 free = [d for d in range(7) if d not in set(days)]   # unused weekdays for extra easy runs
                 while n_short < need_short and len(days) < 7 and free:
                     days.append(free.pop(0)); easy_slots.append(len(days) - 1); n_short += 1
+    # §JR — junk-run floor: when the governed budget spread over the template's short-easy days
+    # would prescribe runs under RUN_MIN_KM, shed short days (nearest the long run first — the
+    # freed day doubles as pre-long freshness) until the survivors are real runs. Collapses
+    # gracefully: n_short → 0 hands the whole easy budget to the long slot (one honest run, never
+    # five stubs). Normal weeks never trip it; the quality slots are untouched.
+    # taper is EXEMPT: race-week leg-looseners are deliberately tiny — a 2km shakeout before a race
+    # is a real prescription, not a junk run (same reasoning as _mark_load_integrity's exemption)
+    min_tr = 0.0 if _is_taper(wk.get("intent")) else \
+        RUN_MIN_KM * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
+    if 0 < easy_budget * long_w < min_tr and long_idx in easy_slots:
+        easy_slots = [long_idx]                              # even the LONG's share is a stub —
+        n_short = 0                                          # one honest run takes the whole budget
+    while n_short > 0 and easy_budget * (1 - long_w) / n_short < min_tr:
+        drop = max((i for i in easy_slots if i != long_idx), key=lambda i: days[i])
+        easy_slots.remove(drop)
+        n_short -= 1
     first_easy = min(easy_slots) if easy_slots else None
     for i in easy_slots:
         is_long = (i == long_idx)
@@ -3221,11 +3866,10 @@ def _banked_streak(db, today, prior_plan):
     drop = dropped_ids(db)
     today_d = _date(today) if isinstance(today, str) else today
     elapsed = []
-    for key in ("rebase", "base", "build", "peak", "taper"):
-        for w in ((prior_plan or {}).get(key) or {}).get("weeks", []):
-            ws = _date(w["start"]); we = ws + timedelta(days=6)
-            if we < today_d:                       # only fully-completed weeks are evidence
-                elapsed.append((ws, we, w))
+    for w in _plan_all_weeks(prior_plan or {}):    # the whole road — chain segments count as evidence too
+        ws = _date(w["start"]); we = ws + timedelta(days=6)
+        if we < today_d:                           # only fully-completed weeks are evidence
+            elapsed.append((ws, we, w))
     elapsed.sort(key=lambda t: t[0])
     streak = 0
     for ws, we, w in elapsed:
@@ -3614,9 +4258,12 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # breach when EOW is already near the soft cap, so its refill barely moves total load; §H2 can
         # fire when EOW is LOW (the quality spike, not volume, was the binding constraint), so a naive
         # refill to the soft cap would ADD load at low CTL — the exact thing the brake must not allow.
-        # So §H2 CAPS the re-governed all-easy week at its PRE-DROP governed TRIMP: load (and EOW ACWR)
-        # is preserved EXACTLY, only the hard slice is removed and the mid-week peak falls. Suppressing
-        # intensity can therefore never raise load. Self-heals as CTL rebuilds.
+        # So §H2 CAPS the re-governed all-easy week at its PRE-DROP governed TRIMP. That is a load
+        # BOUND, not load-neutrality: the pure-easy layout concentrates the week on the long run, so
+        # the peak-ACWR cap can bind sooner on the re-govern and the week may carry LESS than
+        # pre-drop (measured on a braked week 2026-07-04: 249 vs 282 TRIMP). The guarantee is
+        # one-sided — total ≤ pre-drop, the mid-week peak falls — so suppressing intensity can never
+        # raise load. Self-heals as CTL rebuilds.
         breach = bool(zones and peak and peak > ACWR_HARD)
         eroded = bool(zones and not breach
                       and _hard_share(sessions, sum(dt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
@@ -5156,9 +5803,16 @@ def _plan_all_weeks(plan):
     any rebase-only read silently drops the whole road — the 2026-07-04 family of bugs (the log
     overlay, the readiness tile's phantom 'No active plan', the explainer's empty week list)."""
     weeks = [{**w, "pk": "rebase"} for w in (plan.get("rebase") or {}).get("weeks", [])]
+    keyed = False
     for ph in plan.get("phases", []):
         key = ph.get("key")
         if key and key != "rebase":
+            weeks += [{**w, "pk": key} for w in (plan.get(key) or {}).get("weeks", [])]
+            keyed = True
+    if not keyed:   # LEGACY saved plan (pre-§6q phases carry no keys): the classic single-A blocks.
+        # Matters because prior_plan rows feed DECISIONS (_banked_streak → regime/earned gates): a
+        # stale-format row must not silently zero the banked evidence right after an upgrade.
+        for key in ("base", "build", "peak", "taper"):
             weeks += [{**w, "pk": key} for w in (plan.get(key) or {}).get("weeks", [])]
     return weeks
 
@@ -6455,6 +7109,26 @@ def api_activity_one(aid):
     return jsonify(_activity_payload(db, json.loads(row["raw"])))
 
 
+@app.get("/api/activity/<int:aid>/structure")
+def api_activity_structure(aid):
+    """§RD — the detected workout structure for one activity, classified lazily on first view when
+    the sync hook hasn't already (that's the agreed backfill: from-now-on eager, history on open).
+    Public read-only container: served from CACHE ONLY (tokenless — no stream fetch) and per-segment
+    HR withheld server-side — the same H7 posture as the activity payload; the pace-based label
+    itself is as public as pace."""
+    db = get_db()
+    row = db.execute("SELECT date FROM activities WHERE id=?", (aid,)).fetchone()
+    if not row:
+        return jsonify(None), 404
+    st, err = _structure_cached(db, aid, date_iso=row["date"], fetch=not READONLY)
+    if not st:
+        return jsonify({"ok": False, "reason": "not classified yet" if READONLY
+                        else f"streams unavailable ({err})"})
+    if READONLY and st.get("segments"):
+        st = {**st, "segments": [{k: v for k, v in s.items() if k != "hr"} for s in st["segments"]]}
+    return jsonify(st)
+
+
 @app.post("/api/activity/<int:aid>/ignore")
 def api_activity_ignore(aid):
     """One-click data-quality override: exclude this activity from the reconstruction
@@ -7206,6 +7880,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
      row. profmeta is ABSOLUTE inside the relative .profbar (anchored bottom-right), so the legend
      appearing on HR hover grows it sideways WITHOUT reflowing the row → the tile height never jumps.
      The row's height is set by .profhint alone (constant); padding-right keeps the hint clear of it. */
+  .structline{color:var(--muted);font-size:12px;line-height:1.5;margin-top:8px}
+  .structline:empty{display:none}
+  .structline b{font-weight:600}
+  .structline .sdet{border-bottom:1px dotted var(--muted);cursor:help}
   .profbar{position:relative;margin-top:12px;min-height:15px}
   .profmeta{position:absolute;right:0;bottom:0;display:inline-flex;align-items:center;gap:12px;
     white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
@@ -8550,6 +9228,7 @@ async function loadActivity(aid){
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
       </div>
+      <div class="structline" id="structline"></div>
       <div class="profbar">
         <span class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</span>
         <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
@@ -8558,6 +9237,14 @@ async function loadActivity(aid){
     ${SH_READONLY?"":'<div id="actmap" class="actmap"></div>'}` + crossNote;
   // load the profile once, show the default (locked) one, then wire hover-preview + click-lock
   if(a.id){
+    // §RD — the detected-structure line fills in async (lazy classification can take a beat on a
+    // first view of an old run); absence or an unreadable run just leaves the line empty.
+    getJSON(`/api/activity/${a.id}/structure`).then(st=>{
+      const el=$("#structline");
+      if(!el || !st || !st.ok) return;
+      el.innerHTML=`<span class="sdet" title="Detected from the recorded pace profile — grade-adjusted, segmented by sustained pace shifts, and named against your zones as of that day. What the app read back, not what was prescribed.">Read back:</span> <b>${esc(st.kind_label)}</b> — ${esc(st.summary)}`+
+        (st.confidence==="rough"?` <span class="muted" title="The pace signal was noisy (GPS gaps or drift) — segment paces are approximate.">·rough signal</span>`:"");
+    }).catch(()=>{});
     try{ ACTPROFILE = await getJSON(`/api/activity/${a.id}/profile`); }
     catch(e){ ACTPROFILE={}; }
   }
@@ -9880,7 +10567,9 @@ async function loadEffort(){
       const [col,lbl]=EFFV[r.verdict]||EFFV.unknown;
       // "low" confidence is the VERDICT's own trust level (a structured session's whole-run avg HR
       // blends reps with recovery), NOT the runner's compliance — say so, don't abbreviate to ambiguity
-      const tag = r.confidence==="low"?` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Low confidence in this VERDICT — not in your effort: a structured session's whole-run average heart rate blends work reps with warm-up, recovery jogs and cool-down, so the 'did you hit it' read is approximate. Quality sessions never count toward the easy-run discipline score.">·rough read</span>`:"";
+      const tag = r.seg_read
+        ? ` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Graded on the DETECTED work reps only (§RD) — warm-up, floats and cool-down excluded${r.seg?`: ${r.seg.n_work} rep${r.seg.n_work>1?"s":""}${r.seg.work_hr?` @ ~${r.seg.work_hr} bpm`:` @ ${r.seg.work_pace}/km`} vs the ${r.seg.zone} band`:""}.">·reps read</span>`
+        : (r.confidence==="low"?` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Low confidence in this VERDICT — not in your effort: a structured session's whole-run average heart rate blends work reps with warm-up, recovery jogs and cool-down, so the 'did you hit it' read is approximate (once this run's structure is detected, the verdict upgrades to a per-rep read). Quality sessions never count toward the easy-run discipline score.">·rough read</span>`:"");
       return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
         `<td class="mono">${r.km}k</td><td class="mono col-sec">${EFFP(r.gap_pace)}</td>`+
         `<td class="mono">${r.hr_avg}<span class="muted hrpct"> ${r.hr_pct}%</span></td>`+
@@ -9893,7 +10582,7 @@ async function loadEffort(){
       `<th>avg HR</th>`+
       `<th class="col-sec">TE ${qhint("Training Effect — Runalyze/Firstbeat's 1–5 aerobic-stress rating (intensity × duration). It only corroborates the heart-rate read here, it never overrides it.")}</th>`+
       `<th class="col-sec">feel</th>`+
-      `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace. A '·rough read' tag means the verdict itself is low-confidence — a structured session's whole-run average HR blends reps with recovery — never a judgment of your compliance; those sessions are excluded from the easy-discipline score.")}</th>`;
+      `<th>verdict ${qhint("How this run's effort compared to its prescription — graded by heart rate (terrain and heat already live in your HR), not pace. A '·reps read' tag means a quality session was graded on its DETECTED work reps only (warm-up, floats and cool-down excluded — the sharper §RD read); '·rough read' means the whole-run average HR had to stand in (reps blend with recovery), never a judgment of your compliance. Quality sessions are excluded from the easy-discipline score either way.")}</th>`;
     const basis = d.anchor==="lthr" ? `(85% of LTHR ${d.lthr})`
                 : d.anchor==="lt1_pace" ? `(pace-anchored LT1)` : `(78% of HRmax ${d.hrmax})`;
     const ceil = d.anchor==="lt1_pace"
@@ -12993,7 +13682,8 @@ def _stc_regime_gate():
             ws = today - timedelta(weeks=n - i)
             wks.append({"start": ws.isoformat(), "intent_km": 20, "km": 20, "runs": 4,
                         "intent": "Easy aerobic base"})
-        return {"base": {"weeks": wks}}
+        # real saved plans carry a phases list — _plan_all_weeks (the shared whole-road reader) needs it
+        return {"base": {"weeks": wks}, "phases": [{"key": "base"}]}
 
     def log_adherence(m, n):
         for i in range(n):                # 4 runs/wk totalling 20km ≥ 0.8×20
@@ -13246,7 +13936,8 @@ def _stc_regime_plan():
                 mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?)",
                             (d, d + "T18:00", RUNNING_SPORT, 6.0, 2100, 40.0))
         mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
-                    (_now_iso(), today.isoformat(), "{}", json.dumps({"base": {"weeks": wks}})))
+                    (_now_iso(), today.isoformat(), "{}",
+                     json.dumps({"base": {"weeks": wks}, "phases": [{"key": "base"}]})))
         mem.commit()
         return generate_plan(mem)
 
@@ -13484,8 +14175,9 @@ def _stc_polarization_floor():
     """§H2 — the polarization floor holds at LOW CTL and self-heals. At a detrained seed the ACWR
     governor clips a week's easy volume hard, so the fixed quality TRIMP floor would balloon past the
     cap and erode easy_frac below POLARIZED_EASY_MIN (the safety-negative artifact the corrected EWMA
-    exposed). §H2 drops that week's quality to easy — load-neutral (capped at the pre-drop governed
-    TRIMP, so it can only LOWER intensity, never add volume) — and restores quality once CTL can
+    exposed). §H2 drops that week's quality to easy — load-BOUNDED, not load-neutral (capped at the
+    pre-drop governed TRIMP; the pure-easy layout concentrates on the long run so the peak cap can
+    bind sooner and the week may carry LESS — never more) — and restores quality once CTL can
     afford it. Two-sided lock: (1) at a deep-detrained seed EVERY build week stays easy-dominant AND
     quality is genuinely suppressed (no interval survives — proves §H2 fires, not a vacuous pass) AND
     the governor cap still holds; (2) at a fit seed the SAME build keeps its interval (proves the
@@ -13528,7 +14220,8 @@ def _stc_polarization_floor():
         fails.append("fit-CTL dropped all quality — suppression not self-healing")
     return _st("det", "polarization-floor",
                "the §H2 polarization floor keeps every week easy-dominant at low CTL (drops quality "
-               "load-neutrally, governor cap intact) and restores quality once fitness returns",
+               "load-bounded — never more TRIMP than pre-drop, governor cap intact) and restores "
+               "quality once fitness returns",
                passed=not fails, expect="low CTL: easy≥floor + quality suppressed + cap held; fit: quality back",
                got={"violations": fails or "none"},
                output={"low": {"eroded": low_eroded or "none", "over_cap": low_over or "none",
@@ -13842,11 +14535,33 @@ def _stc_earned_lift():
                output={"troughs": troughs})
 
 
+def _fixture_plan_db():
+    """A CONSTRUCTED plan-generation fixture: fresh schema, a known-headroom snapshot (CTL 45,
+    caution regime — no banked evidence) and a marathon 24 weeks out. The deterministic seed the
+    earned/freq gate end-to-end checks run generate_plan on, instead of the ambient DB — whose
+    CTL and regime flip their verdicts (the [[governor-lever-retune]] fixture-hygiene item; the
+    07-03 assertive flip broke the freq e2e the same way). Caller closes."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = datetime.now().date()
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+                "VALUES(?,?,?,?)", (today.isoformat(), 50.0, 45.0, 42.0))
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("marathon", "Fixture Marathon", (today + timedelta(weeks=24)).isoformat(),
+                 "finish", "A", "upcoming", _now_iso()))
+    mem.commit()
+    return mem
+
+
 def _stc_earned_gate(db):
     """§6e/§6f earned-progression GATE: it's opt-in and bounded. Default-off is a pure no-op
     (factor 1.0 ⇒ shape untouched), the lift never scales a down week, the tier math is capped at
     EARNED_MAX_TIERS, and the LIVE plan exposes the gate state OFF ⇒ factor 1.0 (never automatic).
-    Non-persisting (read-only on the DB)."""
+    The end-to-end off/on comparison runs on a CONSTRUCTED in-memory fixture at a known-headroom
+    seed, NOT the ambient DB — so the verdict can't flip with whatever DB happens to be loaded
+    (the [[governor-lever-retune]] fixture-hygiene item). Non-persisting (read-only on the DB)."""
     fails = []
     sh = build_shape(8, 24)
     if _apply_earned_lift(sh, 1.0) != sh:
@@ -13867,17 +14582,23 @@ def _stc_earned_gate(db):
     elif not e.get("opted_in") and e.get("factor") != 1.0:
         fails.append(f"off-but-not-no-op: {e}")                    # off must always mean factor 1.0
     # End-to-end through generate_plan (force the gate active): the lift must be a SINGLE level-lift
-    # (build ≈ ×F vs off, NOT ×F² compounded phase-over-phase) and the down-week troughs must survive
-    # the real frozen/chained path — the regression `det/earned-lift` (one generate_block) can't see.
+    # (build ≈ ×F vs off, NOT ×F² compounded phase-over-phase), the down-week troughs must survive
+    # the real chained path, and the lever must actually move output — none of which the regression
+    # `det/earned-lift` (one generate_block) can see. Runs on the CONSTRUCTED fixture, not the
+    # ambient DB: an assertion that flips with ambient CTL/regime isn't a deterministic guardrail —
+    # the old ambient read passed at live CTL 36 and failed at a stale CTL-12 copy
+    # [[governor-lever-retune]].
+    mem = _fixture_plan_db()
     _orig, F = earned_state, round(1 + EARNED_VOLUME_STEP * EARNED_MAX_TIERS, 4)
     g = globals()
     try:
-        off = generate_plan(db)
+        off = generate_plan(mem)
         g["earned_state"] = lambda d, t, pr: {**_orig(d, t, pr), "opted_in": True, "unlocked": True,
             "ready_ok": True, "active": True, "tiers": EARNED_MAX_TIERS, "factor": F}
-        on = generate_plan(db)
+        on = generate_plan(mem)
     finally:
         g["earned_state"] = _orig
+        mem.close()
     nd = lambda pl, k: next((w["intent_km"] for w in (pl.get(k) or {}).get("weeks", [])
                              if not _is_down(w.get("intent"))), None)
     bo, bn = nd(off, "build"), nd(on, "build")
@@ -13892,26 +14613,37 @@ def _stc_earned_gate(db):
             if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
                 fails.append(f"{key} acwr#{w['wk']}={w.get('proj_acwr')}")
             if _is_down(w.get("intent")):
-                # Trough survival is NOT asserted on this path: it reads the AMBIENT DB via generate_plan,
-                # so the verdict flips with ambient CTL (holds at CTL 36; the down week inverts at a stale
-                # CTL-12 seed — cap-pinning AND faster-ATL weekly volatility). An assertion that depends on
-                # ambient state isn't a deterministic guardrail; trough survival is locked deterministically
-                # by det/earned-lift at a constructed headroom fixture. The low-CTL inversions and the
-                # "det tests shouldn't read ambient DB" smell are banked [[governor-lever-retune]]. Kept
-                # here only as an informational diagnostic.
-                nb = [ws[j].get("proj_acwr") for j in (i - 1, i + 1) if 0 <= j < len(ws)]
-                troughs_e2e.append({"phase": key, "wk": w["wk"],
-                                    "down_acwr": w.get("proj_acwr"), "neighbours": nb})
+                # Trough survival, asserted ONLY on a fully-unclipped triple (same volume-aware
+                # predicate as det/earned-lift): when a building neighbour is governor-clipped below
+                # its intent, the down week can legitimately ride above it — the banked low-CTL
+                # trough inversion, a cap artifact, not a lost recovery [[governor-lever-retune]].
+                # Through the real caution path (fixed small re-base ⇒ low CTL at base/build) a
+                # full-tier lift is governor-dominated, so today every triple clips and this stays a
+                # deterministic diagnostic; the binding dip-under-headroom lock is det/earned-lift.
+                # If a future engine change frees a triple here, the assertion arms itself.
+                nbi = [j for j in (i - 1, i + 1) if 0 <= j < len(ws)]
+                nb = [ws[j].get("proj_acwr") for j in nbi]
+                nb_km = [ws[j].get("km") or 0 for j in nbi]
+                a, km = w.get("proj_acwr") or 0, w.get("km") or 0
+                asserted = bool(nbi) and not w.get("clipped") \
+                    and not any(ws[j].get("clipped") for j in nbi)
+                troughs_e2e.append({"phase": key, "wk": w["wk"], "down_acwr": a, "neighbours": nb,
+                                    "km": km, "nb_km": nb_km, "asserted": asserted})
+                if asserted and (a > min(nb) + 0.005 or km >= min(nb_km)):
+                    fails.append(f"trough-collapsed {key}#{w['wk']} acwr {a} vs {nb}, "
+                                 f"km {km} vs {nb_km}")
             elif offw.get(w["wk"]) and w["km"] > offw[w["wk"]]["km"] + 0.5:
                 moved_e2e += 1
-    # NB: "the lift moves output" is asserted by det/earned-lift at a headroom seed; we don't fail on
-    # moved_e2e here because under the corrected EWMA the governor can pin building weeks at the cap so
-    # the lift is legitimately inert through the real chained path at low CTL [[governor-lever-retune]].
+    if moved_e2e == 0:   # at the fixture the lever MUST move output (no ambient cap-pinning excuse)
+        fails.append("lift inert e2e — no non-down base/build week rose at the headroom fixture")
     return _st("det", "earned-gate",
                "earned lift is opt-in & bounded: factor-1.0 no-op, down weeks never scaled, tiers "
-               "capped; end-to-end it's a single level-lift (no phase compounding), ceiling held, live "
-               "plan off ⇒ no-op (trough survival is locked deterministically by det/earned-lift)",
-               passed=not fails, expect="opt-in no-op · single lift · ceiling held",
+               "capped; end-to-end on a CONSTRUCTED fixture (not the ambient DB) it's a single "
+               "level-lift (no phase compounding), ceiling held, lift moves output; troughs asserted "
+               "on unclipped triples (else the banked cap-artifact inversion — diagnostic only); "
+               "live plan off ⇒ no-op",
+               passed=not fails, expect="opt-in no-op · single lift · ceiling held · lift moves "
+               "(fixture) · unclipped troughs survive",
                got={"violations": fails or "none", "build_lift_ratio": ratio,
                     "weeks_moved_e2e": moved_e2e},
                output={"earned_live": e, "troughs_e2e": troughs_e2e})
@@ -13950,29 +14682,36 @@ def _stc_freq_advance(db):
         fails.append("plan missing freq state")
     elif not f.get("opted_in") and (f.get("active") or f.get("runs") != BASE_RUNS):
         fails.append(f"off-but-not-no-op: {f}")                    # off must always mean 5 runs / inactive
-    # End-to-end through generate_plan (force the gate active): structural invariants hold whatever the
-    # live volume is — down weeks + Peak/Taper stay 5, any non-down Base/Build week is 5-or-6, volume
-    # is unchanged vs off, ACWR held. At today's detrained volume the floor keeps it DORMANT (0
-    # advanced) — that's correct, not a failure; advancement itself is covered by the high-volume case.
+    # End-to-end through generate_plan (force the gate active): structural invariants hold whatever
+    # the volume is — down weeks + Peak/Taper stay 5, any non-down Base/Build week is 5-or-6, volume
+    # is unchanged vs off, ACWR held. When the floor keeps it DORMANT (0 advanced) that's correct,
+    # not a failure; advancement itself is covered by the high-volume case. Runs on the CONSTRUCTED
+    # fixture, not the ambient DB — these are caution-era invariants, and an assertive ambient plan
+    # legitimately breaks them (§PRO8 rides the floored cap to 1.30; frozen lived weeks carry his
+    # real 3–4 run counts): the same fixture hygiene as det/earned-gate.
+    mem = _fixture_plan_db()
     _orig = freq_state
     g = globals()
     try:
-        off = generate_plan(db)
+        off = generate_plan(mem)
         g["freq_state"] = lambda d, t, pr: {**_orig(d, t, pr), "opted_in": True, "unlocked": True,
             "ready_ok": True, "active": True, "runs": BASE_RUNS + 1}
-        on = generate_plan(db)
+        on = generate_plan(mem)
     finally:
         g["freq_state"] = _orig
+        mem.close()
     moved = 0
     for key in ("base", "build", "peak", "taper"):
         offw = {w["wk"]: w for w in (off.get(key) or {}).get("weeks", [])}
         for w in (on.get(key) or {}).get("weeks", []):
             if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
                 fails.append(f"{key} acwr#{w['wk']}={w.get('proj_acwr')}")
-            allowed = {BASE_RUNS} if (key in ("peak", "taper") or _is_down(w.get("intent"))) \
-                else {BASE_RUNS, BASE_RUNS + 1}
-            if w.get("runs") not in allowed:
-                fails.append(f"{key} runs#{w['wk']}={w.get('runs')} not in {allowed}")
+            # UPPER bound only: the freq contract is "never a 6th run where it shouldn't be";
+            # FEWER runs is legitimate (§JR junk floor sheds sub-2.5km stub days)
+            cap_runs = BASE_RUNS if (key in ("peak", "taper") or _is_down(w.get("intent"))) \
+                else BASE_RUNS + 1
+            if (w.get("runs") or 0) > cap_runs:
+                fails.append(f"{key} runs#{w['wk']}={w.get('runs')} > {cap_runs}")
             ow = offw.get(w["wk"])
             if ow and abs((w.get("intent_km") or 0) - (ow.get("intent_km") or 0)) > 0.6:
                 fails.append(f"{key} volume moved#{w['wk']}")      # frequency must not change km
@@ -13984,7 +14723,7 @@ def _stc_freq_advance(db):
                "ACWR held, live off ⇒ 5",
                passed=not fails, expect="opt-in · floored · non-down Base/Build only · constant volume",
                got={"violations": fails or "none", "advanced_hi_vol": advanced_hi,
-                    "advanced_e2e_live": moved}, output={"freq_live": f})
+                    "advanced_e2e_fixture": moved}, output={"freq_live": f})
 
 
 def _stc_effort_discipline(db):
@@ -13992,7 +14731,10 @@ def _stc_effort_discipline(db):
     case: a long easy run with LOW HR but a duration-lifted high Training Effect must read ON, never
     'too hard' (TE-gating would false-flag his cleanest easy run). Plus: a threshold-paced 'easy' run
     flags too_hard, TE only sets confidence, quality sandbagging reads too_easy/low, and the live read
-    is structurally sound with a spike-resistant HRmax (his raw max is a 210 strap artifact)."""
+    is structurally sound with a spike-resistant HRmax (his raw max is a 210 strap artifact).
+    §RD extension: with a detected structure CACHED, a quality run is graded on its work reps vs the
+    prescribed zone band (on/moderate + seg_read; sandbagged reps ⇒ too_easy; no-HR reps ⇒ pace
+    fallback), and without one the whole-run read stands — cached-only, never a fetch."""
     fails = []
     HM = 189
     def v(kind, hr, te):
@@ -14034,7 +14776,8 @@ def _stc_effort_discipline(db):
     mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
                 ("now", tdy.isoformat(), "{}", json.dumps(
                     {"build": {"weeks": [{"sessions": [{"date": qd, "kind": "interval"},
-                                                       {"date": ed, "kind": "easy"}]}]}})))
+                                                       {"date": ed, "kind": "easy"}]}]},
+                     "phases": [{"key": "build"}]})))
     for i, (dt, hr) in enumerate([(qd, 170), (ed, 168)]):
         mem.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
                     (i + 1, dt + "T19:00:00", dt, RUNNING_SPORT, 6.0, 2160, hr, hr + 20,
@@ -14047,6 +14790,52 @@ def _stc_effort_discipline(db):
         fails.append(f"easy date not matched: {kinds.get(ed)}")
     if md["easy_counts"]["judged"] != 1:          # only the easy-prescribed run is in the easy bucket
         fails.append(f"quality run leaked into easy score: judged={md['easy_counts']['judged']}")
+    qrow = next((r for r in md["runs"] if r["date"] == qd), {})
+    if qrow.get("seg_read"):                      # no structure cached yet ⇒ whole-run read stands
+        fails.append("seg read claimed without a cached structure")
+    # §RD × §6m — the per-rep quality read. With a detected structure cached, the interval run must
+    # be graded on its WORK reps vs the prescribed zone band (HRmax grid here: 95th-pct 190 ⇒ Z5
+    # starts 171): reps @175 ⇒ on/moderate + seg_read; the same reps @140 ⇒ too_easy (sandbagged —
+    # the whole-run average, diluted by wu/cd, could never say so this sharply); reps with NO HR
+    # fall back to pace vs the zone target. The easy run keeps the aerobic path (never seg-graded).
+    mem.execute("CREATE TABLE structcache(activity_id INTEGER PRIMARY KEY, structure TEXT, cached_at TEXT)")
+
+    def put_struct(work_hr, work_pace=295, rep_sec=180):
+        segs = [{"role": "warmup", "zone": "easy", "sec": 600, "km": 1.7, "pace": 350, "hr": 140}] + \
+               [{"role": "work", "zone": "interval", "sec": rep_sec, "km": 0.6, "pace": work_pace,
+                 "hr": work_hr} for _ in range(3)] + \
+               [{"role": "cooldown", "zone": "easy", "sec": 600, "km": 1.6, "pace": 360, "hr": 138}]
+        mem.execute("INSERT OR REPLACE INTO structcache VALUES(?,?,?)",
+                    (1, json.dumps({"v": STRUCT_VERSION, "ok": True, "kind": "interval",
+                                    "segments": segs}), "now"))
+        mem.commit()
+
+    def qread():
+        return next((r for r in effort_discipline(mem)["runs"] if r["date"] == qd), {})
+
+    put_struct(175)
+    r_on = qread()
+    if not (r_on.get("seg_read") and r_on.get("verdict") == "on"
+            and r_on.get("confidence") == "moderate" and (r_on.get("seg") or {}).get("n_work") == 3):
+        fails.append(f"rep read (hr in band) wrong: {r_on.get('verdict')}/{r_on.get('confidence')} "
+                     f"seg={r_on.get('seg')}")
+    put_struct(140)
+    if qread().get("verdict") != "too_easy":
+        fails.append(f"sandbagged reps not too_easy: {qread().get('verdict')}")
+    put_struct(None, work_pace=pace_zones(50.0)["interval"])   # no HR ⇒ pace-vs-target fallback
+    r_pace = qread()
+    if not (r_pace.get("seg_read") and r_pace.get("verdict") == "on"):
+        fails.append(f"pace-fallback rep read wrong: {r_pace.get('verdict')} seg={r_pace.get('seg')}")
+    # HR-LAG case (owner's 2026-07-05 observation): a SHORT rep's within-rep HR under-reads — it
+    # starts rested and peaks into the recovery — so 2-min reps with low in-rep HR but ON-target
+    # pace must read 'on' via the pace anchor, never 'sandbagged' off the lagging HR.
+    put_struct(150, work_pace=pace_zones(50.0)["interval"], rep_sec=120)
+    r_short = qread()
+    if not (r_short.get("seg_read") and r_short.get("verdict") == "on"):
+        fails.append(f"short-rep HR-lag mis-judged: {r_short.get('verdict')} "
+                     f"(within-rep HR lags; pace must lead under {EFFORT_SEG_HR_MIN_S}s)")
+    mem.execute("DELETE FROM structcache")
+    mem.commit()
     # Nearest-prescription matching (§6m follow-up): the pure matcher is the contract effort_discipline
     # calls. An ANTICIPATED quality session — run a day before its prescribed date, on a day with no session
     # — must claim that session and be judged as quality, not flagged as a blown easy day. An exact-date run
@@ -14086,8 +14875,11 @@ def _stc_effort_discipline(db):
                "effort monitor is HR-LED (a low-HR long run w/ duration-lifted TE reads ON not too-hard); "
                "prescribed quality dates are matched + excluded from the easy score (incl. an anticipated/"
                "postponed session matched to its nearest prescription within ±2d); HRmax spike-resistant; "
-               "the PUBLIC read is sanitized to a pace-based score with no HR/TE/feeling/critique",
-               passed=not fails, expect="HR gates · TE corroborates · quality excluded · public = pace, no HR",
+               "a cached §RD structure upgrades quality to a per-rep read (on/sandbag/pace-fallback), no "
+               "structure ⇒ whole-run read stands; the PUBLIC read is sanitized to a pace-based score "
+               "with no HR/TE/feeling/critique",
+               passed=not fails, expect="HR gates · TE corroborates · quality excluded · reps read when "
+               "cached · public = pace, no HR",
                got={"violations": fails or "none"},
                output={"easy_score": d.get("easy_score"), "hrmax": d.get("hrmax"),
                        "easy_counts": d.get("easy_counts"),
@@ -14600,7 +15392,8 @@ def _stc_plan_explain(db):
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     plan = json.loads(row["plan"]) if row else {}
     proj = (plan.get("feasibility") or {}).get("projected_ctl") or 0
-    ends = [(plan.get(k) or {}).get("end_ctl") or 0 for k in ("rebase", "base", "build", "peak", "taper")]
+    keys = ["rebase"] + [ph["key"] for ph in plan.get("phases", []) if ph.get("key") and ph["key"] != "rebase"]
+    ends = [(plan.get(k) or {}).get("end_ctl") or 0 for k in keys]   # chain segments' end_ctls count too
     ceiling = max([proj] + ends) + 6
     text = (r.get("headline", "") + " " + " ".join(r.get("points", []))).replace("≈", " ")
     cited = [int(n) for n in re.findall(r"CTL[^\d]{0,6}(\d{2,3})", text, re.IGNORECASE)]
@@ -14611,6 +15404,190 @@ def _stc_plan_explain(db):
                expect=f"structured + no CTL > {ceiling}", got={"cited_ctl": cited, "inflated": inflated},
                output={"headline": r.get("headline"), "points": r.get("points"),
                        "change_note": r.get("change_note"), "projected_race_ctl": proj})
+
+
+def _stc_junk_floor():
+    """§JR — the junk-run floor: a governed budget too thin for the week's template sheds DAYS,
+    never prescribing a run under RUN_MIN_KM (the 2026-07-05 live case: the ACWR brake crushed a
+    week into 0.3–1.4km stubs across 5 days). Locks: crushed ⇒ fewer, REAL runs; a budget whose
+    long share is itself a stub collapses to ONE run; a normal budget is untouched (floor dormant —
+    the min-dose consolidation reversion stands, this never grows normal weeks); a crushed BUILDING
+    week keeps its structured session while the easies shed days."""
+    from datetime import date
+    wk = {"wk": 4, "km": 16, "runs": 5, "long": 5, "strides": 0,
+          "intent": "Down week — absorb the block"}
+    fails = []
+    crushed, _ = _distribute_week(wk, date(2026, 7, 6), 130, 430)
+    if not (2 <= len(crushed) < 5 and all(s["km"] >= RUN_MIN_KM - 0.1 for s in crushed)):
+        fails.append(f"crushed: {[(s['kind'], s['km']) for s in crushed]}")
+    tiny, _ = _distribute_week(wk, date(2026, 7, 6), 45, 430)
+    if not (len(tiny) == 1 and tiny[0]["km"] >= RUN_MIN_KM):
+        fails.append(f"tiny not collapsed to one real run: {[(s['kind'], s['km']) for s in tiny]}")
+    normal, _ = _distribute_week(wk, date(2026, 7, 6), 290, 430)
+    if len(normal) != 5 or any(s["km"] < RUN_MIN_KM for s in normal):
+        fails.append(f"normal week disturbed: {[(s['kind'], s['km']) for s in normal]}")
+    zones = {"easy_top": 430, "easy": 460, "marathon": 400, "threshold": 370, "interval": 340}
+    qwk = {**wk, "intent": "General", "quality": [{"kind": "interval", "zone": "interval",
+           "frac": 0.12, "structure": "intervals", "rep_min": 2, "rec_min": 2}]}
+    qcr, _ = _distribute_week(qwk, date(2026, 7, 6), 130, 430, zones)
+    plain = [s for s in qcr if not s.get("reps")]
+    if not any(s.get("reps") for s in qcr):
+        fails.append("crushed quality week lost its structured session")
+    if any(s["km"] < RUN_MIN_KM - 0.1 for s in plain):
+        fails.append(f"quality-week easies under floor: {[(s['kind'], s['km']) for s in plain]}")
+    twk = {**wk, "intent": "Taper — drop volume, keep sharpness"}
+    tap, _ = _distribute_week(twk, date(2026, 7, 6), 130, 430)
+    if len(tap) != 5:
+        fails.append(f"taper not exempt (race-week leg-looseners are real): {len(tap)} runs")
+    return _st("det", "junk-floor",
+               "no prescribed run under RUN_MIN_KM: a crushed budget sheds days (real runs only), "
+               "collapses to one run at the extreme, leaves normal weeks byte-identical, and keeps "
+               "the structured session on a crushed building week",
+               passed=not fails, expect=f"stubs shed days · ≥{RUN_MIN_KM}km/run · normal untouched",
+               got={"violations": fails or "none"},
+               output={"crushed": [(s["kind"], s["km"]) for s in crushed],
+                       "tiny": [(s["kind"], s["km"]) for s in tiny]})
+
+
+def _stc_structure():
+    """§RD — the workout-structure classifier reads a recorded pace profile back into the plan's
+    vocabulary. Fixtures are synthesized 1Hz streams with deterministic jitter; the flagship case is
+    the owner's worked example VERBATIM (12min@5:50 wu · 3:00@5:10 / 1:00@6:10 / 4:00@5:05 / 1:30@
+    6:15 / 3:30@5:15 · 15min@6:30 cd ⇒ intervals, 3 work reps). Locks: interval/tempo/long_mp/easy/
+    long shapes, jitter invariance (same verdict under a different noise seed), the GAP path (a
+    constant-EFFORT run over rolling ±6% grades must read flat easy, not intervals), strides noted
+    without corrupting the easy kind, honest refusal on short/garbage input, and determinism."""
+    fails = []
+
+    def synth(spec, hilly=False, seed=1.0, with_hr=False):
+        # spec entries: (sec, pace) or (sec, pace, cadence) — a cadence stream is emitted only when
+        # some entry carries one, so pace-only fixtures still exercise the no-cadence fallback
+        tim, dist, hr, elev, cads = [], [], [], [], []
+        has_cad = any(len(entry) > 2 for entry in spec)
+        t, d, e = 0, 0.0, 100.0
+        for entry in spec:
+            sec, pace = entry[0], entry[1]
+            c = entry[2] if len(entry) > 2 else 158
+            for _ in range(int(sec)):
+                eff = pace * (1 + 0.02 * math.sin(seed * 7.3 + t * 0.37) * math.cos(t * 0.11))
+                if hilly:                                    # constant effort over rolling grades:
+                    g = 6.0 * math.sin(t / 120.0)            # recorded pace slows uphill by the same
+                    eff *= 1 + 0.029 * g + 0.0015 * g * g    # cost model the classifier removes
+                    e += g / 100.0 * (1000.0 / eff)
+                t += 1
+                d += 1000.0 / eff
+                tim.append(t)
+                dist.append(round(d, 1))
+                hr.append(round(150 - (pace - 330) * 0.5) if with_hr else None)
+                elev.append(round(e, 1))
+                cads.append(c)
+        s = {"time": tim, "distance": dist, "heart_rate": hr if with_hr else []}
+        if has_cad:
+            s["cadence"] = cads
+        if hilly:
+            s["elevation_corrected"] = elev
+        return s
+
+    Z = {"easy": 400, "easy_top": 360, "lt1": 345, "marathon": 330, "threshold": 310, "interval": 290}
+    duarte = [(720, 350), (180, 310), (60, 370), (240, 305), (90, 375), (210, 315), (900, 390)]
+
+    def expect(name, streams, kind, n_work, extra=None):
+        r = classify_structure(streams, Z)
+        if not r.get("ok"):
+            fails.append(f"{name}: unreadable ({r.get('reason')})")
+            return None
+        if r["kind"] != kind or r["n_work"] != n_work:
+            fails.append(f"{name}: kind={r['kind']} n_work={r['n_work']} "
+                         f"(want {kind}/{n_work}) — {r['summary']}")
+        if extra:
+            extra(name, r)
+        return r
+
+    def duarte_shape(name, r):
+        roles = [s["role"] for s in r["segments"]]
+        if roles != ["warmup", "work", "float", "work", "float", "work", "cooldown"]:
+            fails.append(f"{name}: roles {roles}")
+        wu, cdn = r["segments"][0], r["segments"][-1]
+        if not (11 <= wu["sec"] / 60 <= 13 and 14 <= cdn["sec"] / 60 <= 16):
+            fails.append(f"{name}: wu {wu['sec']}s / cd {cdn['sec']}s off the 12/15min truth")
+        if "3×" not in r["summary"]:
+            fails.append(f"{name}: summary lost the rep count — {r['summary']}")
+
+    r1 = expect("duarte", synth(duarte, with_hr=True), "interval", 3, duarte_shape)
+    expect("duarte-reseed", synth(duarte, seed=4.2), "interval", 3, duarte_shape)
+    if r1 and classify_structure(synth(duarte, with_hr=True), Z) != r1:
+        fails.append("not deterministic on identical input")
+    if r1 and not all(s.get("hr") for s in r1["segments"]):
+        fails.append("segments lost the HR channel (the effort monitor needs it)")
+    expect("easy", synth([(2700, 385)]), "easy", 0)
+    expect("long", synth([(5700, 390)]), "long", 0)
+    expect("tempo", synth([(600, 355), (1200, 312), (480, 380)]), "tempo", 1)
+    expect("long-mp", synth([(4800, 385), (1500, 332)]), "long_mp", 1)
+    expect("hilly-const-effort", synth([(3000, 380)], hilly=True), "easy", 0)  # GAP flattens hills
+    # in-run strides at REALISTIC contrast (~35% over easy, cadence up ~11% — the RD_STRIDE_PEAK
+    # bar exists exactly so that 10–20% easy-run texture does NOT count, and the RD_STRIDE_CAD
+    # gate so that a GPS speed spike with FLAT cadence does not either: his 2026-07-04 easy run
+    # grew 4 phantom strides from wobbles at a flat 10% bar, then 4 more from GPS spikes that
+    # cleared even the 22% pace bar at full stream resolution)
+    st = expect("strides", synth([(1500, 385, 158), (25, 285, 176), (300, 385, 158),
+                                  (25, 283, 174), (300, 385, 158)]), "easy", 0)
+    if st and st.get("strides") != 2:
+        fails.append(f"in-run strides: counted {st.get('strides')} of 2 (the peak pass is a COUNT)")
+    tex = expect("easy-texture", synth([(1200, 400), (20, 355), (600, 395), (30, 340), (600, 400)]),
+                 "easy", 0)
+    if tex and tex.get("strides"):
+        fails.append(f"easy-run texture (~11–15% wobbles) counted as strides: {tex.get('strides')}")
+    gps = expect("gps-spike", synth([(1200, 400, 158), (15, 290, 158), (900, 400, 158),
+                                     (15, 285, 158), (600, 400, 158)]), "easy", 0)
+    if gps and gps.get("strides"):
+        fails.append(f"GPS spikes (fast pace, FLAT cadence) counted as strides: {gps.get('strides')}")
+    # a STRIDES SESSION (the real 2026-07-04 case): walking recovery makes each ~25s stride its own
+    # short fast block — they must count as strides, and the summary pace must be honest
+    # time-over-distance (the v1 block-weighted mean read a 7:58 session as @10:46)
+    ss = expect("strides-session",
+                synth([(300, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 5 + [(210, 540, 110)]),
+                "strides", 0)   # ≥4 strides over a walking base ⇒ the dedicated Strides kind
+    if ss:
+        # the global peak pass counts what the CHART shows (the owner's 2026-07-05 framing) — on a
+        # clean fixture that's exact, and he reads the number off the tile as ground truth
+        if ss.get("strides") != 5:
+            fails.append(f"strides session: counted {ss.get('strides')} of 5 peaks")
+        tot_s = sum(s["sec"] for s in ss["segments"])
+        tot_k = sum(s["km"] for s in ss["segments"])
+        if fmt_pace(round(tot_s / tot_k)) not in ss["summary"]:
+            fails.append(f"summary pace not time/distance-honest: {ss['summary']}")
+        sp = ss.get("stride_pace")
+        if not sp or not (250 <= sp <= 340):                 # ~280 synth, frame-diluted
+            fails.append(f"strides-only pace off (want ≈4:40): {sp}")
+    # FUSED cluster (the real 2026-07-05 under-count: 6 of his 11 at full streams): two strides
+    # bridged by a quick-but-still-fast recovery form ONE wide episode — its internal dip-separated
+    # peaks must each count, not be discarded with the episode
+    fu = expect("strides-fused",
+                synth([(300, 540, 110), (25, 280, 172), (20, 430, 150), (25, 282, 172),
+                       (90, 540, 110), (25, 281, 172), (90, 540, 110), (25, 283, 172),
+                       (240, 540, 110)]), "strides", 0)
+    if fu and fu.get("strides") != 4:
+        fails.append(f"fused cluster: counted {fu.get('strides')} of 4 (2 fused + 2 apart)")
+    # SET grouping — his "5 then a longer rest then 6": a clearly longer gap splits the sets
+    ts = expect("strides-two-sets",
+                synth([(300, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 3
+                      + [(120, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 3
+                      + [(120, 540, 110)]), "strides", 0)
+    if ts:
+        if ts.get("strides") != 6 or ts.get("stride_sets") != [3, 3]:
+            fails.append(f"set grouping wrong: n={ts.get('strides')} sets={ts.get('stride_sets')}")
+        if "(3+3)" not in ts["summary"]:
+            fails.append(f"summary lost the set grouping: {ts['summary']}")
+    for name, bad in (("short", synth([(300, 380)])), ("empty", {"time": [], "distance": []})):
+        if classify_structure(bad, Z).get("ok"):
+            fails.append(f"{name} input classified instead of refused")
+    return _st("det", "structure",
+               "§RD classifier: owner's worked example reads back verbatim (3-rep intervals + wu/cd),"
+               " tempo/long_mp/easy/long shapes, jitter-invariant, grade-adjusted (constant-effort"
+               " hills stay easy), strides noted, short/garbage refused, deterministic",
+               passed=not fails, expect="every fixture shape reads back; no forced labels",
+               got={"violations": fails or "none"},
+               output={"duarte_summary": r1 and r1["summary"]})
 
 
 def _stc_post_race_reckoning():
@@ -14741,6 +15718,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_long_run(),
                  lambda: _stc_earned_lift(), lambda: _stc_earned_gate(db),
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
+                 lambda: _stc_structure(), lambda: _stc_junk_floor(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),

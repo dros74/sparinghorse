@@ -12,6 +12,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-05
+
+The app now reads your runs back to you — and a safety-brake week can no longer decay into junk
+prescriptions.
+
+### Added
+- **"Read back" — automatic workout-structure detection.** When a run lands, the app decodes its
+  recorded pace profile into the plan's own vocabulary and narrates it on the activity tile:
+  `Intervals — 12min wu @5:50 · 3× 3–4min @5:05–5:15 w/ 60–90s floats · 15min cd @6:30`, or simply
+  `Easy run — 45min @6:25/km · 2× strides`. Structure is found by *contrast* (sustained pace
+  shifts on grade-adjusted streams at any sample rate — hills can't fake intervals), then each
+  block is named against your zones **as of that day**, so the read tracks your fitness, not a
+  constant. Honest by design: a noisy signal yields no label rather than a guess, and the
+  structure line describes what you did — whether it was too hot stays the effort monitor's
+  verdict. New runs classify at sync; older ones the first time you open them (the run browser
+  included). The label is pace-based and public-safe; per-segment heart rate stays private.
+- **Strides, counted the way a human reads the chart.** Short, prominent speed peaks over the
+  run's local valley floor — each countersigned by a cadence rise, because a GPS speed spike
+  leaves cadence flat and pace alone cannot tell them apart — with width judged on the time axis
+  (seconds is a stride, minutes is a rep). A dedicated strides workout gets its own read:
+  `Strides — 18min @7:53/km · 11× strides (5+6) @4:40/km` — count, set grouping detected from the
+  gap pattern, and the strides-only pace alongside the whole-session pace.
+- **Per-rep effort verdicts.** A quality session with a detected structure is now graded on its
+  work reps only — warm-up, floats and cool-down excluded — against the prescribed zone's HR
+  band, tagged *·reps read* (the whole-run *·rough read* remains only where no structure exists).
+  Reps shorter than ~3 minutes are judged on pace instead: a short rep starts rested and the HR
+  peak lands in the recovery, so a within-rep average would under-read every short rep.
+- **Junk-run floor.** When the safety governor crushes a week's budget (say, after an acute-load
+  spike), the week now sheds run-days instead of prescribing 300-metre stubs: no planned run
+  under 2.5 km, a gutted week collapses to fewer real runs (a single one at the extreme), taper
+  race-week leg-looseners stay exempt, and normal weeks are untouched.
+
+### Fixed
+- The earned-volume and 6th-run gate self-tests run their end-to-end checks on a constructed
+  fixture instead of the ambient database — their verdicts no longer flip with whatever data is
+  loaded (both failed on a live copy after the training-regime flip).
+- The quality-drop reshape's documentation now states its honest guarantee: weekly load is
+  *bounded* at the pre-drop level, not "preserved exactly" — the pure-easy layout can carry
+  slightly less.
+- The last plan readers that only understood single-race plans now read the whole multi-race
+  road (chain segments count toward banked evidence and effort matching), with a legacy fallback
+  so an old saved plan can't silently zero the banked streak right after an upgrade.
+
 ## [0.11.0] - 2026-07-04
 
 Quality sessions now hand you their execution plan, and a new run-browser page turns your whole

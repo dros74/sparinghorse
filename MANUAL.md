@@ -239,6 +239,14 @@ hard); each run's `anchor` names the basis it used. Prescribed quality sessions 
 within ±2 days and excluded from the easy score, so an anticipated or postponed session isn't misread. The
 **public** view is sanitized to a pace-based score with no HR, no critique.
 
+**Quality sessions get a per-rep read** where the run's detected structure (the "Read back" line) is
+available: the verdict is graded on the **work reps only** — warm-up, floats and cool-down excluded —
+against the prescribed zone's HR band, tagged **·reps read**. Reps shorter than ~3 minutes are judged
+on **pace** vs the zone target instead: a short rep starts rested and HR peaks *into* the recovery
+(the pace and HR peaks are out of phase), so a within-rep HR average would under-read every short rep
+as sandbagged. Pace also stands in whenever the reps carry no HR. Without a detected structure the whole-run average has to stand in, tagged **·rough read**
+(reps blend with recovery, so that verdict is low-confidence by construction).
+
 **How "effort" is actually computed.** The app keeps the *prescription* and the *judgment* on different
 anchors, on purpose:
 
@@ -300,6 +308,14 @@ AI needed to catch them) and, on red, halts the plan and tells you to see a doct
 The most recent **running** activity (trail and treadmill count), with a per-point trace (pace / HR / cadence
 / elevation) and a route map. The **map is private-only** (location privacy). If the most recent activity is
 a non-run, a private note tells you so.
+
+**Read back** — under the metrics, the app narrates what the recorded pace profile *says you did*, in the
+plan's own vocabulary: `Intervals — 12min wu @5:50 · 3× 3–4min @5:05–5:15 w/ 60–90s floats · 15min cd @6:30`,
+or simply `Easy run — 45min @6:25/km · 2× strides`. Structure is detected from **contrast** (sustained pace
+shifts, grade-adjusted so hills don't fake intervals), then each block is named against **your zones as of
+that day**. It's a description of what happened, never a judgment — and if the signal is too noisy it says
+nothing rather than guess. New runs are read at sync; older runs the first time you open them (in the
+`/runs` browser too). The label is pace-based and public-safe; per-segment HR stays private.
 
 A thin **HR-zone band** runs along the top of the chart: each section of the run is coloured by the HR zone
 you were in (the same Z1–Z5 model used everywhere else — LTHR-anchored when confident, %HRmax otherwise; hover
