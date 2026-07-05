@@ -1019,6 +1019,14 @@ MARKERS = {
     # the trend vs your OWN history is the signal). HRV = sleeping RMSSD.
     "resting_hr":        {"label": "Resting HR", "unit": "bpm", "ref": [None, None], "good": "low"},
     "hrv":               {"label": "HRV (sleeping RMSSD)", "unit": "ms", "ref": [None, None], "good": "high"},
+    # Sleep, synced from Runalyze's per-night summary. No clinical band — the trend vs your own history
+    # is the signal; displayed alongside HRV/RHR, never a plan input. night_hr = overnight lowest HR
+    # (a de-facto resting-HR that, unlike resting_hr, continues through the Suunto era).
+    "sleep_duration":    {"label": "Sleep", "unit": "h", "ref": [None, None], "good": "high"},
+    "sleep_quality":     {"label": "Sleep quality", "unit": "/10", "ref": [None, None], "good": "high"},
+    "sleep_deep":        {"label": "Deep sleep", "unit": "min", "ref": [None, None], "good": "high"},
+    "sleep_rem":         {"label": "REM sleep", "unit": "min", "ref": [None, None], "good": "high"},
+    "night_hr":          {"label": "Overnight low HR", "unit": "bpm", "ref": [None, None], "good": "low"},
 }
 
 
@@ -1497,6 +1505,38 @@ HEALTH_SYNC = {
     "resting_hr": ("get_resting_heart_rate_trend", "heart_rate"),
 }
 
+# Sleep is one MCP summary tool feeding SEVERAL markers (one row per night). Field -> (marker, transform).
+# night_hr is the overnight LOWEST HR — kept a DISTINCT marker, NOT merged into resting_hr, which is
+# Runalyze's algorithmic "dynamic resting HR" (a different measurement that dead-ends at the
+# Garmin→Suunto switch). Splicing the two would misread a device change as a physiological trend.
+SLEEP_MARKERS = {
+    "duration":            ("sleep_duration", lambda v: round(v / 60.0, 2)),  # minutes → hours
+    "quality":             ("sleep_quality", float),
+    "deep_sleep_duration": ("sleep_deep", float),
+    "rem_duration":        ("sleep_rem", float),
+    "hr_lowest":           ("night_hr", float),
+}
+
+
+def _sleep_main_by_date(items):
+    """Runalyze can return several sleep records for one day (naps, split sleep). Attribute each to the
+    morning you WOKE (start + duration) and keep the single longest per wake-date — the main overnight
+    sleep — so the series is one honest point per night. Returns {wake_date_iso: item}."""
+    from datetime import datetime as _dt, timedelta as _td
+    best = {}
+    for it in items or []:
+        dur, dtm = it.get("duration"), it.get("datetime")
+        if not dur or not dtm:
+            continue
+        try:
+            wake = (_dt.fromisoformat(dtm) + _td(minutes=dur)).date().isoformat()
+        except ValueError:
+            continue
+        cur = best.get(wake)
+        if cur is None or dur > cur["duration"]:
+            best[wake] = it
+    return best
+
 
 def sync_health_metrics(db, backfill=False):
     """Pull watch-recorded daily metrics (HRV / weight / resting HR) from Runalyze's MCP trend tools into
@@ -1524,6 +1564,20 @@ def sync_health_metrics(db, backfill=False):
                        "VALUES (?,?,?,?,?)", (marker, dt[:10], float(val), "runalyze", it.get("source") or ""))
             n += 1
         out[marker] = n
+    # Sleep summary → per-night markers (duration/stages/quality/overnight-HR). DISPLAY ONLY: the study
+    # found no acute sleep→next-day-quality signal, so sleep is never a plan/readiness input (PROJECT_LOG).
+    try:
+        sc = mcp_call("get_sleep_summary", {"start_date": start, "end_date": end.isoformat()})
+    except (RunalyzeError, requests.RequestException, KeyError, ValueError, TypeError):
+        sc = None
+    for wake, it in _sleep_main_by_date((sc or {}).get("items")).items():
+        for field, (marker, tf) in SLEEP_MARKERS.items():
+            val = it.get(field)
+            if val is None:
+                continue
+            db.execute("INSERT OR REPLACE INTO health_markers (marker, date, value, source, note) "
+                       "VALUES (?,?,?,?,?)", (marker, wake, float(tf(val)), "runalyze", it.get("source") or ""))
+            out[marker] = out.get(marker, 0) + 1
     db.commit()
     return out
 
@@ -4109,7 +4163,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     projected from today (model A — no double-count). The remaining days are generated EASY (a
     partially-done week's remainder is governed recovery volume; a missed quality day isn't crammed
     into the back of the week). Load already done this week therefore shrinks the remaining allowance,
-    and the EOW ACWR ceiling still holds. Default None = full-week behaviour (every existing caller)."""
+    and the EOW ACWR ceiling still holds. §6o-B: when `week_actuals` is supplied, the km already RUN
+    this week is also charged against the week's km intent (one-way — it only ever reduces the
+    remainder), so an over-run week stops laying sessions on the remaining days instead of
+    re-prescribing volume as if the week were fiction. Default None = full-week behaviour."""
     from datetime import timedelta
     weeks = []
     ctl, atl = ctl0, atl0
@@ -4145,29 +4202,45 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             rem = [o for o in offsets if o >= today_off]
             full, _ = _distribute_week(wk, wk_start_d, intent_trimp, easy_pace_sec, zones)
             elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
-            # §6e-FREQ — frequency met: if the athlete has already logged the week's prescribed run
-            # COUNT *and* km, an additional same-week run isn't forced (a met-week junk run does nothing
-            # for aerobic shape). Drop the remaining runs → rest; never force load. Down/quality-bearing
-            # remainders are unaffected because §6o already generates the remainder EASY in every phase.
-            freq_met = False
+            # §6e-FREQ + §6o-B — what this week's ACTUALS already cover. freq_met: run COUNT *and* km
+            # both logged → the remainder is optional rest (a met-week junk run does nothing for
+            # aerobic shape). vol_met (§6o-B, the 2026-07-05 over-run incident): the km intent alone
+            # is spent — an over-run week must NOT lay more sessions on the remaining days just
+            # because the run count is short (more runs to hit a count = junk by definition). "Spent"
+            # = less than one §JR-honest run left (taper exempt: a tiny shakeout is real).
+            freq_met = vol_met = False
             if rem and week_actuals is not None:
                 a_runs, a_km = week_actuals
+                left_tr = max(0.0, (wk.get("km") or 0) - a_km) * TRIMP_PER_KM
+                min_left = 0.0 if _is_taper(wk.get("intent")) else \
+                    RUN_MIN_KM * (easy_pace_sec / 60.0) * EASY_TRIMP_PER_MIN
                 freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= (wk.get("km") or 0)
-                if freq_met:
+                vol_met = (wk.get("km") or 0) > 0 and left_tr <= min_left
+                if freq_met or vol_met:
                     rem = []
             if rem:
                 allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT,
                                           zones=None, roll_from=today.isoformat(), days_override=rem,
                                           soft_ctl_floor=soft_ctl_floor)
-                chosen = min(intent_trimp * len(rem) / max(1, len(offsets)), allowed)
+                prorate = intent_trimp * len(rem) / max(1, len(offsets))
+                if week_actuals is not None:
+                    # §6o-B — charge the ACTUAL km already run against the week's intent: the
+                    # remainder may never re-prescribe volume he has already done. One-way (min), so
+                    # an under-run early week still gets only its day-prorated share — a missed day
+                    # is never crammed into the back of the week.
+                    prorate = min(prorate, max(0.0, (wk.get("km") or 0) - week_actuals[1]) * TRIMP_PER_KM)
+                chosen = min(prorate, allowed)
                 rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None, days_override=rem)
-            elif freq_met:                                 # week's frequency + volume already met → optional
+            elif freq_met or vol_met:                      # week already covered → optional, never forced
                 a_runs, a_km = week_actuals
+                what = (f"✓ Week's frequency met — {a_runs}/{wk.get('runs')} runs, "
+                        f"{a_km}km ≥ {wk.get('km')}km planned." if freq_met else
+                        f"✓ Week's volume already run — {a_km}km of {wk.get('km')}km planned, "
+                        f"in {a_runs} runs.")
                 rem_s = [{"date": today.isoformat(), "kind": "rest", "optional": True,
                           "km": 0.0, "minutes": 0, "trimp": 0.0,
-                          "note": (f"✓ Week's frequency met — {a_runs}/{wk.get('runs')} runs, "
-                                   f"{a_km}km ≥ {wk.get('km')}km planned. Today is optional: rest is "
-                                   f"prescribed, but an easy run is fine if you feel good.")}]
+                          "note": what + (" Today is optional: rest is prescribed, but an easy run "
+                                          "is fine if you feel good.")}]
                 chosen, dt = 0.0, {}
             else:                                          # today is past this week's last run → only decay
                 chosen, rem_s, dt = 0.0, [], {}
@@ -4184,8 +4257,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                           "proj_acwr": eow, "peak_acwr": peak, "proj_ctl": round(ctl, 1),
                           "intent_km": wk["km"], "adjusted": adjusted["touched"],
                           "clipped": False, "partial": True,
-                          "frequency_met": freq_met,
-                          "freq_actual": list(week_actuals) if freq_met else None})
+                          "frequency_met": freq_met, "volume_met": vol_met,
+                          "freq_actual": list(week_actuals) if (freq_met or vol_met) else None})
             continue
         allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones, ramp_max=ramp,
                                   soft_ctl_floor=soft_ctl_floor)
@@ -7232,48 +7305,78 @@ def _zone_idx(hr, cutoffs):
     return sum(1 for c in cutoffs if hr >= c)
 
 
+def _agg_new():
+    return {"n": 0, "dist": 0.0, "sec": 0.0, "trimp": 0.0, "longest": 0.0, "hw": 0.0, "hs": 0.0}
+
+
+def _agg_add(a, r):
+    a["n"] += 1
+    a["dist"] += r["distance"]
+    a["sec"] += r["duration"] or 0.0
+    a["trimp"] += r["trimp"] or 0.0
+    a["longest"] = max(a["longest"], r["distance"])
+    if r["hr_avg"] and r["duration"]:                 # duration-weighted avg HR — a long easy
+        a["hw"] += r["hr_avg"] * r["duration"]        # hour outweighs a short blast
+        a["hs"] += r["duration"]
+
+
+def _agg_stats(a):
+    """One stats-rail column — the same dict shape for the month, 12-month and all-time windows."""
+    if not a["n"]:
+        return {"runs": 0}
+    pace = a["sec"] / (a["dist"] * 60) if (a["sec"] and a["dist"]) else None
+    return {"runs": a["n"], "km": round(a["dist"], 1),
+            "hms": f"{int(a['sec'] // 3600)}h {int((a['sec'] % 3600) // 60):02d}m" if a["sec"] else None,
+            "pace": f"{int(pace)}:{int((pace * 60) % 60):02d}" if pace else None,
+            "hr_avg": round(a["hw"] / a["hs"]) if a["hs"] else None,
+            "trimp": round(a["trimp"]) if a["trimp"] else None,
+            "longest_km": round(a["longest"], 1) if a["longest"] else None}
+
+
 def _runs_month(db, month):
     """§RB — one calendar month of activity for the /runs explorer: every non-dropped run grouped
     per day (time-ordered, so a double shows both), each with the id the profile/map pipeline needs
     plus a dot colour (dominant-intensity proxy = zone of avg HR; None degrades to neutral). Days
     with only non-run activity are listed separately (faint tick, not clickable — the tile is
-    run-centric). `first`/`last` bound the month navigation to where data actually exists."""
+    run-centric). `first`/`last` bound the month navigation to where data actually exists.
+    The stats rail gets three windows over the same run set in one pass: the browsed month, the
+    trailing 12 calendar months ending with it (moves with the nav, so browsing history compares
+    like with like), and all time — plus `since`, the first counted run's date."""
     drop = dropped_ids(db)
     cut = (hr_zones(db) or {}).get("cutoffs")
     days, other = {}, set()
-    dist = sec = trimp = longest = 0.0
-    hr_wsum = hr_wsec = 0.0            # duration-weighted avg HR (a long easy hour outweighs a short blast)
+    y, m = int(month[:4]), int(month[5:7])
+    mlo, mhi = month + "-01", month + "-31"           # ISO strings compare as dates
+    k = y * 12 + (m - 1) - 11                         # first month of the trailing-12 window
+    ylo = f"{k // 12:04d}-{k % 12 + 1:02d}-01"
+    a_month, a_12mo, a_all = _agg_new(), _agg_new(), _agg_new()
+    since = None
     for r in db.execute(
         "SELECT id, date, date_time, sport, distance, duration, hr_avg, trimp FROM activities "
-        "WHERE date LIKE ? ORDER BY date_time", (month + "-%",)
-    ).fetchall():
-        if r["id"] in drop:
+        "ORDER BY date_time").fetchall():
+        if r["id"] in drop or not r["date"]:
             continue
+        in_month = mlo <= r["date"] <= mhi
         if not (_is_run_family(r["sport"]) and (r["distance"] or 0) > 0):
-            other.add(r["date"])
+            if in_month:
+                other.add(r["date"])
             continue
+        since = since or r["date"]
+        _agg_add(a_all, r)
+        if ylo <= r["date"] <= mhi:
+            _agg_add(a_12mo, r)
+        if not in_month:
+            continue
+        _agg_add(a_month, r)
         pace = (r["duration"] / (r["distance"] * 60)) if (r["duration"] and r["distance"]) else None
         days.setdefault(r["date"], []).append({
             "id": r["id"], "t": (r["date_time"] or "")[11:16], "km": round(r["distance"], 1),
             "pace": f"{int(pace)}:{int((pace * 60) % 60):02d}" if pace else None,
             "z": _zone_idx(r["hr_avg"], cut)})
-        dist += r["distance"]
-        sec += r["duration"] or 0.0
-        trimp += r["trimp"] or 0.0
-        longest = max(longest, r["distance"])
-        if r["hr_avg"] and r["duration"]:
-            hr_wsum += r["hr_avg"] * r["duration"]; hr_wsec += r["duration"]
-    n = sum(len(v) for v in days.values())
-    mpace = sec / (dist * 60) if (sec and dist) else None
-    stats = {"runs": n, "km": round(dist, 1),
-             "hms": f"{int(sec // 3600)}h {int((sec % 3600) // 60):02d}m" if sec else None,
-             "pace": f"{int(mpace)}:{int((mpace * 60) % 60):02d}" if mpace else None,
-             "hr_avg": round(hr_wsum / hr_wsec) if hr_wsec else None,
-             "trimp": round(trimp) if trimp else None,
-             "longest_km": round(longest, 1) if longest else None} if n else {"runs": 0}
     b = db.execute("SELECT MIN(date) AS lo, MAX(date) AS hi FROM activities WHERE "
                    + RUN_FAMILY_SQL).fetchone()
-    return {"ok": True, "month": month, "days": days, "stats": stats,
+    return {"ok": True, "month": month, "days": days, "stats": _agg_stats(a_month),
+            "stats12": _agg_stats(a_12mo), "statsAll": _agg_stats(a_all), "since": since,
             "other": sorted(other - set(days)),
             "first": (b["lo"] or "")[:7] or None, "last": (b["hi"] or "")[:7] or None}
 
@@ -8164,14 +8267,19 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   body[data-page="runs"] #sec-recent{display:block!important}
   .rcal-wrap{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
   .rcal{flex:1 1 460px;max-width:560px}
-  .rcal-stats{flex:1 1 210px;min-width:210px;border-left:1px solid var(--line);padding-left:26px}
+  .rcal-stats{flex:1 1 300px;min-width:280px;border-left:1px solid var(--line);padding-left:26px}
   @media (max-width:820px){ .rcal-stats{border-left:0;padding-left:0} }
   .rst-title{font-family:var(--serif);font-size:15px;font-weight:600;margin-bottom:8px}
-  .rst{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:5px 0;
-    border-bottom:1px solid color-mix(in oklab,var(--line),transparent 45%);font-size:12px;color:var(--muted)}
-  .rst:last-child{border-bottom:0}
-  .rst b{font-size:15px;color:var(--text);font-weight:600;white-space:nowrap}
-  .rst b small{font-size:10px;color:var(--muted);font-weight:400}
+  .rst3{display:grid;grid-template-columns:minmax(72px,auto) repeat(3,minmax(52px,1fr));gap:10px;
+    align-items:baseline;padding:5px 0;font-size:12px;color:var(--muted);
+    border-bottom:1px solid color-mix(in oklab,var(--line),transparent 45%)}
+  .rst3:last-of-type{border-bottom:0}
+  .rst3 i{font-style:normal;font-size:13px;color:var(--text);font-weight:600;text-align:right;white-space:nowrap}
+  /* fixed unit slot (sized for TRIMP, empty when unitless) so the NUMBERS share one right edge */
+  .rst3 i small{display:inline-block;width:30px;margin-left:3px;text-align:left;
+    font-size:9px;color:var(--muted);font-weight:400}
+  .rst3-head i{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+  .rst-since{margin-top:7px;font-size:10.5px;color:var(--muted);text-align:right}
   .rcal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
   .rcal-head b{font-family:var(--serif);font-size:16px;font-weight:600}
   .rcal-nav{font:inherit;font-size:15px;line-height:1;padding:3px 11px;background:none;color:var(--muted);
@@ -9330,20 +9438,27 @@ async function loadRunsCal(month){
     cells+=`<div class="${cls}" data-date="${date}"${tip}>${day}<div class="rcal-dots">${dots}</div></div>`;
   }
   const zl=["Z1","Z2","Z3","Z4","Z5"].map((z,i)=>`<span><span class="rcal-dot" style="background:${HRZONE_COLORS[i]}"></span>${z}</span>`).join("");
-  // month roll-up rail (server-computed over the same non-dropped run set the calendar shows)
-  const st=d.stats||{};
-  const srow=(k,v,u,tip)=>v==null?"":`<div class="rst"${tip?` title="${tip}"`:""}><span>${k}</span><b>${v}${u?`<small> ${u}</small>`:""}</b></div>`;
-  const statsHtml = st.runs
-    ? `<div class="rcal-stats"><div class="rst-title">Month totals</div>`+
-      srow("Runs", st.runs)+
-      srow("Distance", st.km, "km")+
-      srow("Time on feet", st.hms)+
-      srow("Avg pace", st.pace, "/km")+
-      srow("Avg heart rate", st.hr_avg, "bpm", "Duration-weighted across the month's runs — a long easy hour counts for more than a short blast")+
-      srow("Training load", st.trimp, "TRIMP")+
-      srow("Longest run", st.longest_km, "km")+
-      `</div>`
-    : `<div class="rcal-stats"><div class="rst-title">Month totals</div><div class="muted" style="font-size:12px">No runs this month.</div></div>`;
+  // roll-up rail: three windows over the same non-dropped run set the calendar shows — the browsed
+  // month, the trailing 12 calendar months ending with it (moves with the nav), and all time
+  const cols=[d.stats||{}, d.stats12||{}, d.statsAll||{}];
+  const since=d.since?d.since.split("-").reverse().join("/"):null;
+  // numbers share one right edge: every cell carries a fixed-width unit slot (sized for TRIMP,
+  // empty when unitless) and thousands get a narrow space so 121 130 reads at a glance
+  const fmtN=v=>{const [i,f]=String(v).split("."); return i.replace(/\B(?=(\d{3})+(?!\d))/g," ")+(f?"."+f:"");};
+  const c3=(k,f,u,tip)=>`<div class="rst3"${tip?` title="${tip}"`:""}><span>${k}</span>`+
+    cols.map(s=>{const v=s[f]; return `<i>${v==null?"—":(typeof v==="number"?fmtN(v):v)}<small>${v!=null&&u?u:""}</small></i>`;}).join("")+`</div>`;
+  const statsHtml =
+    `<div class="rcal-stats"><div class="rst-title">Totals &amp; averages</div>`+
+    `<div class="rst3 rst3-head"><span></span><i>Month<small></small></i><i title="The 12 calendar months ending with the browsed month">12 mo<small></small></i><i${since?` title="Since ${since}"`:""}>All time<small></small></i></div>`+
+    c3("Runs","runs")+
+    c3("Distance","km","km")+
+    c3("Time on feet","hms")+
+    c3("Avg pace","pace","/km")+
+    c3("Avg HR","hr_avg","bpm","Duration-weighted across each window's runs — a long easy hour counts for more than a short blast")+
+    c3("Load","trimp","TRIMP")+
+    c3("Longest run","longest_km","km")+
+    (since?`<div class="rst-since">all time = since ${since}</div>`:"")+
+    `</div>`;
   host.innerHTML=`<div class="rcal-wrap"><div class="rcal">
       <div class="rcal-head">
         <button class="rcal-nav" id="rcprev" ${d.first&&d.month<=d.first?"disabled":""} aria-label="Previous month">‹</button>
@@ -9998,7 +10113,9 @@ function weekHtml(w,p,today){
     return ('done' in s) ? logLine(s,today,label)
       : `<div class="sline"><span class="sdate">${sessDate(s.date)}</span>${label}</div>`;
   }).join("");
-  const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>':'',
+  const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>'
+                 // §6o-B — volume charged: the week's km intent is already run (even if the run count is short) — no more sessions are laid on the remaining days
+                 :(w.volume_met?'<span class="wfz" title="You’ve already run this week’s planned km — the remaining days aren’t re-prescribed just to hit a run count. Rest is prescribed; an easy run is fine if you feel good.">✓ volume run — today optional</span>':''),
                w.fatigue_capped?'<span class="down" title="A building week, but recent fatigue left no ACWR headroom — the long run was held back. Load capped for safety, not silently degraded.">⚠ build intent capped by recent fatigue</span>'
                  :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
                // §PRO9 — long-run progression cap (Aarhus injury lever); §3.1 — biomechanical (eq_km) load ease
@@ -11349,6 +11466,7 @@ def _stc_runs_browser():
         (3, "2026-06-03", "2026-06-03T18:00:00", "Cycling", 25.0, 3600, 120, None, 40),      # non-run day
         (4, "2026-06-05", "2026-06-05T18:00:00", RUNNING_SPORT, 6.0, 2160, 130, None, 30),   # manually ignored
         (5, "2026-06-07", "2026-06-07T09:00:00", RUNNING_SPORT, 12.0, 4680, 141, None, 80),  # plain long
+        (6, "2024-01-15", "2024-01-15T08:00:00", RUNNING_SPORT, 10.0, 3600, 120, None, 55),  # beyond 12mo — all-time only
     ]:
         m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)", row)
     m.execute("INSERT INTO ignored_activities VALUES (4)")
@@ -11364,13 +11482,22 @@ def _stc_runs_browser():
         fails.append(f"non-run day not surfaced as 'other': {d['other']}")
     if any(r["z"] is not None for rs in d["days"].values() for r in rs):
         fails.append("dot colour invented without an HR model (must degrade to None)")
-    if not (d["first"] == "2026-06" and d["last"] == "2026-06"):
+    if not (d["first"] == "2024-01" and d["last"] == "2026-06"):
         fails.append(f"nav bounds wrong: {d['first']}..{d['last']}")
-    # month roll-up: runs only, dropped excluded; avg HR duration-WEIGHTED (not a run-mean)
+    # roll-up windows: runs only, dropped excluded; avg HR duration-WEIGHTED (not a run-mean).
+    # The 2024 run sits beyond the trailing-12 window (2025-07..2026-06) → 12mo == month here,
+    # while all-time picks it up and dates `since`.
     want = {"runs": 3, "km": 24.2, "hms": "2h 31m", "pace": "6:14",
             "hr_avg": 136, "trimp": 150, "longest_km": 12.0}
     if d.get("stats") != want:
         fails.append(f"month stats wrong: {d.get('stats')} != {want}")
+    if d.get("stats12") != want:
+        fails.append(f"12mo window leaked beyond its start: {d.get('stats12')} != {want}")
+    sa = d.get("statsAll") or {}
+    if not (sa.get("runs") == 4 and sa.get("km") == 34.2 and sa.get("longest_km") == 12.0):
+        fails.append(f"all-time stats wrong: {sa}")
+    if d.get("since") != "2024-01-15":
+        fails.append(f"`since` should date the first counted run: {d.get('since')}")
     cuts = [117, 131, 145, 158]
     for hr, want in ((None, None), (110, 0), (117, 1), (150, 3), (170, 4)):
         if _zone_idx(hr, cuts) != want:
@@ -12848,6 +12975,55 @@ def _stc_health_sync():
                got={"violations": fails or "none", "counts": res})
 
 
+def _stc_sleep_sync():
+    """Sleep summary → per-night markers: attribute to the WAKE date, keep the longest record per night
+    (naps dropped), convert duration min→h, skip null stage/quality fields, night_hr from hr_lowest."""
+    import sqlite3 as _sq
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.execute("CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, "
+              "PRIMARY KEY(marker,date));")
+    stub = {"get_sleep_summary": {"items": [
+        # main overnight sleep → wakes 2026-07-01; 7.0h, full fields
+        {"datetime": "2026-06-30T23:30:00+02:00", "duration": 420, "quality": 8,
+         "deep_sleep_duration": 80, "rem_duration": 100, "hr_lowest": 48, "source": "Suunto"},
+        # a nap the SAME wake-date — shorter, must be dropped (its hr_lowest 60 must NOT win)
+        {"datetime": "2026-07-01T14:00:00+02:00", "duration": 30, "quality": 3,
+         "deep_sleep_duration": 0, "rem_duration": 0, "hr_lowest": 60, "source": "Suunto"},
+        # next night → wakes 2026-07-02; null stages/quality must be skipped, hr_lowest kept
+        {"datetime": "2026-07-02T00:10:00+02:00", "duration": 380, "quality": None,
+         "deep_sleep_duration": None, "rem_duration": None, "hr_lowest": 50, "source": "Suunto"},
+        # malformed (no datetime) → ignored
+        {"duration": 500, "quality": 9, "date": "2026-07-03"}]}}
+    g = globals(); orig = g.get("mcp_call")
+    g["mcp_call"] = lambda tool, args: stub.get(tool, {})
+    try:
+        res = sync_health_metrics(m, backfill=True)
+    finally:
+        g["mcp_call"] = orig
+    fails = []
+
+    def val(marker, date):
+        r = m.execute("SELECT value FROM health_markers WHERE marker=? AND date=?", (marker, date)).fetchone()
+        return r["value"] if r else None
+
+    if res.get("sleep_duration") != 2:
+        fails.append(f"sleep_duration count {res.get('sleep_duration')} (expected 2 nights)")
+    if val("sleep_duration", "2026-07-01") != 7.0:
+        fails.append(f"wake-date/hours wrong: 2026-07-01={val('sleep_duration', '2026-07-01')} (expected 7.0)")
+    if val("night_hr", "2026-07-01") != 48:
+        fails.append(f"nap not dropped — night_hr should be the main sleep's 48, got {val('night_hr', '2026-07-01')}")
+    if val("sleep_quality", "2026-07-02") is not None:
+        fails.append("null quality leaked into the series")
+    if val("night_hr", "2026-07-02") != 50:
+        fails.append("hr_lowest not mapped to night_hr on the null-stage night")
+    counts = {k: v for k, v in res.items() if k.startswith("sleep") or k == "night_hr"}
+    return _st("det", "sleep-sync",
+               "sleep summary → per-night markers: wake-date attribution, longest-per-night (naps "
+               "dropped), min→h, null-field skip, night_hr from hr_lowest (kept distinct from resting_hr)",
+               passed=not fails, expect="2 nights; 2026-07-01=7.0h & night_hr=48; null quality skipped",
+               got={"violations": fails or "none", "counts": counts})
+
+
 def _stc_projector(db):
     # Validate the reconstruction only where it's LIKE-FOR-LIKE with Runalyze's snapshot. A
     # snapshot is comparable only when both hold:
@@ -13059,10 +13235,12 @@ def _stc_building_load_integrity():
 
 
 def _stc_frequency_met():
-    """§6e-FREQ — once the CURRENT week's prescribed run COUNT *and* volume are both already logged,
-    the partial-week remainder is dropped to optional rest (a met-week junk run does nothing for
-    aerobic shape). Short on EITHER bar (too few runs, or 4 tiny junk jogs) ⇒ the remaining run is
-    still prescribed. No actuals (legacy callers) ⇒ unchanged. Never forces load. Pure/in-memory."""
+    """§6e-FREQ + §6o-B — the CURRENT week's actuals govern its remainder. Count AND km both met ⇒
+    optional rest (frequency_met). Km intent already RUN — even with the count short — ⇒ optional
+    rest too (volume_met, the 2026-07-05 over-run incident: more runs to hit a count is junk), and
+    a PARTIAL over-run charges the remainder budget (never re-prescribes km already done). Count met
+    but km short (4 tiny junk jogs) ⇒ the remaining run IS still prescribed. No actuals (legacy
+    callers) ⇒ unchanged. Never forces load. Pure/in-memory."""
     from datetime import date, timedelta
     bs = date(2026, 8, 3)                  # a Monday
     today = bs + timedelta(days=6)         # Sunday — a planned run day straddles
@@ -13085,12 +13263,24 @@ def _stc_frequency_met():
     if not any(s.get("kind") == "rest" and "frequency met" in (s.get("note") or "").lower()
                for s in met["sessions"] if s["date"] == today.isoformat()):
         fail.append("met week missing the optional-rest note")
-    short_runs = week((2, 24.0))           # volume ok, run COUNT short
-    if short_runs.get("frequency_met") or not run_today(short_runs):
-        fail.append("count-short week wrongly dropped the run / set the flag")
+    over = week((2, 24.0))                 # §6o-B — km intent OVER-RUN, count short: nothing forced
+    if over.get("frequency_met"):
+        fail.append("count-short week wrongly claimed frequency_met")
+    if not over.get("volume_met"):
+        fail.append("over-run week (24km ≥ 15km) did not set volume_met")
+    if run_today(over):
+        fail.append("over-run week still laid a session on the remaining day (the 2026-07-05 flaw)")
+    if not any(s.get("kind") == "rest" and "volume already run" in (s.get("note") or "").lower()
+               for s in over["sessions"] if s["date"] == today.isoformat()):
+        fail.append("over-run week missing the volume-met optional-rest note")
+    partial = week((2, 12.0))              # §6o-B — 3km of 15 left: remainder charged, run kept but small
+    if partial.get("volume_met") or not run_today(partial):
+        fail.append("partially-run week wrongly dropped its remaining run")
+    if run_today(partial) and run_today(partial)[0]["km"] > 3.0 + 0.3:
+        fail.append(f"remainder not charged: {run_today(partial)[0]['km']}km offered with only 3km of intent left")
     short_vol = week((4, 5.0))             # count ok, VOLUME short (4 junk jogs)
-    if short_vol.get("frequency_met") or not run_today(short_vol):
-        fail.append("volume-short week wrongly dropped the run / set the flag")
+    if short_vol.get("frequency_met") or short_vol.get("volume_met") or not run_today(short_vol):
+        fail.append("volume-short week wrongly dropped the run / set a flag")
     legacy = week(None)                    # no actuals (existing callers) — unchanged
     if legacy.get("frequency_met") or not run_today(legacy):
         fail.append("legacy (no actuals) path changed behaviour")
@@ -13103,10 +13293,12 @@ def _stc_frequency_met():
     if not (sf_partial and sf_partial[0].get("frequency_met")):
         fail.append("_split_freeze did not propagate week_actuals → frequency_met")
     return _st("det", "frequency-met",
-               "current week's run count+volume both met ⇒ remaining run becomes optional rest; short "
-               "on either ⇒ run still prescribed; no actuals ⇒ unchanged",
-               passed=not fail, expect="met⇒rest+flag; short⇒run kept; legacy⇒run kept",
-               got={"met_flag": met.get("frequency_met"), "failures": fail or "none"})
+               "current week's actuals govern its remainder: count+km met ⇒ optional rest; km OVER-RUN "
+               "(count short) ⇒ optional rest too, never re-forced (§6o-B); partial over-run charges "
+               "the remainder budget; count-met-km-short ⇒ run kept; no actuals ⇒ unchanged",
+               passed=not fail, expect="met/over-run⇒rest+flag; partial⇒charged run; km-short⇒run kept",
+               got={"met_flag": met.get("frequency_met"), "over_flag": over.get("volume_met"),
+                    "failures": fail or "none"})
 
 
 def _stc_run_metrics():
@@ -15696,7 +15888,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_lt1(),
-                 lambda: _stc_health_sync(),
+                 lambda: _stc_health_sync(), lambda: _stc_sleep_sync(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(), lambda: _stc_building_load_integrity(),

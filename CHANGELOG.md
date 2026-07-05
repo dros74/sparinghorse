@@ -12,6 +12,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-05
+
+Sleep lands on the health view, the run browser learns your whole history, and an over-run week
+finally stops prescribing.
+
+### Fixed
+- **An over-run week no longer keeps prescribing.** The in-flight week's remaining days are now
+  charged for the km you have already run (§6o-B): once the week's planned volume is done — even
+  when the run *count* is short, as with doubles — the remaining days become optional rest
+  (marked *"✓ volume run — today optional"*) instead of laying more sessions just to hit a count.
+  A partial over-run shrinks the remaining prescription to exactly the km still owed. The charge
+  only ever reduces: an under-run week still gets its day-prorated share, so a missed day is never
+  crammed into the back of the week, and a week tracking its plan is byte-identical.
+
+### Added
+- **The run browser's stats rail now spans three windows.** Next to the browsed month's totals sit
+  two more columns: the trailing 12 calendar months ending with that month (so browsing back to a
+  peak year compares its rolling volume, not today's), and all time — dated from your first
+  recorded run. Same rows throughout: runs, distance, time on feet, average pace, duration-weighted
+  average HR, training load, longest run.
+- **Sleep, on the health view.** The nightly sleep summary now syncs from Runalyze alongside HRV,
+  weight and resting HR — total duration, deep and REM minutes, and the 0–10 quality score, one
+  honest point per night (a night is attributed to the morning you woke, and the main sleep wins
+  over any nap). It also brings **Overnight low HR**, a de-facto resting-heart-rate trend that —
+  unlike the existing Resting HR series, which dead-ends where the device changed — carries
+  through to today. These are **displayed signals only**: a study of four years of nights against
+  next-day run quality found no predictive link, so sleep never steers the plan or a readiness
+  gate. The honest training brakes stay the mechanism; sleep is there to look at.
+
 ## [0.12.0] - 2026-07-05
 
 The app now reads your runs back to you — and a safety-brake week can no longer decay into junk
