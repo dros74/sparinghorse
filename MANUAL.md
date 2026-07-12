@@ -25,8 +25,9 @@ one-paragraph pitch, the feature list and the public-vs-private capability matri
 9. [Easing, medical holds and adjustments](#9-easing-medical-holds-and-adjustments)
 10. [The privacy model](#10-the-privacy-model)
 11. [Settings and secrets](#11-settings-and-secrets)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Glossary](#13-glossary)
+12. [Backing up your data](#12-backing-up-your-data)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Glossary](#14-glossary)
 
 ---
 
@@ -162,6 +163,15 @@ taper for the earlier race, a re-build *bridge* back up, then the peak and taper
 
 The **A | B | C** selector and the chain strip in the plan tile let you see and steer this. If you set two
 A-races impossibly close, the engine clamps the phases so they can't overrun a race date.
+
+### After the race — the lifecycle
+
+Once a race date passes, the engine settles it on the next re-plan (or the next look at the
+objectives card): it finds the race-day run, marks the objective **done**, and records the result —
+finish time and whether your target fell, or the distance you reached on a DNF. If no race-day run
+syncs within a few days, the objective **lapses** instead. Settled races move to a **Past races**
+strip under the objectives card (private console only — results are personal), and the drift
+scorecard keeps reckoning the race for ~12 weeks. The plan itself never trains toward a past date.
 
 ### Target times
 
@@ -428,7 +438,28 @@ Anything you'd rather set via environment still works — see the env table in t
 
 ---
 
-## 12. Troubleshooting
+## 12. Backing up your data
+
+Everything the app knows lives in one SQLite file — but only some of it can be rebuilt. Runalyze can
+re-backfill your activities and fitness history any time; what **cannot** be rebuilt is what you put
+in yourself: objectives and their race outcomes, readiness check-ins, session reflections,
+adjustments, manual lab markers, and the versioned plan history (which carries the engine's banked
+evidence). Back those up.
+
+Two downloads, both in **Settings → Backup & export** (private console only):
+
+- **Database snapshot (.db)** — a complete, consistent copy of the database (safe to take while the
+  app runs). Restore: stop the container, drop the file into `./data` as `sparinghorse.db`, start it.
+  This is the recommended backup.
+- **Data export (.json)** — a portable export of just the non-rebuildable tables. Restore into a
+  *fresh* instance with `python SparingHorse.py import <file>` (it refuses to import over existing
+  data), then **Sync** + **Backfill all** to rebuild activities from Runalyze.
+
+API keys and tokens are **never** included in either file — they live in a separate secrets store.
+
+---
+
+## 13. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
@@ -443,7 +474,7 @@ Anything you'd rather set via environment still works — see the env table in t
 
 ---
 
-## 13. Glossary
+## 14. Glossary
 
 - **CTL** — Chronic Training Load. A slow (~42-day) average of training load; the app's proxy for *fitness*.
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.

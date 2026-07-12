@@ -15,21 +15,25 @@ Production:    waitress-serve --listen=0.0.0.0:8770 SparingHorse:app
 """
 import base64
 import html
+import io
 import json
 import math
 import os
 import re
 import secrets
 import sqlite3
+import struct
 import threading
 import time
+import zipfile
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
-from flask import Flask, g, jsonify, redirect, request
+from flask import Flask, g, jsonify, redirect, request, send_file
 from requests.adapters import HTTPAdapter, Retry
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -845,7 +849,9 @@ CREATE TABLE IF NOT EXISTS objectives (
     target     TEXT,                 -- goal time string or 'finish'
     priority   TEXT DEFAULT 'A',     -- A | B | C
     status     TEXT DEFAULT 'upcoming',  -- upcoming | done | removed | lapsed
-    created_at TEXT
+    created_at TEXT,
+    outcome    TEXT,                 -- §RL: JSON result once resolved (finished/dnf/unrun/unverified)
+    resolved_at TEXT                 -- §RL: when resolve_passed_races settled it
 );
 
 -- Versioned training plans. Each generation is a new row → diff-able history (§4).
@@ -1075,6 +1081,13 @@ def init_db():
     # nominal `applies_until` (≤ raise+27d) which can lapse while the hold is still active.
     if "cleared_at" not in cols:
         db.execute("ALTER TABLE adjustments ADD COLUMN cleared_at TEXT")
+    # §RL migration: race-lifecycle columns — a resolved race carries its outcome (JSON: finished
+    # time / dnf km / goal comparison) and when the resolver settled it.
+    ocols = {r["name"] for r in db.execute("PRAGMA table_info(objectives)").fetchall()}
+    if "outcome" not in ocols:
+        db.execute("ALTER TABLE objectives ADD COLUMN outcome TEXT")
+    if "resolved_at" not in ocols:
+        db.execute("ALTER TABLE objectives ADD COLUMN resolved_at TEXT")
     # Self-healing migration: deactivate any legacy *active* no-op adjustment (multiplier ≥ 1,
     # no easy-only, no medical) saved before the §6c routing fix — those were reflections that
     # got stored as an "Active adjustment" and still render a pointless banner. New no-ops are
@@ -1271,6 +1284,16 @@ SECRET_SPEC = [
     {"key": "anthropic_api_key", "env": "ANTHROPIC_API_KEY", "label": "Claude API key",
      "help": "Optional — turns on AI plan explanations and natural-language adjustments. Without it "
              "the deterministic engine still does all the planning and safety clamping."},
+    # Suunto Cloud API (partner program) — the three app credentials from apizone.suunto.com. All
+    # optional: without them the watch push is simply off. The user OAuth tokens are NOT here —
+    # they're stored internally (see SUUNTO_TOKENS_KEY) after the one-time Connect authorization.
+    {"key": "suunto_client_id", "env": "SUUNTO_CLIENT_ID", "label": "Suunto app client ID",
+     "help": "From apizone.suunto.com → your OAuth app (auto-generated client id). Optional — enables "
+             "pushing planned sessions to a Suunto watch as SuuntoPlus Guides."},
+    {"key": "suunto_client_secret", "env": "SUUNTO_CLIENT_SECRET", "label": "Suunto app client secret",
+     "help": "The client secret you set on the same OAuth app in apizone.suunto.com."},
+    {"key": "suunto_subscription_key", "env": "SUUNTO_SUBSCRIPTION_KEY", "label": "Suunto subscription key",
+     "help": "API Zone → your profile → subscriptions (primary or secondary key both work)."},
 ]
 SECRET_BY_KEY = {s["key"]: s for s in SECRET_SPEC}
 
@@ -1388,10 +1411,384 @@ def validate_secret(key):
                 return "invalid"
             except Exception:
                 return "unknown"
+        if key.startswith("suunto_"):
+            # The app credentials only prove themselves in the OAuth dance / an authorised call, so:
+            # once CONNECTED we probe the guides list (exercises subscription key + access token);
+            # before that the honest answer is "unknown" (badge shows plain "configured").
+            if key == "suunto_subscription_key" and _suunto_tokens():
+                tok = suunto_access_token()
+                if not tok:
+                    return "unknown"
+                r = requests.get(f"{SUUNTO_API_BASE}/v2/guides/items",
+                                 headers=_suunto_headers(tok, value), timeout=8)
+                if r.status_code == 200:
+                    return "valid"
+                return "invalid" if r.status_code in (401, 403) else "unknown"
+            return "unknown"
     except Exception as e:
         print(f"[secrets] validate {key} failed: {e}")
         return "unknown"
     return "unknown"
+
+
+# ── Suunto Cloud API — SuuntoPlus Guides push (§SG) ─────────────────────────
+# Partner-program integration (approved 2026-07-10): the plan's next few days are converted to
+# SuuntoPlus Guides and pushed to the owner's watch, so each prescribed session shows its steps,
+# pace band, and HR band ON the wrist during the run. Three layers, cleanly separable:
+#   1. OAuth2 (authorization-code + refresh) — one-time "Connect Suunto" in Settings; the user
+#      token pair lives in the PRIVATE secrets store under an internal key (never in the UI spec).
+#   2. session_to_guide() — a PURE converter: plan session dict → guide.zip bytes (det-testable).
+#   3. push_guides() — idempotent upload of the next window via externalId (update, never duplicate).
+SUUNTO_OAUTH_BASE = "https://cloudapi-oauth.suunto.com"
+SUUNTO_API_BASE = "https://cloudapi.suunto.com"
+SUUNTO_TOKENS_KEY = "suunto_oauth_tokens"   # internal secrets-store row (JSON); not in SECRET_SPEC
+SUUNTO_PUSH_DAYS = int(os.environ.get("SH_SUUNTO_PUSH_DAYS", "7"))  # nightly horizon (today + N-1)
+_suunto_oauth_state = {}                    # state nonce → issue time (single-user; CSRF guard)
+
+
+def _suunto_conf():
+    """Effective app credentials (stored → env), or '' where unset."""
+    return {k: _resolve_secret(SECRET_BY_KEY[k])[0]
+            for k in ("suunto_client_id", "suunto_client_secret", "suunto_subscription_key")}
+
+
+def _suunto_tokens():
+    """The stored user token pair {access_token, refresh_token, expires_at, user} or None."""
+    raw = _stored_secret(SUUNTO_TOKENS_KEY)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _save_suunto_tokens(tok):
+    """Persist (or clear, when None) the user token pair. Internal key — save_secret() refuses
+    non-SECRET_SPEC keys on purpose, so this writes the store directly. Refused in READONLY."""
+    if READONLY:
+        return False
+    try:
+        conn = _secrets_conn()
+        if tok:
+            conn.execute("INSERT INTO secret(key,value) VALUES(?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (SUUNTO_TOKENS_KEY, json.dumps(tok)))
+        else:
+            conn.execute("DELETE FROM secret WHERE key=?", (SUUNTO_TOKENS_KEY,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[suunto] token store write failed: {e}")
+        return False
+
+
+def _jwt_user(access_token):
+    """The Suunto username from the JWT's custom 'user' claim (display only — no verification
+    needed: the token came straight from Suunto's token endpoint over TLS)."""
+    try:
+        payload = access_token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload)).get("user")
+    except Exception:
+        return None
+
+
+def _suunto_token_request(form):
+    """One POST to the token endpoint (code exchange or refresh), basic-auth'd with the app
+    credentials. Returns the stored-shape token dict, or raises with the provider's error text."""
+    conf = _suunto_conf()
+    r = requests.post(f"{SUUNTO_OAUTH_BASE}/oauth/token", data=form,
+                      auth=(conf["suunto_client_id"], conf["suunto_client_secret"]),
+                      headers={"Accept": "application/json"}, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"token endpoint {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    return {"access_token": d["access_token"],
+            # refresh responses may omit refresh_token → keep the old one (caller merges)
+            "refresh_token": d.get("refresh_token"),
+            "expires_at": time.time() + float(d.get("expires_in", 86400)),
+            "user": _jwt_user(d["access_token"])}
+
+
+def suunto_access_token():
+    """A currently-valid access token, refreshing through the stored refresh_token when within
+    2 minutes of expiry. None ⇒ not connected (or refresh failed — reconnect via Settings)."""
+    tok = _suunto_tokens()
+    if not tok:
+        return None
+    if time.time() < tok.get("expires_at", 0) - 120:
+        return tok["access_token"]
+    try:
+        new = _suunto_token_request({"grant_type": "refresh_token",
+                                     "refresh_token": tok["refresh_token"]})
+        if not new.get("refresh_token"):
+            new["refresh_token"] = tok["refresh_token"]
+        if not new.get("user"):
+            new["user"] = tok.get("user")
+        _save_suunto_tokens(new)
+        return new["access_token"]
+    except Exception as e:
+        print(f"[suunto] token refresh failed: {e}")
+        return None
+
+
+def _suunto_headers(access_token, sub_key=None):
+    """Headers every Cloud-API call needs: the user JWT + the app's subscription key."""
+    return {"Authorization": f"Bearer {access_token}",
+            "Ocp-Apim-Subscription-Key": sub_key or _suunto_conf()["suunto_subscription_key"],
+            "User-Agent": USER_AGENT}
+
+
+def suunto_status():
+    """Settings-window payload: app-credentials configured? user connected (as whom)? Never a token."""
+    conf = _suunto_conf()
+    tok = _suunto_tokens()
+    return {"configured": all(conf.values()), "connected": bool(tok),
+            "user": (tok or {}).get("user")}
+
+
+# ── §SG guide converter (pure) ───────────────────────────────────────────────
+# guide.json facts confirmed from apizone.suunto.com/suuntoplus-guide-description (2026-07-10):
+# targetPace/targetSpeed are in m/s (NOT sec/km); stepDuration seconds / stepDistance metres;
+# repeats exist but a flat 1–1000 step list is equally valid (our reps arrays are already flat,
+# with per-rep detail text, so flat steps preserve more information than folding into `repeat`).
+# Field/step title limits: step title ≤13 chars, field title ≤9 when several fields share a step;
+# text field ≤54 chars; name ≤60, shortDescription ≤23, description ≤256, externalId ≤64.
+# The guide's "more info" link shown in the Suunto app — cosmetic metadata. Overridable so a
+# self-hoster can point it at their own instance; the neutral default is the project repo.
+SUUNTO_GUIDE_URL = os.environ.get("SH_GUIDE_URL", "https://github.com/dros74/sparinghorse")
+SUUNTO_ACTIVITY_RUNNING = 1
+# Plan intensity zone → the app's HR zone band (hr_zones() Z1–Z5 tuples). "easy" spans Z1–Z2 —
+# the moving easy bar (§3.4) lives in pace; on the wrist the HR band is the honest easy guard.
+_SUUNTO_ZONE_TO_HRZ = {"easy": ("Z1", "Z2"), "easy_top": ("Z2", "Z2"), "lt1": ("Z2", "Z3"),
+                       "marathon": ("Z3", "Z3"), "threshold": ("Z4", "Z4"),
+                       "interval": ("Z5", "Z5"), "p5k": ("Z5", "Z5")}
+_icon_png_cache = None
+
+
+def _guide_txt(s, limit):
+    """Clamp to the watch charset (the docs' minimum supported set) + a length limit. Common
+    typography in our notes (×, —, ’) is transliterated rather than dropped."""
+    s = (s or "").replace("×", "x").replace("—", "-").replace("–", "-").replace("’", "'").replace("·", "-")
+    s = "".join(ch for ch in s if ch in
+                " !\"#$%&'()*+,-./0123456789:;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                "abcdefghijklmnopqrstuvwxyz|°")
+    return s[:limit].strip()
+
+
+def _icon_png():
+    """A 300×300 solid-terracotta PNG built with stdlib only (no PIL in the image). Cached — it's
+    byte-identical for every guide."""
+    global _icon_png_cache
+    if _icon_png_cache is None:
+        w = h = 300
+        rgb = bytes((0xb5, 0x54, 0x3b))                     # house terracotta accent
+        raw = b"".join(b"\x00" + rgb * w for _ in range(h))  # filter 0 per row
+
+        def chunk(tag, data):
+            c = tag + data
+            return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+        _icon_png_cache = (b"\x89PNG\r\n\x1a\n"
+                           + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                           + chunk(b"IDAT", zlib.compress(raw, 6))
+                           + chunk(b"IEND", b""))
+    return _icon_png_cache
+
+
+def _pace_target(sec_per_km, band=0.05):
+    """targetPace field from a sec/km pace: centre m/s with a ±band window."""
+    if not sec_per_km:
+        return None
+    v = 1000.0 / sec_per_km
+    return {"type": "targetPace", "title": "pace",
+            "value": round(v, 3), "min": round(v * (1 - band), 3), "max": round(v * (1 + band), 3)}
+
+
+def _hr_target(zone, hrz):
+    """targetHeartRate field for a plan zone, from the app's own hr_zones() grid. None when the
+    grid is unavailable (no robust anchor) or the zone is unmapped — pace then guides alone."""
+    if not hrz or not hrz.get("zones"):
+        return None
+    span = _SUUNTO_ZONE_TO_HRZ.get(zone)
+    if not span:
+        return None
+    by_label = {z[0]: z for z in hrz["zones"]}
+    lo_z, hi_z = by_label.get(span[0]), by_label.get(span[1])
+    if not lo_z or not hi_z:
+        return None
+    lo = lo_z[1] if lo_z[1] is not None else max(60, (lo_z[2] or 200) - 40)   # Z1 has no floor
+    hi = hi_z[2] if hi_z[2] is not None else (hi_z[1] or 150) + 15            # Z5 has no ceiling
+    return {"type": "targetHeartRate", "title": "HR",
+            "value": int(round((lo + hi) / 2)), "min": int(lo), "max": int(hi)}
+
+
+def _rep_pace_sec(rep):
+    """A rep's numeric sec/km, re-derived from its own km/minutes (the stored fields of record)."""
+    if rep.get("km") and rep.get("minutes"):
+        return rep["minutes"] * 60.0 / rep["km"]
+    return None
+
+
+def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False):
+    """One fields step: countdown + optional pace/HR targets + a detail text line, advancing on
+    its own duration (or distance, for the distance-framed simple runs)."""
+    fields, cond = [], None
+    if minutes:
+        fields.append({"type": "stepDurationCountdown", "title": "left",
+                       "value": round(minutes * 60.0, 1)})
+        cond = {"type": "stepDuration", "value": round(minutes * 60.0, 1)}
+    elif km:
+        fields.append({"type": "stepDistanceCountdown", "title": "left",
+                       "value": round(km * 1000.0, 1)})
+        cond = {"type": "stepDistance", "value": round(km * 1000.0, 1)}
+    pt = _pace_target(pace_sec)
+    if pt:
+        fields.append(pt)
+    if hr:
+        fields.append(hr)
+    txt = _guide_txt(text, 54)
+    if txt:
+        fields.append({"type": "text", "value": txt})
+    step = {"type": "fields", "title": _guide_txt(title, 13) or "Run", "fields": fields}
+    if lap:
+        step["createManualLap"] = True
+    if cond:
+        step["transitions"] = [{"condition": cond}]
+    return step
+
+
+def session_guide_external_id(session):
+    """The idempotency key one session maps to — stable across regenerations of the same date+kind,
+    so a re-push UPDATES the watch guide instead of stacking duplicates."""
+    return f"sh-{session['date']}-{session.get('kind', 'run')}"[:64]
+
+
+def session_to_guide(session, hrz=None):
+    """PURE: one plan session dict → (guide_dict, zip_bytes). Structured sessions (reps arrays from
+    _build_quality/_build_long_mp) become one step per rep — duration-framed, with the work reps
+    lap-marked; simple easy/long runs become a single distance-framed step. Raises on a session
+    with nothing to guide (km≤0)."""
+    kind = session.get("kind", "run")
+    km = session.get("km") or 0
+    if km <= 0:
+        raise ValueError("session has no distance")
+    steps = []
+    reps = session.get("reps")
+    if reps:
+        n_work = sum(1 for r in reps if r["effort"] == "work")
+        wi = 0
+        titles = {"warmup": "Warm up", "recovery": "Recover", "cooldown": "Cool down",
+                  "easy_base": "Easy base"}
+        for r in reps:
+            work = r["effort"] == "work"
+            if work:
+                wi += 1
+            title = f"Work {wi}/{n_work}" if (work and n_work > 1) else titles.get(r["effort"], "Work")
+            steps.append(_guide_step(
+                title, r.get("detail", ""), minutes=r["minutes"],
+                pace_sec=_rep_pace_sec(r), hr=_hr_target(r["zone"], hrz), lap=work))
+    else:
+        pace_sec = session["minutes"] * 60.0 / km if session.get("minutes") else None
+        steps.append(_guide_step("Run", session.get("note", ""), km=km,
+                                 pace_sec=pace_sec, hr=_hr_target("easy", hrz)))
+    label = {"easy": "Easy run", "long": "Long run", "long_mp": "Long run + MP"}.get(kind) \
+        or _guide_txt(kind, 20).title()
+    guide = {"type": "sequence",
+             "name": _guide_txt(f"{label} {km}km - {session['date']}", 60),
+             "shortDescription": _guide_txt(f"{label} {km}km", 23),
+             "description": _guide_txt(session.get("note") or f"{label}, {km}km", 256) or label,
+             "owner": "Sparing Horse", "url": SUUNTO_GUIDE_URL, "usage": "workout",
+             "activities": [SUUNTO_ACTIVITY_RUNNING], "localDate": session["date"],
+             "externalId": session_guide_external_id(session), "steps": steps}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("guide.json", json.dumps(guide, indent=1))
+        z.writestr("icon.png", _icon_png())
+    return guide, buf.getvalue()
+
+
+# ── §SG push (idempotent upload) ─────────────────────────────────────────────
+def _suunto_existing_guides(headers):
+    """externalId → guide id for the guides already on Suunto's side. Defensive about the list
+    payload shape (docs don't pin it): accepts a bare array or the common wrapper keys."""
+    r = requests.get(f"{SUUNTO_API_BASE}/v2/guides/items", headers=headers, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"guides list {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    items = d if isinstance(d, list) else next(
+        (d[k] for k in ("items", "payload", "guides", "data") if isinstance(d.get(k), list)), [])
+    out = {}
+    for it in items:
+        if isinstance(it, dict) and it.get("externalId"):
+            out[it["externalId"]] = it.get("id") or it.get("guideId")
+    return out
+
+
+def push_guides(db, days=None):
+    """Push the plan's next `days` sessions (today inclusive) to the connected Suunto account as
+    Guides. Idempotent via externalId: existing → PUT update, new → POST, so the nightly re-push
+    after a re-plan silently keeps the watch current. Returns a per-session summary; never raises
+    (the scheduler must survive a flaky Suunto night the same way it survives Runalyze)."""
+    days = days or SUUNTO_PUSH_DAYS
+    if READONLY:
+        return {"ok": False, "error": "read-only instance"}
+    st = suunto_status()
+    if not st["configured"] or not st["connected"]:
+        return {"ok": False, "error": "Suunto not connected", "skipped": True}
+    tok = suunto_access_token()
+    if not tok:
+        return {"ok": False, "error": "Suunto token refresh failed — reconnect in Settings"}
+    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return {"ok": False, "error": "no plan", "skipped": True}
+    plan = json.loads(row[0])
+    today = datetime.now().date()
+    horizon = (today + timedelta(days=days - 1)).isoformat()
+    sessions = [s for w in _plan_all_weeks(plan) for s in w.get("sessions", [])
+                if today.isoformat() <= s["date"] <= horizon and (s.get("km") or 0) > 0]
+    if not sessions:
+        return {"ok": True, "pushed": 0, "results": [], "note": "no sessions in window"}
+    hrz = None
+    try:
+        hrz = hr_zones(db)
+    except Exception:
+        pass                                   # pace guides alone — HR grid is an enhancement
+    headers = _suunto_headers(tok)
+    try:
+        existing = _suunto_existing_guides(headers)
+    except Exception as e:
+        return {"ok": False, "error": f"could not list existing guides: {e}"}
+    up_headers = dict(headers, **{"Content-Type": "application/zip"})
+    results, pushed = [], 0
+    for s in sessions:
+        ext = session_guide_external_id(s)
+        try:
+            _, blob = session_to_guide(s, hrz)
+            gid = existing.get(ext)
+            if gid:
+                r = requests.put(f"{SUUNTO_API_BASE}/v2/guides/files/{gid}",
+                                 data=blob, headers=up_headers, timeout=20)
+                action = "updated"
+            else:
+                r = requests.post(f"{SUUNTO_API_BASE}/v2/guides/files",
+                                  data=blob, headers=up_headers, timeout=20)
+                action = "created"
+            if r.status_code in (200, 201, 204):
+                pushed += 1
+                results.append({"date": s["date"], "kind": s.get("kind"), "action": action})
+            elif r.status_code == 409 and action == "created":
+                # already there under this externalId (list was stale) — counts as current
+                results.append({"date": s["date"], "kind": s.get("kind"), "action": "exists"})
+            else:
+                results.append({"date": s["date"], "kind": s.get("kind"),
+                                "error": f"{action} {r.status_code}: {r.text[:120]}"})
+        except Exception as e:
+            results.append({"date": s["date"], "kind": s.get("kind"), "error": str(e)[:200]})
+    errs = [r for r in results if r.get("error")]
+    return {"ok": not errs, "pushed": pushed, "results": results,
+            **({"error": f"{len(errs)} of {len(results)} failed"} if errs else {})}
 
 
 # ── ETL ─────────────────────────────────────────────────────────────────────
@@ -4669,6 +5066,56 @@ def _race_day_activity(db, race_date_iso, race_type):
     return None, None
 
 
+RACE_RESOLVE_GRACE_DAYS = 3   # §RL — sync lag allowance before a passed race with no run lapses
+
+
+def resolve_passed_races(db, today=None):
+    """§RL — the race lifecycle's missing transition: settle every 'upcoming' objective whose date has
+    passed. Before this, a run race stayed 'upcoming' forever — dropped by select_chain (future-only)
+    but never resolved, so the UI listed it as a goal and the schema's done/lapsed states were dead
+    letters. Rules, from owned data only (`_race_day_activity`):
+      • matched run (finished or dnf)      → 'done', outcome JSON records the result + goal comparison.
+      • no match yet, within a grace window → left 'upcoming' (a missing sync isn't a DNS yet).
+      • no match after the grace window     → 'lapsed' (matchable distance) — the race passed unrun;
+        a 'custom' type has no distance to match on, so it settles 'done' with an unverified outcome
+        rather than accusing the runner of skipping it.
+    Idempotent and side-effect-bounded (only rows it transitions); returns the transitions. The plan
+    itself is untouched — select_chain already ignores passed races, so plans stay byte-identical.
+    Private-side only: the read-only mirror never writes."""
+    if READONLY:
+        return []
+    today = today or datetime.now().date()
+    if isinstance(today, str):
+        today = _date(today)
+    out = []
+    rows = db.execute("SELECT * FROM objectives WHERE status='upcoming' AND date < ? "
+                      "ORDER BY date", (today.isoformat(),)).fetchall()
+    for o in rows:
+        act, race_status = _race_day_activity(db, o["date"], o["type"])
+        in_grace = (today - _date(o["date"])).days <= RACE_RESOLVE_GRACE_DAYS
+        if act is None and race_status is None:
+            if o["type"] in RACE_KM and in_grace:
+                continue                       # matchable race, result may simply not be synced yet
+            new_status = "done" if o["type"] not in RACE_KM else "lapsed"
+            outcome = {"status": "unverified" if new_status == "done" else "unrun"}
+        else:
+            new_status = "done"
+            goal_s = _parse_goal_seconds(o["target"], o["type"])
+            actual_s = act["duration"] if race_status == "finished" else None
+            outcome = {"status": race_status, "activity_id": act["id"],
+                       "actual_seconds": actual_s, "actual": _fmt_hms(actual_s),
+                       "goal": o["target"], "goal_seconds": goal_s,
+                       "beat": (None if (goal_s is None or actual_s is None) else actual_s <= goal_s),
+                       "dnf_km": (round(act["distance"], 1) if race_status == "dnf" else None)}
+        db.execute("UPDATE objectives SET status=?, outcome=?, resolved_at=? WHERE id=?",
+                   (new_status, json.dumps(outcome), _now_iso(), o["id"]))
+        out.append({"id": o["id"], "label": o["label"], "date": o["date"],
+                    "status": new_status, "outcome": outcome})
+    if out:
+        db.commit()
+    return out
+
+
 def _recovery_weeks(race_type):
     """Weeks the given race type needs before a second peak can be co-equal (else the earlier race
     is subordinated to a mini-taper). Keyed on the EARLIER race's distance."""
@@ -5171,6 +5618,7 @@ def regenerate(db, baseline=None):
     plan computed for today BEFORE the triggering change) is given, diff against it so only the
     change's own effect shows. Otherwise fall back to the last saved plan (a manual regenerate
     has no 'before' action to isolate)."""
+    resolve_passed_races(db)   # §RL — settle any race that has passed before re-reading objectives
     if baseline is None:
         prev = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
         baseline = json.loads(prev["plan"]) if prev else None
@@ -6217,6 +6665,8 @@ def _private_only_path(p):
     so the score is public while the HR-led critique stays private."""
     return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
                   "/api/secrets/validate", "/api/runs")   # §RB — calendar carries HR-zone grades
+            or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
+            or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the owner's data
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -6601,7 +7051,9 @@ def api_plandrift():
     # and a race the engine still carries is handled on its own path.
     if not obj.get("date"):
         past_a = db.execute(
-            "SELECT * FROM objectives WHERE status='upcoming' AND priority='A' AND date<=? AND date>=? "
+            "SELECT * FROM objectives WHERE status IN ('upcoming','done','lapsed') "   # §RL: resolution (incl. an
+            # unrun race lapsing after the grace window) must not kill the reckoning inside its window
+            "AND priority='A' AND date<=? AND date>=? "
             "ORDER BY date DESC LIMIT 1",
             (today.isoformat(), (today - timedelta(weeks=RECKON_WINDOW_WEEKS)).isoformat())).fetchone()
         if past_a and any(((json.loads(r["plan"]).get("objective") or {}).get("date")) == past_a["date"]
@@ -6894,8 +7346,12 @@ def api_plandrift():
 def api_objectives():
     db = get_db()
     seed_objectives(db)
-    rows = db.execute("SELECT * FROM objectives ORDER BY date").fetchall()
-    return jsonify([dict(r) for r in rows])
+    resolve_passed_races(db)   # §RL — idempotent; keeps the list honest even between nightly re-plans
+    rows = [dict(r) for r in db.execute("SELECT * FROM objectives ORDER BY date").fetchall()]
+    if READONLY:               # §RL/H7 — race RESULTS are personal: redact at the DATA layer (the UI
+        for r in rows:         # hiding the strip is cosmetic), same posture as the §6s reckoning gate.
+            r.pop("outcome", None); r.pop("resolved_at", None)
+    return jsonify(rows)
 
 
 @app.post("/api/objectives")
@@ -7646,6 +8102,86 @@ def api_settings():
     return jsonify(ok=True, settings=current_settings(get_db()))
 
 
+# ── §BX — Backup / export (private-only) ────────────────────────────────────
+# The 1.0 data-safety story. Two artifacts, both owner-only downloads:
+#   • /api/backup/db     — a consistent FULL snapshot of the main DB (VACUUM INTO: WAL-safe, compact).
+#                          Restore = stop the container, drop the file in ./data as sparinghorse.db.
+#   • /api/export/json   — a portable JSON of the NON-REBUILDABLE, user-authored tables. Runalyze can
+#                          re-backfill activities/snapshots and every cache is derived; what CANNOT be
+#                          rebuilt is the owner's judgment + history: objectives (+outcomes), readiness
+#                          check-ins, session_log reflections, adjustments, health_markers (labs are
+#                          manual), ignored_activities (dedup verdicts), the versioned plans (banked
+#                          evidence + frozen weeks), and meta (settings, rebase_start, LTHR stamps).
+# Secrets are structurally absent: keys/tokens live in the separate SH_SECRETS_DB store (§ above),
+# never the main DB — asserted by det/backup-export so a future table can't silently leak.
+# Import (fresh-instance restore of the JSON) is CLI-only: `python SparingHorse.py import <file>` —
+# it refuses a target whose user tables aren't empty; a live instance restores via the DB snapshot.
+
+EXPORT_TABLES = ["objectives", "readiness", "session_log", "adjustments", "health_markers",
+                 "ignored_activities", "plans", "meta"]
+EXPORT_FORMAT = 1
+
+
+def export_user_data(db):
+    """The portable JSON payload: every non-rebuildable table, rows verbatim."""
+    return {"app": "SparingHorse", "format": EXPORT_FORMAT, "exported_at": _now_iso(),
+            "tables": {t: [dict(r) for r in db.execute(f"SELECT * FROM {t}").fetchall()]
+                       for t in EXPORT_TABLES}}
+
+
+def import_user_data(db, payload):
+    """Fresh-instance restore of an export_user_data payload. Refuses unless every target table
+    (meta aside — init writes there) is EMPTY: this is a restore, not a merge, and silently mixing
+    two histories would corrupt banked evidence. Columns are intersected with the live schema so an
+    export from an older version loads into a newer one (new columns default)."""
+    if payload.get("app") != "SparingHorse" or "tables" not in payload:
+        return {"ok": False, "error": "not a SparingHorse export file"}
+    if payload.get("format", 0) > EXPORT_FORMAT:
+        return {"ok": False, "error": f"export format {payload['format']} is newer than this app understands"}
+    for t in EXPORT_TABLES:
+        if t != "meta" and db.execute(f"SELECT 1 FROM {t} LIMIT 1").fetchone():
+            return {"ok": False, "error": f"table '{t}' is not empty — import only restores into a fresh instance"}
+    counts = {}
+    for t in EXPORT_TABLES:
+        rows = payload["tables"].get(t) or []
+        if not rows:
+            counts[t] = 0
+            continue
+        live_cols = [r["name"] for r in db.execute(f"PRAGMA table_info({t})").fetchall()]
+        cols = [c for c in live_cols if c in rows[0]]
+        db.executemany(
+            f"INSERT OR REPLACE INTO {t} ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+            [tuple(r.get(c) for c in cols) for r in rows])
+        counts[t] = len(rows)
+    db.commit()
+    return {"ok": True, "restored": counts}
+
+
+@app.get("/api/backup/db")
+def api_backup_db():
+    """Consistent full-DB snapshot download (private-only via `_private_only_path`)."""
+    import io, tempfile
+    tmp = Path(tempfile.mkdtemp()) / "snapshot.db"
+    try:
+        get_db().execute("VACUUM INTO ?", (str(tmp),))   # WAL-safe, page-consistent, compacted
+        buf = io.BytesIO(tmp.read_bytes())
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+        tmp.parent.rmdir()
+    return send_file(buf, mimetype="application/vnd.sqlite3", as_attachment=True,
+                     download_name=f"sparinghorse-backup-{datetime.now().date().isoformat()}.db")
+
+
+@app.get("/api/export/json")
+def api_export_json():
+    """Portable user-data export download (private-only via `_private_only_path`)."""
+    import io
+    buf = io.BytesIO(json.dumps(export_user_data(get_db()), indent=1).encode())
+    return send_file(buf, mimetype="application/json", as_attachment=True,
+                     download_name=f"sparinghorse-export-{datetime.now().date().isoformat()}.json")
+
+
 @app.get("/api/geocode")
 def api_geocode():
     """Resolve a city name → candidates with lat/lon, via Open-Meteo's keyless geocoding API (same
@@ -7717,6 +8253,74 @@ def api_secrets_validate():
     with ThreadPoolExecutor(max_workers=max(1, len(keys))) as ex:
         results = dict(zip(keys, ex.map(validate_secret, keys)))
     return jsonify(ok=True, results=results)
+
+
+# ── §SG Suunto endpoints (all under /api/suunto → private-only + readonly-guarded) ──
+def _suunto_redirect_uri():
+    """The callback URL the browser lands back on — MUST byte-match the redirect URI registered on
+    the Suunto OAuth app. https behind the proxy (Cloudflare terminates TLS, so request.url_root
+    says http), plain http only for local dev hosts."""
+    host = request.host
+    scheme = "http" if host.split(":")[0] in ("127.0.0.1", "localhost", "0.0.0.0") else "https"
+    return f"{scheme}://{host}/api/suunto/callback"
+
+
+@app.get("/api/suunto/status")
+def api_suunto_status():
+    return jsonify(ok=True, **suunto_status(), redirect_uri=_suunto_redirect_uri())
+
+
+@app.get("/api/suunto/connect")
+def api_suunto_connect():
+    """Kick off the one-time OAuth dance: bounce the browser to Suunto's authorize page. A `state`
+    nonce (10-min validity) rides along so the callback can reject forged redirects."""
+    conf = _suunto_conf()
+    if not (conf["suunto_client_id"] and conf["suunto_client_secret"]):
+        return jsonify(ok=False, error="set the Suunto client ID + secret in Settings first"), 400
+    state = secrets.token_urlsafe(24)
+    now = time.time()
+    _suunto_oauth_state.clear()   # single-user app: one dance in flight at a time
+    _suunto_oauth_state[state] = now
+    from urllib.parse import urlencode
+    q = urlencode({"response_type": "code", "client_id": conf["suunto_client_id"],
+                   "redirect_uri": _suunto_redirect_uri(), "state": state})
+    return redirect(f"{SUUNTO_OAUTH_BASE}/oauth/authorize?{q}")
+
+
+@app.get("/api/suunto/callback")
+def api_suunto_callback():
+    """The browser returns here with ?code — exchange it, store the token pair, land on the
+    dashboard. Errors render as a plain redirect with a flag the Settings window surfaces."""
+    state, code = request.args.get("state", ""), request.args.get("code", "")
+    issued = _suunto_oauth_state.pop(state, None)
+    if not issued or time.time() - issued > 600:
+        return redirect("/?suunto=state_error")
+    if not code:
+        return redirect("/?suunto=denied")
+    try:
+        tok = _suunto_token_request({"grant_type": "authorization_code", "code": code,
+                                     "redirect_uri": _suunto_redirect_uri()})
+    except Exception as e:
+        print(f"[suunto] code exchange failed: {e}")
+        return redirect("/?suunto=exchange_error")
+    _save_suunto_tokens(tok)
+    print(f"[suunto] connected as {tok.get('user')}")
+    return redirect("/?suunto=connected")
+
+
+@app.post("/api/suunto/push")
+def api_suunto_push():
+    """Manual 'push my week to the watch now' — same code path as the nightly push."""
+    d = body()
+    res = push_guides(get_db(), days=int(d.get("days") or SUUNTO_PUSH_DAYS))
+    return jsonify(**res), (200 if res.get("ok") or res.get("skipped") else 502)
+
+
+@app.post("/api/suunto/disconnect")
+def api_suunto_disconnect():
+    """Forget the stored user tokens (the app credentials in Settings stay)."""
+    _save_suunto_tokens(None)
+    return jsonify(ok=True, **suunto_status())
 
 
 def _render_app(page="dash"):
@@ -8539,6 +9143,23 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .sparkdot{fill:var(--accent)}
   .refband{fill:color-mix(in oklab,var(--ok),transparent 86%)}
   .refline{stroke:color-mix(in oklab,var(--ok),transparent 45%);stroke-width:1;stroke-dasharray:3 3}
+  .hhead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+  /* Segmented control: ONE continuous outline on the wrapper (radius + overflow clip); the
+     buttons are borderless segments split by divider lines, so the selected state can tint its
+     segment without breaking the outline's continuity. */
+  .hrange{display:flex;flex:none;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .hrange button{font-family:var(--mono);font-size:9px;letter-spacing:.06em;color:var(--muted);
+    background:none;border:none;border-radius:0;padding:2px 7px;cursor:pointer;line-height:1.4}
+  .hrange button+button{border-left:1px solid var(--line)}
+  .hrange button.on{color:var(--accent);
+    background:color-mix(in oklab,var(--accent),transparent 90%)}
+  .hchart{position:relative}
+  .htip{position:absolute;top:-4px;pointer-events:none;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:8px;padding:4px 8px;font-family:var(--mono);
+    font-size:10px;white-space:nowrap;display:none;z-index:3;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .htip b{color:var(--muted);font-weight:400;margin-right:6px}
+  .hcrossln{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3}
+  .hcrossdot{fill:var(--accent);stroke:var(--bg);stroke-width:1.5}
   .hform{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:14px}
   .hform select,.hform input{font-family:var(--sans);font-size:13px;color:var(--text);
     background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
@@ -9743,7 +10364,9 @@ function refreshFirstRun(){
   // Wait until token, shape AND objectives have each reported once — otherwise the card flashes a
   // wrong/early step on a configured instance as the three async boot signals resolve out of order.
   if(!(_frSeen.tok && _frSeen.shape && _frSeen.obj)) return;
-  const hasObj = OBJECTIVES.some(o=>o.status==='upcoming');
+  // §RL — a resolved (done/lapsed) race still counts as "has added a race": resolution must not
+  // resurrect the first-run card on a veteran instance. Only 'removed' means the user took it back.
+  const hasObj = OBJECTIVES.some(o=>['upcoming','done','lapsed'].includes(o.status));
   const steps=[
     {label:"Connect Runalyze", done: TOKEN_OK || HAS_SHAPE,
      // the token is a secret, but it's now settable in the private Settings window (stored off the
@@ -9797,6 +10420,24 @@ function objManager(p){
       <button class="x" data-oid="${o.id}">remove</button>
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;
   if(SH_READONLY) return `<div class="objs">${rows}</div>`;   // public: list only, no controls
+  // §RL — past races (private-only: results are personal, same posture as the §6s reckoning).
+  const pastChip = o => {
+    let oc = {}; try{ oc = JSON.parse(o.outcome||"{}"); }catch(e){}
+    if(o.status==='lapsed') return `<span class="muted">lapsed — no race-day run</span>`;
+    if(oc.status==='dnf') return `<span>DNF at ${oc.dnf_km} km</span>`;
+    if(oc.status==='finished'){
+      const vs = oc.beat===true ? ' · beat the goal' : oc.beat===false ? ` · goal ${esc(oc.goal)} missed` : '';
+      return `<span>✓ ${esc(oc.actual||'finished')}${vs}</span>`;
+    }
+    return `<span class="muted">run — result unverified</span>`;
+  };
+  const past = OBJECTIVES.filter(o=>o.status==='done'||o.status==='lapsed')
+    .sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5).map(o=>
+      `<div class="obj past"><span class="pr ${o.priority}">${o.priority}</span>
+        <span>${esc(o.label)}</span>
+        <span class="od">${esc(o.date)} · ${esc(o.type)} · ${pastChip(o)}</span></div>`).join("");
+  const pastRow = past ? `<div class="muted" style="font-size:11px;margin-top:8px">Past races</div>
+    <div class="objs">${past}</div>` : "";
   const aCount = OBJECTIVES.filter(o=>o.status==='upcoming' && o.priority==='A').length;
   const conflictRow = aCount>=2 ? `
     <div class="conflictrow">
@@ -9819,7 +10460,8 @@ function objManager(p){
       <select id="ao_pri"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
       <input id="ao_target" placeholder="goal (finish / 3:55)" style="width:120px">
       <button class="primary" id="ao_add" style="font-size:12px;padding:6px 11px">Add objective</button>
-    </div>`;
+    </div>
+    ${pastRow}`;
 }
 function diffBanner(diff){
   if(!diff || diff.first) return "";
@@ -10870,8 +11512,13 @@ async function loadDrift(){
 
 // ── Health markers ──────────────────────────────────────────────────────────
 let MARKERS = {};
+let HSERIES = {};   // marker -> full ascending series, kept so range toggles re-render locally
+// per-marker window choice, remembered across visits. "all" | "365" | "180" (days)
+const HRANGE = (()=>{ try{ return JSON.parse(localStorage.getItem("hrange"))||{}; }catch(e){ return {}; } })();
+const HRANGES = [["180","6m"],["365","1y"],["all","All"]];
 function sparkline(points, ref){
   // points: [{date, value}] ascending. ref:[low,high] (either may be null).
+  // Returns the markup plus the x/y mappers so the crosshair can snap to real readings.
   const W=240, H=54, pad=6;
   const vals = points.map(p=>p.value);
   let lo = Math.min(...vals), hi = Math.max(...vals);
@@ -10890,39 +11537,102 @@ function sparkline(points, ref){
   const d = points.map((p,i)=>`${i?"L":"M"}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(" ");
   const last = points[points.length-1];
   const dot = `<circle class="sparkdot" cx="${x(points.length-1).toFixed(1)}" cy="${y(last.value).toFixed(1)}" r="3"/>`;
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${band}<path class="spark" d="${d}"/>${dot}</svg>`;
+  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${band}<path class="spark" d="${d}"/>${dot}`+
+    `<g class="hcross" style="display:none"><line class="hcrossln" y1="${pad}" y2="${H-pad}"/><circle class="hcrossdot" r="3"/></g></svg>`;
+  return {svg, x, y, W};
 }
 function inRange(v, ref){ return (ref[0]==null||v>=ref[0]) && (ref[1]==null||v<=ref[1]); }
+// A range toggle only earns its place when there is history to fold away:
+// more than 6 months of span AND more than 50 readings.
+function hrangeEligible(pts){
+  return pts.length>50 && (ISO2T(pts[pts.length-1].date)-ISO2T(pts[0].date)) > 183*86400000;
+}
+function hslice(pts, r){
+  if(r==="all") return pts;
+  // Anchor the window to the LAST READING, not today: a series that stopped (e.g. a marker the
+  // watch no longer reports) still has a meaningful "last 6m/1y of data" — cutting from today
+  // made every window empty and silently fell back to the full span with the button still lit.
+  const cut = new Date(ISO2T(pts[pts.length-1].date)); cut.setDate(cut.getDate()-(+r));
+  const iso = cut.toISOString().slice(0,10);
+  const out = pts.filter(p=>p.date>=iso);
+  return out.length>=2 ? out : pts;   // window nearly empty → fall back to everything
+}
+function hcardHTML(k){
+  const m = MARKERS[k]||{label:k,unit:"",ref:[null,null],good:"band"};
+  const full = HSERIES[k];
+  const eligible = hrangeEligible(full);
+  const r = eligible ? (HRANGE[k]||"all") : "all";
+  const pts = eligible ? hslice(full, r) : full;
+  const last = full[full.length-1];   // headline = latest reading, whatever the window
+  const ok = m.good==="band" ? inRange(last.value,m.ref)
+           : m.good==="low"  ? (m.ref[1]==null||last.value<=m.ref[1])
+           :                    (m.ref[0]==null||last.value>=m.ref[0]);
+  const refTxt = m.ref[0]!=null&&m.ref[1]!=null ? `${m.ref[0]}–${m.ref[1]}`
+               : m.ref[1]!=null ? `&lt; ${m.ref[1]}` : m.ref[0]!=null ? `&gt; ${m.ref[0]}` : "";
+  const range = eligible
+    ? `<div class="hrange">${HRANGES.map(([v,l])=>
+        `<button type="button" data-r="${v}" class="${r===v?"on":""}">${l}</button>`).join("")}</div>`
+    : "";
+  const counts = pts.length===full.length ? `${full.length} readings`
+               : `${pts.length} of ${full.length} readings`;
+  return `<div class="hcard" data-k="${esc(k)}">
+    <div class="hhead"><div class="hk">${m.label}</div>${range}</div>
+    <div class="hv">${fmt(last.value, last.value%1?1:0)}<small> ${m.unit}</small>
+      ${refTxt?`<span class="flag ${ok?"ok":"bad"}">${ok?"ok":"watch"} ${refTxt}</span>`:""}</div>
+    <div class="hchart">${sparkline(pts, m.ref).svg}<div class="htip"></div></div>
+    <div class="hk" style="margin-top:6px;text-transform:none;letter-spacing:0">
+      ${counts} · ${pts[0].date} → ${last.date}</div>
+  </div>`;
+}
+function wireHCard(card){
+  const k = card.dataset.k;
+  const m = MARKERS[k]||{label:k,unit:"",ref:[null,null],good:"band"};
+  const full = HSERIES[k];
+  const pts = hrangeEligible(full) ? hslice(full, HRANGE[k]||"all") : full;
+  const sp = sparkline(pts, m.ref);   // recompute mappers for the slice actually drawn
+  card.querySelectorAll(".hrange button").forEach(b=>b.addEventListener("click",()=>{
+    HRANGE[k]=b.dataset.r;
+    try{ localStorage.setItem("hrange", JSON.stringify(HRANGE)); }catch(e){}
+    const tmp=document.createElement("div"); tmp.innerHTML=hcardHTML(k);
+    const nu=tmp.firstElementChild; card.replaceWith(nu); wireHCard(nu);
+  }));
+  // crosshair — snap to the nearest reading, show its date + value
+  const svg=card.querySelector(".hchart svg"), g=svg.querySelector(".hcross"),
+        ln=g.querySelector("line"), cd=g.querySelector("circle"),
+        wrap=card.querySelector(".hchart"), tip=card.querySelector(".htip");
+  svg.addEventListener("mousemove", e=>{
+    const rect=svg.getBoundingClientRect();
+    const px=(e.clientX-rect.left)/rect.width*sp.W;
+    let best=0, bd=1e18;
+    for(let i=0;i<pts.length;i++){ const dx=Math.abs(sp.x(i)-px); if(dx<bd){bd=dx;best=i;} }
+    const p=pts[best], gx=sp.x(best).toFixed(1);
+    ln.setAttribute("x1",gx); ln.setAttribute("x2",gx);
+    cd.setAttribute("cx",gx); cd.setAttribute("cy",sp.y(p.value).toFixed(1));
+    g.style.display="block";
+    const dt=new Date(p.date+"T00:00:00");
+    tip.innerHTML=`<b>${dt.toLocaleDateString(undefined,{day:"numeric",month:"short",year:"2-digit"})}</b>`+
+      `${fmt(p.value, p.value%1?1:0)} ${m.unit}`;
+    tip.style.display="block";
+    const wr=wrap.getBoundingClientRect();
+    tip.style.left=Math.max(0, Math.min(wr.width-tip.offsetWidth, e.clientX-wr.left+10))+"px";
+  });
+  svg.addEventListener("mouseleave", ()=>{ g.style.display="none"; tip.style.display="none"; });
+}
 
 async function loadHealth(){
   const d = await getJSON("/api/health");
   MARKERS = d.markers;
+  HSERIES = d.series||{};
   // populate the add-form marker dropdown once
   const sel = $("#hmarker");
   if(!sel.options.length){
     sel.innerHTML = Object.entries(MARKERS).map(([k,m])=>`<option value="${k}">${m.label} (${m.unit})</option>`).join("");
   }
   const host = $("#health");
-  const present = Object.keys(d.series||{});
+  const present = Object.keys(HSERIES);
   if(!present.length){ host.innerHTML = `<div class="empty">No markers yet — add one below.</div>`; return; }
-  host.innerHTML = present.map(k=>{
-    const m = MARKERS[k]||{label:k,unit:"",ref:[null,null],good:"band"};
-    const pts = d.series[k];
-    const last = pts[pts.length-1];
-    const ok = m.good==="band" ? inRange(last.value,m.ref)
-             : m.good==="low"  ? (m.ref[1]==null||last.value<=m.ref[1])
-             :                    (m.ref[0]==null||last.value>=m.ref[0]);
-    const refTxt = m.ref[0]!=null&&m.ref[1]!=null ? `${m.ref[0]}–${m.ref[1]}`
-                 : m.ref[1]!=null ? `&lt; ${m.ref[1]}` : m.ref[0]!=null ? `&gt; ${m.ref[0]}` : "";
-    return `<div class="hcard">
-      <div class="hk">${m.label}</div>
-      <div class="hv">${fmt(last.value, last.value%1?1:0)}<small> ${m.unit}</small>
-        ${refTxt?`<span class="flag ${ok?"ok":"bad"}">${ok?"ok":"watch"} ${refTxt}</span>`:""}</div>
-      ${sparkline(pts, m.ref)}
-      <div class="hk" style="margin-top:6px;text-transform:none;letter-spacing:0">
-        ${pts.length} readings · ${pts[0].date} → ${last.date}</div>
-    </div>`;
-  }).join("");
+  host.innerHTML = present.map(hcardHTML).join("");
+  host.querySelectorAll(".hcard").forEach(wireHCard);
 }
 
 const _hform=$("#hform");
@@ -10982,7 +11692,18 @@ async function loadSettings(){
     ${d.settings.map(field).join("")}
     <div class="setbar"><button class="primary" type="submit">Save settings</button>
       <span class="ok" id="setok"></span></div>
-  </form>`;
+  </form>
+  <div class="setrow" style="margin-top:14px">
+    <label>Backup &amp; export</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <a class="ghost" href="/api/backup/db" download style="text-decoration:none;padding:6px 11px;font-size:12px">⬇ Database snapshot (.db)</a>
+      <a class="ghost" href="/api/export/json" download style="text-decoration:none;padding:6px 11px;font-size:12px">⬇ Data export (.json)</a>
+    </div>
+    <div class="help">The snapshot is a complete, consistent copy of the database — restore by stopping the app
+      and dropping it into ./data as sparinghorse.db. The JSON export carries only what can't be rebuilt
+      (objectives, check-ins, reflections, adjustments, lab markers, plans, settings) — restore into a fresh
+      instance with: python SparingHorse.py import &lt;file&gt;. API keys are never included in either.</div>
+  </div>`;
   $("#setform").addEventListener("submit", saveSettings);
   wireCityPicker();
 }
@@ -11071,10 +11792,50 @@ async function loadSecrets(probe){
       <div class="err" id="secerr_${s.key}"></div>
     </div>`;
   host.innerHTML=`<div class="secblock"><div class="sectitle">Connections &amp; keys</div>
-    ${d.secrets.map(row).join("")}</div>`;
+    ${d.secrets.map(row).join("")}<div id="suuntoBox"></div></div>`;
   host.querySelectorAll("button[data-sec]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.sec,false)));
   host.querySelectorAll("button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
+  loadSuunto();
   if(probe) validateSecrets(d.secrets);
+}
+// §SG — the Suunto watch link: a one-time OAuth "Connect" (full-page bounce to Suunto and back),
+// then the nightly re-plan pushes the coming week to the watch as SuuntoPlus Guides. The three app
+// credentials above must be saved first; tokens never reach the browser (status only).
+async function loadSuunto(){
+  const box=$("#suuntoBox"); if(!box) return;
+  let d; try{ d=await getJSON("/api/suunto/status"); }catch(e){ box.innerHTML=""; return; }
+  if(!d.ok){ box.innerHTML=""; return; }
+  const badge = d.connected
+    ? `<span class="src ok">✓ connected${d.user?" as "+esc(String(d.user)):""}</span>`
+    : (d.configured ? `<span class="src warn">not connected</span>`
+                    : `<span class="src warn">needs the 3 Suunto keys above</span>`);
+  box.innerHTML=`<div class="setrow">
+      <label>Suunto watch (Guides push) ${badge}</label>
+      <div class="secinput">
+        ${d.connected
+          ? `<button type="button" class="primary" id="suuntoPush">Push week to watch</button>
+             <button type="button" class="ghost" id="suuntoDisc">Disconnect</button>`
+          : `<button type="button" class="primary" id="suuntoConn" ${d.configured?"":"disabled"}>Connect Suunto</button>`}
+      </div>
+      <div class="help">Sends the plan's next days to your watch as SuuntoPlus Guides (steps, pace
+        and HR bands on the wrist). Auto-pushes nightly after the re-plan once connected.
+        Register the redirect URI <code>${esc(d.redirect_uri||"")}</code> on your Suunto OAuth app.</div>
+      <div class="err" id="suuntoErr"></div>
+    </div>`;
+  const err=$("#suuntoErr");
+  const conn=$("#suuntoConn"); if(conn) conn.addEventListener("click",()=>{ location.href="/api/suunto/connect"; });
+  const disc=$("#suuntoDisc"); if(disc) disc.addEventListener("click",async()=>{
+    try{ await fetch("/api/suunto/disconnect",{method:"POST"}); }catch(e){}
+    loadSuunto();
+  });
+  const push=$("#suuntoPush"); if(push) push.addEventListener("click",async()=>{
+    err.textContent=""; push.disabled=true; push.textContent="Pushing…";
+    let r; try{ r=await (await fetch("/api/suunto/push",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json(); }
+    catch(e){ r={ok:false,error:"network error"}; }
+    push.disabled=false; push.textContent="Push week to watch";
+    if(r.ok) err.innerHTML=`<span class="src ok">✓ ${r.pushed||0} session${(r.pushed===1)?"":"s"} pushed${r.note?" — "+esc(r.note):""}</span>`;
+    else err.textContent="⚠ "+(r.error||"push failed");
+  });
 }
 // Live key check — fires when the Settings window opens (or after a save), not on every page load (the
 // Anthropic probe is a network round-trip). A configured key resolves to ✓ in use · valid, ✗ key rejected,
@@ -11164,6 +11925,11 @@ if(_setBtn && _setDlg){
   _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); loadSecrets(true); _setDlg.showModal(); });  // (re)load settings if the initial fetch failed; refresh + live-validate keys each open
   const _x=$("#settingsClose"); if(_x) _x.addEventListener("click", ()=>_setDlg.close());
   _setDlg.addEventListener("click", e=>{ if(e.target===_setDlg) _setDlg.close(); });  // backdrop click
+  // §SG — landing back from the Suunto OAuth bounce (/?suunto=connected|denied|…): reopen Settings
+  // so the fresh connection status (or the failure) is right there; scrub the flag from the URL.
+  const _su=new URLSearchParams(location.search).get("suunto");
+  if(_su){ history.replaceState(null,"",location.pathname);
+    if(!$("#setform")) loadSettings(); loadSecrets(true); _setDlg.showModal(); }
 }
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
@@ -11273,6 +12039,20 @@ def _scheduler_loop(hhmm):
             _daily_replan()
         except Exception as e:
             print(f"[scheduler] daily re-plan failed: {e}")
+        # §SG — after the re-plan, keep the watch current: push the refreshed next-days sessions
+        # as SuuntoPlus Guides. No-ops (skipped=True) when Suunto isn't connected; push_guides
+        # never raises, but the belt-and-braces try keeps a converter surprise from killing the loop.
+        try:
+            db = connect_db()
+            try:
+                res = push_guides(db)
+            finally:
+                db.close()
+            if not res.get("skipped"):
+                print(f"[scheduler] suunto guides push: {res.get('pushed', 0)} pushed"
+                      + (f" — {res['error']}" if res.get("error") else ""))
+        except Exception as e:
+            print(f"[scheduler] suunto guides push failed: {e}")
         time.sleep(61)  # step past the trigger minute before recomputing the next wait
 
 
@@ -12272,6 +13052,142 @@ def _stc_race_day_landing():
                got={"violations": fails or "none"})
 
 
+def _stc_race_lifecycle():
+    """§RL — the objectives status machine actually transitions: a passed race with a matching run
+    settles 'done' (outcome carries the result + goal comparison), a passed race with no run holds
+    'upcoming' through the sync-grace window then lapses, a passed 'custom' settles 'done' unverified,
+    future races and already-resolved rows are untouched, and the resolver is idempotent. Constructed
+    in-memory fixture; pure of the ambient DB."""
+    import sqlite3 as _sq
+    global READONLY
+    if READONLY:   # the resolver is private-side only (never writes on the mirror) — nothing to test
+        return _st("det", "race-lifecycle", "resolver is a no-op on the read-only mirror", skipped=True)
+    fails = []
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = datetime.now().date()
+    d = lambda n: (today - timedelta(days=n)).isoformat()
+    obj = lambda typ, date, tgt="finish": mem.execute(
+        "INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+        "VALUES(?,?,?,?,'A','upcoming',?)", (typ, f"{typ}@{date}", date, tgt, _now_iso())).lastrowid
+    finished = obj("10k", d(10), "50:00")                      # matched run below → done/finished
+    dnf      = obj("marathon", d(10))                          # short race-day run → done/dnf
+    graced   = obj("half", d(RACE_RESOLVE_GRACE_DAYS))         # no run, inside grace → stays upcoming
+    lapsed   = obj("half", d(RACE_RESOLVE_GRACE_DAYS + 1))     # no run, past grace → lapsed
+    custom   = obj("custom", d(30))                            # unmatchable distance → done unverified
+    future   = obj("marathon", (today + timedelta(weeks=20)).isoformat())
+    mem.execute("INSERT INTO activities(id,date,sport,distance,duration) VALUES(?,?,?,?,?)",
+                (9101, d(10), "Running", 10.1, 47 * 60 + 30))  # the 10k race, beat the 50:00 goal
+    mem.execute("INSERT INTO activities(id,date,sport,distance,duration) VALUES(?,?,?,?,?)",
+                (9102, d(10), "Running", 28.0, 3 * 3600))      # marathon day, 28 km → DNF
+    mem.commit()
+    trans = {t["id"]: t for t in resolve_passed_races(mem, today)}
+    rows = {r["id"]: dict(r) for r in mem.execute("SELECT * FROM objectives").fetchall()}
+    oc = lambda i: json.loads(rows[i]["outcome"] or "{}")
+    if rows[finished]["status"] != "done" or oc(finished).get("status") != "finished":
+        fails.append(f"finished: {rows[finished]['status']}/{oc(finished)}")
+    elif not (oc(finished).get("beat") is True and oc(finished).get("actual") == "47:30"):
+        fails.append(f"finished outcome wrong: {oc(finished)}")
+    if rows[dnf]["status"] != "done" or oc(dnf).get("status") != "dnf" or oc(dnf).get("dnf_km") != 28.0:
+        fails.append(f"dnf: {rows[dnf]['status']}/{oc(dnf)}")
+    if rows[graced]["status"] != "upcoming" or graced in trans:
+        fails.append(f"grace window violated: {rows[graced]['status']}")
+    if rows[lapsed]["status"] != "lapsed" or oc(lapsed).get("status") != "unrun":
+        fails.append(f"lapsed: {rows[lapsed]['status']}/{oc(lapsed)}")
+    if rows[custom]["status"] != "done" or oc(custom).get("status") != "unverified":
+        fails.append(f"custom: {rows[custom]['status']}/{oc(custom)}")
+    if rows[future]["status"] != "upcoming":
+        fails.append(f"future touched: {rows[future]['status']}")
+    if resolve_passed_races(mem, today):                       # second pass must be a no-op
+        fails.append("not idempotent — second pass transitioned rows")
+    if not rows[finished]["resolved_at"]:
+        fails.append("resolved_at not stamped")
+    mem.close()
+    # §RL/H7 WIRING — race results are personal: the public read-only container must redact
+    # outcome/resolved_at at the DATA layer (the UI hiding the Past-races strip is cosmetic).
+    saved = READONLY
+    try:
+        READONLY = True
+        with app.test_client() as c:
+            for o in (c.get("/api/objectives").get_json() or []):
+                if "outcome" in o or "resolved_at" in o:
+                    fails.append("public /api/objectives leaks outcome/resolved_at")
+                    break
+    finally:
+        READONLY = saved
+    return _st("det", "race-lifecycle",
+               "passed races resolve: matched→done(+outcome/goal), unmatched holds grace then lapses, custom→unverified, future untouched, idempotent",
+               passed=not fails, expect="all lifecycle transitions correct",
+               got={"violations": fails or "none"})
+
+
+def _stc_backup_export():
+    """§BX — the backup/export story holds: the JSON export round-trips every non-rebuildable table
+    byte-faithfully into a fresh instance, import REFUSES a non-empty target and foreign/newer files,
+    the DB snapshot (VACUUM INTO) is a complete consistent copy, no secret store can ride either
+    artifact, and both endpoints stay private-only. Constructed in-memory fixtures."""
+    import sqlite3 as _sq, tempfile as _tf
+    fails = []
+    src = _sq.connect(":memory:"); src.row_factory = _sq.Row
+    src.executescript(SCHEMA)
+    today = datetime.now().date().isoformat()
+    src.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at,outcome) "
+                "VALUES('marathon','R',?,'3:45','A','done',?,'{\"status\":\"finished\"}')", (today, _now_iso()))
+    src.execute("INSERT INTO readiness(date,energy,sleep,stop_symptom,note,created_at) "
+                "VALUES(?,'good','ok',0,'fine',?)", (today, _now_iso()))
+    src.execute("INSERT INTO session_log(date,note,created_at) VALUES(?,'strong',?)", (today, _now_iso()))
+    src.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,active) "
+                "VALUES(?,'tired week','{}',?,?,1)", (_now_iso(), today, today))
+    src.execute("INSERT INTO health_markers(marker,date,value,source) VALUES('triglycerides',?,132,'manual')", (today,))
+    src.execute("INSERT INTO ignored_activities(id,reason,created_at) VALUES(9,'dup',?)", (_now_iso(),))
+    src.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}','{\"ok\":true}')", (_now_iso(), today))
+    src.execute("INSERT INTO meta VALUES('set:house_name','X')")
+    src.commit()
+    payload = export_user_data(src)
+    if set(payload["tables"]) != set(EXPORT_TABLES) or payload["format"] != EXPORT_FORMAT:
+        fails.append("export envelope wrong")
+    dst = _sq.connect(":memory:"); dst.row_factory = _sq.Row
+    dst.executescript(SCHEMA)
+    out = import_user_data(dst, payload)
+    if not out.get("ok"):
+        fails.append(f"import refused a fresh target: {out}")
+    else:
+        for t in EXPORT_TABLES:
+            a = [dict(r) for r in src.execute(f"SELECT * FROM {t}").fetchall()]
+            b = [dict(r) for r in dst.execute(f"SELECT * FROM {t}").fetchall()]
+            if a != b:
+                fails.append(f"{t} not round-tripped")
+        if import_user_data(dst, payload).get("ok"):
+            fails.append("import into a NON-empty target not refused")
+    if import_user_data(dst, {"app": "other"}).get("ok"):
+        fails.append("foreign file not refused")
+    if import_user_data(dst, {"app": "SparingHorse", "format": EXPORT_FORMAT + 1, "tables": {}}).get("ok"):
+        fails.append("newer format not refused")
+    # DB snapshot: VACUUM INTO gives a complete copy; and NO secret table exists to ride along —
+    # the secrets store is a separate file (SH_SECRETS_DB), asserted here so a refactor that moves
+    # keys into the main DB fails this test instead of leaking into every future backup.
+    with _tf.TemporaryDirectory() as td:
+        snap_path = str(Path(td) / "snap.db")
+        src.execute("VACUUM INTO ?", (snap_path,))
+        snap = _sq.connect(snap_path); snap.row_factory = _sq.Row
+        if snap.execute("SELECT COUNT(*) FROM objectives").fetchone()[0] != 1:
+            fails.append("snapshot missing rows")
+        tables = {r["name"] for r in snap.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if any("secret" in t.lower() for t in tables):
+            fails.append(f"secret-ish table in the main DB/snapshot: {tables}")
+        snap.close()
+    if any("secret" in t.lower() for t in EXPORT_TABLES):
+        fails.append("secret-ish table in EXPORT_TABLES")
+    for p in ("/api/backup/db", "/api/export/json"):
+        if not _private_only_path(p):
+            fails.append(f"{p} not private-only")
+    src.close(); dst.close()
+    return _st("det", "backup-export",
+               "JSON export round-trips all non-rebuildable tables; import refuses non-empty/foreign/newer; VACUUM snapshot complete + secret-free; endpoints private-only",
+               passed=not fails, expect="round-trip faithful + guards hold",
+               got={"violations": fails or "none"})
+
+
 def _stc_chain_drift():
     """§6q/#3 drift-scorecard multi-peak awareness — _chain_drift matches each A-race's founding vs current
     projected race-day CTL by date, computes the same ±0.5 trend, marks passed races, finds the next peak,
@@ -12676,6 +13592,95 @@ def _stc_zones():
                "degrades honestly (pace-only without HR; ok=False with nothing)",
                passed=not fails, expect="pace/HR coherence with the prescribing + judging models",
                got={"violations": fails or "none"})
+
+
+def _stc_guides():
+    """§SG guide-converter det-lock — PURE (no DB, no network): a structured interval session and a
+    simple easy run must convert to guide.zips that hold every documented Suunto hard limit (name ≤60,
+    shortDescription ≤23, description ≤256, step title ≤13, text ≤54, steps 1–1000, watch charset) with
+    the doc-confirmed UNITS (targetPace in m/s, stepDuration in seconds, stepDistance in metres — the
+    banked spec's one real ambiguity, locked here so a future 'fix' back to sec/km fails loudly), one
+    step per rep with lap-marked work, HR bands from the app's own grid, and a stable externalId (the
+    push idempotency key)."""
+    from datetime import date as _d
+    fails = []
+    zones = pace_zones(50.0)
+    spec = {"zone": "threshold", "structure": "intervals", "rep_min": 5, "rec_min": 2,
+            "kind": "intervals", "label": "cruise intervals"}
+    sess = _build_quality(spec, 78, _d(2026, 7, 13), 2, zones, zones["easy"])
+    hrz = {"anchor": "lthr", "ref": 166, "cutoffs": [135, 149, 157, 166],
+           "zones": [("Z1", None, 135), ("Z2", 135, 149), ("Z3", 149, 157),
+                     ("Z4", 157, 166), ("Z5", 166, None)], "lthr_confidence": "high"}
+    g, blob = session_to_guide(sess, hrz)
+    z = zipfile.ZipFile(io.BytesIO(blob))
+    if set(z.namelist()) != {"guide.json", "icon.png"}:
+        fails.append(f"zip contents wrong: {z.namelist()}")
+    elif json.loads(z.read("guide.json")) != g:
+        fails.append("guide.json in zip != returned guide dict")
+    else:
+        icon = z.read("icon.png")
+        if icon[:8] != b"\x89PNG\r\n\x1a\n" or struct.unpack(">II", icon[16:24]) != (300, 300):
+            fails.append("icon.png not a 300x300 PNG")
+    # documented hard limits + charset (the Suunto validator rejects, we must never emit)
+    lims = [("name", 60), ("shortDescription", 23), ("description", 256), ("owner", 64), ("url", 256)]
+    for k, n in lims:
+        if not (1 <= len(g.get(k, "")) <= n):
+            fails.append(f"{k} violates 1..{n}: {g.get(k)!r}")
+    if g["type"] != "sequence" or g["usage"] != "workout" or g["localDate"] != sess["date"]:
+        fails.append("type/usage/localDate wrong")
+    if not (1 <= len(g["steps"]) <= 1000) or len(g["steps"]) != len(sess["reps"]):
+        fails.append(f"steps != one per rep: {len(g['steps'])} vs {len(sess['reps'])}")
+    bad_chars = set("×—–’·") & set(json.dumps(g))
+    if bad_chars:
+        fails.append(f"unsupported watch chars leaked: {bad_chars}")
+    for st_, rep in zip(g["steps"], sess["reps"]):
+        if len(st_["title"]) > 13:
+            fails.append(f"step title >13: {st_['title']!r}")
+        cond = (st_.get("transitions") or [{}])[0].get("condition") or {}
+        if cond != {"type": "stepDuration", "value": round(rep["minutes"] * 60.0, 1)}:
+            fails.append(f"step condition not the rep duration in SECONDS: {cond}")
+        for f in st_["fields"]:
+            if f["type"] == "text" and len(f["value"]) > 54:
+                fails.append(f"text field >54: {f['value']!r}")
+        if bool(st_.get("createManualLap")) != (rep["effort"] == "work"):
+            fails.append(f"lap marking != work rep on {st_['title']}")
+    # UNITS lock: targetPace m/s on the first work step ≈ 1000/sec_per_km(threshold), min<value<max
+    work = next(s for s, r in zip(g["steps"], sess["reps"]) if r["effort"] == "work")
+    tp = next((f for f in work["fields"] if f["type"] == "targetPace"), None)
+    if not tp or not (tp["min"] < tp["value"] < tp["max"]):
+        fails.append(f"work targetPace missing/unordered: {tp}")
+    elif abs(tp["value"] - 1000.0 / zones["threshold"]) > 0.2 or not (1.5 < tp["value"] < 7.5):
+        fails.append(f"targetPace not m/s of threshold pace: {tp['value']} vs "
+                     f"{1000.0 / zones['threshold']:.3f}")
+    th = next((f for f in work["fields"] if f["type"] == "targetHeartRate"), None)
+    if not th or (th["min"], th["max"]) != (157, 166):
+        fails.append(f"work HR band != grid Z4: {th}")
+    if g["externalId"] != session_guide_external_id(sess) or g["externalId"] != "sh-2026-07-15-intervals":
+        fails.append(f"externalId not stable/derived: {g['externalId']}")
+    # simple easy run: single DISTANCE-framed step (metres), pace from km/minutes, no HR without a grid
+    easy = {"date": "2026-07-14", "kind": "easy", "km": 8.0, "minutes": 48, "trimp": 48,
+            "pace_zone": "6:00/km easy", "note": "easy run + 4×4–6 strides"}
+    g2, _ = session_to_guide(easy, None)
+    st2 = g2["steps"][0]
+    cond2 = st2["transitions"][0]["condition"]
+    if len(g2["steps"]) != 1 or cond2 != {"type": "stepDistance", "value": 8000.0}:
+        fails.append(f"easy run not one distance step in METRES: {cond2}")
+    tp2 = next((f for f in st2["fields"] if f["type"] == "targetPace"), None)
+    if not tp2 or abs(tp2["value"] - 1000.0 / 360.0) > 0.01:
+        fails.append(f"easy targetPace wrong: {tp2}")
+    if any(f["type"] == "targetHeartRate" for f in st2["fields"]):
+        fails.append("HR target emitted without an HR grid")
+    try:
+        session_to_guide({"date": "2026-07-14", "kind": "easy", "km": 0}, None)
+        fails.append("km=0 session did not raise")
+    except ValueError:
+        pass
+    return _st("det", "guides", "§SG converter: Suunto limits/charset, m/s+seconds+metres units, "
+               "one step per rep w/ lap-marked work, grid HR bands, stable externalId",
+               passed=not fails, expect="all §SG converter locks hold",
+               got="; ".join(fails) if fails else "ok",
+               inp={"quality": spec, "easy_km": 8.0},
+               note="pure — no DB/network; the push path (OAuth/upload) is exercised live, not here")
 
 
 def _stc_hr_zones():
@@ -15883,10 +16888,12 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
                  lambda: _stc_multi_a_chain(),
                  lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
+                 lambda: _stc_race_lifecycle(), lambda: _stc_backup_export(),
                  lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
+                 lambda: _stc_guides(),
                  lambda: _stc_lt1(),
                  lambda: _stc_health_sync(), lambda: _stc_sleep_sync(),
                  lambda: _stc_rebase_anchor_derive(),
@@ -16309,6 +17316,22 @@ if __name__ == "__main__":
             rep["id"] = save_selftest_run(db, rep)
         print(_selftest_text(rep))
         sys.exit(1 if rep["summary"]["failed"] else 0)
+    if len(sys.argv) > 1 and sys.argv[1] == "import":     # §BX CLI: python SparingHorse.py import export.json
+        if len(sys.argv) < 3:
+            print("Usage: python SparingHorse.py import <sparinghorse-export.json>")
+            sys.exit(2)
+        try:
+            payload = json.loads(Path(sys.argv[2]).read_text())
+        except (OSError, ValueError) as e:
+            print(f"Could not read export file: {e}")
+            sys.exit(2)
+        with app.app_context():
+            out = import_user_data(get_db(), payload)
+        if out.get("ok"):
+            print("Restored:", ", ".join(f"{t}={n}" for t, n in out["restored"].items()))
+            sys.exit(0)
+        print(f"Import refused: {out.get('error')}")
+        sys.exit(1)
     if len(sys.argv) > 1 and sys.argv[1] == "seed":       # CLI: SH_DB=test.db python SparingHorse.py seed
         # Populates a TOKEN-FREE local test/demo instance. seed_synthetic_db DELETEs the data
         # tables first, so two independent guards keep it from ever wiping a REAL database:

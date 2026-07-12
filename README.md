@@ -52,6 +52,12 @@ showcase deliberately shows a slice; the real console has the full set.
   your grade-adjusted pace vs an aerobic-threshold (LT1) bar — with an HR-redline backstop either way.
 - **Readiness gate** — a daily green/amber/red verdict that flags stop-the-run / cardiac-type symptoms.
 - **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation), an HR-zone band, and a route map.
+- **Race lifecycle** — a passed race resolves on its own: the race-day run is matched and the objective
+  settles as done (result + goal comparison recorded) or lapsed, with a private *Past races* history.
+- **Backup & export** — one-click consistent database snapshot + a portable JSON export of everything
+  that can't be rebuilt from Runalyze, with a fresh-instance restore command. Keys are never included.
+- **Suunto watch push** *(optional)* — upcoming planned sessions land on a Suunto watch as SuuntoPlus
+  Guides (steps with pace + HR bands), via your own Suunto partner-app keys.
 
 **AI layer** *(optional — set `ANTHROPIC_API_KEY`; blank = dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), multi-A adjudication advice, plain-language
@@ -85,7 +91,8 @@ in [`MANUAL.md`](MANUAL.md). The sections below are the quick-start.
 - **Anthropic API key** *(optional)* — enables the LLM layer (natural-language objectives, clamped
   qualitative adjustments, readiness judgment, plan narration). Blank keeps the AI features dormant; the
   deterministic engine is unaffected.
-- **Suunto** *(optional, planned)* — structured-workout push to the watch, pending Suunto partner-API access.
+- **Suunto partner-app keys** *(optional)* — enable the watch push by registering your own app at
+  `apizone.suunto.com` (partner program) and pasting its client id/secret + subscription key in Settings.
 
 ## Run locally
     pip install -r requirements.txt
@@ -125,6 +132,7 @@ caches only the shell and never the API.
 | `SH_ATHLETE_CONTEXT` | one-line context injected into the LLM prompts (e.g. returning from injury) |
 | `SH_WEATHER_CITIES` | header weather widget (`Name,lat,lon;…`); blank = hidden |
 | `SH_HOUSE_URL` / `SH_HOUSE_NAME` | optional back-link in the header |
+| `SH_GUIDE_URL` | "more info" link on pushed Suunto guides (default: this repo) |
 | `SH_READONLY` | public container only (set in docker-compose) |
 
 ## Calibration

@@ -12,6 +12,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-12
+
+The watch learns the plan, a finished race settles its own score, and your data finally has a
+backup story.
+
+### Fixed
+- **Health-marker range toggle windows from the last reading, not today.** A series that stopped
+  (e.g. resting HR after a watch change) always produced an empty 6m/1y window and silently fell
+  back to the full span with the button still lit; the window is now the last 6m/1y *of data*.
+  The toggle also renders as a proper segmented control — one continuous outline instead of
+  per-button borders that broke around the selected segment.
+
+### Added
+- **Suunto watch push (§SG).** Planned sessions can now land on a Suunto watch as **SuuntoPlus
+  Guides**: connect once via OAuth in Settings (bring your own Suunto partner-app keys — client
+  id/secret + subscription key from `apizone.suunto.com`; there is no central relay), and the
+  nightly re-plan pushes the upcoming days' structured sessions — steps with duration/distance,
+  pace windows and HR bands — replacing yesterday's push idempotently. Without keys or a
+  connection the push is simply off; nothing else changes. *(First on-hardware verification is
+  still pending — a Suunto-side login issue is blocking the initial OAuth connect; details that
+  their docs leave unspecified may need small follow-up fixes.)*
+- **Backup & export (§BX).** The app finally has a data-safety story. Settings gains a
+  **Backup & export** section with two private-only downloads: a **database snapshot** (a
+  consistent, compacted copy of the whole DB, safe to take while the app runs — restore by
+  dropping it into `./data`) and a portable **JSON export** of everything that cannot be
+  rebuilt from Runalyze (objectives + race outcomes, readiness check-ins, reflections,
+  adjustments, lab markers, ignore-list, plan history, settings). A new
+  `python SparingHorse.py import <file>` restores the JSON into a fresh instance — and
+  refuses to import over existing data. API keys live in the separate secrets store and are
+  never in either artifact (locked by the new `det/backup-export`). MANUAL §12 documents the
+  whole story.
+- **Race lifecycle (§RL).** A race that has passed now resolves instead of staying "upcoming"
+  forever: the nightly re-plan (and the objectives list itself) matches the race-day run and
+  settles the objective — **done** with a recorded result (finish time, DNF distance, and
+  whether the goal time was beaten) or **lapsed** when no race-day run appears after a short
+  sync-grace window (a `custom` race with no standard distance settles done/unverified rather
+  than being accused of a DNS). Resolved races show in a private-only **Past races** strip on
+  the objectives card, and the drift scorecard's post-race reckoning now survives resolution.
+  Plans are untouched — periodization already ignored passed races. Race results are redacted
+  at the data layer on the public read-only mirror (`outcome`/`resolved_at` never leave the
+  private console). New `det/race-lifecycle`.
+
 ## [0.13.0] - 2026-07-05
 
 Sleep lands on the health view, the run browser learns your whole history, and an over-run week
