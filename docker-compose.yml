@@ -27,6 +27,8 @@ services:
       - SH_TZ=${SH_TZ:-}
       - SH_ATHLETE_CONTEXT=${SH_ATHLETE_CONTEXT:-}
       - SH_SEED_OBJECTIVE=${SH_SEED_OBJECTIVE:-}
+      # "More info" link on pushed Suunto guides (default: the project repo).
+      - SH_GUIDE_URL=${SH_GUIDE_URL:-}
     volumes:
       # Locally-owned data copy lives on the NAS — back it up by copying this folder.
       # This is the single writer of the DB.

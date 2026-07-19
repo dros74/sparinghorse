@@ -247,7 +247,10 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 4   # v4 (2026-07-05): fused stride clusters counted by INTERNAL peaks (a wide
+STRUCT_VERSION = 5   # v5 (2026-07-14): baseline = the whole slowest LEVEL's time/distance pace, not
+#                      the anchor block's own — a 2-min float anchored the baseline on the first live
+#                      §RD read and promoted a marathon-pace run-home to work rep 3 (n_work 3, want 2).
+#                      v4 (2026-07-05): fused stride clusters counted by INTERNAL peaks (a wide
 #                      episode was discarded whole — 6 of his real 11 counted at full streams),
 #                      dedicated "Strides" kind + set grouping "(5+6)" + strides-only pace, per the
 #                      owner's spec. v3: cadence corroboration (GPS spikes). v2: honest pace.
@@ -620,7 +623,14 @@ def classify_structure(streams, zones):
     major = [b for b in segs if level_sec(b) >= min(max(RD_BASE_MIN_SHARE * total_sec, 600),
                                                     0.5 * total_sec)]
     base_blk = max(major or segs, key=lambda b: (b["pace"], level_sec(b)))   # slowest qualifying level
-    baseline = base_blk["pace"]
+    # The baseline pace is the whole LEVEL's time-over-distance, not the anchor block's own pace:
+    # a 2-min recovery float can anchor the slowest qualifying level (its ±contrast neighbourhood
+    # borrows the warm-up's minutes) and a float-pace baseline then hands a marathon-effort run-home
+    # a >10% "work" contrast it never had vs the run's real easy pace (2026-07-14 live read: a 15min
+    # @6:29 cool-down became work rep 3 of a 2-rep VO₂ session).
+    base_members = [s for s in segs if abs(math.log(s["pace"] / base_blk["pace"])) <= thr]
+    base_km = sum(s["km"] for s in base_members)
+    baseline = (sum(s["sec"] for s in base_members) / base_km) if base_km else base_blk["pace"]
     fast_ix = [i for i, s in enumerate(segs)
                if s["zone"] in RD_WORK_ZONES
                and math.log(baseline / s["pace"]) >= math.log1p(RD_WORK_CONTRAST)]
@@ -925,6 +935,21 @@ CREATE TABLE IF NOT EXISTS ignored_activities (
     id         INTEGER PRIMARY KEY,   -- the activity id to exclude from the reconstruction
     reason     TEXT,
     created_at TEXT
+);
+
+-- §AV — availability: away days the plan must lay AROUND (travel, life). Deterministic UI input
+-- (no LLM in the path — must work on a keyless install), date-granular, inclusive range. The
+-- layout derives from these rows (constraints-not-edits: the plan stays a pure function of
+-- (today, shape, objectives, adjustments, availability)); past rows are naturally inert.
+-- PRIVACY (H7-class): these rows and every derived marker are PRIVATE-ONLY — away dates on the
+-- public box are an empty-house broadcast. The public plan shows only the resulting laid days.
+CREATE TABLE IF NOT EXISTS availability (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT,
+    date_from  TEXT,               -- YYYY-MM-DD inclusive
+    date_to    TEXT,               -- YYYY-MM-DD inclusive
+    note       TEXT,               -- optional, owner's words ("flight", "family week")
+    active     INTEGER DEFAULT 1   -- 0 once deleted
 );
 
 -- Self-test harness (§ diagnostics). Each run is one row: summary counts for quick listing
@@ -1558,7 +1583,7 @@ def suunto_status():
 # text field ≤54 chars; name ≤60, shortDescription ≤23, description ≤256, externalId ≤64.
 # The guide's "more info" link shown in the Suunto app — cosmetic metadata. Overridable so a
 # self-hoster can point it at their own instance; the neutral default is the project repo.
-SUUNTO_GUIDE_URL = os.environ.get("SH_GUIDE_URL", "https://github.com/dros74/sparinghorse")
+SUUNTO_GUIDE_URL = os.environ.get("SH_GUIDE_URL") or "https://github.com/dros74/sparinghorse"
 SUUNTO_ACTIVITY_RUNNING = 1
 # Plan intensity zone → the app's HR zone band (hr_zones() Z1–Z5 tuples). "easy" spans Z1–Z2 —
 # the moving easy bar (§3.4) lives in pace; on the wrist the HR band is the honest easy guard.
@@ -3501,6 +3526,37 @@ def _run_days(n):
     return sorted({round(i * 6 / (n - 1)) for i in range(n)})
 
 
+AV_MAX_STREAK = 3   # §AV — a relocation may never create a run-streak longer than this (the n=6
+#                     layout's unavoidable 3 is the ceiling); if every candidate would, the run is
+#                     SHED instead — blocked days make a week lighter, never denser.
+
+
+def _av_run_days(n, blocked_offsets):
+    """§AV — availability-aware run-day slots: the template layout re-laid around blocked week
+    offsets (0=Mon…6=Sun). Minimal displacement: unblocked template slots stay put; each blocked
+    slot relocates to the free day minimizing (resulting max run-streak, distance, day) — ties break
+    to the earlier day, so the choice is deterministic and a ±1-day slide beats a far jump. A
+    relocation that would force a streak > AV_MAX_STREAK (or has no free day at all) is SHED
+    (reduce-only: §AV may move or remove load, never cram it). The sorted result's last slot is the
+    long run — "long = last available day" generalizes the template's fixed Sunday. Returns
+    (days, shed_count); blocked days that were rest anyway return the template untouched."""
+    base = _run_days(n)
+    blocked = set(blocked_offsets or ())
+    if not blocked & set(base):
+        return list(base), 0
+    days = [d for d in base if d not in blocked]
+    for b in [d for d in base if d in blocked]:
+        cands = [c for c in range(7) if c not in blocked and c not in days]
+        if not cands:
+            continue                                   # nowhere to go — shed
+        best = min(cands, key=lambda c: (_max_streak(sorted(days + [c])), abs(c - b), c))
+        if _max_streak(sorted(days + [best])) > AV_MAX_STREAK:
+            continue                                   # any placement over-densifies — shed
+        days.append(best)
+        days.sort()
+    return days, n - len(days)
+
+
 # Base phase (§6f Step B) — the aerobic-base block after the re-base. A gentle, mostly-under-cap
 # volume ramp (the ACWR governor in generate_block is the hard ceiling regardless), with a 3:1
 # load:recovery mesocycle. Conservative posture: hold the 5-run week (frequency-advance is the
@@ -3883,7 +3939,7 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
 
 
 def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
-                     long_km_cap=None):
+                     long_km_cap=None, av_blocked=None, q_days=None):
     """Lay `week_trimp` across the week's runs and converting each session's TRIMP back to
     minutes/km. The POLARIZED split (§6f Step C): a `quality` spec carves a small HARD slice of the
     governed weekly TRIMP for structured work (at zone pace), the rest stays easy/long — so total
@@ -3894,7 +3950,11 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     frequency's default layout; the last offset is still the long-run slot. `long_km_cap` (§PRO9,
     default None ⇒ byte-identical) caps the single long run's distance: the long-run SHARE is reduced
     (never raised) so its km ≤ the cap, and the freed budget flows to the short easy runs via the
-    existing (1−long_w) split — the weekly total is untouched. Returns (sessions, day_trimps)."""
+    existing (1−long_w) split — the weekly total is untouched. `av_blocked` (§AV, default None ⇒
+    byte-identical) is the week's blocked (away) day-offsets: extra easy days may never be laid on
+    them, and the mid-quality slot walk keeps the hard-gap invariant (no hard session adjacent to
+    the long or to another quality day) — needed because an §AV re-laid day set isn't a vetted
+    template. Returns (sessions, day_trimps)."""
     from datetime import timedelta
     days = list(days_override) if days_override is not None else list(_run_days(wk["runs"]))
     n = len(days)                                        # last slot = the long run
@@ -3902,11 +3962,23 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     mid_q = [q for q in quality if q.get("attach") != "long"]
     long_q = next((q for q in quality if q.get("attach") == "long"), None)
     # mid-week quality on the earliest mid slots (Tue, Thu, …) — off slot 0 (first run back) and the
-    # long slot; the MP finish (long_q) rides the long run itself.
-    q_slots, s = [], 1
-    for _q in mid_q:
-        if s <= n - 2:
-            q_slots.append(s); s += 1
+    # long slot; the MP finish (long_q) rides the long run itself. `q_days` (§6o-QF, default None ⇒
+    # byte-identical) PINS mid-quality to explicit day-offsets instead of the walk — used by the
+    # straddle remainder to keep a still-ahead quality session on its own laid day (slot 0 is
+    # allowed there: mid-week the athlete isn't on a "first run back").
+    if q_days is not None:
+        pins = [days.index(d) for d in q_days if d in days and d != days[n - 1]]
+        q_slots = pins[:len(mid_q)]
+        mid_q = mid_q[:len(q_slots)]
+    else:
+        q_slots, s = [], 1
+        for _q in mid_q:
+            if av_blocked is not None:                   # §AV — hard-gap guard on re-laid day sets
+                while s <= n - 2 and ((days[n - 1] - days[s]) < 2
+                                      or (q_slots and (days[s] - days[q_slots[-1]]) < 2)):
+                    s += 1
+            if s <= n - 2:
+                q_slots.append(s); s += 1
     mid_q = mid_q[:len(q_slots)]
     q_by_slot = dict(zip(q_slots, mid_q))
 
@@ -3959,7 +4031,9 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             if cap_short_trimp > 0:
                 _need = short_budget / cap_short_trimp
                 need_short = max(n_short, int(_need) + (1 if _need - int(_need) > 1e-9 else 0))
-                free = [d for d in range(7) if d not in set(days)]   # unused weekdays for extra easy runs
+                free = [d for d in range(7) if d not in set(days)
+                        and d not in (av_blocked or ())]   # unused weekdays for extra easy runs (§AV:
+                #                                            an away day can never gain a run)
                 while n_short < need_short and len(days) < 7 and free:
                     days.append(free.pop(0)); easy_slots.append(len(days) - 1); n_short += 1
     # §JR — junk-run floor: when the governed budget spread over the template's short-easy days
@@ -4050,7 +4124,8 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
 
 
 def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None,
-                    days_override=None, ramp_max=None, soft_ctl_floor=None):
+                    days_override=None, ramp_max=None, soft_ctl_floor=None, av_blocked=None,
+                    q_days=None):
     """Binary-search the largest weekly TRIMP whose END-OF-WEEK projected ACWR stays ≤ cap AND whose
     in-week PEAK ACWR stays ≤ ACWR_HARD (§H1). Distributes WITH the week's quality (via `zones`) so
     the bound is on the real, intensity-distributed week. The peak/hard bound only bites at low CTL,
@@ -4070,7 +4145,8 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
     lo, hi = 0.0, 700.0
     for _ in range(34):
         mid = (lo + hi) / 2
-        _, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones, days_override=days_override)
+        _, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones, days_override=days_override,
+                                 av_blocked=av_blocked, q_days=q_days)
         endctl, endatl, eow, peak = _project_week(ctl, atl, start, dt, roll_from=roll_from)
         # §PRO8 — judge the SOFT eow against a floored chronic denominator (raw eow = endatl/endctl);
         # the PEAK below stays raw, so the hard cap remains the genuine acute-spike ceiling.
@@ -4234,6 +4310,31 @@ def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
         if eq:
             out.append(round(eq, 2))
     return out
+
+
+def _actual_week_caps(db, ws, we, zones):
+    """§PRO9/§3.1 — what the athlete ACTUALLY logged inside one plan-week window [ws, we] (ISO,
+    inclusive): (longest single run km, total eq_km). Owned data only. Feeds the progression caps'
+    trailing windows for weeks already lived: an elapsed week's frozen prescription is not evidence —
+    the athlete may have out- or under-run it, and the +10% step's doc'd contract is "his real recent
+    long runs". Anchoring on prescription let the window slide onto fiction (2026-07-16 live case:
+    cap 4.3 = 1.1 × a prescribed 3.9 km long while the actual trailing long was 8.4 km → a 7-run
+    no-rest week spreading the ceiling volume over junk-sized days)."""
+    drop = dropped_ids(db)
+    rows = db.execute(
+        "SELECT id, distance, duration, raw FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+        (ws, we)).fetchall()
+    longest = eq = 0.0
+    for r in rows:
+        if r["id"] in drop or not r["distance"]:
+            continue
+        longest = max(longest, r["distance"])
+        raw = json.loads(r["raw"] or "{}")
+        gap = raw.get("gap")                                  # grade-adjusted speed (km/h)
+        gap_pace = (round(3600.0 / gap) if gap else
+                    (round(r["duration"] / r["distance"]) if r["duration"] else None))
+        eq += _run_eq_km(r["distance"], gap_pace, zones)
+    return round(longest, 1), round(eq, 2)
 
 
 def _material_ease(row):
@@ -4539,7 +4640,7 @@ def _hard_share(sessions, total_trimp):
 def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None,
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
-                   recent_eq=None):
+                   recent_eq=None, week_actual_long=None, week_actual_eq=None, blocked=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -4585,19 +4686,37 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     # separate generate_block call). Without threading the streak reset every phase and a phase that opened
     # on a down week lost its trough anchor — both fixed by accepting + returning the carry state.
     # §PRO9 — `recent_longs` seeds the long-run progression window (recent ACTUAL long runs + the caller's
-    # frozen weeks); the accumulating `weeks` extend it in-phase, so the cap sees a continuous trailing max.
+    # frozen weeks); `blk_longs`/`blk_eqs` extend it in-phase, so the cap sees a continuous trailing max.
+    # The straddling week contributes TRUTH-aware values (`week_actual_long`/`week_actual_eq` — what was
+    # really run so far, plus the governed remainder): its elapsed planned days are display-only and may
+    # never anchor the +10% step (the athlete may have out- or under-run them).
     seed_longs = list(recent_longs or [])
     seed_eq = list(recent_eq or [])            # §3.1 — trailing weekly eq_km (biomechanical chronic baseline)
+    blk_longs, blk_eqs = [], []                # per-week window contributions, appended as weeks finalize
     for wk in shape:
         wk_start_d = block_start + timedelta(weeks=wk["wk"] - 1)
         wk_start = wk_start_d.isoformat()
         intent_trimp = wk["km"] * TRIMP_PER_KM            # easy-equivalent volume intent, in TRIMP
+        # §AV — away days inside this week's window re-lay the run-day slots (and may SHED runs when
+        # nothing legal remains). `blocked` is a set of ISO dates from the availability table; None/
+        # no-intersection ⇒ av_days stays None and every path below is byte-identical.
+        av_dates, av_days, av_off, av_shed = None, None, None, 0
+        if blocked:
+            wk_end = (wk_start_d + timedelta(days=6)).isoformat()
+            av_dates = sorted(d for d in blocked if wk_start <= d <= wk_end)
+            if av_dates:
+                av_off = [(_date(d) - wk_start_d).days for d in av_dates]
+                av_days, av_shed = _av_run_days(wk["runs"], av_off)
+            else:
+                av_dates = None
+        av_frac = (len(av_days) / max(1, wk["runs"])) if av_shed else 1.0
         # §6o — the week that STRADDLES today: keep elapsed days, govern only today-onward (easy).
         if today and wk_start_d < today <= wk_start_d + timedelta(days=6):
-            offsets = _run_days(wk["runs"])
+            offsets = av_days if av_days is not None else _run_days(wk["runs"])
             today_off = (today - wk_start_d).days
             rem = [o for o in offsets if o >= today_off]
-            full, _ = _distribute_week(wk, wk_start_d, intent_trimp, easy_pace_sec, zones)
+            full, _ = _distribute_week(wk, wk_start_d, intent_trimp, easy_pace_sec, zones,
+                                       days_override=av_days, av_blocked=av_off)
             elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
             # §6e-FREQ + §6o-B — what this week's ACTUALS already cover. freq_met: run COUNT *and* km
             # both logged → the remainder is optional rest (a met-week junk run does nothing for
@@ -4616,10 +4735,25 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 if freq_met or vol_met:
                     rem = []
             if rem:
+                # §6o-QF — a MID-QUALITY session whose laid day is still AHEAD isn't "missed": it
+                # survives the remainder re-lay, pinned to its own day. The easy-only rule was
+                # written for the quality-day-already-past case (a missed session is never crammed
+                # into the back of the week — that stands, q_ahead is empty then). Invisible before
+                # §AV (template quality = Tue, always past once a week straddles); §AV's relocation
+                # made a future quality day normal, and the card must not lie about it.
+                q_ahead = sorted({(_date(s["date"]) - wk_start_d).days for s in full
+                                  if s.get("kind") in ("tempo", "interval")
+                                  and s["date"] >= today.isoformat()})
+                q_ahead = [o for o in q_ahead if o in rem] or None
+                use_zones = zones if q_ahead else None
                 allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT,
-                                          zones=None, roll_from=today.isoformat(), days_override=rem,
-                                          soft_ctl_floor=soft_ctl_floor)
-                prorate = intent_trimp * len(rem) / max(1, len(offsets))
+                                          zones=use_zones, roll_from=today.isoformat(), days_override=rem,
+                                          soft_ctl_floor=soft_ctl_floor, av_blocked=av_off,
+                                          q_days=q_ahead)
+                # §AV — the denominator is the TEMPLATE's run count (== len(offsets) without §AV, so
+                # byte-identical): an av-shed week's blocked days contribute nothing, they don't
+                # concentrate the intent into the surviving days.
+                prorate = intent_trimp * len(rem) / max(1, wk["runs"])
                 if week_actuals is not None:
                     # §6o-B — charge the ACTUAL km already run against the week's intent: the
                     # remainder may never re-prescribe volume he has already done. One-way (min), so
@@ -4627,7 +4761,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     # is never crammed into the back of the week.
                     prorate = min(prorate, max(0.0, (wk.get("km") or 0) - week_actuals[1]) * TRIMP_PER_KM)
                 chosen = min(prorate, allowed)
-                rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None, days_override=rem)
+                rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, use_zones,
+                                             days_override=rem, av_blocked=av_off, q_days=q_ahead)
+                if q_ahead and sum(dt.values()) > chosen + 1.0:
+                    # §6o-QF fallback — the governed remainder can't carry the quality session's
+                    # fixed TRIMP floor (late week / tiny budget): keep the honest easy-only lay
+                    # rather than over-prescribing past the charge (§6o-B's contract wins).
+                    rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None,
+                                                 days_override=rem, av_blocked=av_off)
             elif freq_met or vol_met:                      # week already covered → optional, never forced
                 a_runs, a_km = week_actuals
                 what = (f"✓ Week's frequency met — {a_runs}/{wk.get('runs')} runs, "
@@ -4648,17 +4789,24 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # km + trimp_total cover the SAME set (elapsed-planned + governed remainder) so the week
             # summary is internally consistent; proj_acwr/peak come from the remaining-only `dt` rolled
             # from today's seed (the safety number — elapsed load is in the seed, never double-counted).
-            weeks.append({**wk, "start": wk_start, "sessions": sessions,
-                          "km": round(sum(s["km"] for s in sessions), 1),
-                          "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
-                          "proj_acwr": eow, "peak_acwr": peak, "proj_ctl": round(ctl, 1),
-                          "intent_km": wk["km"], "adjusted": adjusted["touched"],
-                          "clipped": False, "partial": True,
-                          "frequency_met": freq_met, "volume_met": vol_met,
-                          "freq_actual": list(week_actuals) if (freq_met or vol_met) else None})
+            pweek = {**wk, "start": wk_start, "sessions": sessions,
+                     "km": round(sum(s["km"] for s in sessions), 1),
+                     "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
+                     "proj_acwr": eow, "peak_acwr": peak, "proj_ctl": round(ctl, 1),
+                     "intent_km": wk["km"], "adjusted": adjusted["touched"],
+                     "clipped": False, "partial": True,
+                     "frequency_met": freq_met, "volume_met": vol_met,
+                     "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
+            if av_dates:                                   # §AV — laid around away days (PRIVATE-only
+                pweek["av_dates"] = av_dates               # field; the public plan view strips it)
+                if av_shed:
+                    pweek["av_shed"] = av_shed
+            weeks.append(pweek)
+            blk_longs.append(max(week_actual_long or 0.0, _week_long_km(rem_s)))
+            blk_eqs.append(round((week_actual_eq or 0.0) + _week_eq_km(rem_s), 2))
             continue
         allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones, ramp_max=ramp,
-                                  soft_ctl_floor=soft_ctl_floor)
+                                  soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off)
         is_down = _is_down(wk.get("intent"))
         is_taper = _is_taper(wk.get("intent"))
         is_peak = str(wk.get("intent") or "").lower().startswith("peak")
@@ -4684,6 +4832,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             chosen = min(target, allowed)
         else:
             chosen = min(intent_trimp, allowed)            # caution (or assertive taper) — designed shape
+        if av_frac < 1.0:
+            chosen *= av_frac    # §AV — shed days take their load with them: a travel week is honestly
+            #                      LIGHTER, never the full budget crammed into the surviving days
         # §PRO6/E — a forced deload is a genuine recovery week: strip quality (pure easy), so a
         # tissue-protection deload never prescribes the highest-stress interval session.
         wk_zones = None if forced_deload else zones
@@ -4693,18 +4844,18 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # REDUCES, so a deliberately-short recovery/taper long sits below the cap and is untouched — but a
         # week whose long would JUMP past +10% is clipped even on a down week (exempting them let a
         # recovery week's naturally-larger long leap past the cap and reset the baseline for the rest).
-        prior_longs = seed_longs + [_week_long_km(w["sessions"]) for w in weeks]
+        prior_longs = seed_longs + blk_longs
         trailing = [x for x in prior_longs[-LONG_RUN_STEP_WINDOW:] if x]
         long_km_cap = (round(LONG_RUN_STEP_CAP * max(trailing), 1)
                        if (assertive and trailing) else None)
         # §3.1 — the biomechanical soft ceiling: the week's pace-weighted eq_km may not jump beyond
         # BIO_EQ_STEP × the MAX eq_km of the trailing BIO_EQ_WINDOW weeks (recent actuals seeded + this
         # block's earlier weeks). Assertive-only; caution passes no cap ⇒ byte-identical.
-        prior_eq = seed_eq + [_week_eq_km(w["sessions"]) for w in weeks]
+        prior_eq = seed_eq + blk_eqs
         trailing_eq = [x for x in prior_eq[-BIO_EQ_WINDOW:] if x]
         bio_cap = (BIO_EQ_STEP * max(trailing_eq)) if (assertive and trailing_eq) else None
         sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, wk_zones,
-                                        long_km_cap=long_km_cap)
+                                        long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off)
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
         ctl_n, atl_n, eow, peak = _project_week(ctl, atl, wk_start, dt)
@@ -4748,13 +4899,16 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if breach or eroded or bio_over:
             pre_total = sum(dt.values())
             allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
-                                      ramp_max=ramp)
+                                      ramp_max=ramp, days_override=av_days, av_blocked=av_off)
             # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
             chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
+            if av_frac < 1.0:
+                chosen *= av_frac                      # §AV — the shed prorate holds on the re-govern too
             if eroded or bio_over:
                 chosen = min(chosen, pre_total)        # never add volume when suppressing intensity
             sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, None,
-                                            long_km_cap=long_km_cap)   # §PRO9 — keep the cap on re-govern
+                                            long_km_cap=long_km_cap,   # §PRO9 — keep the cap on re-govern
+                                            days_override=av_days, av_blocked=av_off)
             adjusted = _apply_adjustment(sessions, dt, adjust)
             sessions, dt = adjusted["sessions"], adjusted["dt"]
             ctl_n, atl_n, eow, peak = _project_week(ctl, atl, wk_start, dt)
@@ -4785,13 +4939,19 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
         if bio_over:                                 # §3.1 — the soft bio ceiling reshaped this week to easy
             week["bio_capped"] = round(bio_cap, 1)
+        if av_dates:                                 # §AV — laid around away days (PRIVATE-only field;
+            week["av_dates"] = av_dates              # the public plan view strips it)
+            if av_shed:
+                week["av_shed"] = av_shed
         weeks.append(week)
+        blk_longs.append(_week_long_km(sessions))
+        blk_eqs.append(week["eq_km"])
     for w in weeks:                       # honesty pass — relabel governor-gutted long runs (§6f Step F)
         _mark_load_integrity(w, zones)
     # §PRO9/§3.1 carry-out — the trailing long-run + eq_km windows (seed + this block's weeks), tail-trimmed,
     # so the next phase's caps continue off a continuous history instead of resetting at each phase boundary.
-    out_longs = (seed_longs + [_week_long_km(w["sessions"]) for w in weeks])[-LONG_RUN_STEP_WINDOW:]
-    out_eq = (seed_eq + [_week_eq_km(w["sessions"]) for w in weeks])[-BIO_EQ_WINDOW:]
+    out_longs = (seed_longs + blk_longs)[-LONG_RUN_STEP_WINDOW:]
+    out_eq = (seed_eq + blk_eqs)[-BIO_EQ_WINDOW:]
     return weeks, {"clipped_by_acwr": clipped_any,
                    "end_ctl": round(ctl, 1), "end_atl": round(atl, 1),
                    "consec_hard": consec_hard, "last_nondown": last_nondown,   # §PRO6 carry-out
@@ -5176,7 +5336,7 @@ def _prior_weeks_all(prior_plan):
 def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, prior_by_start, today,
                   week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                   consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
-                  recent_eq=None):
+                  recent_eq=None, db=None, pace_zones=None, blocked=None):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
     start date), so a mid-block regeneration never rewrites weeks already lived. Today-onward weeks
@@ -5219,26 +5379,50 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                                         easy_pace_sec, adjust, zones, regime=regime, ride_cap=ride_cap,
                                         consec_hard=consec_hard, last_nondown=last_nondown,
                                         soft_ctl_floor=soft_ctl_floor, recent_longs=recent_longs,
-                                        recent_eq=recent_eq)
+                                        recent_eq=recent_eq, blocked=blocked)
         backfilled = [{**w, "elapsed": True, "frozen": False} for w in mweeks]
         end_ctl, end_atl, generated_any = mbound["end_ctl"], mbound["end_atl"], True
         consec_hard, last_nondown = mbound["consec_hard"], mbound["last_nondown"]
     fresh = []
     if future_sub:                                           # today-onward, seeded from live state
-        # seed the future weeks' caps off the ACTUAL elapsed history: recent actuals + this phase's
-        # frozen/backfilled (already-lived) weeks, in date order, tail-trimmed to each window.
+        # §PRO9/§3.1 — seed the future weeks' caps off the ACTUAL elapsed history: recent actuals +
+        # what was really RUN inside this phase's already-lived week windows, in date order, tail-
+        # trimmed to each window. The frozen weeks' planned sessions are NOT evidence — the athlete
+        # may have out- or under-run them, and the +10% step's contract is "his real recent long
+        # runs". Anchoring on prescription let the window slide onto fiction (2026-07-16 live case:
+        # cap 4.3 = 1.1 × a prescribed 3.9 while his actual trailing long was 8.4 → a 7-run no-rest
+        # week). No db (det fixtures) ⇒ the planned sessions stand in, as before; weeks he skipped
+        # entirely contribute nothing (a gap can't set the baseline — same as `_recent_long_runs`).
         elapsed_now = sorted(frozen + backfilled, key=lambda w: w["start"])
-        fresh_seed = (list(recent_longs or [])
-                      + [_week_long_km(w.get("sessions") or []) for w in elapsed_now])[-LONG_RUN_STEP_WINDOW:]
-        fresh_seed_eq = (list(recent_eq or [])
-                         + [_week_eq_km(w.get("sessions") or []) for w in elapsed_now])[-BIO_EQ_WINDOW:]
+        if db is not None:
+            caps = [_actual_week_caps(db, w["start"],
+                                      (_date(w["start"]) + timedelta(days=6)).isoformat(), pace_zones)
+                    for w in elapsed_now]
+            elapsed_longs = [c[0] for c in caps if c[0]]
+            elapsed_eqs = [c[1] for c in caps if c[1]]
+        else:
+            elapsed_longs = [_week_long_km(w.get("sessions") or []) for w in elapsed_now]
+            elapsed_eqs = [_week_eq_km(w.get("sessions") or []) for w in elapsed_now]
+        fresh_seed = (list(recent_longs or []) + elapsed_longs)[-LONG_RUN_STEP_WINDOW:]
+        fresh_seed_eq = (list(recent_eq or []) + elapsed_eqs)[-BIO_EQ_WINDOW:]
+        # the straddling week's truth: the longest run / eq_km already LOGGED in its window so far,
+        # so its display-only elapsed planned days never anchor the caps for the weeks after it.
+        wal = wae = None
+        if db is not None:
+            for wk in future_sub:
+                ws_d = phase_start + timedelta(weeks=wk["wk"] - 1)
+                if ws_d < today <= ws_d + timedelta(days=6):
+                    wal, wae = _actual_week_caps(db, ws_d.isoformat(), today.isoformat(), pace_zones)
+                    break
         fweeks, fbound = generate_block(future_sub, phase_start, end_ctl, end_atl,
                                         easy_pace_sec, adjust, zones, today=today,   # §6o partial week
                                         week_actuals=week_actuals, regime=regime,    # §6e-FREQ + §PRO3 regime
                                         ride_cap=ride_cap,                           # §PRO5 shape-response
                                         consec_hard=consec_hard, last_nondown=last_nondown,  # §PRO6 carry
                                         soft_ctl_floor=soft_ctl_floor,               # §PRO8 low-CTL soft floor
-                                        recent_longs=fresh_seed, recent_eq=fresh_seed_eq)  # §PRO9/§3.1 caps
+                                        recent_longs=fresh_seed, recent_eq=fresh_seed_eq,  # §PRO9/§3.1 caps
+                                        week_actual_long=wal, week_actual_eq=wae,
+                                        blocked=blocked)                             # §AV — away days
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True
         consec_hard, last_nondown = fbound["consec_hard"], fbound["last_nondown"]
@@ -5290,6 +5474,7 @@ def generate_plan(db, force_regime=None):
     block_start = _rebase_start(db, today)
     adj = active_adjustment(db, today.isoformat())   # §6c — clamped directive or None
     adj_dir = adj["directive"] if adj else None
+    av_blocked = _av_blocked_dates(db, today)        # §AV — away days the layout must respect
     # §6q — select the A-race chain up front: the runway to the first race is needed to clamp the
     # re-base length just below (§PER1 F1). Pure function of (objectives, today); no side effects.
     objs = [dict(r) for r in db.execute(
@@ -5362,7 +5547,10 @@ def generate_plan(db, force_regime=None):
                                                              live["consec_hard"], live["last_nondown"],
                                                              soft_ctl_floor=soft_floor_,
                                                              recent_longs=live["recent_longs"],   # §PRO9
-                                                             recent_eq=live["recent_eq"])         # §3.1
+                                                             recent_eq=live["recent_eq"],         # §3.1
+                                                             db=db, pace_zones=zones,  # §PRO9/§3.1 — elapsed
+                                                             # weeks anchor the caps on ACTUALS, not plan
+                                                             blocked=av_blocked)       # §AV — away days
         if gen:
             live["ctl"], live["atl"], live["started"] = ec, ea, True
         live["consec_hard"], live["last_nondown"] = ch, ln   # §PRO6 carry across phases
@@ -5888,6 +6076,33 @@ def propose_adjustment(text, today=None, easy_pace=None):
     kind = "log" if is_noop_adjustment(directive) else "adjust"
     return {"ok": True, "kind": kind, "reply": out.get("reply", ""),
             "note": text.strip(), "directive": directive, "clamp": clamp}
+
+
+AV_HORIZON_DAYS = 400   # §AV — expansion bound: an availability range never yields more dates than
+#                         this past today (a typo'd year can't inflate the blocked set)
+
+
+def _av_blocked_dates(db, today):
+    """§AV — the active away-day set as ISO dates, from the Monday of `today`'s week onward (the
+    straddling week keeps its blocked days visible until the week closes, so an elapsed away day
+    still anchors the week's re-laid layout for display/matching), horizon-bounded. Read by
+    generate_plan so the plan stays a pure function of its inputs. Returns a (possibly empty) set."""
+    from datetime import timedelta
+    monday = today - timedelta(days=today.weekday())
+    rows = db.execute(
+        "SELECT date_from, date_to FROM availability WHERE active=1 AND date_to >= ?",
+        (monday.isoformat(),)).fetchall()
+    out, horizon = set(), today + timedelta(days=AV_HORIZON_DAYS)
+    for r in rows:
+        try:
+            d, end = _date(r["date_from"]), min(_date(r["date_to"]), horizon)
+        except (ValueError, TypeError):
+            continue                                   # malformed row can't poison the plan
+        d = max(d, monday)
+        while d <= end:
+            out.add(d.isoformat())
+            d += timedelta(days=1)
+    return out
 
 
 def active_adjustment(db, today):
@@ -6667,6 +6882,7 @@ def _private_only_path(p):
                   "/api/secrets/validate", "/api/runs")   # §RB — calendar carries HR-zone grades
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
             or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the owner's data
+            or p.startswith("/api/availability")          # §AV — away days = empty-house broadcast
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
 
@@ -7409,6 +7625,51 @@ def api_objectives_remove(oid):
         "UPDATE objectives SET status='removed' WHERE id=?", (oid,)))
 
 
+@app.get("/api/availability")
+def api_availability():
+    """§AV — the owner's away-day windows still in play (this week's Monday onward, so a window
+    covering days already lived stays listed until its week closes). PRIVATE-ONLY: the whole
+    /api/availability surface is blocked on the public box (_private_only_path) — away dates are
+    an empty-house broadcast."""
+    from datetime import timedelta
+    db = get_db()
+    monday = datetime.now().date()
+    monday -= timedelta(days=monday.weekday())
+    rows = [dict(r) for r in db.execute(
+        "SELECT id, date_from, date_to, note, created_at FROM availability "
+        "WHERE active=1 AND date_to >= ? ORDER BY date_from", (monday.isoformat(),)).fetchall()]
+    return jsonify(rows)
+
+
+@app.post("/api/availability")
+def api_availability_add():
+    """§AV — declare away days; the plan re-lays around them immediately (constraints-not-edits:
+    the layout derives from the declared reality, spacing stays engine-owned)."""
+    d = body()
+    f = (d.get("date_from") or "").strip()
+    t = (d.get("date_to") or f).strip()
+    try:
+        df, dto = _date(f), _date(t)
+    except (ValueError, TypeError):
+        return jsonify(ok=False, error="need date_from (and optional date_to) as YYYY-MM-DD"), 400
+    if dto < df:
+        return jsonify(ok=False, error="date_to is before date_from"), 400
+    if (dto - df).days + 1 > AV_HORIZON_DAYS:
+        return jsonify(ok=False, error=f"range longer than {AV_HORIZON_DAYS} days"), 400
+    db = get_db()
+    return replan(db, lambda: db.execute(
+        "INSERT INTO availability (created_at, date_from, date_to, note, active) VALUES (?,?,?,?,1)",
+        (_now_iso(), df.isoformat(), dto.isoformat(), (d.get("note") or "").strip() or None)))
+
+
+@app.post("/api/availability/<int:avid>/remove")
+def api_availability_remove(avid):
+    """§AV — clear an away window; the plan re-lays immediately."""
+    db = get_db()
+    return replan(db, lambda: db.execute(
+        "UPDATE availability SET active=0 WHERE id=?", (avid,)))
+
+
 @app.post("/api/adjustment/propose")
 def api_adjustment_propose():
     """§6c — read free text and classify it (see propose_adjustment): a reflection comes back
@@ -7502,6 +7763,17 @@ def api_plan_explain():
     return jsonify(out), (200 if out.get("ok") else 502)
 
 
+def _strip_av_public(plan):
+    """§AV/H7 — away dates on the public box are an empty-house broadcast: remove every
+    availability trace from the plan payload at the DATA layer (the week chip derives from these
+    fields, so stripping here silences the UI with no second render path — same posture as the
+    §RL outcome redaction). The re-laid session days themselves stay: they're just a plan."""
+    for key in ("base", "build", "peak", "taper"):
+        for w in ((plan.get(key) or {}).get("weeks") or []):
+            w.pop("av_dates", None)
+            w.pop("av_shed", None)
+
+
 @app.get("/api/plan")
 def api_plan():
     """The latest generated plan (or null if none yet)."""
@@ -7510,6 +7782,7 @@ def api_plan():
     plan = json.loads(row["plan"]) if row else None
     if plan and READONLY:
         plan.pop("adjustment", None)   # the adjustment carries free-text/medical context — withhold
+        _strip_av_public(plan)         # §AV — away days never reach the public box
     return jsonify(plan)
 
 
@@ -9199,7 +9472,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .modal-x{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;
     line-height:1;padding:4px 8px;border-radius:8px}
   .modal-x:hover{color:var(--text);background:var(--surface-2)}
-  #settings{padding:20px 22px;overflow:auto;flex:1 1 auto;min-height:0}
+  /* ONE scroll region for the whole dialog body (secrets + settings together): with the §SG key
+     rows the secrets box alone can exceed 86vh, which collapsed the old #settings-only scroller
+     to zero height — nothing scrolled and everything below the keys was unreachable. */
+  .modal-body{overflow:auto;flex:1 1 auto;min-height:0}
+  #settings{padding:20px 22px}
   /* Weather city picker — chips + typeahead, replaces the raw lat/lon string */
   .wxchips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}
   .wxchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);
@@ -9465,8 +9742,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
         <h2>Settings <span class="muted mono" style="font-size:12px">— keys &amp; personalization, stored privately on your instance</span></h2>
         <button class="modal-x" id="settingsClose" aria-label="Close settings">✕</button>
       </div>
-      <div id="secretsBox"></div>
-      <div id="settings"><div class="empty">Loading…</div></div>
+      <div class="modal-body">
+        <div id="secretsBox"></div>
+        <div id="settings"><div class="empty">Loading…</div></div>
+      </div>
     </dialog>
 
     <!-- Reusable consequence-explaining confirmation for destructive actions (house-styled, replaces the
@@ -10274,13 +10553,18 @@ function renderReadiness(d){
 async function loadReadiness(){ renderReadiness(await getJSON("/api/readiness")); }
 // Opportunistic page-load sync (private only): pull any activities synced to Runalyze since the
 // last sync — throttled server-side — so a run finished earlier today lands without the manual
-// button, and the readiness tile flips to "done ✓". Silent + non-blocking; only the refresh
-// fires when something actually arrived, so it never flickers on a quiet load.
+// button, and the readiness tile flips to "done ✓". Silent + non-blocking. A real (non-skipped)
+// sync always re-reads readiness: the HRV snapshot can move with zero new activities (the morning
+// pull after the watch uploads last night's reading), and the tile must not keep a verdict computed
+// from pre-sync data. The full page refresh still fires only when an activity actually arrived,
+// so a quiet load never flickers the heavier tiles.
 async function touchSync(){
   try{
     const d = await getJSON("/api/sync?auto=1",{method:"POST"});
-    if(d && d.ok && d.activities && d.activities.added>0){
-      loadReadiness(); loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones();
+    if(!d || !d.ok || d.skipped) return;
+    loadReadiness();
+    if(d.activities && d.activities.added>0){
+      loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones();
     }
   }catch(e){ /* offline / token issue — the tile just keeps its last-known state */ }
 }
@@ -10763,6 +11047,8 @@ function weekHtml(w,p,today){
                // §PRO9 — long-run progression cap (Aarhus injury lever); §3.1 — biomechanical (eq_km) load ease
                w.long_step_capped?`<span class="wfz" title="Long-run progression cap: this week's long run was held to +10% over your longest run of the last 4 weeks — the strongest single injury lever (a sharp long-run jump predicts injury more than mileage jumps). Freed volume went to easy runs; weekly load unchanged.">long-run held (+10%)</span>`:'',
                w.bio_capped?`<span class="wfz" title="Biomechanical load ease: this week's pace-weighted 'damage-equivalent' load (fast km count for more) jumped too far above your recent weeks, so the fast work was eased to easy — aerobic volume kept, only the high-damage fast km reduced. The biomechanical/tissue-damage axis (informed by John Davis), invisible to heart-rate load.">fast load eased</span>`:'',
+               // §AV — laid around declared away days (private payload only: the public box strips av_dates)
+               w.av_dates?`<span class="eased" title="Away days: the week is laid around the days you declared unavailable — runs relocated to the nearest legal day, spacing kept${w.av_shed?'; too few legal days remained, so '+w.av_shed+' run'+(w.av_shed>1?'s were':' was')+' shed and the load went with them (a travel week is lighter, never crammed)':''}.">✈ away ${w.av_dates.map(sessDate).join(', ')}${w.av_shed?' · −'+w.av_shed+' run'+(w.av_shed>1?'s':''):''}</span>`:'',
                w.adjusted?'<span class="eased">eased</span>':'',
                w.frozen?'<span class="wfz">✓ done</span>':''].filter(Boolean).join(" · ");
   // §3.1 — surface the biomechanical eq_km on quality weeks (where it exceeds raw km); calm/muted.
@@ -11703,9 +11989,60 @@ async function loadSettings(){
       and dropping it into ./data as sparinghorse.db. The JSON export carries only what can't be rebuilt
       (objectives, check-ins, reflections, adjustments, lab markers, plans, settings) — restore into a fresh
       instance with: python SparingHorse.py import &lt;file&gt;. API keys are never included in either.</div>
+  </div>
+  <div class="setrow" style="margin-top:14px">
+    <label>Away / can't run</label>
+    <ul class="avlist" id="avlist" style="list-style:none;margin:0 0 8px;padding:0"></ul>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="avfrom" type="date" style="max-width:150px">
+      <span class="muted">→</span>
+      <input id="avto" type="date" style="max-width:150px">
+      <input id="avnote" type="text" placeholder="note (optional) — e.g. flight" style="flex:1;min-width:120px">
+      <button type="button" class="ghost" id="avadd">Add</button>
+    </div>
+    <div class="help">Days you can't run (travel, life). The plan lays around them: runs slide to the
+      nearest sensible day, spacing rules hold, and a heavily blocked week gets honestly lighter —
+      never crammed. Single day: leave the second date empty. Private — away days never appear on
+      the public page.</div>
+    <div class="err" id="averr"></div>
   </div>`;
   $("#setform").addEventListener("submit", saveSettings);
   wireCityPicker();
+  wireAway();
+}
+
+// §AV — the away-days list: add/remove re-lay the plan immediately (the response is the replan
+// payload, same contract as objectives/adjustment writes).
+async function wireAway(){
+  const list=$("#avlist"); if(!list) return;
+  const err=$("#averr");
+  const fmt=d=>{ const x=new Date(d+"T00:00:00");
+    return x.toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"}); };
+  async function render(){
+    let rows=[]; try{ rows=await getJSON("/api/availability"); }catch(e){ rows=[]; }
+    list.innerHTML = rows.length ? rows.map(a=>`<li style="display:flex;gap:8px;align-items:center;padding:2px 0">
+        <span class="mono">${fmt(a.date_from)}${a.date_to!==a.date_from?" → "+fmt(a.date_to):""}</span>
+        ${a.note?`<span class="muted">${esc(a.note)}</span>`:""}
+        <button type="button" class="ghost" data-av="${a.id}" title="Clear — the plan re-lays" style="margin-left:auto;padding:1px 8px">✕</button>
+      </li>`).join("") : `<li class="muted" style="padding:2px 0">none — you're fully available</li>`;
+    list.querySelectorAll("[data-av]").forEach(b=>b.addEventListener("click",async()=>{
+      b.disabled=true;
+      const r=await fetch(`/api/availability/${b.dataset.av}/remove`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+      const p=await r.json(); if(p.ok){ LASTDIFF=p.diff; await refreshPlan(p); } await render();
+    }));
+  }
+  $("#avadd").addEventListener("click",async()=>{
+    err.textContent="";
+    const f=$("#avfrom").value, t=$("#avto").value||f;
+    if(!f){ err.textContent="pick at least the first date"; return; }
+    const r=await fetch("/api/availability",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({date_from:f,date_to:t,note:$("#avnote").value})});
+    const p=await r.json();
+    if(!p.ok){ err.textContent=p.error||"could not save"; return; }
+    $("#avfrom").value=$("#avto").value=$("#avnote").value="";
+    LASTDIFF=p.diff; await refreshPlan(p); await render();
+  });
+  await render();
 }
 
 const MAX_CITIES=5;   // mirrors the server's MAX_WEATHER_CITIES (validated there too)
@@ -12439,6 +12776,197 @@ def _stc_day_spacing():
                "weekend; no double-rest at any week BOUNDARY; long run on the true calendar weekend",
                passed=not bad, expect="≤2 consec · 6: no hard adjacent · boundary gap ≤2d · long Sat/Sun",
                got="ok" if not bad else f"fails: {bad}", output=detail)
+
+
+def _stc_availability():
+    """§AV — availability-aware layout. Golden byte-identity with no blocks; the Tue relocation
+    (his 2026-07-21 flight — the feature's founding case); the weekend block moving the long to the
+    last available day; the heavy block shedding runs WITH their load (prorate, never cram); the
+    straddling week's remainder avoiding a blocked day; and the hard-gap invariant on re-laid sets."""
+    from datetime import date, timedelta
+    detail, bad = [], []
+    easy = 430
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    mon = date(2026, 8, 3)                                   # a Monday
+    shape = base_shape(3, 30)
+    base_weeks, _ = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones)
+    b0 = base_weeks[0]
+    b0_days = sorted(_date(s["date"]).weekday() for s in b0["sessions"])
+
+    # ① golden — None / empty set / non-intersecting dates ⇒ byte-identical output
+    for label, blk in (("none", None), ("empty", set()), ("elsewhere", {"2027-03-02"})):
+        same, _ = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, blocked=blk)
+        if same != base_weeks:
+            bad.append(f"golden:{label}")
+    detail.append({"golden": "None/empty/non-intersecting all byte-identical",
+                   "base_wk1_days": b0_days})
+
+    # ② Tuesday blocked — the run slides to Wednesday; count kept; no hard-hard adjacency
+    tue = (mon + timedelta(days=1)).isoformat()
+    wk1 = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, blocked={tue})[0][0]
+    days = sorted(_date(s["date"]).weekday() for s in wk1["sessions"])
+    HARD = {"tempo", "interval", "long_mp", "long"}
+    hards = sorted(_date(s["date"]).weekday() for s in wk1["sessions"] if s["kind"] in HARD)
+    if 1 in days:
+        bad.append("tue:laid-on-blocked-day")
+    if len(days) != len(b0_days):
+        bad.append(f"tue:count {len(days)}≠{len(b0_days)}")
+    if wk1.get("av_shed"):
+        bad.append("tue:shed")
+    if wk1.get("av_dates") != [tue]:
+        bad.append("tue:av_dates")
+    if any(b - a == 1 for a, b in zip(hards, hards[1:])):
+        bad.append("tue:hard-adjacent")
+    detail.append({"tue_blocked": {"days": days, "hard_days": hards, "km": wk1["km"]}})
+
+    # ③ weekend blocked — the long relocates to the LAST available day; one run shed with its load
+    wknd = {(mon + timedelta(days=5)).isoformat(), (mon + timedelta(days=6)).isoformat()}
+    wk1w = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, blocked=wknd)[0][0]
+    wdays = sorted(_date(s["date"]).weekday() for s in wk1w["sessions"])
+    longs = [s for s in wk1w["sessions"] if "long" in (s.get("kind") or "")]
+    if any(d >= 5 for d in wdays):
+        bad.append("wknd:laid-on-blocked-day")
+    if not longs or _date(longs[0]["date"]).weekday() != (wdays[-1] if wdays else None):
+        bad.append("wknd:long-not-last")
+    if wk1w.get("av_shed") != 1:
+        bad.append(f"wknd:shed {wk1w.get('av_shed')}≠1")
+    if wk1w["km"] >= b0["km"]:
+        bad.append("wknd:not-lighter")
+    detail.append({"weekend_blocked": {"days": wdays, "long_day": _date(longs[0]["date"]).weekday()
+                                       if longs else None, "km": wk1w["km"], "vs": b0["km"]}})
+
+    # ④ Mon–Fri blocked — a 2-run weekend week at ~2/5 of the load; real runs, no stubs
+    week_block = {(mon + timedelta(days=i)).isoformat() for i in range(5)}
+    wk1h = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, blocked=week_block)[0][0]
+    hdays = sorted(_date(s["date"]).weekday() for s in wk1h["sessions"])
+    if not set(hdays) <= {5, 6}:
+        bad.append("heavy:laid-on-blocked-day")
+    if wk1h["km"] > 0.6 * b0["km"]:
+        bad.append(f"heavy:crammed {wk1h['km']} vs {b0['km']}")
+    if any((s.get("km") or 0) < RUN_MIN_KM - 1e-9 for s in wk1h["sessions"]):
+        bad.append("heavy:stub-run")
+    detail.append({"heavy_blocked": {"days": hdays, "km": wk1h["km"], "vs": b0["km"],
+                                     "shed": wk1h.get("av_shed")}})
+
+    # ⑤ straddle — Wed 'today', Thu blocked: the governed remainder avoids the blocked day
+    thu = (mon + timedelta(days=3)).isoformat()
+    wk1s = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, today=mon + timedelta(days=2),
+                          week_actuals=(2, 10.0), blocked={thu})[0][0]
+    rem_days = sorted(_date(s["date"]).weekday() for s in wk1s["sessions"]
+                      if s["date"] >= (mon + timedelta(days=2)).isoformat() and s["kind"] != "rest")
+    if 3 in rem_days:
+        bad.append("straddle:laid-on-blocked-day")
+    if not wk1s.get("partial") or wk1s.get("av_dates") != [thu]:
+        bad.append("straddle:flags")
+    detail.append({"straddle": {"remainder_days": rem_days, "av_dates": wk1s.get("av_dates")}})
+
+    # ⑥ hard-gap guard — on a re-laid set where the naive slot walk would butt quality against the
+    # long, the guard moves (or drops) it; the same call WITHOUT av_blocked shows the naive walk.
+    q = {"kind": "interval", "zone": "interval", "frac": 0.05, "structure": "intervals",
+         "rep_min": 2, "rec_min": 2, "label": "short VO₂ touch", "component": "vo2max"}
+    wkq = {"runs": 3, "km": 20, "long": 8, "strides": 0, "quality": [q], "intent": "General"}
+    sess_g, _ = _distribute_week(wkq, mon, 220.0, easy, zones, days_override=[3, 5, 6],
+                                 av_blocked=[0, 1, 2, 4])
+    gq = sorted(_date(s["date"]).weekday() for s in sess_g if s["kind"] in ("tempo", "interval"))
+    glong = next((_date(s["date"]).weekday() for s in sess_g if "long" in s["kind"]), None)
+    if gq and glong is not None and any(abs(glong - d) < 2 for d in gq):
+        bad.append(f"hard-gap:quality {gq} adjacent to long {glong}")
+    detail.append({"hard_gap": {"quality_days": gq, "long_day": glong,
+                                "note": "quality dropped/moved rather than adjacent to the long"}})
+
+    return _st("det", "availability",
+               "§AV — no-block golden byte-identity; Tue block slides the run (no shed); weekend "
+               "block moves the long to the last available day (−1 run); Mon–Fri block ⇒ 2-run "
+               "weekend at prorated load, no stubs; straddle remainder avoids the block; hard-gap "
+               "holds on re-laid sets",
+               passed=not bad, expect="golden identical · relocate · shed-not-cram · straddle · hard-gap",
+               got="ok" if not bad else f"fails: {bad}", output=detail)
+
+
+def _stc_quality_forward():
+    """§6o-QF — a still-ahead mid-quality session survives the straddle remainder on its own day;
+    a passed one stays missed (never crammed); a budget too thin for the quality floor falls back
+    to the honest easy-only lay; an intraday replan keeps today's quality visible."""
+    from datetime import date, timedelta
+    detail, bad = [], []
+    easy = 430
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    mon = date(2026, 8, 3)
+    shape = base_shape(3, 30)                 # quality appears from wk 3 (BASE_TEMPO_FROM_WEEK)
+    QWK = 2                                   # index of the quality-carrying week
+    w3 = mon + timedelta(weeks=QWK)           # its Monday
+    tue = (w3 + timedelta(days=1)).isoformat()
+    Q = ("tempo", "interval")
+
+    def rem_kinds(weeks_out, frm):
+        return [(s["date"], s["kind"]) for s in weeks_out[QWK]["sessions"] if s["date"] >= frm]
+
+    # A — §AV founding case: Tue blocked, quality relocated to Wed, viewed ON Wed → the card
+    # keeps the quality on Wednesday instead of degrading it to easy.
+    wed = w3 + timedelta(days=2)
+    wksA, _ = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, today=wed,
+                             week_actuals=(1, 6.0), blocked={tue})
+    remA = rem_kinds(wksA, wed.isoformat())
+    if not any(k in Q and d == wed.isoformat() for d, k in remA):
+        bad.append(f"A:relocated-quality-lost {remA}")
+
+    # B — missed stays missed: NO block, template quality was Tue, viewed Wed → remainder easy-only.
+    wksB, _ = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, today=wed,
+                             week_actuals=(1, 6.0))
+    remB = rem_kinds(wksB, wed.isoformat())
+    if any(k in Q for _, k in remB):
+        bad.append(f"B:passed-quality-crammed {remB}")
+
+    # C — fallback: Tue blocked (quality → Wed) but the week is nearly charged out → the governed
+    # remainder can't carry the quality floor → honest easy-only, never over-prescribed.
+    wk3_km = shape[QWK]["km"]
+    wksC, _ = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, today=wed,
+                             week_actuals=(2, wk3_km - 2.6), blocked={tue})
+    remC = rem_kinds(wksC, wed.isoformat())
+    if any(k in Q for _, k in remC):
+        bad.append(f"C:thin-budget-still-quality {remC}")
+
+    # D — intraday replan ON the quality day (no block): today's session stays visible.
+    tue_d = w3 + timedelta(days=1)
+    wksD, _ = generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, today=tue_d,
+                             week_actuals=(1, 6.0))
+    remD = rem_kinds(wksD, tue_d.isoformat())
+    if not any(k in Q and d == tue_d.isoformat() for d, k in remD):
+        bad.append(f"D:intraday-quality-lost {remD}")
+
+    detail.append({"A_relocated": remA, "B_missed": remB, "C_fallback": remC, "D_intraday": remD})
+    return _st("det", "quality-forward",
+               "§6o-QF — still-ahead quality survives the straddle remainder on its laid day; a "
+               "passed session stays missed; a charged-out week falls back to easy-only; intraday "
+               "replan keeps today's quality",
+               passed=not bad, expect="ahead kept · passed missed · thin fallback · intraday kept",
+               got="ok" if not bad else f"fails: {bad}", output=detail)
+
+
+def _stc_av_public_strip():
+    """§AV/H7 — the public plan payload carries NO availability trace (data-layer strip, same
+    posture as the §RL outcome redaction), and the /api/availability surface itself is on the
+    public box's private-only blocklist."""
+    plan = {"base": {"weeks": [{"km": 20, "av_dates": ["2026-08-04"], "av_shed": 1},
+                               {"km": 22}]},
+            "build": {"weeks": [{"km": 25, "av_dates": ["2026-09-01"]}]},
+            "peak": {}, "taper": {"weeks": []}}
+    _strip_av_public(plan)
+    leaks = [k for key in ("base", "build", "peak", "taper")
+             for w in ((plan.get(key) or {}).get("weeks") or [])
+             for k in ("av_dates", "av_shed") if k in w]
+    kept = plan["base"]["weeks"][0]["km"] == 20 and plan["build"]["weeks"][0]["km"] == 25
+    gated = all(_private_only_path(p) for p in
+                ("/api/availability", "/api/availability/3/remove"))
+    bad = ([] if not leaks else [f"leaks: {leaks}"]) \
+        + ([] if kept else ["stripped more than av fields"]) \
+        + ([] if gated else ["/api/availability not private-only"])
+    return _st("det", "av-public-strip",
+               "§AV/H7 — av_dates/av_shed stripped from every phase's weeks in the public plan "
+               "payload; other fields untouched; /api/availability blocked on the public box",
+               passed=not bad, expect="no av trace public · fields intact · endpoint gated",
+               got="ok" if not bad else f"fails: {bad}",
+               output={"leaks": leaks, "endpoint_gated": gated})
 
 
 def _stc_log_phases():
@@ -15587,6 +16115,66 @@ def _stc_freeze_continuity():
                        "fresh_starts": [w["start"] for w in fresh]})
 
 
+def _stc_cap_truth_anchor():
+    """§PRO9/§3.1 (fix 2026-07-16): the progression caps' trailing windows anchor on what was
+    ACTUALLY run in already-lived weeks, not on their frozen prescriptions. Live case: three rebase
+    weeks prescribed a 3.9 km long while the athlete's real trailing long was 8.4 km — the window
+    slid onto the plan's own fiction, capped every run at 4.3 km, and §PRO9's day-padding spread the
+    ceiling volume over a 7-run no-rest week. With a db, elapsed weeks (and the week straddling
+    today) contribute actuals; without one (det fixtures), the planned sessions stand in as before."""
+    import sqlite3 as _sq
+    from datetime import date
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+        " distance REAL, duration REAL, raw TEXT);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
+    for i, (d, km) in enumerate([("2026-01-06", 5.0), ("2026-01-13", 5.05),
+                                 ("2026-01-20", 8.4), ("2026-01-22", 4.0)]):
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?)",
+                  (i + 1, d, d + "T18:00:00", RUNNING_SPORT, km, km * 400, "{}"))
+    zones = {"easy": 460, "easy_top": 425, "marathon": 360, "threshold": 330, "interval": 300}
+    ps = date(2026, 1, 5)
+    shape = [{"wk": k, "km": 29.5, "runs": 5, "long": 9, "strides": 0,
+              "intent": "Extend easy aerobic volume"} for k in range(1, 5)]
+    tiny = [{"date": "x", "km": 3.9, "kind": "easy"}, {"date": "x", "km": 3.9, "kind": "long"}]
+    prior = {f"2026-01-{d:02d}": {"start": f"2026-01-{d:02d}", "wk": w, "sessions": tiny,
+                                  "intent": "x", "trimp_total": 40.0}
+             for w, d in ((1, 5), (2, 12), (3, 19))}
+    fails = []
+
+    def wk4(today, db):
+        weeks, *_ = _split_freeze(shape, ps, (46.0, 57.0), 425, None, zones, prior, today,
+                                  regime="assertive", db=db, pace_zones=zones)
+        w = next(w for w in weeks if w["start"] == "2026-01-26")
+        return w, max((s.get("km") or 0) for s in w["sessions"]), \
+            len([s for s in w["sessions"] if (s.get("km") or 0) > 0])
+    # (a) elapsed weeks: actuals (8.4 long in wk3) must anchor wk4's cap, not the prescribed 3.9
+    w_t, long_t, runs_t = wk4(date(2026, 1, 26), m)
+    if not long_t > 4.35:
+        fails.append(f"truth anchor ignored: wk4 long {long_t} still fiction-capped")
+    if runs_t != 5:
+        fails.append(f"§PRO9 day-padding on a truth-anchored week: {runs_t} runs (want 5)")
+    # (b) the straddling week (today mid-wk3): its logged 8.4 must reach wk4's window even though
+    # its elapsed planned days are tiny
+    _, long_s, _ = wk4(date(2026, 1, 22), m)
+    if not long_s > 6.7:                       # > any planned/remainder contribution; 9.2 when binding
+        fails.append(f"straddle actual missing from the window: wk4 long {long_s}")
+    # det-fixture path (no db): the old planned-sessions semantics stand — window off the 3.9s
+    _, long_f, _ = wk4(date(2026, 1, 26), None)
+    if not long_f <= 4.4:
+        fails.append(f"no-db fixture path changed: wk4 long {long_f} (want ≤ 1.1×3.9)")
+    m.close()
+    return _st("det", "cap-truth-anchor",
+               "§PRO9/§3.1 progression caps anchor elapsed + straddling weeks on ACTUAL runs, not "
+               "frozen prescriptions (the 2026-07-16 7-run no-rest week); det fixtures without a db "
+               "keep the planned-sessions path",
+               passed=not fails,
+               expect="wk4 long rides the real 8.4 (no day-padding); no-db stays ≤4.3",
+               got={"truth_long": long_t, "truth_runs": runs_t, "straddle_long": long_s,
+                    "fiction_long": long_f, "violations": fails or "none"})
+
+
 def _stc_down_weeks():
     """§6f Step D/F: the 3:1 mesocycle — every 4th Base/Build week is a DOWN week with reduced
     volume (vs the prior week) and NO quality, so the block absorbs load before building again."""
@@ -16716,6 +17304,16 @@ def _stc_structure():
         fails.append("not deterministic on identical input")
     if r1 and not all(s.get("hr") for s in r1["segments"]):
         fails.append("segments lost the HR channel (the effort monitor needs it)")
+    # float-anchored baseline (the 2026-07-14 first live read, scaled to the test grid): 15min wu,
+    # 2 real VO₂ reps with a 2min float, then a 15min marathon-effort run-home. The float is the
+    # slowest block, so it anchors the baseline level — with the anchor's OWN pace as baseline the
+    # run-home cleared the 10% work contrast by a hair and read as rep 3. The level's time/distance
+    # baseline keeps it a cool-down: 2 reps, run-home ≠ work.
+    fl = expect("float-baseline", synth([(900, 344), (180, 264), (120, 364), (120, 270), (900, 330)],
+                                        with_hr=True), "interval", 2)
+    if fl and [s["role"] for s in fl["segments"]][-1] != "cooldown":
+        fails.append(f"float-baseline: marathon run-home not a cooldown — "
+                     f"roles {[s['role'] for s in fl['segments']]}")
     expect("easy", synth([(2700, 385)]), "easy", 0)
     expect("long", synth([(5700, 390)]), "long", 0)
     expect("tempo", synth([(600, 355), (1200, 312), (480, 380)]), "tempo", 1)
@@ -16913,7 +17511,10 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),
-                 lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_down_weeks(),
+                 lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
+                 lambda: _stc_availability(), lambda: _stc_av_public_strip(),
+                 lambda: _stc_quality_forward(),
+                 lambda: _stc_down_weeks(),
                  lambda: _stc_long_run(),
                  lambda: _stc_earned_lift(), lambda: _stc_earned_gate(db),
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),

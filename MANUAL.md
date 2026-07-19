@@ -375,6 +375,14 @@ out of a red/halt. Blank key = every one of these is dormant and the determinist
   routine "feeling better" does *not* lift a medical hold — only an explicit clear does.
 - Every easing is shown in the plan (an `eased` tag on affected weeks) and is diff-able against the prior
   version, so nothing changes silently.
+- **Away days** (Settings → *Away / can't run*) are the third, structural lever — for when a day
+  doesn't exist for training (a flight, a family day), not for when you're struggling. Declare the
+  date or range and the plan **re-lays the week around it**: the displaced run slides to the nearest
+  sensible day, hard sessions keep their spacing, and the long run takes the last available day. A
+  heavily blocked week gets honestly **lighter** — runs that have no legal day are shed *with their
+  load*, never crammed into the days around them. Affected weeks carry an `✈ away` tag. Away days
+  are **private**: they never appear on the public page in any form (an away date on a public site
+  tells the world your house is empty).
 
 ---
 

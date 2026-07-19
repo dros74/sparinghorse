@@ -12,6 +12,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-19
+
+The plan learns to lay itself around your life: declare the days you can't run and the week
+re-shapes — honestly.
+
+### Added
+- **Away days (§AV).** Settings gains an **"Away / can't run"** row: declare a date or range
+  (travel, life — no explanation needed, a note is optional) and the plan **re-lays the week
+  around it** immediately. The displaced run slides to the nearest sensible day (a blocked
+  Tuesday moves its session to Wednesday, not to a far corner of the week), hard sessions keep
+  their spacing, and the long run takes the last available day — a blocked weekend moves it to
+  Friday. A heavily blocked week gets honestly **lighter**: runs with no legal day left are shed
+  *with their load*, never crammed into the surviving days, and a relocation is refused rather
+  than allowed to create an unbroken multi-day run streak. Affected weeks carry an `✈ away` tag.
+  Away days are **structural, not easing** — different from a check-in ("legs flat"), which
+  reduces load; this moves it. Deterministic input, no LLM in the path, works on a keyless
+  install. **Private by design**: away dates never appear on the public read-only mirror in any
+  form — not as rows, tags, or markers (an away date on a public page is an empty-house
+  broadcast; redacted at the data layer, locked by `det/av-public-strip`). MANUAL §9 documents
+  it. New `det/availability`.
+
+### Fixed
+- **Progression caps anchor on what you actually ran, not on old prescriptions (§PRO9/§3.1).**
+  The +10% long-run cap and the biomechanical (eq-km) ceiling window over *elapsed* weeks used
+  to read the plan's own frozen prescriptions — so an athlete who consistently out-ran a
+  conservative stretch could see the cap collapse below their real trailing long run and the
+  honest day-padding degenerate into many tiny no-rest days. Elapsed and straddling weeks now
+  seed those windows from **logged actuals** (weeks with no runs contribute nothing, so the cap
+  follows reality down too). New `det/cap-truth-anchor`.
+- **A still-ahead quality session survives the mid-week re-plan (§6o-QF).** The week that
+  straddles today regenerates its remaining days as easy — correct for a quality session whose
+  day already passed (a missed session is never crammed into the back of the week), but wrong
+  for one whose laid day is still ahead (now normal, since §AV can relocate a session later
+  into the week). A future quality day now keeps its session, pinned in place, with an
+  easy-only fallback when the week's remaining budget can't honestly carry it. New
+  `det/quality-forward`.
+- **Interval read-back no longer counts a hot run-home as an extra rep (§RD v5).** The
+  classifier's work/easy contrast baseline could anchor on a recovery *float's own pace* level,
+  letting a faster-than-prescribed cooldown clear the work-contrast bar by a hair and read as a
+  work rep. The baseline is now the slowest qualifying level's time/distance pace. Cached
+  read-backs reclassify lazily on next view. New `det/float-baseline` fixture.
+- **Readiness tile refreshes on a morning sync even when no new run arrived.** The page-load
+  auto-sync only re-rendered tiles when activities were added, so an HRV-only overnight pull
+  could leave yesterday's amber readiness on screen until a manual reload. Any real sync now
+  re-reads readiness.
+- **Settings window scrolls as one surface.** With the Suunto key rows present, the keys section
+  alone could fill the dialog's height — collapsing the settings area below it to zero and
+  making everything under the keys unreachable on shorter windows. The dialog body is now a
+  single scroll region.
+
 ## [0.14.0] - 2026-07-12
 
 The watch learns the plan, a finished race settles its own score, and your data finally has a
