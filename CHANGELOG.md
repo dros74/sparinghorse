@@ -12,6 +12,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-20
+
+Record a session in deliberate parts — easy body saved, fresh recording for the strides — and the
+engine reads it back as ONE session. And it now counts your strides even when you barely rest
+between them.
+
+### Added
+- **Split sessions — "1+1" (§SJ).** Some runners deliberately record a mixed session as separate
+  parts so no platform averages the strides into the easy run's numbers. The engine now agrees
+  with them: same-day recordings a save-and-restart apart (≤30 min, never overlapping) are read as
+  **one logical session**, derived at view time — activity rows are never merged or edited.
+  Everything downstream understands the group: the **effort monitor** judges your easy discipline
+  on the session's aerobic body only (the strides part's HR stays out of your easy score — the
+  whole point of splitting) and matches ONE prescription per session, so a second same-day
+  recording can no longer "reschedule" itself onto a neighbouring day's quality session; the
+  **read-back line** joins the parts ("47min @6:42/km · then 6min · 10× strides @4:24/km") with a
+  `1+1` chip on the tile and a merged day entry in `/runs`; the **long-run progression cap**
+  anchors on the whole outing's distance (a 3-minute save-and-restart doesn't reset a continuous
+  run); a race recorded in chunks (watch save mid-race) can still resolve; and a short part that
+  was unreadable alone (under 10 min / 2 km) is read on the strength of the session it belongs
+  to. Public mirror posture unchanged: pace-only, every HR field withheld server-side.
+- **Strides execution read (§SQ).** When a session carries strides, the read-back gains an
+  execution line: **count vs what was prescribed** ("10× strides · count on target (8–12)"),
+  strides-only pace, and — private box only — the HR *response*: per-rep peaks and whether your
+  HR floor recovers between reps (a creeping floor reads as "rest ran short"). HR is reported as
+  response, never as an effort verdict — a 15–20 s stride's cardiac peak lands in the recovery,
+  so pace remains the honest effort signal.
+
+### Fixed
+- **Short stride-dense recordings read as Strides, not "tempo" (§RD).** A 6-minute strides
+  recording with jog recovery used to blend into a "sustained effort, no easy bracket" verdict:
+  the wall-to-wall-hard branch answered before the stride count was consulted, and the old rule
+  required a walking-pace base calibrated on full-length sessions. Now ≥4 counted strides inside
+  ~12 minutes is a strides session regardless of recovery pace, and the strides check runs first.
+- **Strides counted through frame aliasing (cadence-burst pass, §RD).** With rests shorter than
+  the 15 s analysis grid, every other stride can vanish into a pace blend (a real 10-stride set
+  counted 6). The raw ~1 Hz **cadence** stream keeps one distinct high-cadence run per stride —
+  legs stop turning over instantly even when frame-blended pace doesn't — so cadence graduates
+  from countersign to counting channel: bursts ≥10% over a recovery-quartile cadence floor,
+  5–60 s wide, corroborated against pace (half the stride bar, so a flat-pace cadence flutter
+  never counts), deduped against pace-counted strides. Pace stays primary. Each stride rep's own
+  pace now also quotes the fastest frame it touches, never a rest-blend frame.
+
 ## [0.15.0] - 2026-07-19
 
 The plan learns to lay itself around your life: declare the days you can't run and the week

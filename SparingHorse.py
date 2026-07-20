@@ -247,7 +247,22 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 5   # v5 (2026-07-14): baseline = the whole slowest LEVEL's time/distance pace, not
+STRUCT_VERSION = 7   # v7 (2026-07-20, same night): a SHORT stride-dense recording (≥4 counted
+#                      strides in ≤ RD_STRIDES_SHORT_S) reads Strides regardless of base pace, and
+#                      the strides check now precedes the wall-to-wall-hard return (which also
+#                      carries the stride fields now) — the first live 1+1 part (6 strides, jog
+#                      recovery, 6min) had read "tempo, no easy bracket" with stride_reps dropped.
+#                      ALSO v7 (owner's ground truth: 10 run, 6 counted; his hint "look at
+#                      cadence"): the cadence-burst pass — sub-frame rests alias strides into pace
+#                      blends, the raw ~1Hz cadence stream doesn't; bursts ≥10% over the local
+#                      cadence floor, 5–60s wide, pace-corroborated at half the stride bar,
+#                      deduped against pace-counted centers. Pace stays primary.
+#                      v6 (2026-07-20, §SJ/§SQ): per-stride execution detail (`stride_reps`: peak
+#                      pace + pre-stride floor HR + post-peak HR in a lag window + recovery floor)
+#                      computed AT CLASSIFY TIME — frames aren't persisted, so a view-time read
+#                      would need a re-fetch; the version bump makes old cached reads lazily
+#                      re-classify on first view (the v4→v5 rollout pattern).
+#                      v5 (2026-07-14): baseline = the whole slowest LEVEL's time/distance pace, not
 #                      the anchor block's own — a 2-min float anchored the baseline on the first live
 #                      §RD read and promoted a marathon-pace run-home to work rep 3 (n_work 3, want 2).
 #                      v4 (2026-07-05): fused stride clusters counted by INTERNAL peaks (a wide
@@ -282,8 +297,25 @@ RD_STRIDES_SESSION_MIN = 4 # ≥ this many strides over a NON-easy base (slower 
 #                            a strides session — his spec: "Strides — 18min @7:53/km · 11× strides
 #                            (5+6) @4:20/km". Strides sprinkled on a genuine easy run stay "Easy
 #                            run · N× strides".
+RD_STRIDES_SHORT_S = 720   # ≤ this long AND ≥ SESSION_MIN counted strides ⇒ Strides REGARDLESS of
+#                            the base pace (§SJ, first live 1+1 2026-07-20): a 6-min jog-recovery
+#                            strides part smears stride speed into every 15s block — the blend read
+#                            "threshold wall-to-wall" and the tempo branch won its race against the
+#                            stride count. Inside ~12min there is no easy run to protect, and a
+#                            genuine short tempo counts ~0 stride peaks (width + cadence gates), so
+#                            the counted-strides discriminator is decisive on its own.
 RD_STRIDE_SET_GAP = 1.4    # a gap between strides > 1.4× the median gap (and >90s) starts a new
 #                            SET — the "(5+6)" grouping; uniform gaps read as one set
+# §RD v7 cadence-burst counting (the owner's hint, 2026-07-20: he ran 10, frames counted 6 — rests
+# shorter than the 15s grid alias every other stride into a blend; the RAW ~1Hz cadence stream
+# still shows one distinct high-cadence run per stride). Pace stays PRIMARY; a cadence burst only
+# counts with pace corroboration (half the stride bar), so a flat-pace cadence flutter never does.
+RD_STRIDE_CAD_BURST = 0.10  # a burst rides ≥10% over the local cadence floor (strides +10–20% spm)
+RD_STRIDE_BURST_MIN_S = 5   # … sustained ≥5s (a stride is 15–25s of fast legs; bounce is shorter)
+RD_STRIDE_BURST_PAD = 20    # a burst within ±20s of a pace-counted stride IS that stride (dedupe):
+#                             the pace center is frame-quantized (an episode's centre can sit ~15s
+#                             off the burst midpoint), while real consecutive strides are ≥~30s
+#                             apart — so ±20s merges duplicates without eating a neighbour
 RD_MIN_RUN_S = 600         # under 10 minutes there's no structure worth reading
 RD_LONG_MIN = 85           # a uniform easy run at/over this many minutes is a "long" run
 RD_MP_BASE_MIN = 30        # long_mp needs at least this much easy base before the MP finish
@@ -310,7 +342,7 @@ def _rd_median(xs):
     return None if not n else (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0)
 
 
-def _rd_frames(streams):
+def _rd_frames(streams, min_s=RD_MIN_RUN_S):
     """Raw MCP streams → 15s frames of grade-adjusted pace (sec/km) + hr + km, by INTERPOLATING the
     cumulative distance/elevation/HR at the frame edges — so any sampling density works (1Hz Suunto,
     battery-save every 25s, whatever). A frame across a recording gap where the runner stood still
@@ -332,8 +364,8 @@ def _rd_frames(streams):
     if len(pts) < 2:
         return [], 0.0
     t0, total_t = pts[0][0], pts[-1][0] - pts[0][0]
-    if not total_t or total_t < RD_MIN_RUN_S:
-        return [], 0.0
+    if not total_t or total_t < min_s:      # §SJ: a grouped part reads under a relaxed floor —
+        return [], 0.0                      # the group supplies the context this bar demands
     m_scale = 1.0 if (pts[-1][1] or 0) > 100 else 1000.0     # metres already, or km → metres
     nf = int(total_t // RD_FRAME_S)
     import bisect
@@ -359,7 +391,7 @@ def _rd_frames(streams):
         hm = interp((ta + tb) / 2.0, 2)
         cm = interp((ta + tb) / 2.0, 4)
         f = {"pace": None, "hr": round(hm) if hm else None,
-             "cad": round(cm, 1) if cm else None, "km": 0.0}
+             "cad": round(cm, 1) if cm else None, "km": 0.0, "t": ta}
         if da is not None and db_ is not None:
             dd = max(0.0, (db_ - da) * m_scale)
             f["km"] = dd / 1000.0
@@ -386,7 +418,7 @@ def _rd_frames(streams):
     return frames, (valid / nf if nf else 0.0)
 
 
-def _rd_strides(frames):
+def _rd_strides(frames, cad_pts=None):
     """Strides counted the way the owner reads the chart (his 2026-07-05 framing: 'count the
     peaks, look at the time axis'): a GLOBAL peak pass over the RAW grade-adjusted speed, not
     incremental burst state (which leaked half a real session's strides through merges and
@@ -396,17 +428,21 @@ def _rd_strides(frames):
     grammar owns it), countersigned by a cadence rise over the surrounding frames (GPS spikes
     leave cadence flat), counts as ONE stride — and a WIDER episode is a fused cluster whose
     internal dip-separated peaks each count (his real 5+6 session fused at full resolution).
-    Returns {"n", "sets", "pace"}: the count, the set grouping by gap pattern, and the
-    strides-only time-over-distance pace."""
+    v7: `cad_pts` (raw (t, cadence) samples) adds the CADENCE-BURST pass — rests shorter than
+    the 15s frame grid alias strides into pace blends (his real 10 counted 6), but the ~1Hz
+    cadence stream keeps one distinct high-cadence run per stride; bursts are pace-corroborated
+    (half the stride bar) and deduped against pace-counted centers, so pace stays primary and a
+    flat-pace cadence flutter never counts. Returns {"n", "sets", "pace", "reps"}."""
     spd = [(1000.0 / f["raw"]) if f.get("raw") else None for f in frames]
     cads = [f.get("cad") for f in frames]
     n, W = len(frames), RD_STRIDE_FLOOR_WIN
-    fast = [False] * n
+    fast, floors = [False] * n, [None] * n
     for i in range(n):
         if spd[i] is None:
             continue
         loc = [s for s in spd[max(0, i - W):i + W + 1] if s is not None]
         floor = _rd_median(loc)
+        floors[i] = floor
         if floor and spd[i] >= floor * (1 + RD_STRIDE_PEAK):
             fast[i] = True
     centers, ep_frames = [], []           # one center per counted stride + all counted fast frames
@@ -447,8 +483,52 @@ def _rd_strides(frames):
             centers.extend(float(m) for m in kept)
         ep_frames.extend(range(i, j + 1))
         i = j + 1
+    # ── the cadence-burst pass (v7) — recover strides the frame grid aliased away ──
+    if cad_pts and any(cads):
+        t_org = frames[0].get("t", 0.0)
+
+        def _p25(vals):       # the RECOVERY-quartile floor: in a DENSE strides region (~50% of a
+            s = sorted(vals)  # window is stride content) the rolling MEDIAN is itself stride-
+            return s[len(s) // 4] if s else None   # polluted and the threshold inflates past the
+        #                                            bursts it exists to find; p25 sits on recovery
+
+        def cfloor(k):
+            loc = [c for c in cads[max(0, k - W):k + W + 1] if c]
+            return _p25(loc)
+
+        runs, cur = [], None
+        for t, c in cad_pts:
+            k = max(0, min(n - 1, int((t - t_org) // RD_FRAME_S)))
+            fl = cfloor(k)
+            if fl and c >= fl * (1 + RD_STRIDE_CAD_BURST):
+                cur = [t, t] if cur is None else [cur[0], t]
+            elif cur:
+                runs.append(cur)
+                cur = None
+        if cur:
+            runs.append(cur)
+        for a, b in runs:
+            if not (RD_STRIDE_BURST_MIN_S <= b - a <= RD_STRIDE_MAX_S):
+                continue          # too brief = bounce; too wide = a rep, the block grammar owns it
+            fidx = max(0.0, min(n - 1.0, ((a + b) / 2.0 - t_org) / RD_FRAME_S))
+            if any(abs(fidx - c0) * RD_FRAME_S <= RD_STRIDE_BURST_PAD for c0 in centers):
+                continue          # the pace pass already counted this stride
+            # pace corroboration at HALF the stride bar, against the recovery-quartile speed floor
+            # (the median floor is blend-inflated in exactly the dense regions this pass serves).
+            # Judged on the FASTEST frame the burst touches — a burst straddles two frames and the
+            # rounded midpoint can land on the mostly-recovery one (the same aliasing again). The
+            # blended frame under a real stride rides clearly over the recovery floor; a flat-pace
+            # cadence flutter does not.
+            f_lo = max(0, min(n - 1, int((a - t_org) // RD_FRAME_S)))
+            f_hi = max(f_lo, min(n - 1, int((b - t_org) // RD_FRAME_S)))
+            smax = max((s for s in spd[f_lo:f_hi + 1] if s is not None), default=None)
+            p25f = _p25([s for s in spd[max(0, f_lo - W):f_hi + W + 1] if s is not None])
+            if smax is None or not p25f or smax < p25f * (1 + RD_STRIDE_PEAK / 2):
+                continue
+            centers.append(fidx)
+        centers.sort()
     if not centers:
-        return {"n": 0, "sets": [], "pace": None}
+        return {"n": 0, "sets": [], "pace": None, "reps": []}
     # set grouping: a gap clearly longer than the typical stride cadence starts a new set
     sets, cur_set = [], 1
     gaps = [(centers[k + 1] - centers[k]) * RD_FRAME_S for k in range(len(centers) - 1)]
@@ -463,7 +543,27 @@ def _rd_strides(frames):
     # strides-only pace: time over distance across the counted fast frames
     sec = len(ep_frames) * RD_FRAME_S
     km = sum(frames[k]["km"] for k in ep_frames)
-    return {"n": len(centers), "sets": sets, "pace": round(sec / km) if km > 0 else None}
+    # §SQ — per-stride execution detail (computed HERE because frames aren't persisted): the peak
+    # frame's raw pace, the pre-stride floor HR, the HR peak inside a +45–60s LAG window (a 15–20s
+    # stride's cardiac peak lands in the recovery — HR is reported as RESPONSE, never as the effort
+    # verdict), and the recovery floor before the next stride (a creeping floor = rest too short).
+    reps = []
+    for k, c in enumerate(centers):
+        i0 = min(n - 1, max(0, int(round(c))))
+        pre = [f["hr"] for f in frames[max(0, i0 - 6):max(0, i0 - 1)] if f.get("hr")]
+        peak = [f["hr"] for f in frames[i0:min(n, i0 + 4)] if f.get("hr")]
+        nxt = min(n - 1, max(0, int(round(centers[k + 1])))) if k + 1 < len(centers) else min(n, i0 + 10)
+        rec = [f["hr"] for f in frames[min(n, i0 + 3):max(min(n, i0 + 3), nxt - 1)] if f.get("hr")]
+        # the rep's pace = the FASTEST raw frame it touches (±1): a cadence-recovered stride's
+        # centre frame can be mostly rest (an aliased rep once recorded 882 s/km — standing)
+        pcand = [f["raw"] for f in frames[max(0, i0 - 1):min(n, i0 + 2)] if f.get("raw")]
+        reps.append({"t": i0 * RD_FRAME_S,
+                     "pace": round(min(pcand)) if pcand else None,
+                     "hr_pre": round(_rd_median(pre)) if pre else None,
+                     "hr_peak": max(peak) if peak else None,
+                     "hr_rec": min(rec) if rec else None})
+    return {"n": len(centers), "sets": sets, "pace": round(sec / km) if km > 0 else None,
+            "reps": reps}
 
 
 def _rd_blocks(frames):
@@ -579,19 +679,24 @@ def _rd_fmt_range(vals, fmt):
     return a if a == b else f"{a}–{b}"
 
 
-def classify_structure(streams, zones):
+def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     """§RD entry point: raw activity streams + that-date pace zones → the detected workout.
     Returns {"v", "ok", "kind", "kind_label", "summary", "segments", "n_work", "strides",
     "confidence"} — or ok=False with a reason when the run is honestly unreadable (never force a
-    label). Kinds are the PLAN vocabulary: easy / long / tempo / interval / long_mp."""
-    frames, valid = _rd_frames(streams)
+    label). Kinds are the PLAN vocabulary: easy / long / tempo / interval / long_mp.
+    `min_s` relaxes the structure floor for a §SJ grouped PART (SJ_PART_MIN_S): a 6-min strides
+    recording is readable because of the session it belongs to — never relaxed for lone runs."""
+    frames, valid = _rd_frames(streams, min_s)
     if not frames:
         return {"v": STRUCT_VERSION, "ok": False, "reason": "no usable pace/distance streams"}
     if valid < 0.7:
         return {"v": STRUCT_VERSION, "ok": False,
                 "reason": f"pace unreadable ({round(valid * 100)}% of frames usable)"}
     blocks = _rd_blocks(frames)
-    sinfo = _rd_strides(frames)                              # the global peak pass (chart-read)
+    tarr, carr = streams.get("time") or [], streams.get("cadence") or []
+    cad_pts = [(tarr[k], carr[k]) for k in range(min(len(tarr), len(carr)))
+               if tarr[k] is not None and carr[k] is not None]
+    sinfo = _rd_strides(frames, cad_pts)     # global peak pass + v7 cadence-burst recovery
     strides = sinfo["n"]
 
     def stride_note():
@@ -661,18 +766,24 @@ def classify_structure(streams, zones):
         # slow walking blocks (the strides session read @10:46 while the tile said 7:58)
         pace_all = round(total_sec / total_km) if total_km else segs[0]["pace"]
         z_all = _rd_zone(pace_all, zones)
-        if z_all in ("threshold", "interval"):               # wall-to-wall HARD (race / straight tempo)
-            return {"v": STRUCT_VERSION, "ok": True, "kind": "tempo", "kind_label": "Sustained effort",
-                    "summary": f"{_rd_fmt_dur(total_sec)} @{p(pace_all)}/km {z_all}, no easy bracket",
-                    "segments": segs, "n_work": 0, "strides": strides, "confidence": conf}
-        # a STRIDES SESSION: enough strides over a base too slow to be easy RUNNING (walking/
-        # standing recovery) — his spec. Strides on a genuine easy run stay "Easy run · N× strides".
-        if strides >= RD_STRIDES_SESSION_MIN and zones.get("easy") and baseline > zones["easy"]:
+        # a STRIDES SESSION — checked BEFORE the wall-to-wall-hard return (the 2026-07-20 first
+        # live 1+1: 6 counted strides lost to a "threshold" blend verdict): enough strides over a
+        # base too slow to be easy RUNNING (walking/standing recovery), OR a SHORT stride-dense
+        # recording (a §SJ part: the blocks are stride-smeared, the peak count is the truth).
+        # Strides on a genuine easy run stay "Easy run · N× strides".
+        if strides >= RD_STRIDES_SESSION_MIN and \
+                ((zones.get("easy") and baseline > zones["easy"]) or total_sec <= RD_STRIDES_SHORT_S):
             return {"v": STRUCT_VERSION, "ok": True, "kind": "strides", "kind_label": "Strides",
                     "summary": f"{_rd_fmt_dur(total_sec)} @{p(pace_all)}/km · {stride_note()}",
                     "segments": segs, "n_work": 0, "strides": strides,
                     "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
-                    "confidence": conf}
+                    "stride_reps": sinfo.get("reps") or [], "confidence": conf}
+        if z_all in ("threshold", "interval"):               # wall-to-wall HARD (race / straight tempo)
+            return {"v": STRUCT_VERSION, "ok": True, "kind": "tempo", "kind_label": "Sustained effort",
+                    "summary": f"{_rd_fmt_dur(total_sec)} @{p(pace_all)}/km {z_all}, no easy bracket",
+                    "segments": segs, "n_work": 0, "strides": strides,
+                    "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
+                    "stride_reps": sinfo.get("reps") or [], "confidence": conf}
         # aerobic throughout — marathon-zone drift stays "easy" here BY DESIGN: whether an easy day
         # ran too hot is the effort monitor's verdict, not a structure claim
         kind = "long" if total_sec >= RD_LONG_MIN * 60 else "easy"
@@ -682,7 +793,7 @@ def classify_structure(streams, zones):
                 "kind_label": "Long run" if kind == "long" else "Easy run",
                 "summary": summary, "segments": segs, "n_work": 0, "strides": strides,
                 "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
-                "confidence": conf}
+                "stride_reps": sinfo.get("reps") or [], "confidence": conf}
 
     works = [segs[i] for i in work_ix]
     wu = [s for s in segs if s["role"] == "warmup"]
@@ -723,7 +834,7 @@ def classify_structure(streams, zones):
     return {"v": STRUCT_VERSION, "ok": True, "kind": kind, "kind_label": kind_label,
             "summary": " · ".join(parts), "segments": segs, "n_work": len(works),
             "strides": strides, "stride_sets": sinfo["sets"], "stride_pace": sinfo.get("pace"),
-            "confidence": conf}
+            "stride_reps": sinfo.get("reps") or [], "confidence": conf}
 
 
 def _zones_asof(db, date_iso=None):
@@ -744,26 +855,29 @@ def _zones_asof(db, date_iso=None):
     return pace_zones(row["effective_vo2max"])
 
 
-def _structure_cached(db, aid, date_iso=None, fetch=True):
+def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S):
     """§RD — the current-version detected structure for an activity: from structcache, else (when
     `fetch` allows) classified from freshly-pulled streams + stored. Mirrors _profile_cached:
     re-classifies on a VERSION mismatch, and on a fetch failure returns (stale_or_None, err).
     `fetch=False` = cached-only, for the public container (tokenless) and the effort monitor's
     bulk read (a panel load must never fan out into stream fetches). Tolerates a DB without the
-    structcache table (minimal det fixtures) — absent reads as unclassified."""
+    structcache table (minimal det fixtures) — absent reads as unclassified.
+    §SJ: `min_s` < RD_MIN_RUN_S (a grouped part) also RETRIES a cached refusal — a short part
+    refused as a lone run may be readable under the group's relaxed floor."""
     try:
         row = db.execute("SELECT structure FROM structcache WHERE activity_id=?", (aid,)).fetchone()
     except sqlite3.OperationalError:
         return None, None
     cached = json.loads(row["structure"]) if row else None
     if cached and cached.get("v") == STRUCT_VERSION:
-        return cached, None
+        if cached.get("ok") or min_s >= RD_MIN_RUN_S or not fetch:
+            return cached, None
     if not fetch:
         return cached, None
     try:
         det = mcp_call("get_activity_details", {"activity_id": int(aid)})
         streams = (det.get("activity", det)).get("streams") or {}
-        st = classify_structure(streams, _zones_asof(db, date_iso))
+        st = classify_structure(streams, _zones_asof(db, date_iso), min_s=min_s)
     except (RunalyzeError, requests.RequestException, KeyError, ValueError) as e:
         return cached, e
     db.execute("INSERT OR REPLACE INTO structcache (activity_id, structure, cached_at) "
@@ -780,14 +894,24 @@ def classify_recent(db, days=14, cap=12):
     from datetime import timedelta
     since = (datetime.now().date() - timedelta(days=days)).isoformat()
     rows = db.execute(
-        "SELECT a.id, a.date FROM activities a LEFT JOIN structcache s ON s.activity_id=a.id "
-        "WHERE " + RUN_FAMILY_SQL.replace("sport", "a.sport") + " AND a.date>=? AND a.distance>=2 "
-        "AND s.activity_id IS NULL ORDER BY a.date DESC LIMIT ?", (since, cap)).fetchall()
+        "SELECT a.id, a.date, a.date_time, a.distance, a.duration, a.elapsed_time, "
+        "s.activity_id AS done FROM activities a LEFT JOIN structcache s ON s.activity_id=a.id "
+        "WHERE " + RUN_FAMILY_SQL.replace("sport", "a.sport") + " AND a.date>=? "
+        "ORDER BY a.date DESC", (since,)).fetchall()
+    # §SJ — eligibility is per SESSION, not per recording: a lone run still needs ≥2 km, but a
+    # short PART of a 1+1 group classifies (relaxed floor) because its group carries the session.
+    todo = []
+    for grp in _session_groups(rows):
+        gkm = sum((p["distance"] or 0) for p in grp)
+        for p in grp:
+            if p["done"] is None and ((p["distance"] or 0) >= 2 or (len(grp) > 1 and gkm >= 2)):
+                todo.append((p, SJ_PART_MIN_S if len(grp) > 1 else RD_MIN_RUN_S))
+    todo.sort(key=lambda t: t[0]["date"], reverse=True)
     n = 0
-    for i, r in enumerate(rows):
+    for i, (r, ms) in enumerate(todo[:cap]):
         if i:
             time.sleep(PAGE_DELAY)                           # WAF politeness between stream pulls
-        st, err = _structure_cached(db, r["id"], date_iso=r["date"])
+        st, err = _structure_cached(db, r["id"], date_iso=r["date"], min_s=ms)
         if st is not None and not err:
             n += 1
     return n
@@ -2217,6 +2341,18 @@ EASY_PACE_GRACE = 0.03      # public PACE read: allow GAP up to 3% quicker than 
 AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (his documented failure mode)
 EFFORT_MATCH_DAYS = 2       # a session shuffled within ±2 days reads as a reschedule, not a new run
 
+# ── §SJ split sessions ("1+1") — several recordings, one session (PROJECT_LOG §30) ─────
+# The owner deliberately records a mixed session as separate parts (easy body saved, fresh recording
+# for the strides) so neither part pollutes the other's numbers — the right instinct watch-side; the
+# engine must read the parts back as ONE session. Groups are DERIVED at read time (a pure function
+# over one day's owned rows) — activity rows are Runalyze's raw truth and are never merged at rest.
+SJ_MAX_GAP_MIN = 30   # a save-and-restart between parts is minutes; a real morning/evening double is
+#                       hours apart. Overlapping recordings NEVER join (same-instant duplicate-source
+#                       pairs exist in his history under different TZ spellings — a restart starts
+#                       after the previous part ended).
+SJ_PART_MIN_S = 180   # a grouped part's own §RD floor: the GROUP supplies the context RD_MIN_RUN_S
+#                       demands, so a 6-min strides recording is readable because of what it follows
+
 # ── LTHR (lactate-threshold HR) derivation — see [[hr-zones-lthr-design]] ─────
 # A data-derived LTHR anchors HR zones + the effort monitor more accurately than %HRmax at the
 # easy↔threshold turnpoint (two runners, same HRmax, can have thresholds 15+ bpm apart). Slice #1 is
@@ -2560,6 +2696,180 @@ def _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="easy_top"):
     return "hot"
 
 
+def _sj_col(r, key):
+    """Tolerant column read for sqlite3.Row/dict mixes (minimal det fixtures omit columns)."""
+    try:
+        return r[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _session_groups(rows):
+    """§SJ — split-session ("1+1") grouping: owned run rows → time-ordered groups, each group one
+    LOGICAL session. Pure + deterministic (testable without a DB). Rules:
+      • only same-DATE rows group (cross-midnight is a non-goal);
+      • within a date, rows sort by (date_time, id) and consecutive rows JOIN when the recording gap
+        0 ≤ start(next) − end(prev) ≤ SJ_MAX_GAP_MIN — end from elapsed_time (wall clock), falling
+        back to duration; chains (wu + reps + cd as three recordings) join transitively;
+      • a NEGATIVE gap (overlap) never joins: a restart starts after the previous part ended —
+        overlap means duplicate-source rows (his 2023 history has same-instant pairs under
+        different TZ spellings);
+      • a blank/unparseable date_time never joins (the dedup blank-timestamp posture), nor does a
+        naive/aware timestamp mix (the gap is not computable — honesty over guessing).
+    Callers drop-filter (ignored/deleted) BEFORE grouping so an ignored part leaves cleanly.
+    Returns a list of groups (each a time-ordered list of the input rows), dates ascending."""
+    from datetime import datetime as _dtt
+
+    def ts(r):
+        v = _sj_col(r, "date_time")
+        try:
+            return _dtt.fromisoformat(v) if v else None
+        except ValueError:
+            return None
+
+    by_date = {}
+    for r in rows:
+        if _sj_col(r, "date"):
+            by_date.setdefault(r["date"], []).append(r)
+    out = []
+    for d in sorted(by_date):
+        day = sorted(by_date[d], key=lambda r: (_sj_col(r, "date_time") or "", _sj_col(r, "id") or 0))
+        cur = [day[0]]
+        for nxt in day[1:]:
+            prev = cur[-1]
+            pt, nt = ts(prev), ts(nxt)
+            gap = None
+            if pt and nt:
+                try:
+                    gap = (nt - pt).total_seconds() - \
+                          (_sj_col(prev, "elapsed_time") or _sj_col(prev, "duration") or 0)
+                except TypeError:                      # naive vs tz-aware mix — not computable
+                    gap = None
+            if gap is not None and 0 <= gap <= SJ_MAX_GAP_MIN * 60:
+                cur.append(nxt)
+            else:
+                out.append(cur)
+                cur = [nxt]
+        out.append(cur)
+    return out
+
+
+def _sj_group_for(db, aid):
+    """§SJ — the group containing activity `aid` (list of rows, time-ordered), or None when it is a
+    plain singleton / unknown id. Owned rows only — an ignored part has left its group."""
+    row = db.execute("SELECT date FROM activities WHERE id=?", (aid,)).fetchone()
+    if not row or not row["date"]:
+        return None
+    drop = dropped_ids(db)
+    rows = [r for r in db.execute(
+        "SELECT id, date, date_time, distance, duration, elapsed_time FROM activities "
+        "WHERE date=? AND " + RUN_FAMILY_SQL, (row["date"],)).fetchall()
+        if r["id"] not in drop and r["distance"]]
+    for g in _session_groups(rows):
+        if len(g) > 1 and any(r["id"] == aid for r in g):
+            return g
+    return None
+
+
+SJ_KIND_PRIORITY = ("interval", "tempo", "long_mp", "strides", "long", "easy")   # §SJ composite kind
+
+
+def _sj_composite(db, group, fetch=True):
+    """§SJ — the 1+1 composite read, assembled at VIEW time from the parts' own §RD reads (the
+    per-activity structcache stays the storage; nothing composite is persisted). kind = the
+    highest-priority part read, summary = part summaries joined in time order, strides/n_work
+    summed; the per-part reads ride along under `parts` so the UI can show the seam. Parts read
+    under the relaxed SJ_PART_MIN_S floor — the group is their context. None until at least one
+    part has a readable structure."""
+    parts, kinds = [], []
+    strides = n_work = 0
+    for p in group:
+        st, _e = _structure_cached(db, p["id"], date_iso=p["date"], fetch=fetch,
+                                   min_s=SJ_PART_MIN_S)
+        read = st if st else {"ok": False, "reason": "not classified yet"}
+        parts.append({"id": p["id"], "km": round(p["distance"] or 0, 2),
+                      "min": round((p["duration"] or 0) / 60), "read": read})
+        if read.get("ok"):
+            kinds.append(read["kind"])
+            strides += read.get("strides") or 0
+            n_work += read.get("n_work") or 0
+    oks = [e["read"] for e in parts if e["read"].get("ok")]
+    if not oks:
+        return None
+    kind = next((k for k in SJ_KIND_PRIORITY if k in kinds), "easy")
+    labels = [r.get("kind_label") or "" for r in oks]
+    kind_label = labels[0] + "".join(f" + {l.lower()}" for l in labels[1:] if l)
+    return {"v": STRUCT_VERSION, "ok": True, "composite": True, "n_parts": len(parts),
+            "kind": kind, "kind_label": kind_label,
+            "summary": " · then ".join(r["summary"] for r in oks),
+            "strides": strides, "n_work": n_work,
+            "confidence": "rough" if any(r.get("confidence") == "rough" for r in oks) else "good",
+            "km": round(sum(e["km"] for e in parts), 1), "parts": parts}
+
+
+def _sq_read(db, reps, n, sets, pace, date_iso):
+    """§SQ — the strides EXECUTION read: how many vs prescribed, the strides-only pace, and HR as
+    RESPONSE — the post-stride peak (a 15–20s stride's cardiac peak lands in the recovery: the
+    §RD HR-lag rule, so HR is never the effort verdict; pace is the trick) and the recovery floor
+    between reps (a creeping floor = rest ran short). Count verdict vs the prescribed set band:
+    `strides: S` prescribes S sets of 4–6. Display/verdict only — no training lever consumes this."""
+    out = {"n": n, "sets": sets, "pace": pace}
+    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    presc = None
+    if row:
+        for w in _plan_all_weeks(json.loads(row["plan"])):
+            for s in w.get("sessions", []):
+                if s.get("date") == date_iso and s.get("strides"):
+                    presc = int(s["strides"])
+    if presc:
+        lo, hi = 4 * presc, 6 * presc
+        out["prescribed"] = [lo, hi]
+        out["count_verdict"] = "on" if lo <= n <= hi else ("short" if n < lo else "over")
+    peaks = [r["hr_peak"] for r in reps if r.get("hr_peak")]
+    floors = [r["hr_rec"] for r in reps if r.get("hr_rec")]
+    if peaks:
+        out["hr_peak_first"], out["hr_peak_last"] = peaks[0], peaks[-1]
+    if floors:
+        out["hr_floor_first"], out["hr_floor_last"] = floors[0], floors[-1]
+        out["recovered"] = (floors[-1] - floors[0]) <= 10
+    bits = [f"{n}× strides" + (f" ({'+'.join(map(str, sets))})" if len(sets) > 1 else "")
+            + (f" @{fmt_pace(pace)}/km" if pace else "")]
+    if out.get("prescribed"):
+        lo, hi = out["prescribed"]
+        bits.append({"on": f"count on target ({lo}–{hi})",
+                     "short": f"{n} of {lo}–{hi} prescribed",
+                     "over": f"{n} vs {lo}–{hi} prescribed"}[out["count_verdict"]])
+    if peaks:
+        bits.append(f"HR peaks {peaks[0]}→{peaks[-1]}")
+    if floors:
+        bits.append(f"recovery floor {floors[0]}→{floors[-1]}"
+                    + ("" if out.get("recovered", True) else " — creeping, rest ran short"))
+    out["line"] = " · ".join(bits)
+    return out
+
+
+def _strip_structure_hr(st):
+    """§H7 — remove every HR field from a structure read (segments, §SQ stride_reps + narrative),
+    recursing into §SJ composite parts. The pace-based label is as public as pace; HR is not."""
+    if not st:
+        return st
+    out = {**st}
+    if out.get("segments"):
+        out["segments"] = [{k: v for k, v in s.items() if k != "hr"} for s in out["segments"]]
+    if out.get("stride_reps"):
+        out["stride_reps"] = [{k: v for k, v in r.items() if not k.startswith("hr")}
+                              for r in out["stride_reps"]]
+    if out.get("sq"):
+        sq = {k: v for k, v in out["sq"].items() if not k.startswith("hr") and k != "recovered"}
+        if sq.get("line"):
+            sq["line"] = " · ".join(b for b in sq["line"].split(" · ")
+                                    if not b.startswith(("HR peaks", "recovery floor")))
+        out["sq"] = sq
+    if out.get("parts"):
+        out["parts"] = [{**e, "read": _strip_structure_hr(e.get("read"))} for e in out["parts"]]
+    return out
+
+
 def _match_prescriptions(run_dates, prescribed, match_days=EFFORT_MATCH_DAYS):
     """Assign each run the kind of the plan session it belongs to (§6m). The runner doesn't always run a
     session on its prescribed calendar day — they anticipate or postpone by a day or two. Exact-date logic
@@ -2633,25 +2943,61 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             if s.get("date") and s.get("kind"):
                 prescribed.append((s["date"], s["kind"]))
     rows = [r for r in db.execute(
-        "SELECT id, date, distance, duration, hr_avg, raw FROM activities "
+        "SELECT id, date, date_time, distance, duration, elapsed_time, hr_avg, raw FROM activities "
         "WHERE " + RUN_FAMILY_SQL + " AND date>=? ORDER BY date DESC", (since,)).fetchall()
-        if not (r["id"] in drop or not r["distance"] or r["distance"] < 2)]
-    # Match each run to its prescription (nearest within ±EFFORT_MATCH_DAYS — an anticipated/postponed
-    # session is judged against its real prescription, not the easy default of the day it landed on).
-    matched = _match_prescriptions([r["date"] for r in rows], prescribed)
+        if not (r["id"] in drop or not r["distance"])]
+    # §SJ — group deliberately-split recordings into logical sessions BEFORE matching: two same-day
+    # parts used to fight over the day's prescription, the loser "rescheduling" onto a neighbouring
+    # day's quality session (the Wed-steal), and the ≥2 km junk floor now tests the SESSION, not the
+    # part — a 1.5 km strides part is the analysable half of a 1+1, not noise.
+    groups = [g for g in _session_groups(rows)
+              if sum((p["distance"] or 0) for p in g) >= 2]
+    groups.sort(key=lambda g: g[0]["date"], reverse=True)      # the panel's date-DESC order
+    matched = _match_prescriptions([g[0]["date"] for g in groups], prescribed)
     runs = []
-    for r, kind in zip(rows, matched):
-        raw = json.loads(r["raw"] or "{}")
-        gap = raw.get("gap")                              # Runalyze grade-adjusted speed (km/h)
-        gap_pace = (round(3600.0 / gap) if gap else
-                    (round(r["duration"] / r["distance"]) if r["duration"] else None))
+    for g, kind in zip(groups, matched):
+        r = g[0]
+        km_total = sum((p["distance"] or 0) for p in g)
+        if len(g) == 1:
+            raw = json.loads(r["raw"] or "{}")
+            gap = raw.get("gap")                          # Runalyze grade-adjusted speed (km/h)
+            gap_pace = (round(3600.0 / gap) if gap else
+                        (round(r["duration"] / r["distance"]) if r["duration"] else None))
+            hr_avg = r["hr_avg"]
+        else:
+            # §SJ multi-part: the easy-discipline verdict judges the session's aerobic BODY —
+            # duration-weighted HR/GAP over the parts whose cached read is easy/long. The strides/
+            # quality part's numbers stay out of the easy read (the entire point of the owner's
+            # split-recording workflow); its reps are graded by the per-rep read below. Preference
+            # order read-aerobic → unread → all: a still-unclassified addendum must not tilt the
+            # verdict while a read body exists (it converges to exclusion once read anyway).
+            parts = []
+            for p in g:
+                st, _e = _structure_cached(db, p["id"], fetch=False)
+                parts.append((p, st.get("kind") if (st and st.get("ok")) else None))
+            body = ([p for p, pk in parts if pk in AEROBIC_KINDS]
+                    or [p for p, pk in parts if pk is None] or [p for p, _ in parts])
+            r = max(body, key=lambda p: p["duration"] or 0)   # context (TE/feeling) from the body
+            hrs = [(p["hr_avg"], p["duration"] or 0) for p in body if p["hr_avg"]]
+            hr_avg = round(sum(h * w for h, w in hrs) / sum(w for _, w in hrs)) if hrs else None
+
+            def _part_pace(p):
+                pg = json.loads(p["raw"] or "{}").get("gap")
+                return ((3600.0 / pg) if pg else
+                        ((p["duration"] / p["distance"]) if p["duration"] and p["distance"] else None))
+            pp = [(v, p["duration"] or 0) for p in body for v in [_part_pace(p)] if v]
+            gap_pace = round(sum(v * w for v, w in pp) / sum(w for _, w in pp)) if pp else None
+            raw = json.loads(r["raw"] or "{}")
         if public:
             if not gap_pace:                              # pace-judged → needs a pace
                 continue
-            runs.append({"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
-                         "gap_pace": gap_pace, "verdict": _effort_verdict_pace(kind, gap_pace, zones)})
+            row_pub = {"date": g[0]["date"], "km": round(km_total, 1), "kind": kind,
+                       "gap_pace": gap_pace, "verdict": _effort_verdict_pace(kind, gap_pace, zones)}
+            if len(g) > 1:
+                row_pub["joined"] = len(g)
+            runs.append(row_pub)
         else:
-            if not r["hr_avg"]:                           # HR-judged → needs HR
+            if not hr_avg:                                # HR-judged → needs HR
                 continue
             te = raw.get("fit_training_effect")
             # §3.4 verdict switch — the PACE-vs-LT1 cross-check on the MOVING, fitness-tracking LT1 bar
@@ -2661,7 +3007,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             # naive flip to pace-primary would over-police a detrained rebuild (the reconciled §3.4 finding).
             pace_verdict = _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="lt1")
             if use_lthr:                                  # HR-led on the MOVING LTHR (Friel %LTHR ceilings)
-                verdict, conf = _effort_verdict(kind, r["hr_avg"] / lthr_info["lthr"], te,
+                verdict, conf = _effort_verdict(kind, hr_avg / lthr_info["lthr"], te,
                                                 LTHR_EASY_FRAC, LTHR_HARD_FRAC)
             elif pace_verdict != "unknown":               # no trustworthy LTHR ⇒ the moving pace-LT1 bar
                 verdict, conf = pace_verdict, "moderate"   #   (RETIRES the fixed %HRmax fallback, §3.4)
@@ -2671,10 +3017,10 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                 # at THRESHOLD+ effort (≥ the hard bar) was hard on the honest axis (TRIMP already scores it
                 # so), so it can't read easy/hot — else the monitor tells a detrained returner his redline was
                 # fine. Retiring the fixed %HRmax bar dropped this catch; restore it as a one-way escalation.
-                if hrmax and verdict in ("too_easy", "on", "hot") and r["hr_avg"] / hrmax >= HARD_HR_FRAC:
+                if hrmax and verdict in ("too_easy", "on", "hot") and hr_avg / hrmax >= HARD_HR_FRAC:
                     verdict, conf = "too_hard", "moderate"
             else:                                         # no pace either ⇒ last-resort %HRmax cross-check
-                hrf = (r["hr_avg"] / hrmax) if hrmax else None
+                hrf = (hr_avg / hrmax) if hrmax else None
                 verdict, conf = _effort_verdict(kind, hrf, te)
             # §RD — per-rep quality read: with the detected structure cached (sync/tile already
             # classified it — CACHED-ONLY here, a panel load never fans out into stream fetches),
@@ -2683,9 +3029,11 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             # read with a 'moderate' one that actually isolates the reps.
             seg = None
             if kind not in AEROBIC_KINDS:
-                st, _e = _structure_cached(db, r["id"], fetch=False)
-                works = ([s for s in st.get("segments", []) if s.get("role") == "work"]
-                         if st and st.get("ok") else [])
+                works = []                                # §SJ — reps live in whichever PART ran them
+                for p in g:
+                    stp, _e = _structure_cached(db, p["id"], fetch=False)
+                    if stp and stp.get("ok"):
+                        works += [s for s in stp.get("segments", []) if s.get("role") == "work"]
                 if works:
                     zone = KIND_ZONE.get(kind, "threshold")
                     wsec = sum(s["sec"] for s in works)
@@ -2709,12 +3057,14 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                         verdict, conf = v2, "moderate"
                         seg = {"n_work": len(works), "work_hr": round(whr) if whr else None,
                                "work_pace": fmt_pace(wpace), "zone": zone}
-            row_out = {"date": r["date"], "km": round(r["distance"], 1), "kind": kind,
-                       "hr_avg": r["hr_avg"],
-                       "hr_pct": round(r["hr_avg"] / hrmax * 100) if hrmax else None,
+            row_out = {"date": g[0]["date"], "km": round(km_total, 1), "kind": kind,
+                       "hr_avg": hr_avg,
+                       "hr_pct": round(hr_avg / hrmax * 100) if hrmax else None,
                        "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
                        "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
                        "verdict": verdict, "confidence": conf, "pace_verdict": pace_verdict}
+            if len(g) > 1:                                # §SJ — surface the join (UI chip + honesty)
+                row_out["joined"] = len(g)
             if seg:
                 row_out["seg_read"] = True
                 row_out["seg"] = seg
@@ -4242,10 +4592,14 @@ def _recent_long_runs(db, before, n_weeks=LONG_RUN_STEP_WINDOW):
     for w in range(n_weeks, 0, -1):                          # oldest → most recent
         ws = mon0 - timedelta(days=7 * w)
         we = ws + timedelta(days=6)
-        rows = db.execute(
-            "SELECT id, distance FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+        rows = [r for r in db.execute(
+            "SELECT id, date, date_time, distance, duration, elapsed_time FROM activities "
+            "WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
             (ws.isoformat(), we.isoformat())).fetchall()
-        longest = max((r["distance"] for r in rows if r["id"] not in drop and r["distance"]), default=0.0)
+            if r["id"] not in drop and r["distance"]]
+        # §SJ — the longest single OUTING: a deliberately split recording (save-and-restart minutes
+        # apart) is one continuous biomechanical load, so a group's km SUM competes for "longest".
+        longest = max((sum(p["distance"] for p in g) for g in _session_groups(rows)), default=0.0)
         if longest:
             out.append(round(longest, 1))
     return out
@@ -4321,14 +4675,15 @@ def _actual_week_caps(db, ws, we, zones):
     cap 4.3 = 1.1 × a prescribed 3.9 km long while the actual trailing long was 8.4 km → a 7-run
     no-rest week spreading the ceiling volume over junk-sized days)."""
     drop = dropped_ids(db)
-    rows = db.execute(
-        "SELECT id, distance, duration, raw FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
-        (ws, we)).fetchall()
-    longest = eq = 0.0
+    rows = [r for r in db.execute(
+        "SELECT id, date, date_time, distance, duration, elapsed_time, raw FROM activities "
+        "WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL, (ws, we)).fetchall()
+        if r["id"] not in drop and r["distance"]]
+    # §SJ — "longest single run" means the longest OUTING: a split recording's group-sum competes.
+    # eq_km stays PER PART on purpose — each part pace-classifies on its own (sharper, if anything).
+    longest = max((sum(p["distance"] for p in g) for g in _session_groups(rows)), default=0.0)
+    eq = 0.0
     for r in rows:
-        if r["id"] in drop or not r["distance"]:
-            continue
-        longest = max(longest, r["distance"])
         raw = json.loads(r["raw"] or "{}")
         gap = raw.get("gap")                                  # grade-adjusted speed (km/h)
         gap_pace = (round(3600.0 / gap) if gap else
@@ -5213,13 +5568,26 @@ def _race_day_activity(db, race_date_iso, race_type):
         return None, None
     rd = _date(race_date_iso)
     rows = db.execute(
-        "SELECT id, date, distance, duration FROM activities "
+        "SELECT id, date, date_time, distance, duration, elapsed_time FROM activities "
         "WHERE date BETWEEN ? AND ? AND " + RUN_FAMILY_SQL + " AND distance > 0 AND duration > 0",
         ((rd - timedelta(days=2)).isoformat(), (rd + timedelta(days=2)).isoformat())).fetchall()
     full = [r for r in rows if abs(r["distance"] - target_km) / target_km <= 0.15]
     if full:
         full.sort(key=lambda r: (abs((_date(r["date"]) - rd).days), r["duration"] / r["distance"]))
         return full[0], "finished"
+    # §SJ fallback — a race recorded in CHUNKS (watch save mid-race + restart): no single row
+    # matches, but a split-group's SUM does. Single-row match stays first — a split warm-up +
+    # race day must resolve to the race part alone, never to warm-up+race summed.
+    gfull = [g for g in _session_groups(rows) if len(g) > 1
+             and abs(sum(p["distance"] for p in g) - target_km) / target_km <= 0.15]
+    if gfull:
+        gfull.sort(key=lambda g: (abs((_date(g[0]["date"]) - rd).days),
+                                  sum(p["duration"] for p in g) / sum(p["distance"] for p in g)))
+        g = gfull[0]
+        big = max(g, key=lambda p: p["distance"])
+        return {"id": big["id"], "date": g[0]["date"],
+                "distance": round(sum(p["distance"] for p in g), 2),
+                "duration": round(sum(p["duration"] for p in g))}, "finished"
     same_day_short = [r for r in rows if _date(r["date"]) == rd and r["distance"] <= target_km * 0.75]
     if same_day_short:
         return max(same_day_short, key=lambda r: r["distance"]), "dnf"   # how far they got
@@ -7866,6 +8234,13 @@ def _activity_payload(db, a):
         "ignored": bool(db.execute("SELECT 1 FROM ignored_activities WHERE id=?",
                                    (a.get("id"),)).fetchone()),
     }
+    grp = _sj_group_for(db, a.get("id")) if a.get("id") else None
+    if grp:                           # §SJ — this recording is part of a 1+1: tell the tile (pace/
+        payload["sj"] = {             # distance-class data only, so it serves on both containers)
+            "parts": len(grp), "ids": [p["id"] for p in grp],
+            "index": next(i for i, p in enumerate(grp) if p["id"] == a.get("id")) + 1,
+            "km": round(sum(p["distance"] or 0 for p in grp), 1),
+            "min": round(sum(p["duration"] or 0 for p in grp) / 60)}
     if READONLY:                      # per-run HR is private (same posture that drops HR from the public
         payload.pop("hr_avg", None)   # effort-discipline read) — withhold it server-side on the public
         payload.pop("hr_max", None)   # container, not just in the UI
@@ -7915,19 +8290,35 @@ def api_activity_one(aid):
 def api_activity_structure(aid):
     """§RD — the detected workout structure for one activity, classified lazily on first view when
     the sync hook hasn't already (that's the agreed backfill: from-now-on eager, history on open).
-    Public read-only container: served from CACHE ONLY (tokenless — no stream fetch) and per-segment
-    HR withheld server-side — the same H7 posture as the activity payload; the pace-based label
-    itself is as public as pace."""
+    §SJ: when the activity is a PART of a split-recording group, the COMPOSITE read is served —
+    whichever part is open, the read-back line tells the whole 1+1 session. §SQ rides along when
+    the read carries strides. Public read-only container: served from CACHE ONLY (tokenless — no
+    stream fetch) and every HR field withheld server-side — the same H7 posture as the activity
+    payload; the pace-based label itself is as public as pace."""
     db = get_db()
     row = db.execute("SELECT date FROM activities WHERE id=?", (aid,)).fetchone()
     if not row:
         return jsonify(None), 404
-    st, err = _structure_cached(db, aid, date_iso=row["date"], fetch=not READONLY)
+    err = None
+    grp = _sj_group_for(db, aid)
+    st = _sj_composite(db, grp, fetch=not READONLY) if grp else None
+    if st is None:
+        st, err = _structure_cached(db, aid, date_iso=row["date"], fetch=not READONLY)
     if not st:
         return jsonify({"ok": False, "reason": "not classified yet" if READONLY
                         else f"streams unavailable ({err})"})
-    if READONLY and st.get("segments"):
-        st = {**st, "segments": [{k: v for k, v in s.items() if k != "hr"} for s in st["segments"]]}
+    if st.get("ok") and (st.get("strides") or 0) > 0:
+        reps = ([r for e in st.get("parts", []) for r in (e["read"].get("stride_reps") or [])]
+                if st.get("composite") else (st.get("stride_reps") or []))
+        src = st
+        if st.get("composite"):     # the strides-carrying part owns the sets/pace detail
+            src = next((e["read"] for e in st["parts"]
+                        if e["read"].get("ok") and (e["read"].get("strides") or 0) > 0), st)
+        st = {**st, "sq": _sq_read(db, reps, st.get("strides") or 0,
+                                   src.get("stride_sets") or [], src.get("stride_pace"),
+                                   row["date"])}
+    if READONLY:
+        st = _strip_structure_hr(st)
     return jsonify(st)
 
 
@@ -8080,9 +8471,10 @@ def _runs_month(db, month):
     ylo = f"{k // 12:04d}-{k % 12 + 1:02d}-01"
     a_month, a_12mo, a_all = _agg_new(), _agg_new(), _agg_new()
     since = None
+    month_runs = []
     for r in db.execute(
-        "SELECT id, date, date_time, sport, distance, duration, hr_avg, trimp FROM activities "
-        "ORDER BY date_time").fetchall():
+        "SELECT id, date, date_time, sport, distance, duration, elapsed_time, hr_avg, trimp "
+        "FROM activities ORDER BY date_time").fetchall():
         if r["id"] in drop or not r["date"]:
             continue
         in_month = mlo <= r["date"] <= mhi
@@ -8097,11 +8489,23 @@ def _runs_month(db, month):
         if not in_month:
             continue
         _agg_add(a_month, r)
-        pace = (r["duration"] / (r["distance"] * 60)) if (r["duration"] and r["distance"]) else None
-        days.setdefault(r["date"], []).append({
-            "id": r["id"], "t": (r["date_time"] or "")[11:16], "km": round(r["distance"], 1),
-            "pace": f"{int(pace)}:{int((pace * 60) % 60):02d}" if pace else None,
-            "z": _zone_idx(r["hr_avg"], cut)})
+        month_runs.append(r)
+    # §SJ — a split recording renders as ONE day entry (the session), km summed, pace over the
+    # whole outing, dot colour from the duration-weighted HR; click lands on the first part (the
+    # composite read is served for any part). Stats above stay PER RECORDING (they count data rows).
+    for grp in _session_groups(month_runs):
+        r = grp[0]
+        km = sum((p["distance"] or 0) for p in grp)
+        dur = sum((p["duration"] or 0) for p in grp)
+        hrs = [(p["hr_avg"], p["duration"] or 0) for p in grp if p["hr_avg"]]
+        hr_w = round(sum(h * w for h, w in hrs) / sum(w for _, w in hrs)) if hrs else None
+        pace = (dur / (km * 60)) if (dur and km) else None
+        entry = {"id": r["id"], "t": (r["date_time"] or "")[11:16], "km": round(km, 1),
+                 "pace": f"{int(pace)}:{int((pace * 60) % 60):02d}" if pace else None,
+                 "z": _zone_idx(hr_w, cut)}
+        if len(grp) > 1:
+            entry["sj"] = len(grp)
+        days.setdefault(r["date"], []).append(entry)
     b = db.execute("SELECT MIN(date) AS lo, MAX(date) AS hi FROM activities WHERE "
                    + RUN_FAMILY_SQL).fetchone()
     return {"ok": True, "month": month, "days": days, "stats": _agg_stats(a_month),
@@ -8864,6 +9268,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .structline:empty{display:none}
   .structline b{font-weight:600}
   .structline .sdet{border-bottom:1px dotted var(--muted);cursor:help}
+  /* §SJ — the 1+1 chip marks a composite read (a deliberately split recording joined back) */
+  .sjchip{font-weight:600;font-size:10.5px;border:1px solid var(--muted);color:var(--muted);
+    border-radius:4px;padding:0 4px;margin-right:2px;cursor:help;letter-spacing:.03em;white-space:nowrap}
+  .structline .sqline{margin-top:2px}
+  .structline .sqline .sdet{cursor:help}
   .profbar{position:relative;margin-top:12px;min-height:15px}
   .profmeta{position:absolute;right:0;bottom:0;display:inline-flex;align-items:center;gap:12px;
     white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
@@ -10225,7 +10634,7 @@ async function loadActivity(aid){
           `<a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ ignore instead.">🗑 delete</a></div>`}
       </div>
       <div class="mrow">
-        <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}</span>
+        <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}${a.sj?` <span class="sjchip" title="This recording is part ${a.sj.index} of ${a.sj.parts} of a deliberately split session (${a.sj.km} km · ${a.sj.min} min total) — the read-back line below joins the parts. Numbers on this card are THIS part's own.">1+1 · part ${a.sj.index}/${a.sj.parts}</span>`:""}</span>
         ${m("When", when, "")}
         ${m("Distance", fmt(a.distance,2), "km")}
         ${m("Duration", durStr(a.duration), "")}
@@ -10250,8 +10659,11 @@ async function loadActivity(aid){
     getJSON(`/api/activity/${a.id}/structure`).then(st=>{
       const el=$("#structline");
       if(!el || !st || !st.ok) return;
-      el.innerHTML=`<span class="sdet" title="Detected from the recorded pace profile — grade-adjusted, segmented by sustained pace shifts, and named against your zones as of that day. What the app read back, not what was prescribed.">Read back:</span> <b>${esc(st.kind_label)}</b> — ${esc(st.summary)}`+
-        (st.confidence==="rough"?` <span class="muted" title="The pace signal was noisy (GPS gaps or drift) — segment paces are approximate.">·rough signal</span>`:"");
+      el.innerHTML=`<span class="sdet" title="Detected from the recorded pace profile — grade-adjusted, segmented by sustained pace shifts, and named against your zones as of that day. What the app read back, not what was prescribed.">Read back:</span> `+
+        (st.composite?`<span class="sjchip" title="A deliberately split recording (${st.n_parts} parts, saved minutes apart) read back as ONE session — each part analysed on its own clean streams, then joined.">1+1</span> `:"")+
+        `<b>${esc(st.kind_label)}</b> — ${esc(st.summary)}`+
+        (st.confidence==="rough"?` <span class="muted" title="The pace signal was noisy (GPS gaps or drift) — segment paces are approximate.">·rough signal</span>`:"")+
+        (st.sq&&st.sq.line?`<div class="sqline"><span class="sdet" title="Strides execution — count vs the prescribed set band; HR shown as RESPONSE (a 15–20s stride's HR peak lags into the recovery), never as the effort verdict — pace is the trick.">Strides read:</span> ${esc(st.sq.line)}</div>`:"");
     }).catch(()=>{});
     try{ ACTPROFILE = await getJSON(`/api/activity/${a.id}/profile`); }
     catch(e){ ACTPROFILE={}; }
@@ -10334,7 +10746,7 @@ async function loadRunsCal(month){
     const dots=runs.slice(0,3).map(r=>rcalDot(r.z)).join("")+(runs.length>3?`<span class="rcal-more">+${runs.length-3}</span>`:"")
       +(!runs.length&&other.has(date)?`<span class="rcal-tick" title="Activity, but not a run (counts toward load; the viewer below is run-centric)"></span>`:"");
     const cls=["rcal-day", runs.length?"has":"", date===todayIso?"today":"", date===RCAL.sel?"sel":""].filter(Boolean).join(" ");
-    const tip=runs.length?` title="${runs.length===1?`${runs[0].km} km${runs[0].pace?` @ ${runs[0].pace}/km`:""} — view this run`:`${runs.length} runs — pick one`}"`:"";
+    const tip=runs.length?` title="${runs.length===1?`${runs[0].km} km${runs[0].pace?` @ ${runs[0].pace}/km`:""}${runs[0].sj?` (1+1 split recording, ${runs[0].sj} parts)`:""} — view this run`:`${runs.length} runs — pick one`}"`:"";
     cells+=`<div class="${cls}" data-date="${date}"${tip}>${day}<div class="rcal-dots">${dots}</div></div>`;
   }
   const zl=["Z1","Z2","Z3","Z4","Z5"].map((z,i)=>`<span><span class="rcal-dot" style="background:${HRZONE_COLORS[i]}"></span>${z}</span>`).join("");
@@ -10379,7 +10791,7 @@ async function loadRunsCal(month){
       if(runs.length===1){ rcalPick(runs[0].id, cell.dataset.date, cell); return; }
       const pop=document.createElement("div");
       pop.className="rcal-pop";
-      pop.innerHTML=runs.map(r=>`<button type="button" class="rcal-chip" data-id="${r.id}">${rcalDot(r.z)}${esc(r.t||"—")} · ${r.km} km${r.pace?` · ${esc(r.pace)}/km`:""}</button>`).join("");
+      pop.innerHTML=runs.map(r=>`<button type="button" class="rcal-chip" data-id="${r.id}">${rcalDot(r.z)}${esc(r.t||"—")} · ${r.km} km${r.pace?` · ${esc(r.pace)}/km`:""}${r.sj?` · 1+1`:""}</button>`).join("");
       pop.addEventListener("click", ev2=>{
         const c=ev2.target.closest(".rcal-chip"); if(!c) return;
         ev2.stopPropagation(); rcalCloseAllPops();
@@ -12575,17 +12987,17 @@ def _stc_runs_browser():
     m = _sq.connect(":memory:"); m.row_factory = _sq.Row
     m.executescript(
         "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
-        " distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL);"
+        " distance REAL, duration REAL, elapsed_time REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
     for row in [
-        (1, "2026-06-02", "2026-06-02T07:12:00", RUNNING_SPORT, 8.2, 2952, 132, None, 50),   # a DOUBLE, part 1
-        (2, "2026-06-02", "2026-06-02T18:30:00", RUNNING_SPORT, 4.0, 1440, 128, None, 20),   # a DOUBLE, part 2
-        (3, "2026-06-03", "2026-06-03T18:00:00", "Cycling", 25.0, 3600, 120, None, 40),      # non-run day
-        (4, "2026-06-05", "2026-06-05T18:00:00", RUNNING_SPORT, 6.0, 2160, 130, None, 30),   # manually ignored
-        (5, "2026-06-07", "2026-06-07T09:00:00", RUNNING_SPORT, 12.0, 4680, 141, None, 80),  # plain long
-        (6, "2024-01-15", "2024-01-15T08:00:00", RUNNING_SPORT, 10.0, 3600, 120, None, 55),  # beyond 12mo — all-time only
+        (1, "2026-06-02", "2026-06-02T07:12:00", RUNNING_SPORT, 8.2, 2952, 2952, 132, None, 50),   # a DOUBLE, part 1
+        (2, "2026-06-02", "2026-06-02T18:30:00", RUNNING_SPORT, 4.0, 1440, 1440, 128, None, 20),   # a DOUBLE, part 2
+        (3, "2026-06-03", "2026-06-03T18:00:00", "Cycling", 25.0, 3600, 3600, 120, None, 40),      # non-run day
+        (4, "2026-06-05", "2026-06-05T18:00:00", RUNNING_SPORT, 6.0, 2160, 2160, 130, None, 30),   # manually ignored
+        (5, "2026-06-07", "2026-06-07T09:00:00", RUNNING_SPORT, 12.0, 4680, 4680, 141, None, 80),  # plain long
+        (6, "2024-01-15", "2024-01-15T08:00:00", RUNNING_SPORT, 10.0, 3600, 3600, 120, None, 55),  # beyond 12mo — all-time only
     ]:
-        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)", row)
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)", row)
     m.execute("INSERT INTO ignored_activities VALUES (4)")
     d = _runs_month(m, "2026-06")
     if sorted(d["days"]) != ["2026-06-02", "2026-06-07"]:
@@ -13883,7 +14295,7 @@ def _stc_run_family():
     mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
     mem.executescript(
         "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
-        "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, raw TEXT);"
+        "distance REAL, duration REAL, elapsed_time REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, raw TEXT);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
         "CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);"
         "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
@@ -13893,8 +14305,8 @@ def _stc_run_family():
             ("Running", 145, 170), ("Tennis", 160, 200)]   # tennis HRmax 200 = a spike if it leaks in
     for i, (sport, hra, hrm) in enumerate(acts):
         d = (tdy - _td(days=i + 1)).isoformat()
-        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (i + 1, d + "T18:00:00", d, sport, 8.0, 2400, hra, hrm, 40.0, json.dumps({"gap": 11.0})))
+        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (i + 1, d + "T18:00:00", d, sport, 8.0, 2400, 2400, hra, hrm, 40.0, json.dumps({"gap": 11.0})))
     fails = []
     n_judged = len(effort_discipline(mem)["runs"])
     if n_judged != 3:                              # trail + treadmill + running; NOT tennis
@@ -14222,14 +14634,14 @@ def _stc_hr_zones():
     def mkdb(acts):
         m = _sq.connect(":memory:"); m.row_factory = _sq.Row
         m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
-                  "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
+                  "distance REAL, duration REAL, elapsed_time REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
         m.execute("CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
         m.execute("CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);")
         m.execute("CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
         for i, a in enumerate(acts):
-            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)",
                       (i + 1, a["date"] + "T19:00:00", a["date"], "Running", a.get("km", 8.0), a["dur"],
-                       a["hra"], a["hrm"], json.dumps(a.get("raw", {}))))
+                       a["dur"], a["hra"], a["hrm"], json.dumps(a.get("raw", {}))))
         return m
     tdy = date.today()
     def ago(n): return (tdy - _td(days=n)).isoformat()
@@ -14385,7 +14797,7 @@ def _stc_lt1():
     def mkdb(easy_hrs, qualifiers=True, hmax=None):
         m = _sq.connect(":memory:"); m.row_factory = _sq.Row
         m.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
-                  "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
+                  "distance REAL, duration REAL, elapsed_time REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);")
         m.execute("CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
         m.execute("CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);")
         m.execute("CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
@@ -14393,17 +14805,17 @@ def _stc_lt1():
         i = 0
         for k in range(6 if qualifiers else 0):          # 6 LTHR qualifiers ⇒ confident LTHR (else thin)
             i += 1
-            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
-                      (i, ago(k * 5 + 1) + "T19:00:00", ago(k * 5 + 1), "Running", 8.0, 30 * 60, 166, 189,
-                       json.dumps({"gap": fast_kmh})))
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (i, ago(k * 5 + 1) + "T19:00:00", ago(k * 5 + 1), "Running", 8.0, 30 * 60, 30 * 60,
+                       166, 189, json.dumps({"gap": fast_kmh})))
         # easy-PACED runs; SHORT (< LTHR_MIN_SEC) when thin so they can't themselves qualify as LTHR efforts.
         # `hmax` pins a realistic HRmax (else hr+18) so the HR-redline safety-catch can be tested honestly.
         edur = 2700 if qualifiers else 900
         for k, hr in enumerate(easy_hrs):
             i += 1
-            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
-                      (i, ago(k + 1) + "T07:00:00", ago(k + 1), "Running", 9.0, edur, hr, hmax or hr + 18,
-                       json.dumps({"gap": easy_kmh})))
+            m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)",
+                      (i, ago(k + 1) + "T07:00:00", ago(k + 1), "Running", 9.0, edur, edur, hr,
+                       hmax or hr + 18, json.dumps({"gap": easy_kmh})))
         return m
     # HR under the easy ceiling (~143) ⇒ coherent, not detrained
     fit = lt1(mkdb([135, 134, 136, 138]))
@@ -16127,12 +16539,12 @@ def _stc_cap_truth_anchor():
     m = _sq.connect(":memory:"); m.row_factory = _sq.Row
     m.executescript(
         "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
-        " distance REAL, duration REAL, raw TEXT);"
+        " distance REAL, duration REAL, elapsed_time REAL, raw TEXT);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
     for i, (d, km) in enumerate([("2026-01-06", 5.0), ("2026-01-13", 5.05),
                                  ("2026-01-20", 8.4), ("2026-01-22", 4.0)]):
-        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?)",
-                  (i + 1, d, d + "T18:00:00", RUNNING_SPORT, km, km * 400, "{}"))
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?)",
+                  (i + 1, d, d + "T18:00:00", RUNNING_SPORT, km, km * 400, km * 400, "{}"))
     zones = {"easy": 460, "easy_top": 425, "marathon": 360, "threshold": 330, "interval": 300}
     ps = date(2026, 1, 5)
     shape = [{"wk": k, "km": 29.5, "runs": 5, "long": 9, "strides": 0,
@@ -16551,7 +16963,7 @@ def _stc_effort_discipline(db):
     mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
     mem.executescript(
         "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
-        "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);"
+        "distance REAL, duration REAL, elapsed_time REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
         "CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);"
         "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
@@ -16564,8 +16976,8 @@ def _stc_effort_discipline(db):
                                                        {"date": ed, "kind": "easy"}]}]},
                      "phases": [{"key": "build"}]})))
     for i, (dt, hr) in enumerate([(qd, 170), (ed, 168)]):
-        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?)",
-                    (i + 1, dt + "T19:00:00", dt, RUNNING_SPORT, 6.0, 2160, hr, hr + 20,
+        mem.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (i + 1, dt + "T19:00:00", dt, RUNNING_SPORT, 6.0, 2160, 2160, hr, hr + 20,
                      json.dumps({"fit_training_effect": 4.5, "gap": 10.0})))
     md = effort_discipline(mem)
     kinds = {r["date"]: r["kind"] for r in md["runs"]}
@@ -17354,6 +17766,40 @@ def _stc_structure():
         sp = ss.get("stride_pace")
         if not sp or not (250 <= sp <= 340):                 # ~280 synth, frame-diluted
             fails.append(f"strides-only pace off (want ≈4:40): {sp}")
+    # §SJ v7 (the real 2026-07-20 first live 1+1): a SHORT jog-recovery strides PART — stride speed
+    # smears into every 15s block (no walking floor), the BLEND averages threshold (here 308 vs
+    # threshold 310) and the baseline (~330) is FASTER than the easy edge, so both the old
+    # walking-base rule and the branch order called it "tempo, no easy bracket" and dropped the
+    # stride fields. ≥4 counted peaks in ≤12min IS a strides session; §SQ needs stride_reps.
+    sj = expect("strides-jog-short",
+                synth([(90, 330, 150)] + [(25, 250, 174), (70, 330, 150)] * 6, with_hr=True),
+                "strides", 0)
+    if sj:
+        if sj.get("strides") != 6:
+            fails.append(f"jog-short: counted {sj.get('strides')} of 6")
+        if not sj.get("stride_reps"):
+            fails.append("jog-short: stride_reps missing (§SQ starves)")
+        elif not all(r.get("hr_peak") for r in sj["stride_reps"]):
+            fails.append("jog-short: stride_reps lost the HR channel")
+    # …and the wall-to-wall-hard branch survives for a genuine sustained effort (0 stride peaks)
+    ww = expect("wall-to-wall", synth([(1200, 300)]), "tempo", 0)
+    if ww and ("no easy bracket" not in ww["summary"] or ww.get("strides")):
+        fails.append(f"wall-to-wall hard read regressed: {ww['summary']} strides={ww.get('strides')}")
+    # v7 cadence-burst recovery (the owner's ground truth 2026-07-20: TEN strides on ~18s rests,
+    # frames counted 6 — a 36s stride cycle against the 15s grid aliases every other stride into a
+    # pace blend; the raw 1Hz cadence stream keeps ten distinct high-cadence runs; his hint).
+    ten = expect("strides-ten-subframe-rest",
+                 synth([(150, 420, 150)] + [(18, 290, 172), (18, 420, 150)] * 10
+                       + [(120, 420, 150)], with_hr=True), "strides", 0)
+    if ten:
+        if ten.get("strides") != 10:
+            fails.append(f"sub-frame rests: counted {ten.get('strides')} of 10 (cadence pass)")
+        if ten.get("stride_reps") is not None and len(ten.get("stride_reps") or []) != ten.get("strides"):
+            fails.append(f"sub-frame rests: {len(ten.get('stride_reps') or [])} stride_reps "
+                         f"for {ten.get('strides')} strides")
+        slow = [r["pace"] for r in ten.get("stride_reps") or [] if (r.get("pace") or 0) >= 400]
+        if slow:   # a rep's pace must come from its fastest touched frame, never a rest blend
+            fails.append(f"sub-frame rests: rep pace from a rest frame: {slow}")
     # FUSED cluster (the real 2026-07-05 under-count: 6 of his 11 at full streams): two strides
     # bridged by a quick-but-still-fast recovery form ONE wide episode — its internal dip-separated
     # peaks must each count, not be discarded with the episode
@@ -17385,6 +17831,151 @@ def _stc_structure():
                output={"duarte_summary": r1 and r1["summary"]})
 
 
+def _stc_session_join():
+    """§SJ split sessions ('1+1') — the join is derived, deterministic and conservative: minutes-
+    apart same-day recordings group; hours-apart doubles, blank timestamps, tz-mixes and OVERLAPS
+    (duplicate-source rows) never do. On groups: the matcher sees ONE session (the Wed-steal
+    regression — a same-day pair must not consume a neighbouring day's quality prescription), the
+    easy verdict judges the aerobic BODY only, the composite read joins the part reads, §SQ counts
+    strides vs the prescribed set band, and §H7 strips every HR field for the public box."""
+    fails = []
+    D = "2026-07-20"
+
+    def row(i, dt, km, dur, date=D, elapsed=None):
+        return {"id": i, "date": date, "date_time": dt, "distance": km,
+                "duration": dur, "elapsed_time": elapsed if elapsed is not None else dur}
+
+    # ── the pure join rule ──
+    g = _session_groups([row(1, f"{D}T19:00:00", 6.6, 2940), row(2, f"{D}T19:53:00", 1.5, 480)])
+    if [len(x) for x in g] != [2]:                                   # 49min body + 4min gap ⇒ joins
+        fails.append(f"1+1 didn't join: {[len(x) for x in g]}")
+    g = _session_groups([row(1, f"{D}T07:00:00", 5.0, 1800), row(2, f"{D}T19:00:00", 5.0, 1800)])
+    if [len(x) for x in g] != [1, 1]:                                # a real double stays two sessions
+        fails.append("hours-apart double joined")
+    g = _session_groups([row(1, None, 5.0, 1800), row(2, f"{D}T09:31:00", 1.0, 300)])
+    if [len(x) for x in g] != [1, 1]:                                # blank timestamp never joins
+        fails.append("blank date_time joined")
+    g = _session_groups([row(1, f"{D}T09:00:00", 2.0, 600), row(2, f"{D}T09:12:00", 3.0, 900),
+                         row(3, f"{D}T09:29:00", 1.5, 480)])         # wu+reps+cd, 2min gaps
+    if [len(x) for x in g] != [3]:
+        fails.append(f"3-part chain didn't join: {[len(x) for x in g]}")
+    g = _session_groups([row(1, f"{D}T09:00:00", 5.0, 1800), row(2, f"{D}T10:00:00", 1.0, 300)])
+    if [len(x) for x in g] != [2]:                                   # gap exactly 30min ⇒ joins
+        fails.append("30min-boundary gap didn't join")
+    g = _session_groups([row(1, f"{D}T09:00:00", 5.0, 1800), row(2, f"{D}T10:00:01", 1.0, 300)])
+    if [len(x) for x in g] != [1, 1]:                                # a second past ⇒ splits
+        fails.append("gap past the boundary joined")
+    g = _session_groups([row(1, f"{D}T20:37:37+02:00", 2.6, 900),    # duplicate-source pair: SAME
+                         row(2, f"{D}T18:37:37+00:00", 2.6, 900)])   # instant, different tz spelling
+    if [len(x) for x in g] != [1, 1]:                                # overlap NEVER joins
+        fails.append("overlapping duplicate-source rows joined")
+    g = _session_groups([row(1, f"{D}T09:00:00+02:00", 5.0, 1800), row(2, f"{D}T09:32:00", 1.0, 300)])
+    if [len(x) for x in g] != [1, 1]:                                # naive/aware mix ⇒ not computable
+        fails.append("tz-aware/naive mix joined")
+
+    # ── groups through the effort monitor (the Wed-steal regression) ──
+    import sqlite3 as _sq
+    from datetime import timedelta as _td
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+        "distance REAL, duration REAL, elapsed_time REAL, hr_avg INTEGER, hr_max INTEGER, raw TEXT);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE shape_snapshots(snapshot_date TEXT, effective_vo2max REAL, fitness REAL, fatigue REAL);"
+        "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);"
+        "CREATE TABLE structcache(activity_id INTEGER PRIMARY KEY, structure TEXT, cached_at TEXT)")
+    tdy = datetime.now().date()
+    d0 = (tdy - _td(days=1)).isoformat()                 # the 1+1 day
+    d2 = (tdy + _td(days=1)).isoformat()                 # the VO₂ day, 2 days later — inside ±2
+    mem.execute("INSERT INTO shape_snapshots VALUES(?,?,?,?)", (tdy.isoformat(), 50.0, 30.0, 28.0))
+    mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                ("now", tdy.isoformat(), "{}", json.dumps(
+                    {"build": {"weeks": [{"sessions": [
+                        {"date": d0, "kind": "easy", "strides": 2},
+                        {"date": d2, "kind": "interval"}]}]},
+                     "phases": [{"key": "build"}]})))
+    mem.executemany("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?,?,?)", [
+        (1, d0 + "T19:00:00", d0, RUNNING_SPORT, 6.6, 2940, 2940, 149, 165,
+         json.dumps({"fit_training_effect": 2.5, "gap": 8.0})),
+        (2, d0 + "T19:53:00", d0, RUNNING_SPORT, 1.5, 480, 480, 165, 182,
+         json.dumps({"fit_training_effect": 2.0, "gap": 10.5})),
+    ])
+    strides_reps = [{"t": 60 + 120 * k, "pace": 290, "hr_pre": 132 + k, "hr_peak": 158 + k,
+                     "hr_rec": 133 + k} for k in range(8)]
+    mem.execute("INSERT INTO structcache VALUES(?,?,?)", (2, json.dumps(
+        {"v": STRUCT_VERSION, "ok": True, "kind": "strides", "kind_label": "Strides",
+         "summary": "8min @7:40/km · 8× strides (4+4) @4:50/km", "n_work": 0, "strides": 8,
+         "stride_sets": [4, 4], "stride_pace": 290, "stride_reps": strides_reps,
+         "segments": [{"role": "easy", "zone": "easy", "sec": 480, "km": 1.5, "pace": 320, "hr": 165}],
+         "confidence": "good"}), "now"))
+    md = effort_discipline(mem)
+    day_rows = [r for r in md["runs"] if r["date"] == d0]
+    if len(day_rows) != 1:
+        fails.append(f"1+1 day produced {len(day_rows)} monitor rows (want 1)")
+    else:
+        r0 = day_rows[0]
+        if r0["kind"] != "easy" or r0.get("joined") != 2 or r0["km"] != 8.1:
+            fails.append(f"joined row wrong: kind={r0['kind']} joined={r0.get('joined')} km={r0['km']}")
+        if r0["hr_avg"] != 149:                          # the BODY's HR — strides part stays out
+            fails.append(f"easy verdict ate the strides HR: hr_avg={r0['hr_avg']}")
+    if any(r["kind"] == "interval" for r in md["runs"]):
+        fails.append("Wed-steal: a part claimed the neighbouring quality prescription")
+
+    # ── the composite read + §SQ + §H7 strip ──
+    mem.execute("INSERT INTO structcache VALUES(?,?,?)", (1, json.dumps(
+        {"v": STRUCT_VERSION, "ok": True, "kind": "easy", "kind_label": "Easy run",
+         "summary": "49min @7:26/km", "n_work": 0, "strides": 0, "stride_sets": [],
+         "stride_pace": None, "stride_reps": [],
+         "segments": [{"role": "easy", "zone": "easy", "sec": 2940, "km": 6.6, "pace": 445, "hr": 149}],
+         "confidence": "good"}), "now"))
+    grp = _sj_group_for(mem, 2)
+    if not grp or len(grp) != 2:
+        fails.append(f"_sj_group_for missed the pair: {grp and len(grp)}")
+    comp = _sj_composite(mem, grp, fetch=False) if grp else None
+    if not comp:
+        fails.append("composite not assembled from cached parts")
+    else:
+        if comp["kind"] != "strides" or comp["kind_label"] != "Easy run + strides":
+            fails.append(f"composite kind wrong: {comp['kind']}/{comp['kind_label']}")
+        if comp["strides"] != 8 or comp["n_parts"] != 2 or comp["km"] != 8.1:
+            fails.append(f"composite totals wrong: strides={comp['strides']} parts={comp['n_parts']} km={comp['km']}")
+        if "49min @7:26/km · then 8min @7:40/km" not in comp["summary"]:
+            fails.append(f"composite summary not joined in time order: {comp['summary']}")
+        sq = _sq_read(mem, strides_reps, 8, [4, 4], 290, d0)
+        if sq.get("prescribed") != [8, 12] or sq.get("count_verdict") != "on":
+            fails.append(f"§SQ count vs prescription wrong: {sq.get('prescribed')}/{sq.get('count_verdict')}")
+        if _sq_read(mem, strides_reps[:5], 5, [5], 290, d0).get("count_verdict") != "short":
+            fails.append("§SQ under-count not flagged short")
+        if not (sq.get("hr_peak_first") == 158 and sq.get("hr_peak_last") == 165
+                and sq.get("recovered") is True and "HR peaks 158→165" in sq.get("line", "")):
+            fails.append(f"§SQ HR response read wrong: {sq}")
+        creep = [{**r, "hr_rec": 130 + 3 * k} for k, r in enumerate(strides_reps)]
+        if _sq_read(mem, creep, 8, [4, 4], 290, d0).get("recovered") is not False:
+            fails.append("§SQ creeping recovery floor not flagged")
+        md2 = effort_discipline(mem)          # both parts now read: body = the read-aerobic part
+        r2 = next((r for r in md2["runs"] if r["date"] == d0), {})
+        if r2.get("hr_avg") != 149:
+            fails.append(f"body preference (read-aerobic first) broke: hr={r2.get('hr_avg')}")
+        pub = _strip_structure_hr({**comp, "sq": sq})
+        def _leaks(o):
+            if isinstance(o, dict):
+                return any(k == "hr" or k.startswith("hr_") for k in o) or any(_leaks(v) for v in o.values())
+            return any(_leaks(v) for v in o) if isinstance(o, list) else False
+        if _leaks(pub):
+            fails.append("§H7: HR survived the public strip")
+        if "HR peaks" in (pub.get("sq") or {}).get("line", ""):
+            fails.append("§H7: HR narrative survived in the public §SQ line")
+    mem.close()
+    return _st("det", "session-join",
+               "§SJ 1+1: minutes-apart recordings join (chains, 30min boundary); doubles/blank-ts/"
+               "tz-mix/overlaps never; matcher sees ONE session (no Wed-steal), easy verdict = body "
+               "only; composite read joins parts; §SQ counts vs prescribed band + HR-as-response; "
+               "§H7 strips HR everywhere",
+               passed=not fails, expect="join conservative · one session per group · composite + "
+               "§SQ honest · public HR-free",
+               got={"violations": fails or "none"})
+
+
 def _stc_post_race_reckoning():
     """§6s — the goal-time parser + finish formatter that drive the post-race verdict. Free-form
     `target` strings must map to seconds (H:MM vs MM:SS disambiguated by race type) and unparseable
@@ -17404,18 +17995,28 @@ def _stc_post_race_reckoning():
     # _race_day_activity: pick the race over a near-distance training run; detect a DNF; None when absent
     import sqlite3
     mem = sqlite3.connect(":memory:"); mem.row_factory = sqlite3.Row
-    mem.executescript("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, sport TEXT, "
-                      "distance REAL, duration REAL);")
+    mem.executescript("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, "
+                      "sport TEXT, distance REAL, duration REAL, elapsed_time REAL);")
     rd = "2026-06-20"
-    mem.executemany("INSERT INTO activities VALUES(?,?,?,?,?)", [
-        (1, "2026-06-19", "Running", 10.2, 3600),     # an easy 10k the day before (a decoy)
-        (2, "2026-06-20", "Running", 10.0, 2520),     # THE 10k race, on race day
+    mem.executemany("INSERT INTO activities VALUES(?,?,?,?,?,?,?)", [
+        (1, "2026-06-19", "2026-06-19T10:00:00", "Running", 10.2, 3600, 3600),  # easy 10k decoy, day before
+        (2, "2026-06-20", "2026-06-20T10:00:00", "Running", 10.0, 2520, 2520),  # THE 10k race, on race day
     ])
     act, st = _race_day_activity(mem, rd, "10k")
     if not (act and act["id"] == 2 and st == "finished"):
         fail.append(f"race-match={act and act['id']}/{st} (want 2/finished, not the decoy)")
+    # §SJ — a race recorded in CHUNKS (watch save + restart mid-race): no single row matches the
+    # distance, the split-group's sum does; the biggest part fronts the match.
     mem.execute("DELETE FROM activities")
-    mem.execute("INSERT INTO activities VALUES(3, '2026-06-20', 'Running', 28.0, 9000)")  # DNF a marathon at 28k
+    mem.executemany("INSERT INTO activities VALUES(?,?,?,?,?,?,?)", [
+        (7, "2026-06-20", "2026-06-20T10:00:00", "Running", 6.2, 1560, 1560),
+        (8, "2026-06-20", "2026-06-20T10:27:00", "Running", 3.9, 990, 990),   # restart 3 min later
+    ])
+    act, st = _race_day_activity(mem, rd, "10k")
+    if not (act and st == "finished" and act["id"] == 7 and round(act["distance"], 1) == 10.1):
+        fail.append(f"split-race group not matched: {act and dict(act)}/{st}")
+    mem.execute("DELETE FROM activities")
+    mem.execute("INSERT INTO activities VALUES(3, '2026-06-20', '2026-06-20T10:00:00', 'Running', 28.0, 9000, 9000)")  # DNF a marathon at 28k
     act, st = _race_day_activity(mem, rd, "marathon")
     if not (act and st == "dnf" and round(act["distance"]) == 28):
         fail.append(f"dnf-detect={act and act['distance']}/{st}")
@@ -17518,7 +18119,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_long_run(),
                  lambda: _stc_earned_lift(), lambda: _stc_earned_gate(db),
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
-                 lambda: _stc_structure(), lambda: _stc_junk_floor(),
+                 lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),
