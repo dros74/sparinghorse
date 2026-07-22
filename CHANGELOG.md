@@ -12,6 +12,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-07-23
+
+The projection learns progressive overload — a plan that used to draw a flat fitness line to race
+day now compounds, honestly labelled. And the run read-back learns that workouts end.
+
+### Added
+- **Progressive-overload floor on the assertive ceiling (§PRO10).** The weekly-load ceiling is a
+  ratio of chronic load, so riding it has a fixed point: the projection allowed ~maintenance, the
+  down weeks handed the small surplus back, and a months-long build could project **zero fitness
+  gain by race day**. Now a building week's allowance can't be soft-clipped below a modest
+  progression (+6%/wk) over the last realised non-down week. The acute guardrails are untouched
+  and always win: the in-week peak ACWR hard cap, the chronic-ramp cap, forced deloads, the
+  long-run step cap and the biomechanical ceiling all still bound every week — and the floor
+  suspends itself entirely whenever the shape-response brake measures that absorption is lagging.
+  Weeks the floor lifted are labelled in the plan (`prog_ridden`): the drawn trajectory assumes
+  continued clean absorption and re-anchors on your actuals at every regeneration.
+- **Build phase intents grow again.** The Build weekly intent ramp rises 2%→4.5% (matching Base):
+  "lightly growing" plus 3:1 down weeks nearly cancelled, so even the conservative regime asked
+  for a flat Build.
+
+### Fixed
+- **Read-back (§RD v8): the workout ends.** A trailing work-zone block whose rest gap dwarfs the
+  session's own observed rest scale (≥8 min AND ≥3× the longest real inter-rep rest) is cooldown
+  drift — terrain letting go on the way home — not another rep. A 2-rep VO₂ session no longer
+  gains a phantom third rep from a cool-down that quickens when the uphill flattens; everything
+  after the last real rep reads as cooldown, so per-rep effort grading stays honest. Long-recovery
+  formats (uniform 5-min jogs) keep their genuine final reps; a plain 2-rep session can never
+  lose its second rep. Cached reads re-heal lazily on first view.
+
 ## [0.16.0] - 2026-07-20
 
 Record a session in deliberate parts — easy body saved, fresh recording for the strides — and the

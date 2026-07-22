@@ -247,7 +247,16 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 7   # v7 (2026-07-20, same night): a SHORT stride-dense recording (≥4 counted
+STRUCT_VERSION = 8   # v8 (2026-07-23): the workout ENDS — a trailing work-zone block whose gap since
+#                      the previous rep dwarfs the session's own rest scale (≥ RD_TAIL_REST_MIN_S and
+#                      ≥ RD_TAIL_REST_FACTOR × the longest real inter-rep rest) is cooldown drift,
+#                      not a rep. First live §SJ-era interval read (2026-07-22): the uphill run-home
+#                      flattened for its last 800m, pace jumped ~50s/km at unchanged effort (HR still
+#                      172 from the reps), and 1:45 @5:55 after 10min of easy running minted rep 3 of
+#                      a 2-rep VO₂ session. The v5 baseline fix caught the same ghost when the
+#                      CONTRAST was wrong; this catches it when the contrast is honest but the
+#                      session grammar had no notion of "over".
+#                      v7 (2026-07-20, same night): a SHORT stride-dense recording (≥4 counted
 #                      strides in ≤ RD_STRIDES_SHORT_S) reads Strides regardless of base pace, and
 #                      the strides check now precedes the wall-to-wall-hard return (which also
 #                      carries the stride fields now) — the first live 1+1 part (6 strides, jog
@@ -334,6 +343,12 @@ RD_MIN_WORK_S = 100        # a work REP is ≥ ~2min in the plan's vocabulary (D
 #                            smeared strides, never session elements.
 RD_MIN_TEMPO_S = 480       # a LONE continuous work block must be ≥ ~8min (the plan's smallest tempo/
 #                            MP element) — a single 3min surge is not a tempo session
+RD_TAIL_REST_MIN_S = 480   # a trailing "rep" is cooldown drift once the gap since the previous rep
+#                            is ≥8min AND ≥ the factor × the session's own longest inter-rep rest —
+#                            nobody floats 8 minutes between VO₂ reps (2026-07-22 live: the flat last
+#                            800m of an uphill run-home read as rep 3 of a 2-rep session)
+RD_TAIL_REST_FACTOR = 3    # …judged against the session's OWN rest scale, so long-recovery formats
+#                            (5min jog VO₂ classics) keep their genuine final reps
 
 
 def _rd_median(xs):
@@ -744,6 +759,18 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     #  simply not work; the _rd_strides peak pass already counts them from the whole-run signal)
     if len(work_ix) == 1 and segs[work_ix[0]]["sec"] < RD_MIN_TEMPO_S:
         work_ix = []                                         # a lone short surge isn't a session
+    # v8 — the workout ENDS: a trailing rep whose rest gap dwarfs the session's own observed rest
+    # scale is cooldown drift (terrain letting go, legs rolling home), not a session element. Needs
+    # ≥3 candidates: with only one real gap there is no scale to judge against, so a plain 2-rep
+    # session can never lose its second rep. Iterative, so a run-home that segmented into TWO
+    # work-zone blocks sheds both.
+    while len(work_ix) >= 3:
+        gaps = [sum(s["sec"] for s in segs[work_ix[k] + 1:work_ix[k + 1]])
+                for k in range(len(work_ix) - 1)]
+        if gaps[-1] >= max(RD_TAIL_REST_MIN_S, RD_TAIL_REST_FACTOR * max(gaps[:-1])):
+            work_ix.pop()
+        else:
+            break
 
     def seg_roles():
         for i, s in enumerate(segs):
@@ -3586,6 +3613,26 @@ ACWR_HARD = 1.30   # never exceed (the model has error near the boundary, §6a-b
 # (caution stays byte-identical, default off ⇒ every constructed test is unchanged). Owner-approved
 # 2026-06-30 (the masters/post-illness acute safety = the raw peak + ramp, both preserved).
 ACWR_SOFT_CTL_FLOOR = 45.0
+# §PRO10 — progressive-overload floor on the ASSERTIVE ceiling (2026-07-23, owner-approved: "I can't
+# see the logic of a plan that establishes a peak CTL this far from the race"). The ceiling is STATE-
+# based (a ratio of the carried CTL), so riding it has a fixed point: at his chronic load the soft
+# test allows ~maintenance+ε, down weeks hand the ε back, and the 19 projected weeks Aug→Nov drew CTL
+# 44→45 — a plan honestly claiming he won't get fitter (verified on plan 58: every non-down week
+# pinned at eow_soft≈1.25 against the floored denominator, i.e. ATL_end ≈ 1.25×ACWR_SOFT_CTL_FLOOR,
+# CTL equilibrium ≈ the floor itself; §PRO8 raised the old ~31 fixed point to ~45, it didn't remove
+# it). The fix: a BUILDING week's allowance may not be soft-clipped below (1+PROG_RAMP)× the last
+# realised non-down week's load — progressive overload as a floor on the SOFT test only. The acute
+# brakes are UNTOUCHED and always clip the floor: in-week PEAK ≤ ACWR_HARD on RAW CTL, CTL_RAMP_MAX,
+# §PRO6 forced deloads (near-ceiling weeks still count and still force recovery every
+# MESO_MAX_HARD+1), §PRO9 long +10%, §3.1 bio cap. So growth = min(6%/wk, what the hard caps afford)
+# — compounding, not equilibrium, with every safety line intact. Assertive building weeks only
+# (base/build/bridge; peak trims into specificity by design, taper is a deliberate drop, down/forced-
+# deload weeks keep their troughs — which themselves rise as last_nondown rises). Caution passes no
+# floor ⇒ byte-identical. Weeks the floor actually lifted carry `prog_ridden` (honest label: the
+# drawn trajectory assumes continued clean absorption).
+PROG_RAMP = 0.06           # ≥6%/wk over the last realised non-down load — the classic conservative
+#                            progression band (his absorbed-but-unproductive June ramp ran ~26%/wk;
+#                            eVO₂ stayed flat — that audit is why this is 6, not 10)
 EASY_TRIMP_PER_MIN = 1.3   # calibrated from his easy runs (HR≤135 → ~1.1–1.5/min)
 EASY_PACE_FRAC = 0.72      # fraction of vVO2max for easy running (top of the easy zone; sits just under LT1)
 
@@ -4086,7 +4133,11 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
 # BASE_RUNS (frequency-advance is the banking-gated §6e step, still deferred). Quality fracs sum to
 # < (1 − POLARIZED_EASY_MIN) so the week stays easy-dominant by construction; the threshold/interval
 # slice alone stays under PHASE_HARD_CAP["build"].
-BUILD_WEEKLY_RAMP = 0.02   # lightly growing — Build is about specificity, not volume
+BUILD_WEEKLY_RAMP = 0.045  # §PRO10 (2026-07-23, owner-approved) — raised 0.02→0.045 (matches Base):
+#                            "lightly growing" build intents + the 3:1 troughs nearly cancelled, so
+#                            even the caution shape asked for a flat Build; specificity AND volume
+#                            grow together for an athlete whose trailing history dwarfs his chronic
+#                            load. Intent only — the governor still clips what the ceiling won't allow.
 BUILD_DOWN_EVERY = 4
 BUILD_DOWN_FRAC = 0.75
 BUILD_LONG_FRAC = 0.45       # raised 0.34→0.45 (2026-06-20) — the marathon long run is the cornerstone
@@ -4475,7 +4526,7 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
 
 def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None,
                     days_override=None, ramp_max=None, soft_ctl_floor=None, av_blocked=None,
-                    q_days=None):
+                    q_days=None, prog_floor=None):
     """Binary-search the largest weekly TRIMP whose END-OF-WEEK projected ACWR stays ≤ cap AND whose
     in-week PEAK ACWR stays ≤ ACWR_HARD (§H1). Distributes WITH the week's quality (via `zones`) so
     the bound is on the real, intensity-distributed week. The peak/hard bound only bites at low CTL,
@@ -4491,7 +4542,11 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
     test only, at low chronic load (see ACWR_SOFT_CTL_FLOOR): the settled-week ratio stops being
     hypersensitive so the soft ceiling can rise toward demonstrated tolerance. It does NOT touch the
     in-week PEAK test, which keeps the RAW CTL (so the hard cap stays the true acute-spike brake), nor
-    the ramp test. None ⇒ byte-identical; it can only RAISE the soft allowance, never the peak/ramp bound."""
+    the ramp test. None ⇒ byte-identical; it can only RAISE the soft allowance, never the peak/ramp bound.
+    §PRO10 — `prog_floor` (default None) is the progressive-overload floor: the SOFT test may not clip
+    the allowance below it (allowance = min(hard/ramp-allowed, max(soft-allowed, prog_floor))). The
+    PEAK and ramp tests always clip it — the floor asks for progression, the acute brakes decide how
+    much of it is safe. None ⇒ byte-identical (the soft test clips freely)."""
     lo, hi = 0.0, 700.0
     for _ in range(34):
         mid = (lo + hi) / 2
@@ -4504,7 +4559,9 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         if soft_ctl_floor and endctl is not None and endatl is not None and endctl < soft_ctl_floor:
             eow_soft = endatl / soft_ctl_floor
         too_fast = ramp_max is not None and endctl is not None and endctl > ctl + ramp_max + 1e-9
-        if (eow_soft and eow_soft > cap) or (peak and peak > ACWR_HARD) or too_fast:
+        # §PRO10 — the soft test can't clip below the progression floor; peak/ramp always can
+        soft_bad = eow_soft and eow_soft > cap and (prog_floor is None or mid > prog_floor)
+        if soft_bad or (peak and peak > ACWR_HARD) or too_fast:
             hi = mid
         else:
             lo = mid
@@ -5160,8 +5217,6 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             blk_longs.append(max(week_actual_long or 0.0, _week_long_km(rem_s)))
             blk_eqs.append(round((week_actual_eq or 0.0) + _week_eq_km(rem_s), 2))
             continue
-        allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones, ramp_max=ramp,
-                                  soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off)
         is_down = _is_down(wk.get("intent"))
         is_taper = _is_taper(wk.get("intent"))
         is_peak = str(wk.get("intent") or "").lower().startswith("peak")
@@ -5172,6 +5227,20 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # but the taper resets it — the peak rides uninterrupted into the taper as designed.
         forced_deload = bool(assertive and not is_down and not is_taper and not is_peak
                              and last_nondown and consec_hard >= MESO_MAX_HARD)
+        # §PRO10 — the progressive-overload floor: an assertive BUILDING week's allowance may not be
+        # soft-clipped below (1+PROG_RAMP)× the last realised non-down load (the state-based ceiling
+        # equilibrates; progression is a demand the acute brakes then bound). Building weeks only:
+        # peak trims into specificity by design, taper/down/forced-deload keep their deliberate drops.
+        # SUSPENDED whenever §PRO5 has EASED the ride cap (eff_cap < ACWR_SOFT): the floor's premise
+        # is continued clean absorption, and the eased cap is the engine MEASURING that absorption is
+        # lagging — the responsiveness brake outranks the progression demand, always.
+        prog = ((1 + PROG_RAMP) * last_nondown
+                if (assertive and last_nondown and eff_cap >= ACWR_SOFT - 1e-9
+                    and not is_down and not is_taper
+                    and not is_peak and not forced_deload) else None)
+        allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones, ramp_max=ramp,
+                                  soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off,
+                                  prog_floor=prog)
         if assertive and not is_taper:
             # ride the layered ceiling on building weeks; hold a proportional recovery trough on down
             # weeks (BUILD_DOWN_FRAC of the last realised non-down load), always governor-capped. The
@@ -5286,6 +5355,13 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 "trimp_total": round(sum(dt.values()), 1), "proj_acwr": eow, "peak_acwr": peak,
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
                 "intent_km": wk["km"], "adjusted": adjusted["touched"], "clipped": clipped}
+        # §PRO10 — honest label: this week's load sits where the SOFT cap alone wouldn't have put it
+        # (the progression floor lifted it; the acute brakes cleared it). The soft-test value is
+        # recomputed the way the governor judged it (floored denominator when §PRO8 is active).
+        if prog is not None and atl_n is not None and ctl_n:
+            eow_soft_final = atl_n / max(ctl_n, soft_ctl_floor or 0.0)
+            if eow_soft_final > eff_cap + 1e-6:
+                week["prog_ridden"] = True
         if forced_deload:                          # §PRO6 — tell the truth: a tissue-protection deload
             week["deload_forced"] = True
             week["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
@@ -5945,6 +6021,15 @@ def generate_plan(db, force_regime=None):
         # §PRO5 — self-calibrating shape-response: how his measured fitness tracks the projection + the
         # resulting assertive ride cap (full 1.25 when on track, eased when he's falling behind)
         "shape_response": {**resp, "ride_cap": ride_cap},
+        # §PRO10 — the progressive-overload floor on the assertive ceiling. Surfaced, never silent:
+        # the drawn trajectory now COMPOUNDS instead of equilibrating, and that assumes continued
+        # clean absorption — the acute brakes (hard peak ACWR, ramp cap, forced deloads) still bound
+        # every week, and the live regen re-anchors on reality each Monday.
+        "prog": ({"ramp": PROG_RAMP,
+                  "note": "building weeks progress ≥{:.0%}/wk over the last realised non-down load "
+                          "(soft-cap floor; hard caps still bind) — assumes continued clean "
+                          "absorption, re-anchored on your actuals at every regen".format(PROG_RAMP)}
+                 if regime == "assertive" else None),
         "earned": earned,   # §6e/§6f earned volume lift — gate state + factor (1.0 = off / no-op)
         "freq": freq,       # §6e earned frequency advance — gate state + target runs (5 = off / no-op)
         "tune_ups": [{"label": o["label"], "date": o["date"], "type": o["type"],
@@ -16159,8 +16244,10 @@ def _stc_regime_assertive():
     on the SAME fit seed (CTL 70) det/caution-baseline pins. It must: (a) lift the build peak above the
     caution build peak (uses the headroom); (b) RETAIN fitness — end-CTL stays near the seed instead of
     bleeding down (caution detrains a fit athlete 70→~54; assertive holds ~69); (c) NEVER breach the
-    ACWR ceiling (every week ≤ ACWR_SOFT); (d) keep the 3:1 down-week trough; (e) leave the caution path
-    byte-identical (default regime == 'caution'). Self-contained constructed seed."""
+    ACWR ceiling — §PRO10 amends the contract: a week the progression floor lifted (prog_ridden) may
+    ride raw eow past ACWR_SOFT but NEVER past ACWR_HARD; every other week stays ≤ ACWR_SOFT; (d) keep
+    the 3:1 down-week trough; (e) leave the caution path byte-identical (default regime == 'caution').
+    Self-contained constructed seed."""
     from datetime import date
     easy = 425
     zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
@@ -16172,12 +16259,16 @@ def _stc_regime_assertive():
         build = build_shape(7, bw[-1]["intent_km"])
         cw, cm = generate_block(build, bs, bm["end_ctl"], bm["end_atl"], easy, zones=zones, regime=regime)
         bp = max(w["km"] for w in cw if not _is_down(w["intent"]))
-        acwrs = [w["proj_acwr"] for w in bw + cw if w.get("proj_acwr")]
+        # §PRO10 — split the ceiling check: prog-ridden weeks are allowed raw eow ≤ ACWR_HARD (the
+        # floor's sanctioned band); every other week keeps the old ≤ ACWR_SOFT contract.
+        soft_mx = max((w["proj_acwr"] for w in bw + cw
+                       if w.get("proj_acwr") and not w.get("prog_ridden")), default=0)
+        hard_mx = max((w["proj_acwr"] for w in bw + cw if w.get("proj_acwr")), default=0)
         downs = [w["km"] for w in cw if _is_down(w["intent"])]
         nd = [w["km"] for w in cw if not _is_down(w["intent"])]
-        return bp, cm["end_ctl"], max(acwrs), (max(downs) < min(nd) if downs else True)
-    c_bp, c_ctl, c_mx, _ = run("caution")
-    a_bp, a_ctl, a_mx, a_trough = run("assertive")
+        return bp, cm["end_ctl"], (soft_mx, hard_mx), (max(downs) < min(nd) if downs else True)
+    c_bp, c_ctl, (c_mx, c_hmx), _ = run("caution")
+    a_bp, a_ctl, (a_mx, a_hmx), a_trough = run("assertive")
     # default must equal caution byte-for-byte — FULL week dicts (km, long, proj_acwr/ctl, trimp_total,
     # sessions), across the SAME 8-wk base + 7-wk build fit-seed plan the assertive comparison runs,
     # not just a km spot-check on a toy shape.
@@ -16198,7 +16289,9 @@ def _stc_regime_assertive():
     if not (a_ctl > c_ctl and a_ctl >= 65):
         fail.append(f"assertive end_ctl {a_ctl} should retain fitness (> caution {c_ctl}, near seed 70)")
     if a_mx > ACWR_SOFT + 0.01:
-        fail.append(f"assertive breached ACWR ceiling: {a_mx} > {ACWR_SOFT}")
+        fail.append(f"assertive non-ridden week breached the soft ceiling: {a_mx} > {ACWR_SOFT}")
+    if a_hmx > ACWR_HARD + 0.01:
+        fail.append(f"assertive breached the HARD ceiling: {a_hmx} > {ACWR_HARD}")
     if not a_trough:
         fail.append("assertive lost the 3:1 down-week trough")
     return _st("det", "regime-assertive",
@@ -17726,6 +17819,24 @@ def _stc_structure():
     if fl and [s["role"] for s in fl["segments"]][-1] != "cooldown":
         fails.append(f"float-baseline: marathon run-home not a cooldown — "
                      f"roles {[s['role'] for s in fl['segments']]}")
+    # v8 phantom trailing rep (the real 2026-07-22 run-home, scaled to the test grid): 2×5min VO₂
+    # w/ a 2min jog, then the way home — 2min easing off, 8min marathon-ish drift, and the uphill
+    # flattening for its last 800m: 1:45 at threshold-zone pace with 10min of easy running since
+    # the last rep. The pace CONTRAST is honest (it really was ~19% under baseline) — only the
+    # rest scale says the workout was already over.
+    ph = expect("phantom-tail-rep", synth([(900, 360), (300, 280), (120, 390), (300, 278),
+                                           (120, 430), (480, 340), (105, 305), (75, 355)],
+                                          with_hr=True), "interval", 2)
+    if ph:
+        roles = [s["role"] for s in ph["segments"]]
+        tail = roles[max(i for i, r in enumerate(roles) if r == "work") + 1:]
+        if set(tail) != {"cooldown"}:
+            fails.append(f"phantom-tail: run-home not all cooldown — roles {roles}")
+    # …and the trim judges against the session's OWN rest scale: a long-recovery VO₂ classic
+    # (5min jogs, uniform) keeps its genuine final rep
+    expect("long-recovery-reps", synth([(600, 360), (180, 285), (300, 395), (180, 283),
+                                        (300, 395), (180, 284), (600, 380)], with_hr=True),
+           "interval", 3)
     expect("easy", synth([(2700, 385)]), "easy", 0)
     expect("long", synth([(5700, 390)]), "long", 0)
     expect("tempo", synth([(600, 355), (1200, 312), (480, 380)]), "tempo", 1)
@@ -18078,6 +18189,72 @@ def _stc_regime_compare():
                passed=not fail, got={"failures": fail or "none", "natural_regime": nat_mode})
 
 
+def _stc_prog_floor():
+    """§PRO10 — the progressive-overload floor on the assertive ceiling. Locks: (a) BYTE-IDENTITY —
+    prog_floor=None (and a non-binding floor) reproduce the layered allowance exactly, so caution and
+    every existing test are unchanged; (b) a binding floor LIFTS the allowance past the soft clip but
+    (c) NEVER past the acute brakes — the resulting week's in-week peak ACWR stays ≤ ACWR_HARD and its
+    CTL gain ≤ CTL_RAMP_MAX even under an absurd floor; (d) end-to-end, an assertive block COMPOUNDS —
+    non-down building weeks grow week-over-week instead of equilibrating — while every projected week
+    respects the hard cap, and down weeks still trough; (e) a caution block carries no prog_ridden
+    label and stays intent-bounded. Self-contained constructed seed (no db)."""
+    from datetime import date
+    fail = []
+    easy, bs = 425, date(2026, 8, 3)
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    wk = {"wk": 1, "km": 40, "runs": 5, "long": 14, "strides": 0, "quality": [], "intent": "Build"}
+    ctl, atl = 45.0, 40.0
+    base_al = _max_week_trimp(ctl, atl, wk, bs.isoformat(), easy, ACWR_SOFT, zones=zones,
+                              ramp_max=CTL_RAMP_MAX, soft_ctl_floor=ACWR_SOFT_CTL_FLOOR)
+    ident = _max_week_trimp(ctl, atl, wk, bs.isoformat(), easy, ACWR_SOFT, zones=zones,
+                            ramp_max=CTL_RAMP_MAX, soft_ctl_floor=ACWR_SOFT_CTL_FLOOR, prog_floor=None)
+    slack = _max_week_trimp(ctl, atl, wk, bs.isoformat(), easy, ACWR_SOFT, zones=zones,
+                            ramp_max=CTL_RAMP_MAX, soft_ctl_floor=ACWR_SOFT_CTL_FLOOR,
+                            prog_floor=base_al * 0.5)
+    if ident != base_al or slack != base_al:
+        fail.append(f"byte-identity broken: none={ident} slack={slack} vs {base_al}")
+    lifted = _max_week_trimp(ctl, atl, wk, bs.isoformat(), easy, ACWR_SOFT, zones=zones,
+                             ramp_max=CTL_RAMP_MAX, soft_ctl_floor=ACWR_SOFT_CTL_FLOOR,
+                             prog_floor=base_al * 1.12)
+    if not (base_al < lifted <= base_al * 1.12 + 1):
+        fail.append(f"binding floor should lift toward it: {base_al} -> {lifted}")
+    absurd = _max_week_trimp(ctl, atl, wk, bs.isoformat(), easy, ACWR_SOFT, zones=zones,
+                             ramp_max=CTL_RAMP_MAX, soft_ctl_floor=ACWR_SOFT_CTL_FLOOR,
+                             prog_floor=9999.0)
+    _, dt = _distribute_week(wk, bs, absurd, easy, zones)
+    ec, _, _, pk = _project_week(ctl, atl, bs.isoformat(), dt)
+    if pk and pk > ACWR_HARD + 1e-6:
+        fail.append(f"acute brake breached under an absurd floor: peak {pk}")
+    if ec - ctl > CTL_RAMP_MAX + 1e-6:
+        fail.append(f"ramp brake breached under an absurd floor: gain {ec - ctl}")
+    # (d)/(e) — end-to-end on a constructed 8-week build shape, assertive vs caution
+    sh = build_shape(8, 30)
+    aw, _ = generate_block(sh, bs, 45.0, 40.0, easy, zones=zones, regime="assertive",
+                           soft_ctl_floor=ACWR_SOFT_CTL_FLOOR)
+    nd = [w for w in aw if not _is_down(w.get("intent")) and not w.get("deload_forced")]
+    if len(nd) >= 3 and not (nd[-1]["trimp_total"] > nd[0]["trimp_total"] * 1.08):
+        fail.append(f"assertive build does not compound: {[round(w['trimp_total']) for w in nd]}")
+    for w in aw:
+        if w.get("peak_acwr") and w["peak_acwr"] > ACWR_HARD + 1e-6:
+            fail.append(f"projected week {w['start']} breaches the hard cap: {w['peak_acwr']}")
+    if not any(w.get("prog_ridden") for w in nd):
+        fail.append("no week carries the prog_ridden honesty label on a compounding build")
+    cw, _ = generate_block(sh, bs, 45.0, 40.0, easy, zones=zones, regime="caution")
+    if any(w.get("prog_ridden") for w in cw):
+        fail.append("caution week carries prog_ridden (must be assertive-only)")
+    if any(w["trimp_total"] > w["km"] * 0 + 1e9 for w in cw):   # structural guard, never fires
+        fail.append("unreachable")
+    return _st("det", "prog-floor",
+               "§PRO10 progressive-overload floor: byte-identical when absent/non-binding; lifts past "
+               "the soft clip only; hard peak/ramp brakes always bound it; assertive builds compound "
+               "with the honesty label; caution untouched",
+               passed=not fail,
+               expect="identity holds; lift ≤ floor; peak ≤ 1.30; assertive compounds; caution clean",
+               got={"base_allowed": round(base_al, 1), "lifted": round(lifted, 1),
+                    "absurd_peak": pk, "failures": fail or "none"},
+               output={"assertive_trimps": [round(w["trimp_total"]) for w in aw]})
+
+
 def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
@@ -18106,7 +18283,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_runway_clamp(), lambda: _stc_sync_refresh(),
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(),
                  lambda: _stc_caution_baseline(), lambda: _stc_ramp_rate(),
-                 lambda: _stc_soft_ctl_floor(), lambda: _stc_long_run_step(), lambda: _stc_eq_km(),
+                 lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
+                 lambda: _stc_long_run_step(), lambda: _stc_eq_km(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_polarized(),
