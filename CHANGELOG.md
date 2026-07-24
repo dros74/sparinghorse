@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-07-24
+
+The recovery cadence learns coordination — the tissue limiter re-phases the plan's own down weeks
+instead of stacking extra ones, and the projected build finally climbs to the race.
+
+### Fixed
+- **Re-phase, don't stack (§PRO11).** The progression floor (0.17.0) made every building week ride
+  near the ceiling *by design* — which meant the tissue limiter's consecutive-week counter now
+  tripped on schedule, forcing a deload every fourth week forever and stripping that week's quality.
+  Those forced troughs landed one or two weeks away from the plan shape's own 3:1 down weeks, so a
+  meso spent two recoveries where it designed one, and projected fitness plateaued at roughly the
+  runner's current shape months before the race. Now, when the counter trips and the shape already
+  schedules a down week later in the block, that down week is **pulled forward** (the two weeks
+  swap): one trough per cycle at the tissue-safe cadence, and the displaced building week keeps its
+  quality sessions. The limiter's guarantee is unchanged — never more than three consecutive
+  near-ceiling weeks — and a shape with no down week ahead still gets the original forced deload.
+  The early-arriving down week is labelled in the plan (`deload_pulled`). On the reference data this
+  moves projected race-day fitness from a flat line at current shape to a monotone build peaking
+  just before the taper.
+
 ## [0.17.0] - 2026-07-23
 
 The projection learns progressive overload — a plan that used to draw a flat fitness line to race

@@ -5105,7 +5105,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     seed_longs = list(recent_longs or [])
     seed_eq = list(recent_eq or [])            # §3.1 — trailing weekly eq_km (biomechanical chronic baseline)
     blk_longs, blk_eqs = [], []                # per-week window contributions, appended as weeks finalize
-    for wk in shape:
+    for wi, wk in enumerate(shape):
         wk_start_d = block_start + timedelta(weeks=wk["wk"] - 1)
         wk_start = wk_start_d.isoformat()
         intent_trimp = wk["km"] * TRIMP_PER_KM            # easy-equivalent volume intent, in TRIMP
@@ -5227,6 +5227,29 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # but the taper resets it — the peak rides uninterrupted into the taper as designed.
         forced_deload = bool(assertive and not is_down and not is_taper and not is_peak
                              and last_nondown and consec_hard >= MESO_MAX_HARD)
+        # §PRO11 — re-phase, don't stack: §PRO10 makes every riding week near-ceiling by construction,
+        # so the streak trips on schedule; if the SHAPE already provides a down week later in this
+        # block, pull it forward (swap the two weeks' fields) instead of inserting an EXTRA trough —
+        # the meso keeps one recovery per cycle and the displaced building week keeps its quality.
+        # No down week ahead ⇒ the original forced deload stands (the no-recovery backstop).
+        deload_pulled = False
+        if forced_deload:
+            nxt = next((j for j in range(wi + 1, len(shape))
+                        if _is_down(shape[j].get("intent"))), None)
+            if nxt is not None:
+                a, b, _MISS = wk, shape[nxt], object()
+                for k in (set(a) | set(b)) - {"wk"}:
+                    av_, bv_ = a.get(k, _MISS), b.get(k, _MISS)
+                    a.pop(k, None); b.pop(k, None)
+                    if bv_ is not _MISS:
+                        a[k] = bv_
+                    if av_ is not _MISS:
+                        b[k] = av_
+                is_down, forced_deload, deload_pulled = True, False, True
+                intent_trimp = wk["km"] * TRIMP_PER_KM      # re-derive from the swapped-in down week
+                if av_off:                                  # §AV — day slots follow the new run count
+                    av_days, av_shed = _av_run_days(wk["runs"], av_off)
+                    av_frac = (len(av_days) / max(1, wk["runs"])) if av_shed else 1.0
         # §PRO10 — the progressive-overload floor: an assertive BUILDING week's allowance may not be
         # soft-clipped below (1+PROG_RAMP)× the last realised non-down load (the state-based ceiling
         # equilibrates; progression is a demand the acute brakes then bound). Building weeks only:
@@ -5365,6 +5388,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if forced_deload:                          # §PRO6 — tell the truth: a tissue-protection deload
             week["deload_forced"] = True
             week["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
+        elif deload_pulled:                        # §PRO11 — the shape's own down week, arrived early
+            week["deload_pulled"] = True
         if long_km_cap and any(s.get("long_step_capped") for s in sessions):
             week["long_step_capped"] = long_km_cap   # §PRO9 — the +10% ceiling that bound this week's long
         week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
@@ -16128,6 +16153,58 @@ def _stc_tissue_limiter():
                     "failures": fail or "none"})
 
 
+def _stc_meso_rephase():
+    """§PRO11 — re-phase, don't stack: when the §PRO6 streak trips and the SHAPE schedules a down week
+    later in the block, that down week is PULLED FORWARD (the two weeks swap) instead of a forced
+    deload adding an EXTRA trough. Misaligned shape: 5 building weeks + a down week at wk6 — the trip
+    at wk MESO_MAX_HARD+1 must land the shape's own down there, the displaced building week (now wk6)
+    must keep its quality, and the block must contain exactly the shape's ONE trough. The §PRO6
+    guarantee (≤MESO_MAX_HARD consecutive near-ceiling weeks) still holds. Caution untouched."""
+    from datetime import date
+    easy, bs = 425, date(2026, 8, 1)
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    q = [{"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+          "rep_min": 3, "rec_min": 2, "label": "x"}]
+    shape = [{"wk": i + 1, "km": 55, "runs": 5, "long": 24, "strides": 0,
+              "quality": [dict(s) for s in q], "intent": "Build — specific"} for i in range(5)]
+    shape.append({"wk": 6, "km": 40, "runs": 4, "long": 14, "strides": 0,
+                  "quality": [], "intent": "Down week — absorb the block"})
+    import copy
+    aw, _ = generate_block(copy.deepcopy(shape), bs, 60.0, 60.0, easy, zones=zones, regime="assertive")
+    cw, _ = generate_block(copy.deepcopy(shape), bs, 60.0, 60.0, easy, zones=zones, regime="caution")
+
+    def consec_near(weeks):
+        mx = c = 0
+        for w in weeks:
+            c = c + 1 if (w["proj_acwr"] and w["proj_acwr"] >= NEAR_CEILING_ACWR) else 0
+            mx = max(mx, c)
+        return mx
+    downs = [w["wk"] for w in aw if _is_down(w.get("intent"))]
+    pulled = [w["wk"] for w in aw if w.get("deload_pulled")]
+    fail = []
+    if any(w.get("deload_forced") for w in aw):
+        fail.append("a down week was available ahead — must re-phase, never force an extra trough")
+    if pulled != [MESO_MAX_HARD + 1]:
+        fail.append(f"the shape's down week must arrive at wk {MESO_MAX_HARD + 1} (deload_pulled), got {pulled}")
+    if downs != [MESO_MAX_HARD + 1]:
+        fail.append(f"block must hold exactly the shape's ONE trough, at wk {MESO_MAX_HARD + 1}; got {downs}")
+    last = next((w for w in aw if w["wk"] == 6), None)
+    if not (last and any(r.get("zone") in HARD_ZONES and r.get("effort") == "work"
+                         for s in last["sessions"] for r in (s.get("reps") or []))):
+        fail.append("the displaced building week (wk 6) lost its quality session")
+    if consec_near(aw) > MESO_MAX_HARD:
+        fail.append(f"assertive let {consec_near(aw)} > {MESO_MAX_HARD} consecutive near-ceiling weeks")
+    if any(w.get("deload_pulled") or w.get("deload_forced") for w in cw):
+        fail.append("caution must never re-phase or force (assertive-only)")
+    return _st("det", "meso-rephase",
+               "§PRO11 re-phase: the §PRO6 trip pulls the shape's own down week forward — one trough "
+               "per meso, displaced quality survives, the streak guarantee holds; caution untouched",
+               passed=not fail, expect=f"down+pulled at wk {MESO_MAX_HARD + 1} only, no deload_forced, "
+                                       f"wk6 keeps quality, ≤{MESO_MAX_HARD} consec near-ceiling",
+               got={"downs": downs, "pulled": pulled, "max_consec_near": consec_near(aw),
+                    "failures": fail or "none"})
+
+
 def _stc_regime_plan():
     """§PRO3/§PRO4 INTEGRATION — generate_plan in the ASSERTIVE regime (in-memory DB, banked into
     assertive via the same fixture as det/regime-gate): it (a) SKIPS the conservative re-base; (b) holds
@@ -18286,7 +18363,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
                  lambda: _stc_long_run_step(), lambda: _stc_eq_km(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
-                 lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(),
+                 lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),
