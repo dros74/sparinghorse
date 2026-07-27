@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-27
+
+A prediction saved by an older engine now says so, instead of quietly presenting itself as current.
+
+### Fixed
+
+- **A plan saved by an earlier version of the engine is labelled as such.** Plans are versioned
+  artifacts: the app serves the most recently *generated* plan, and updating the application does
+  not regenerate it (past weeks are frozen on purpose). That meant a plan generated before an engine
+  upgrade rendered through the new interface with its old numbers and no indication that a newer
+  model was available — the finish projection in particular could show a pre-upgrade estimate as
+  though it were current. Such a plan now carries an explicit *"saved by an earlier engine —
+  regenerate to re-read"* marker, and the same note in the projection's hover. Regenerating the plan
+  re-reads it on the current model.
+- **The projection never claims a trend its own numbers do not show.** The finish strip's hover
+  offered a "with more runway" comparison unconditionally. On a plan whose projection was flat, that
+  printed a sequence of identical times directly after stating that more runway means a faster race —
+  asserting a trend and then contradicting it in the same tooltip. The comparison is now suppressed
+  whenever the projected times do not actually differ, whatever the reason.
+
 ## [0.20.0] - 2026-07-27
 
 The finish projection stops answering a question nobody asked, and starts answering the one every

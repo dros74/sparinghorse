@@ -10261,6 +10261,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .fcpt.now b{color:var(--accent)}
   .fcsep{opacity:.5}
   .fcgain{font-family:var(--serif);font-style:italic;color:var(--accent);opacity:.9}
+  .fcstale{font-family:var(--serif);font-style:italic;color:var(--warn,#b45309);opacity:.95}
   .regimebar{display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;margin:2px 0 14px;
     padding:9px 12px;border-radius:10px;font-size:12px;line-height:1.4;
     border:1px solid var(--line);background:var(--surface2)}
@@ -12490,6 +12491,15 @@ function renderPlan(p){
   // §FT3 — the RANGE is the headline (owner-decided: a point invites anchoring on false precision);
   // the median rides as the trend detail.
   const FTB = FT && FT.band, FTT = FT && FT.today;
+  // §FT7 — a plan SAVED by an EARLIER engine renders through today's UI: /api/plan serves the last
+  // stored row, and deploying new code does not regenerate it (plans are versioned artifacts —
+  // §6f Step E freezes the past on purpose). Such a payload carries no band, no today, and a
+  // pre-§FT1 FROZEN curve — so the strip silently showed a superseded prediction as current, and
+  // the §FT6 runway hover printed three identical times immediately after promising "more runway →
+  // faster". Say it is stale, and never assert a trend the numbers don't show.
+  const fcHms = (FT&&FT.curve||[]).map(c=>c.hms);
+  const ftStale = !!FT && !FTB && !FTT;
+  const ftFrozen = fcHms.length>1 && new Set(fcHms).size===1;
   const ftPts = FTT
     ? [{lab:"off today's shape", hms:FTT.hms}, {lab:"by race day", hms:FT.hms, now:true}]
     : (FT&&FT.curve||[]).map(c=>({lab: c.plus_weeks===0?(FTB?'median now':'now'):'+'+c.plus_weeks+'w',
@@ -12501,15 +12511,18 @@ function renderPlan(p){
   const gain = FTT && FTT.gain_seconds;
   const gainTxt = !FTT ? "" : gain>60 ? `the build buys ${fcMin(gain)}`
     : gain<-60 ? `this runway costs ${fcMin(gain)}` : "holds today's shape";
-  const runway = (FT&&FT.curve||[]).filter(c=>c.plus_weeks>0)
+  const runway = ftFrozen ? "" : (FT&&FT.curve||[]).filter(c=>c.plus_weeks>0)
     .map(c=>`+${c.plus_weeks}w → ${c.hms}`).join(" · ");
-  const fcHint = FT ? (FT.note||"") + (runway?` If the race were later (same training): ${runway}.`:"") : "";
+  const fcHint = !FT ? "" : (FT.note||"")
+    + (runway?` If the race were later (same training): ${runway}.`:"")
+    + (ftStale?" This prediction was saved by an earlier version of the engine — regenerate the plan to re-read it on the current model.":"");
   const finishCurve = FT ? `<div class="finishcurve">
       <span class="fclabel">Projected ${esc(FT.distance)} finish
         ${FTB?`<b>${esc(FTB.lo_hms)}–${esc(FTB.hi_hms)}</b>`:`<b>${esc(FT.hms)}</b>`}</span>
       ${ftPts.map(c=>`<span class="fcpt${c.now?' now':''}">${esc(c.lab)}: <b>${esc(c.hms)}</b></span>`)
         .join('<span class="fcsep">→</span>')}
       ${gainTxt?`<span class="fcgain">${esc(gainTxt)}</span>`:''}
+      ${ftStale?`<span class="fcstale">⟳ saved by an earlier engine — regenerate to re-read</span>`:''}
       ${qhint(fcHint)}
     </div>` : "";
   // §PRO3/§PRO5 — training-regime posture: which regime drove the plan + why, and (assertive) how hard
