@@ -63,5 +63,12 @@ echo "▸ seeding $SETTLED_DB (--past-race)"
 SH_DB="$SETTLED_DB" "$PY" SparingHorse.py seed --past-race >/dev/null
 launch_and_drive "$SETTLED_DB" "$((PORT + 3))" settled "settled" || RC=$?
 
+# Phase 5 — cold (§FT5: one 10k + an objective, NO snapshot/history; the engine cold-starts
+# in caution with a wide-band prediction seeded by VDOT inversion of the 10k)
+COLD_DB="$WORK/cold.db"
+echo "▸ seeding $COLD_DB (--cold)"
+SH_DB="$COLD_DB" "$PY" SparingHorse.py seed --cold >/dev/null
+launch_and_drive "$COLD_DB" "$((PORT + 4))" cold "cold" || RC=$?
+
 echo "▸ artifacts: $WORK (server logs + screenshots)"
 exit $RC

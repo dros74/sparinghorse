@@ -1333,6 +1333,9 @@ SETTINGS_SPEC = [
      "help": "Your lactate-threshold heart rate from a field test (30-min TT: average HR of the final "
              "20 minutes — see the manual). Overrides the data-derived estimate while fresh; it ages "
              "out over weeks because LTHR moves with fitness. Empty = derive from your runs."},
+    {"key": "athlete_age", "env": "SH_ATHLETE_AGE", "label": "Age (years)", "kind": "line",
+     "help": "Used only as a cold-start PRIOR before real data exists (HRmax ≈ 208 − 0.7×age, "
+             "Tanaka); measured heart-rate data takes over as it lands. Empty = no prior."},
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
 MAX_WEATHER_CITIES = 5   # header widget cap (mirrored client-side as MAX_CITIES in the picker JS)
@@ -1388,6 +1391,10 @@ def validate_setting(key, value):
         if not v.isdigit() or not (MANUAL_LTHR_RANGE[0] <= int(v) <= MANUAL_LTHR_RANGE[1]):
             return False, (f"a whole number {MANUAL_LTHR_RANGE[0]}–{MANUAL_LTHR_RANGE[1]} bpm "
                            "(or empty to derive from your runs)")
+    if key == "athlete_age" and value.strip():
+        v = value.strip()
+        if not v.isdigit() or not (10 <= int(v) <= 100):
+            return False, "a whole number of years, 10–100 (or empty for no prior)"
     return True, None
 
 
@@ -2422,7 +2429,11 @@ def _robust_hrmax(db):
         "SELECT hr_max FROM activities WHERE " + RUN_FAMILY_SQL + " AND hr_max IS NOT NULL"
         ).fetchall() if r["hr_max"])
     if not hrs:
-        return None
+        # §FT5 — cold-start prior: with NO measured HR at all, an age-based HRmax (Tanaka,
+        # 208 − 0.7·age) anchors the %HRmax fallback grid until real straps land. Prior, never
+        # a measurement — the first synced hr_max row takes over on the next call.
+        age = _athlete_age(db)
+        return round(208 - 0.7 * age) if age else None
     return hrs[min(len(hrs) - 1, round(0.95 * (len(hrs) - 1)))]
 
 
@@ -3642,6 +3653,9 @@ EASY_PACE_FRAC = 0.72      # fraction of vVO2max for easy running (top of the ea
 # detrained rebuild gets a slower LT1, not a stale fast one — the fix for §3.4's "fitness-tracking" ask).
 V5K_VVO2MAX_FRAC = 0.95    # 5k velocity ≈ this × vVO2max (Daniels; a masters 5k runs a touch under vVO2max)
 LT1_5K_FRAC = 0.80         # Davis: LT1 velocity ≈ 80% of 5k velocity → LT1 ≈ 0.76·vVO2max (easy < LT1 < MP)
+MARATHON_PACE_FRAC = 0.81  # fraction of vVO2max at marathon pace — ONE definition, shared by the
+                           # displayed zone grid (rounded to sec/km) and §FT1's speed axis (unrounded,
+                           # §33f-11): the two must never drift apart, they describe the same pace
 
 # §6e — earned faster exit from Phase 0. Upward responsiveness that NEVER touches the ACWR
 # ceiling or the weekly volumes: demonstrated adaptation lets the block GRADUATE sooner (the
@@ -3744,7 +3758,7 @@ def pace_zones(vo2max):
     # Both are fractions of vVO2max, so they track fitness like the rest of the grid (easy < lt1 < marathon).
     frac = {"easy": 0.70, "easy_top": EASY_PACE_FRAC,
             "lt1": V5K_VVO2MAX_FRAC * LT1_5K_FRAC, "p5k": V5K_VVO2MAX_FRAC,
-            "marathon": 0.81, "threshold": 0.88, "interval": 0.97}
+            "marathon": MARATHON_PACE_FRAC, "threshold": 0.88, "interval": 0.97}
     return {k: round(1000.0 / (vv * f) * 60) for k, f in frac.items()}  # sec/km
 
 
@@ -5432,6 +5446,60 @@ RACE_KM = {"marathon": 42.195, "half": 21.0975, "10k": 10.0, "5k": 5.0}
 FADE_PER_CTL = 0.008   # +0.8% to race pace per CTL point of endurance deficit below the floor
 FADE_CAP = 1.35        # never project worse than +35% (beyond that it's a walk, not a time the model owns)
 
+# §FT1 — Model A: race-day state → finish time. The one-sided fade above becomes one branch of a
+# durability curve that is STRICTLY monotone through the whole CTL range (det/ft-monotone), so the
+# objective finally has a gradient in load everywhere training lives: max safe load = min predicted
+# time BY CONSTRUCTION (log §33). Below the floor the old fade is reproduced exactly (the §PER1 F2/F3
+# verdicts stay byte-identical at neutral inputs); above it the gain saturates toward a fully-built
+# athlete's load with the SAME slope at the floor (C¹: FT_DUR_GAIN = FADE_PER_CTL × FT_DUR_TAU).
+# τ and the ladder/shrinkage priors are OUR operationalization, calibrated 2026-07-26 on the owner's
+# 4-marathon corpus (CTL 67/92/98/109 → actual/VDOT-base 1.215/1.163/1.339/1.134; robust L1 fit —
+# the three cleanly-executed races land within ±1.5%, the 2023-05 first-marathon blow-up (+16%) is
+# band evidence for §FT3, not curve). Durability-via-the-long-run is Davis-consistent (Maunder,
+# Seiler & Plews 2021 on durability; Daniels/Gilbert for the speed axis).
+FT_DUR_TAU = 20.0                        # CTL pts to ~63% of the above-floor durability gain
+FT_DUR_GAIN = FADE_PER_CTL * FT_DUR_TAU  # 0.16 — max fractional gain above the floor (C¹ tie)
+FT_LADDER_REF = 0.70    # longest-long / race-km ratio at which the ladder term is neutral (Λ=1) —
+FT_LADDER_RHO = 0.40    # his whole race corpus sits at 0.71, so the ladder SHAPE is a prior, not
+FT_LADDER_L = 0.25      # a corpus fit: ~+8% at ratio 0.28 (12 km longs) vs 0.71 (30 km longs)
+FT_SHRINK_K = 2         # shrinkage prior strength: the population curve counts as K pseudo-races
+FT_LADDER_TRAIL_DAYS = 56   # trailing window for "longest long" race-readiness (§PRO9's lever)
+FT_MARA_TOL = 0.04      # historical race auto-detect: distance within ±4% of the marathon
+FT_MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}   # healthy-finish floors (§PER1)
+
+# §FT3 — the prediction is a BAND, never a point (owner-decided: the range is the headline; a
+# point invites anchoring on false precision). Predictive spread in log-time, composed from what
+# is genuinely uncertain — ln(actual) = ln(P50) + ε_race + ε_c + ε_state + ε_runway:
+#   race    — race-to-race execution noise, measured as the corpus log-residual spread about its
+#             own mean (his 4 marathons: 0.066 — the 2023-05 blow-up lives here, deliberately);
+#   calib   — posterior spread of the per-runner correction, σ_race/√(n+K) — shrinks as races land;
+#   state   — speed-projection risk, proportional to the PROJECTED eVO₂ gain (truth-anchoring ⇒
+#             zero projected gain ⇒ zero state risk: the band narrows as runs land, structurally);
+#   runway  — completion risk per remaining week (illness/life between now and the start line).
+# Cold start (no raced corpus) is wide BY DESIGN — the "never frustrates the runner" clause.
+FT3_Z = 1.2816              # 80% central band (P10–P90)
+FT3_SIGMA_RACE_FLOOR = 0.05  # never claim a race varies less than ±5% — no corpus is that clean
+FT3_SIGMA_RACE_COLD = 0.08   # population race-noise prior when no raced datapoint exists yet
+FT3_RESP_ERR = 0.5          # the projected speed gain could be ±50% off (2024-replay-informed)
+FT3_RUNWAY_PER_WK = 0.003   # log-time completion risk per remaining week of unbuilt build
+
+
+def _ft_band(pred_s, weeks_away, sigma_race=None, n_races=0, dv_gain=0.0, sens_per_pt=0.0):
+    """§FT3 — the 80% predictive band around a P50 finish time (pure, det-testable). Returns the
+    payload dict; multiplicative in time (symmetric in log). Components rounded in for honesty —
+    the UI can show WHY the band is wide (cold corpus vs long runway vs big projected gain)."""
+    sr = max(sigma_race if (sigma_race is not None and n_races > 0) else FT3_SIGMA_RACE_COLD,
+             FT3_SIGMA_RACE_FLOOR)
+    sc = sr / math.sqrt(n_races + FT_SHRINK_K)
+    ss = abs(dv_gain) * FT3_RESP_ERR * sens_per_pt
+    sw = FT3_RUNWAY_PER_WK * max(0, weeks_away or 0)
+    sig = math.sqrt(sr * sr + sc * sc + ss * ss + sw * sw)
+    lo, hi = round(pred_s * math.exp(-FT3_Z * sig)), round(pred_s * math.exp(FT3_Z * sig))
+    return {"lo_seconds": lo, "hi_seconds": hi, "lo_hms": _fmt_hms(lo), "hi_hms": _fmt_hms(hi),
+            "level": 80, "sigma_log": round(sig, 4),
+            "components": {"race": round(sr, 4), "calibration": round(sc, 4),
+                           "state": round(ss, 4), "runway": round(sw, 4)}}
+
 
 def _fmt_hms(sec):
     if not sec or sec <= 0:
@@ -5440,19 +5508,68 @@ def _fmt_hms(sec):
     return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
 
 
-def _project_finish_time(vo2max, ctl, typ, floor):
-    """Estimated finish time (seconds) for `typ` at projected race-day fitness (effective VO₂max +
-    CTL). VDOT marathon-pace zone × an endurance-deficit penalty (CTL below the healthy-finish floor).
-    Marathon only for now (the build's goal); None for other distances / missing inputs."""
+def _ft_base_time(vo2max, typ):
+    """§FT1 speed axis — the prepared-athlete finish time (seconds) at `vo2max`, per distance.
+    Marathon runs the pace_zones marathon fraction CONTINUOUSLY (§33f-11); the other RACE_KM
+    distances solve the Daniels/Gilbert %VO₂max-vs-duration curve at vVO₂max (fixed point on
+    t = d / (vv·p(t)) — converges in a handful of iterations). None if inputs are missing.
+
+    §33f-11 — this used to read `pace_zones(vo2max)["marathon"]`, which is rounded to a WHOLE
+    sec/km for display. Over 42.195 km that quantized every marathon prediction into 42.2-second
+    treads: fitness could climb ~0.15 eVO₂ with the predicted finish frozen, then jump 42 s at
+    once. The ledger chart drew that staircase while its own caption promised every step meant a
+    model upgrade or real movement, and the band's state term — a finite difference across the
+    treads — wobbled ±15%. The fraction is shared (MARATHON_PACE_FRAC) so the displayed zone and
+    the modelled pace remain the same pace; only the rounding is dropped, and only here. The zone
+    grid is untouched, so §PRO7 and every plan-side consumer stay byte-identical."""
     km = RACE_KM.get(typ)
-    base = (pace_zones(vo2max) or {}).get("marathon")   # sec/km — the prepared-athlete marathon pace
-    if typ != "marathon" or not km or not base:
+    if not km or not vo2max:
         return None
-    factor = min(1.0 + FADE_PER_CTL * max(0.0, floor - (ctl or 0)), FADE_CAP)
-    return round(base * factor * km)
+    vv = _v_at_vo2max(vo2max)                               # m/min
+    if typ == "marathon":
+        return km * 1000.0 / (vv * MARATHON_PACE_FRAC) * 60.0 if vv else None
+    t = km * 1000.0 / vv                                    # minutes at 100% vVO₂max (seed)
+    for _ in range(30):
+        p = 0.8 + 0.1894393 * math.exp(-0.012778 * t) + 0.2989558 * math.exp(-0.1932605 * t)
+        t_new = km * 1000.0 / (vv * p)
+        if abs(t_new - t) < 1e-6:
+            break
+        t = t_new
+    return t * 60.0
 
 
-def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
+def _ft_endurance(ctl, floor, long_km=None, race_km=None):
+    """§FT1 durability axis — endurance factor over (race-day CTL, long-run readiness). Below the
+    floor: exactly the §PRO7 fade (capped), so 'too soon'/'earn it' states read identically. Above:
+    a saturating gain, C¹ at the floor, strictly decreasing forever (the det invariant). The ladder
+    term Λ is a second strict axis — a CTL-50 runner with 30 km longs and one with 12 km longs are
+    different marathons — and is exactly 1.0 when the ladder is unknown (det/cold-start neutral)."""
+    c = ctl or 0.0
+    if c < floor:
+        d = min(1.0 + FADE_PER_CTL * (floor - c), FADE_CAP)
+    else:
+        d = 1.0 - FT_DUR_GAIN * (1.0 - math.exp(-(c - floor) / FT_DUR_TAU))
+    lam = 1.0
+    if long_km and race_km:
+        s = lambda r: 1.0 - math.exp(-r / FT_LADDER_RHO)
+        lam = 1.0 + FT_LADDER_L * (s(FT_LADDER_REF) - s(long_km / race_km))
+    return d * lam
+
+
+def _project_finish_time(vo2max, ctl, typ, floor, long_km=None, correction=1.0):
+    """Estimated finish time (seconds) for `typ` at projected race-day state (effective VO₂max, CTL,
+    longest trailing long). §FT1: speed axis × durability axis × the per-runner shrinkage correction
+    (1.0 for a new runner — the population prior). All RACE_KM distances. None on missing inputs."""
+    km = RACE_KM.get(typ)
+    base = _ft_base_time(vo2max, typ)
+    if not km or not base:
+        return None
+    return round(base * _ft_endurance(ctl, floor, long_km, km) * correction)
+
+
+def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
+                race_long_km=None, correction=1.0, projected_vo2max=None, vo2_curve=None,
+                band_inputs=None):
     """§6a.5 — a sober read on whether the objective is reachable on this runway. CTL can
     grow ~3–4%/wk sustained; from his detrained CTL that lands far short of his PB shape, so
     we separate 'finish healthy' (realistic) from 'PB/target time' (not on this runway).
@@ -5474,25 +5591,45 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
     # Together they catch only the genuine pathology (the §PER1-F1 fresh-near-race overrun): not enough
     # time AND not enough projected base. Distance-aware thresholds.
     MIN_RUNWAY = {"marathon": 14, "half": 9, "10k": 5, "5k": 4}
-    MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}
     typ = (objective.get("type") or "").lower()
-    floor = MIN_CTL.get(typ, 0)
+    floor = FT_MIN_CTL.get(typ, 0)
     short_runway = weeks_away is not None and weeks_away < MIN_RUNWAY.get(typ, 6)
     low_fitness = proj < floor
-    # §PRO7 — finish-time headline + runway-sensitivity curve (more weeks ⇒ higher CTL ⇒ less fade ⇒
-    # faster). Extrapolate CTL at +4/+8 weeks with the same generic ~3.4%/wk the verdict uses, so the
-    # curve is internally consistent. Marathon only; None ⇒ the field is simply absent for other races.
-    fin_now = _project_finish_time(vo2max, proj, typ, floor)
+    # §PRO7/§FT1 — finish-time headline + runway-sensitivity curve (more weeks ⇒ higher CTL ⇒ faster,
+    # now through the WHOLE range — Model A is strictly monotone in load, so the curve genuinely moves
+    # above the floor too). Extrapolate CTL at +4/+8 weeks with the same generic ~3.4%/wk the verdict
+    # uses; the ladder + per-runner correction ride every point so the curve stays internally consistent.
+    # §FT2 — Model B's projected race-day speed axis, when the caller provides it (the live regen
+    # does; det/neutral callers omit it and get today's value — behavior unchanged). `vo2_curve`
+    # extends the speed axis to the +4/+8-week points the same way projected CTL extends the load.
+    v_race = projected_vo2max or vo2max
+    fin_now = _project_finish_time(v_race, proj, typ, floor, race_long_km, correction)
     finish_time = None
     if fin_now:
         curve = [{"plus_weeks": n, "ctl": round(proj * (1.034 ** n)),
-                  "hms": _fmt_hms(_project_finish_time(vo2max, round(proj * (1.034 ** n)), typ, floor))}
+                  "evo2": (round((vo2_curve or {}).get(n, v_race), 1) if projected_vo2max else None),
+                  "hms": _fmt_hms(_project_finish_time((vo2_curve or {}).get(n, v_race),
+                                                       round(proj * (1.034 ** n)), typ, floor,
+                                                       race_long_km, correction))}
                  for n in (0, 4, 8)]
+        # §FT3 — the band IS the prediction; the P50 stays as the trend/detail signal. Speed-
+        # projection risk needs the model's local time-sensitivity to a point of eVO₂ (numeric,
+        # at the projected state) and the projected gain vs the measured v₀ (band_inputs).
+        bi = band_inputs or {}
+        dv_gain = (v_race - bi["v0"]) if (projected_vo2max and bi.get("v0")) else 0.0
+        t_up = _project_finish_time(v_race + 1, proj, typ, floor, race_long_km, correction)
+        sens = math.log(fin_now / t_up) if t_up else 0.0
+        band = _ft_band(fin_now, weeks_away, bi.get("sigma_race"), bi.get("n_races") or 0,
+                        dv_gain, sens)
         finish_time = {"distance": typ, "seconds": fin_now, "hms": _fmt_hms(fin_now),
-                       "at_ctl": proj, "curve": curve,
-                       "note": ("rough estimate at the projected race-day fitness — assumes you complete "
-                                "the build; real time also rides fuelling, pacing and the day. The honest "
-                                "signal is the trend: more runway → higher fitness → faster.")}
+                       "at_ctl": proj, "curve": curve, "band": band,
+                       "at_evo2": (round(v_race, 1) if projected_vo2max else None),
+                       "long_km": (round(race_long_km, 1) if race_long_km else None),
+                       "correction": round(correction, 3),
+                       "note": ("a range, not a promise: it assumes the laid build completes, and race "
+                                "day rides fuelling, pacing, weather and the day's legs. The median is "
+                                "the trend signal — more runway → higher fitness → faster — and the band "
+                                "narrows as runs land and raced results calibrate it.")}
     if short_runway and low_fitness:
         label = objective.get("label", "the race")
         msg = (f"That's only **{weeks_away} week{'s' if weeks_away != 1 else ''}** to {label}"
@@ -5501,8 +5638,9 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
                f"a later date or a shorter distance; the engine still builds you safely toward it and "
                f"re-reads this each block as fitness returns.")
         if finish_time:
-            msg += (f" At this fitness you'd be looking at ~**{finish_time['hms']}** — and it gets "
-                    f"faster the more runway you give it (see the curve).")
+            b = finish_time["band"]
+            msg += (f" At this fitness the honest read is **{b['lo_hms']}–{b['hi_hms']}** — and it "
+                    f"gets faster the more runway you give it (see the curve).")
         return {"verdict": "too soon", "projected_ctl": proj, "estimate_ctl": est,
                 "finish_time": finish_time, "note": msg}
     if low_fitness:
@@ -5519,20 +5657,416 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None):
                f"earned levers) and re-reads this each block — the conservative floor-projection alone "
                f"doesn't get you there yet.")
         if finish_time:
-            msg += (f" Projected finish at this fitness ≈ **{finish_time['hms']}**, faster as the build "
-                    f"banks (the curve shows +4 / +8 weeks).")
+            b = finish_time["band"]
+            msg += (f" Projected finish **{b['lo_hms']}–{b['hi_hms']}** (median {finish_time['hms']}) "
+                    f"at this fitness, faster as the build banks (the curve shows +4 / +8 weeks).")
         return {"verdict": "earn it", "projected_ctl": proj, "estimate_ctl": est,
                 "finish_time": finish_time, "note": msg}
-    verdict = "finish"  # default honest verdict for a marathon off a detrained base
+    verdict = "finish"  # projection clears the distance floor — a healthy finish is the honest call
+    # §FT3 copy review — this prose is a PUBLIC surface and must generalize: no baked-in runner
+    # history (the old text hardcoded "6-month layoff" + "your sub-4 PB"), and it predicts what
+    # the max-safe-load trajectory is worth — it never prescribes ambition.
     msg = (f"Projected fitness by race day ≈ CTL {proj:.0f} (from {ctl0:.0f} now, via "
-           f"{src}). That supports **finishing {objective.get('label','the race')} "
-           f"healthy** — the right goal off a 6-month layoff. A time target near your "
-           f"sub-4 PB would need a much higher chronic load than this runway allows; "
-           f"the engine re-reads this each block as real fitness comes back.")
+           f"{src}) — at/above the ~CTL {floor:.0f} a healthy {typ or 'race'} finish needs. "
+           f"That supports **finishing {objective.get('label','the race')} healthy**; the engine "
+           f"re-reads this each block as measured fitness moves.")
     if finish_time:
-        msg += f" Projected finish ≈ **{finish_time['hms']}** at this fitness."
+        b = finish_time["band"]
+        msg += (f" Projected finish **{b['lo_hms']}–{b['hi_hms']}** (median {finish_time['hms']}) — "
+                f"the range narrows as runs land.")
     return {"verdict": verdict, "projected_ctl": proj, "estimate_ctl": est,
             "finish_time": finish_time, "note": msg}
+
+
+# ── §FT1 — per-runner calibration: the race corpus pulls the population curve personal ──────────
+# A raced datapoint is (state the runner was in, time they actually ran). The correction is the
+# shrunk mean log-ratio actual/predicted over the corpus: a new runner starts at the population
+# prior (c=1, wide band — §FT3), every raced datapoint pulls the curve toward their demonstrated
+# reality. This is the generality mechanism (log §33 thread ii), not a bolt-on.
+
+def _ft_state_at(db, race_iso):
+    """The runner's reconstructed state on race MORNING (race day excluded from every channel):
+    (effective VO₂max, CTL, longest trailing group-summed long). eVO₂ mirrors vo2max_trend's EWMA
+    (α=0.25 over `use_vo2max` runs); CTL is the trimp-EWMA reconstruction; the ladder is the
+    longest §SJ-group-summed run in the trailing FT_LADDER_TRAIL_DAYS."""
+    sm = None
+    for iso, v in _ft_vo2_series(db):          # §FT2 — the one model-scale eVO₂ series
+        if iso >= race_iso:
+            break
+        sm = v
+    day_before = (_date(race_iso) - timedelta(days=1)).isoformat()
+    hist = reconstruct_history(db, end=day_before)
+    ctl = hist[-1]["ctl"] if hist else None
+    drop = dropped_ids(db)
+    since = (_date(race_iso) - timedelta(days=FT_LADDER_TRAIL_DAYS)).isoformat()
+    rows = [r for r in db.execute(
+        "SELECT id, date, date_time, distance, duration, elapsed_time FROM activities WHERE " +
+        RUN_FAMILY_SQL + " AND date >= ? AND date < ? AND distance > 0 AND duration > 0",
+        (since, race_iso)).fetchall() if r["id"] not in drop]
+    long_km = max((sum(p["distance"] for p in g) for g in _session_groups(rows)), default=None)
+    return sm, ctl, long_km
+
+
+def _race_seconds(act):
+    """§33f-4 — a race result is gun-to-mat, not moving time: the elapsed clock when the row carries
+    one, the moving duration otherwise. ONE definition for every consumer — the corpus that
+    CALIBRATES the model (`_ft_race_corpus`) and the ledger that SCORES it (`_ft_prediction_score`,
+    the §6s reckoning) must measure the same thing, or every stopped-clock second at an aid station
+    reads back as prediction error and quietly biases the shrinkage. Accepts a sqlite3.Row or the
+    §SJ split-group dict from `_race_day_activity`."""
+    if act is None:
+        return None
+    try:
+        e = act["elapsed_time"]
+    except (KeyError, IndexError):        # §SJ group dict assembled without an elapsed sum
+        e = None
+    return e or act["duration"]
+
+
+def _ft_race_corpus(db):
+    """The runner's raced datapoints: historical marathons auto-detected by distance (within
+    ±FT_MARA_TOL of 42.195 — a marathon is never a casual training distance; shorter races are NOT
+    auto-detected, a 21.1 km row is usually just a long run) + resolved race objectives with a
+    finished result (§RL outcome), deduped by date. Sorted oldest-first."""
+    lo, hi = RACE_KM["marathon"] * (1 - FT_MARA_TOL), RACE_KM["marathon"] * (1 + FT_MARA_TOL)
+    drop = dropped_ids(db)
+    races = {}
+    for r in db.execute("SELECT id, date, distance, duration, elapsed_time FROM activities WHERE " +
+                        RUN_FAMILY_SQL + " AND distance BETWEEN ? AND ?", (lo, hi)).fetchall():
+        secs = _race_seconds(r)                     # gun-to-mat, the one race-time definition
+        if r["id"] in drop or not secs or not (150 <= secs / 60 <= 480):   # jog/walk sanity gates
+            continue
+        races[r["date"]] = {"date": r["date"], "type": "marathon", "seconds": secs}
+    for o in db.execute("SELECT date, type, outcome FROM objectives WHERE status='done'").fetchall():
+        try:
+            oc = json.loads(o["outcome"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        typ = (o["type"] or "").lower()
+        if oc.get("status") == "finished" and oc.get("actual_seconds") and typ in RACE_KM:
+            races.setdefault(o["date"], {"date": o["date"], "type": typ,
+                                         "seconds": oc["actual_seconds"]})
+    return sorted(races.values(), key=lambda r: r["date"])
+
+
+def _ft_shrunk_correction(log_ratios, k=FT_SHRINK_K):
+    """Shrinkage estimator (pure, det-testable): exp(Σ ln(actual/pred) / (n + k)) — the population
+    prior counts as `k` pseudo-races at ratio 1.0, so one noisy race nudges, a consistent corpus
+    converges on the runner's demonstrated offset."""
+    if not log_ratios:
+        return 1.0
+    return math.exp(sum(log_ratios) / (len(log_ratios) + k))
+
+
+def _ft_correction(db):
+    """§FT1/§FT3 — the runner's personal speed-vs-VDOT correction, shrunk toward the population
+    prior, PLUS the band's race-noise inputs: returns (c, sigma_race, n_races). Predictions at
+    each race use the PRIOR model (c=1) at the reconstructed race-morning state, so the estimator
+    is well-defined (never fit against itself). sigma_race = the log-residual spread about the
+    corpus's own mean (None below 2 races — the cold prior takes over). Owner's corpus
+    2026-07-26: 4 marathons → c≈1.255, sigma_race≈0.066."""
+    lrs = []
+    for race in _ft_race_corpus(db):
+        vo2, ctl, long_km = _ft_state_at(db, race["date"])
+        pred = _project_finish_time(vo2, ctl, race["type"], FT_MIN_CTL.get(race["type"], 0), long_km)
+        if pred:
+            lrs.append(math.log(race["seconds"] / pred))
+    n = len(lrs)
+    sigma_race = None
+    if n >= 2:
+        m = sum(lrs) / n
+        sigma_race = math.sqrt(sum((r - m) ** 2 for r in lrs) / n)
+    return _ft_shrunk_correction(lrs), sigma_race, n
+
+
+# ── §FT2 — Model B speed side: project eVO₂ along the build, truth-anchored every regen ─────────
+# The model's speed axis is the PER-RUN-CORPUS scale: the α=0.25 EWMA over `use_vo2max` per-run
+# values — the exact scale the §FT1 race-corpus states are stated in, so calibration and prediction
+# can never scale-drift. (Runalyze's `effective_vo2max` snapshot applies the user's correction
+# factor and its own smoothing — a DIFFERENT vocabulary, kept for training zones; the two are never
+# mixed inside Model A/B.) Response model, calibrated 2026-07-26 on his 224 consecutive training
+# week-pairs (2021→2026): dv/wk = R·resp·(T_wk/100)·max(0, 1 − v/ceiling) — intensity-weighted
+# load drives the response (TRIMP is composition-sensitive by construction: the §T2 quality mix is
+# what lifts a week's TRIMP at equal km), saturating toward the runner's demonstrated ceiling.
+# Replays: 2023 build actual 40.6→44.2 vs model 44.6; rmse 1.64/wk (weekly noise → the §FT3 band).
+# Truth-anchoring is structural: every regen re-bases v₀ on the MEASURED corpus EWMA and projects
+# only the remaining weeks — a fast- or slow-responder can never drift from reality (§PRO9-style),
+# and the shrunk response factor pulls the population rate toward the runner's own measured slope.
+FT2_R = 0.169            # eVO₂ pts/wk per 100 weekly TRIMP at zero saturation (his-corpus fit)
+FT2_CEIL_HEADROOM = 1.15  # ceiling floor: never below v₀ × this, so today's high can't freeze the axis
+FT2_SHRINK_K = 8         # response-factor prior strength (pseudo week-pairs at slope 1.0)
+
+
+def _ft_vo2_series(db):
+    """The model-scale eVO₂ series: (date, EWMA α=0.25 over `use_vo2max` per-run values), full
+    history, oldest-first. The single source for v₀ (truth-anchor), the ceiling, the response
+    factor and the §FT1 race-corpus states — one scale, no mixing. De-duped against `dropped_ids`
+    like every other projector consumer (2258): a duplicated row would otherwise double-step the
+    EWMA and drag v₀, the ceiling and the response fit off the owned truth."""
+    drop = dropped_ids(db)
+    out, sm = [], None
+    for r in db.execute("SELECT id, date, raw FROM activities WHERE " + RUN_FAMILY_SQL +
+                        " ORDER BY date ASC").fetchall():
+        if r["id"] in drop:
+            continue
+        try:
+            d = json.loads(r["raw"])
+        except (ValueError, TypeError):
+            continue
+        if d.get("use_vo2max") and d.get("vo2max"):
+            v = float(d["vo2max"])
+            sm = v if sm is None else sm + 0.25 * (v - sm)
+            out.append((r["date"], sm))
+    return out
+
+
+def _ft_weekly_series(db):
+    """Weekly (Mon-keyed) view of the model eVO₂ + TRIMP history: ({monday: end-of-week eVO₂},
+    {monday: weekly TRIMP}). The end-of-week sampling is the calibration's own aggregation AND the
+    glitch filter — a bad-data spike (e.g. a mislabeled ride inflating per-run VO₂max) dies inside
+    its week under the EWMA, while a genuinely sustained peak survives to the week boundary."""
+    drop = dropped_ids(db)
+    wk_v, wk_t = {}, {}
+    for iso, v in _ft_vo2_series(db):
+        d = _date(iso)
+        wk_v[(d - timedelta(days=d.weekday())).isoformat()] = v
+    # §33f-8 — RUN-ONLY, to match what the projection is fed: the laid plan's weekly TRIMPs are
+    # run sessions, so calibrating the response against whole-body load (his non-run share ≈ 5.6%)
+    # would fit a rate the plan side can never deliver. §33f-2 — and de-duped, like every sibling.
+    for r in db.execute("SELECT id, date, trimp FROM activities WHERE " + RUN_FAMILY_SQL +
+                        " AND date != '' AND trimp IS NOT NULL").fetchall():
+        if r["id"] in drop:
+            continue
+        d = _date(r["date"])
+        mon = (d - timedelta(days=d.weekday())).isoformat()
+        wk_t[mon] = wk_t.get(mon, 0.0) + (r["trimp"] or 0.0)
+    return wk_v, wk_t
+
+
+def _ft_weekly_response_pairs(wk_v, wk_t, ceiling):
+    """Consecutive training week-pairs (pred_dv_at_resp1, actual_dv) for the response-factor fit:
+    end-of-week model eVO₂ + the NEXT week's TRIMP, weeks separated by exactly 7 days (layoff
+    jumps excluded — a gap week is not a response datapoint). MUST share the caller's ceiling —
+    a mismatched ceiling silently rescales every prediction and fakes a slow/fast responder."""
+    weeks = sorted(wk_v)
+    pairs = []
+    for a, b in zip(weeks, weeks[1:]):
+        if (_date(b) - _date(a)).days != 7:
+            continue
+        pred = FT2_R * (wk_t.get(b, 0.0) / 100.0) * max(0.0, 1.0 - wk_v[a] / ceiling)
+        pairs.append((pred, wk_v[b] - wk_v[a]))
+    return pairs
+
+
+def _ft_shrunk_slope(pairs, k=FT2_SHRINK_K):
+    """Shrinkage slope (pure, det-testable): least-squares slope of actual on predicted weekly
+    ΔeVO₂, with `k` pseudo-pairs of average leverage at slope 1.0 — no data ⇒ exactly 1.0, a
+    consistent corpus converges on the runner's measured response rate. Clamped to [0.25, 2.5]
+    (beyond that it's data trouble, not physiology)."""
+    if not pairs:
+        return 1.0
+    spp = sum(p * p for p, _ in pairs)
+    spa = sum(p * a for p, a in pairs)
+    m = spp / len(pairs) if spp else 1.0
+    return min(2.5, max(0.25, (spa + k * m) / (spp + k * m)))
+
+
+def _ft_project_evo2(v0, weekly_trimps, ceiling, resp=1.0):
+    """§FT2 — race-day model eVO₂ from today's measured value through the remaining laid weeks.
+    Saturating and monotone-safe: the rate is never negative (at/over the ceiling the projection
+    PLATEAUS — more load never predicts a slower runner), so det/ft-monotone extends cleanly."""
+    v = v0
+    for t in weekly_trimps:
+        v += FT2_R * resp * ((t or 0.0) / 100.0) * max(0.0, 1.0 - v / ceiling)
+    return v
+
+
+def _ft_speed_state(db):
+    """The model-scale speed state for this regen: (v₀ = current corpus-EWMA eVO₂, ceiling =
+    demonstrated historical peak sampled at week boundaries — one number shared by the projection
+    AND the response-pair fit, response factor = shrunk measured slope). (None, ...) on an empty
+    corpus — the caller falls back to the frozen effective value."""
+    series = _ft_vo2_series(db)
+    if not series:
+        return None, None, 1.0
+    v0 = series[-1][1]
+    wk_v, wk_t = _ft_weekly_series(db)
+    # §33f-1 — the ceiling is the demonstrated peak but NEVER v₀ itself: a runner sitting at their
+    # own all-time EWMA high would get 1 − v/ceiling = 0, i.e. zero projected gain AND a zeroed band
+    # state term — the §31 frozen-curve pathology, re-grown on the speed axis. The headroom floor
+    # therefore applies at EVERY corpus size (it used to switch on below 10 runs, making the freeze
+    # depend on run count — an undocumented cliff); a runner whose measured peak already clears
+    # v₀ × headroom keeps that peak, so a real history still owns the ceiling.
+    ceiling = max(max(wk_v.values()), v0 * FT2_CEIL_HEADROOM)
+    return v0, ceiling, _ft_shrunk_slope(_ft_weekly_response_pairs(wk_v, wk_t, ceiling))
+
+
+def _ft_plan_weekly_trimps(plan, today, race_date_iso):
+    """The remaining laid weekly TRIMPs between today and race day, oldest-first — the load
+    trajectory Model B projects the speed response through. §33f-7 — summed from the SESSIONS still
+    ahead (Monday-keyed), never from week totals: the current week's already-run days are ALREADY
+    inside the measured v₀ (truth-anchor), so a whole-week total would count them twice and project
+    a gain the runner has in fact already banked; and race day's own session is the race, not
+    training toward it. Weeks with nothing left ahead simply drop out (a zero week adds zero gain)."""
+    if not race_date_iso:
+        return []
+    rd = _date(race_date_iso)
+    wk = {}
+    for blk in plan.values():
+        if not (isinstance(blk, dict) and isinstance(blk.get("weeks"), list)):
+            continue
+        for w in blk["weeks"]:
+            for s in w.get("sessions") or []:
+                try:
+                    sd = _date(s.get("date"))
+                except (ValueError, TypeError):
+                    continue
+                if today <= sd < rd:
+                    mon = (sd - timedelta(days=sd.weekday())).isoformat()
+                    wk[mon] = wk.get(mon, 0.0) + (s.get("trimp") or 0.0)
+    return [t for _, t in sorted(wk.items())]
+
+
+def _ft_plan_race_long(plan, race_date_iso):
+    """§FT1 — the projected race-day ladder read off the LAID plan itself: the longest single
+    prescribed session (km) dated within the trailing FT_LADDER_TRAIL_DAYS of race day (race day
+    excluded — that session is the race). The biomechanical lever is the longest run whatever it's
+    labelled (§PRO9's rule), so this is a plain max over session km. None when nothing qualifies."""
+    if not race_date_iso:
+        return None
+    rd = _date(race_date_iso)
+    lo = rd - timedelta(days=FT_LADDER_TRAIL_DAYS)
+    best = 0.0
+    for blk in plan.values():
+        if not (isinstance(blk, dict) and isinstance(blk.get("weeks"), list)):
+            continue
+        for w in blk["weeks"]:
+            for s in w.get("sessions") or []:
+                try:
+                    sd = _date(s.get("date"))
+                except (ValueError, TypeError):
+                    continue
+                if lo <= sd < rd:
+                    best = max(best, s.get("km") or 0.0)
+    return best or None
+
+
+# ── §FT5 — cold start: the "any runner" path (log §33). Age + one race-distance effort + an
+# objective seed a usable state; the caution→assertive machinery IS the safe-learning path (no new
+# safety code), the §FT3 band is wide by design, and every §PRO9-style truth-anchor re-reads the
+# seeds away as real weeks land. ──────────────────────────────────────────────────────────────────
+FT5_RACE_TOL = 0.10        # a seeding effort must sit within ±10% of a RACE_KM distance
+FT5_PACE_SANE = (150, 620)  # sec/km sanity gates for a seeding effort (2:30–10:20 /km)
+FT5_SEED_TRAIL_DAYS = 365  # §33f-3 — a seeding effort must be RECENT: today's shape, not a career PB
+
+
+def _ft_vo2_from_race(seconds, typ):
+    """§FT5 — VDOT inversion: the eVO₂ (model scale) whose predicted `typ` time equals `seconds`.
+    Bisection over the strictly-monotone speed axis (_ft_base_time). None on nonsense inputs."""
+    if not seconds or seconds <= 0 or typ not in RACE_KM:
+        return None
+    lo, hi = 20.0, 90.0
+    if not (_ft_base_time(hi, typ) < seconds < _ft_base_time(lo, typ)):
+        return None
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        if _ft_base_time(mid, typ) > seconds:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _athlete_age(db):
+    """The runner's age from Settings (meta → SH_ATHLETE_AGE env → none). None unless a plausible
+    whole number — the age is only ever a cold-start PRIOR, so absence is fine."""
+    try:
+        v = int(str(_resolve_setting(db, SETTINGS_BY_KEY["athlete_age"])[0]).strip())
+        return v if 10 <= v <= 100 else None
+    except (ValueError, TypeError, KeyError, sqlite3.OperationalError):
+        return None      # incl. a fixture db with no meta table — no settings ⇒ no prior
+
+
+def _ft_cold_start(db):
+    """§FT5 — the cold-start intake: from a bare db (no shape snapshot yet), seed the engine state
+    the spec names: eVO₂ = VDOT inversion of the runner's best race-distance effort (any RACE_KM
+    distance ±10%, normalized to the exact distance; the FASTEST qualifying effort defines the
+    seed), CTL₀/ATL₀ = the trimp-EWMA reconstruction of whatever little history exists (truth over
+    prior — even two runs beat a magic constant; empty ⇒ 0, the §PER1 floors own the verdict),
+    HRmax prior = Tanaka (208 − 0.7·age) when age is set. LTHR needs no seeding here — the existing
+    derive gates already run over the pool as data lands. None when no qualifying effort exists.
+    §33f-3 — the effort must fall inside the trailing FT5_SEED_TRAIL_DAYS window: a 3-year-old PB
+    describes a runner who no longer exists, and seeding today's paces off it prescribes ~20–25%
+    hot while the reconstructed CTL₀ (which IS recent) says detrained — the two seeds must
+    describe the same person."""
+    drop = dropped_ids(db)
+    since = (datetime.now().date() - timedelta(days=FT5_SEED_TRAIL_DAYS)).isoformat()
+    best = None
+    for r in db.execute("SELECT id, date, distance, duration, elapsed_time FROM activities "
+                        "WHERE " + RUN_FAMILY_SQL + " AND distance > 0 AND duration > 0 "
+                        "AND date >= ?", (since,)).fetchall():
+        if r["id"] in drop:
+            continue
+        secs = r["elapsed_time"] or r["duration"]
+        if not (FT5_PACE_SANE[0] <= secs / r["distance"] <= FT5_PACE_SANE[1]):
+            continue
+        for typ, km in RACE_KM.items():
+            if abs(r["distance"] - km) / km > FT5_RACE_TOL:
+                continue
+            vo2 = _ft_vo2_from_race(secs * (km / r["distance"]), typ)
+            if vo2 and (best is None or vo2 > best["vo2_seed"]):
+                best = {"activity_id": r["id"], "date": r["date"], "race_type": typ,
+                        "distance_km": round(r["distance"], 2), "seconds": round(secs),
+                        "vo2_seed": round(vo2, 1)}
+    if not best:
+        return None
+    hist = reconstruct_history(db)
+    m = hist[-1] if hist else None
+    best["ctl0"] = round(m["ctl"], 1) if m else 0.0
+    best["atl0"] = round(m["atl"], 1) if m else 0.0
+    age = _athlete_age(db)
+    if age:
+        best["age"] = age
+        best["hrmax_prior"] = round(208 - 0.7 * age)   # Tanaka et al. 2001 — a prior, never a measurement
+    return best
+
+
+def _ft_prediction_score(db, race_date_iso, race_type, actual_s):
+    """§FT4 — settle the LAST pre-race prediction for this race against the clock. Finds the most
+    recent saved plan generated strictly before race day whose ANCHOR is this race (same date +
+    type — the founding-road matching rule) and carries a finish_time, then scores it: P50 log
+    error always; when the plan carried a §FT3 band, also in_band + the Gaussian log score
+    (a PROPER score — an over-tight band is punished exactly like an over-wide one, so the band
+    can't cheat its way to looking calibrated). None when no scorable plan exists."""
+    if not (actual_s and race_date_iso):
+        return None
+    for r in db.execute("SELECT id, for_date, plan FROM plans WHERE for_date < ? ORDER BY id DESC",
+                        (race_date_iso,)).fetchall():
+        try:
+            p = json.loads(r["plan"])
+        except (ValueError, TypeError):
+            continue
+        o = p.get("objective") or {}
+        ft = (p.get("feasibility") or {}).get("finish_time") or {}
+        if (o.get("date") != race_date_iso or (o.get("type") or "").lower() != (race_type or "").lower()
+                or not ft.get("seconds")):
+            continue
+        band = ft.get("band") or {}
+        err_log = math.log(actual_s / ft["seconds"])
+        out = {"plan_id": r["id"], "for_date": r["for_date"],
+               "p50_seconds": ft["seconds"], "p50_hms": ft.get("hms"),
+               "actual_seconds": actual_s,
+               "err_pct": round((math.exp(err_log) - 1) * 100, 1),
+               "lo_hms": band.get("lo_hms"), "hi_hms": band.get("hi_hms"),
+               "in_band": (band["lo_seconds"] <= actual_s <= band["hi_seconds"]
+                           if band.get("lo_seconds") else None),
+               "log_score": None}
+        sig = band.get("sigma_log")
+        if sig:
+            out["log_score"] = round(0.5 * math.log(2 * math.pi * sig * sig)
+                                     + err_log ** 2 / (2 * sig * sig), 3)
+        return out
+    return None
 
 
 REBASE_GAP_WEEKS = 2   # consecutive run-free weeks that count as a real break between training blocks
@@ -5688,7 +6222,10 @@ def _race_day_activity(db, race_date_iso, race_type):
         big = max(g, key=lambda p: p["distance"])
         return {"id": big["id"], "date": g[0]["date"],
                 "distance": round(sum(p["distance"] for p in g), 2),
-                "duration": round(sum(p["duration"] for p in g))}, "finished"
+                "duration": round(sum(p["duration"] for p in g)),
+                # §33f-4 — carry a summed gun clock too, so a chunk-recorded race scores on the
+                # same axis as a single-row one (parts without an elapsed contribute their moving time)
+                "elapsed_time": round(sum(_race_seconds(p) for p in g))}, "finished"
     same_day_short = [r for r in rows if _date(r["date"]) == rd and r["distance"] <= target_km * 0.75]
     if same_day_short:
         return max(same_day_short, key=lambda r: r["distance"]), "dnf"   # how far they got
@@ -5730,16 +6267,36 @@ def resolve_passed_races(db, today=None):
         else:
             new_status = "done"
             goal_s = _parse_goal_seconds(o["target"], o["type"])
-            actual_s = act["duration"] if race_status == "finished" else None
+            actual_s = _race_seconds(act) if race_status == "finished" else None
             outcome = {"status": race_status, "activity_id": act["id"],
                        "actual_seconds": actual_s, "actual": _fmt_hms(actual_s),
                        "goal": o["target"], "goal_seconds": goal_s,
                        "beat": (None if (goal_s is None or actual_s is None) else actual_s <= goal_s),
                        "dnf_km": (round(act["distance"], 1) if race_status == "dnf" else None)}
+            # §FT4 — score the engine's final pre-race prediction against the clock, into the
+            # permanent record (the outcome JSON): the product's bet settles when the race does.
+            pred = _ft_prediction_score(db, o["date"], o["type"], actual_s)
+            if pred:
+                outcome["prediction"] = pred
         db.execute("UPDATE objectives SET status=?, outcome=?, resolved_at=? WHERE id=?",
                    (new_status, json.dumps(outcome), _now_iso(), o["id"]))
         out.append({"id": o["id"], "label": o["label"], "date": o["date"],
                     "status": new_status, "outcome": outcome})
+    # §FT4 backfill — races that resolved BEFORE the scoring hook existed get their prediction
+    # settled retroactively (idempotent: only rows still missing one; the ledger was always there,
+    # the score just hadn't been read out of it).
+    for o in db.execute("SELECT id, date, type, outcome FROM objectives WHERE status='done'").fetchall():
+        try:
+            oc = json.loads(o["outcome"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        if oc.get("status") == "finished" and oc.get("actual_seconds") and "prediction" not in oc:
+            pred = _ft_prediction_score(db, o["date"], o["type"], oc["actual_seconds"])
+            if pred:
+                oc["prediction"] = pred
+                db.execute("UPDATE objectives SET outcome=? WHERE id=?", (json.dumps(oc), o["id"]))
+                out.append({"id": o["id"], "date": o["date"], "status": "done",
+                            "outcome": oc, "backfilled_prediction": True})
     if out:
         db.commit()
     return out
@@ -5931,12 +6488,23 @@ def generate_plan(db, force_regime=None):
         "SELECT effective_vo2max, fitness, fatigue FROM shape_snapshots "
         "ORDER BY snapshot_date DESC LIMIT 1"
     ).fetchone()
+    cold = None
     if not snap:
-        return {"ok": False, "error": "no shape snapshot — Sync first"}
-
-    vo2 = snap["effective_vo2max"]
-    ctl0 = snap["fitness"] or 0.0
-    atl0 = snap["fatigue"] or 0.0
+        # §FT5 — the cold-start path: no snapshot yet, but one qualifying race-distance effort
+        # seeds the state (VDOT inversion + reconstructed CTL₀). Regime starts caution by
+        # construction (nothing banked), the §FT3 band is wide by design, and every truth-anchor
+        # replaces these seeds with measurement as runs land.
+        cold = _ft_cold_start(db)
+        if not cold:
+            return {"ok": False, "error": ("no shape snapshot — Sync first (or, for a cold start: "
+                                           "sync one hard race-distance effort — 5k/10k/half — from "
+                                           "the last 12 months and set an objective; age in Settings "
+                                           "sharpens the HR prior)")}
+        vo2, ctl0, atl0 = cold["vo2_seed"], cold["ctl0"], cold["atl0"]
+    else:
+        vo2 = snap["effective_vo2max"]
+        ctl0 = snap["fitness"] or 0.0
+        atl0 = snap["fatigue"] or 0.0
     zones = pace_zones(vo2)
 
     today = datetime.now().date()
@@ -6037,6 +6605,9 @@ def generate_plan(db, force_regime=None):
     plan = {
         "ok": True,
         "generated_at": _now_iso(),
+        # §FT5 — present only on a cold-started plan: WHAT seeded the state (the runner can see the
+        # engine's assumptions; each seed is replaced by measurement as data lands). None otherwise.
+        **({"cold_start": cold} if cold else {}),
         "shape": {"effective_vo2max": vo2, "ctl": ctl0, "atl": atl0},
         "pace_zones": {k: f"{fmt_pace(v)}/km" for k, v in zones.items()},
         "rebase": {**rb, "banked_streak": bank["banked_streak"], "graduated": bank["graduate"],
@@ -6147,7 +6718,28 @@ def generate_plan(db, force_regime=None):
         # §6f Step E / §PRO7b — feasibility re-reads the engine's REAL projected race fitness — the PEAK
         # CTL carried into the final taper (chained through every segment under the ceiling), realized on
         # race day through the taper's freshness — not the generic growth estimate, and not the taper trough.
-        plan["feasibility"] = feasibility(anchor, ctl0, vo2, total_weeks, projected_ctl=peak_ctl)
+        # §FT1 — plus the other two state axes Model A reads: the projected race-day LADDER (the longest
+        # long the laid plan itself puts within the trailing window of race day — the plan and the
+        # prediction are one object) and the per-runner shrinkage correction from the race corpus.
+        # §FT2 — and Model B's speed side: v₀ = the MEASURED corpus-scale eVO₂ (truth-anchored every
+        # regen — never last regen's projection), projected through the laid weeks' TRIMPs to race
+        # day; the +4/+8-week curve points keep training at the build's peak weekly load. Falls back
+        # to the frozen effective value only when the corpus is empty (fresh/synthetic db).
+        race_long = _ft_plan_race_long(plan, anchor.get("date"))
+        ft_corr, ft_sigma, ft_n = _ft_correction(db)
+        v0, v_ceil, v_resp = _ft_speed_state(db)
+        vo2_star, vo2_curve = None, None
+        if v0:
+            wk_trimps = _ft_plan_weekly_trimps(plan, today, anchor.get("date"))
+            ext = max(wk_trimps, default=0.0)     # "+n weeks" = keep training at the peak laid load
+            vo2_star = _ft_project_evo2(v0, wk_trimps, v_ceil, v_resp)
+            vo2_curve = {n: _ft_project_evo2(v0, wk_trimps + [ext] * n, v_ceil, v_resp)
+                         for n in (0, 4, 8)}
+        plan["feasibility"] = feasibility(anchor, ctl0, vo2, total_weeks, projected_ctl=peak_ctl,
+                                          race_long_km=race_long, correction=ft_corr,
+                                          projected_vo2max=vo2_star, vo2_curve=vo2_curve,
+                                          band_inputs={"sigma_race": ft_sigma, "n_races": ft_n,
+                                                       "v0": v0})
         # §6q/§PRO7b — annotate each chain race with its own projected race fitness (the PEAK CTL carried
         # into that race's taper). Map by the segment's taper KEY (chain index i → "taper"/"taper{i}"),
         # not the human label, since two races can share a label.
@@ -7833,6 +8425,25 @@ def api_plandrift():
                                "verdict": (p.get("feasibility") or {}).get("verdict")}
     outcome = [byweek[k] for k in sorted(byweek)]
 
+    # — §FT4 ledger: predicted finish over time, one point per regen DAY (last wins) — the product
+    #   watching itself. Same-goal filter as the founding road (a different race's time isn't this
+    #   series). Pre-§FT3 rows carry no band (lo/hi None) — the P50 line still plots; the day the
+    #   band shipped, the envelope appears. Seeded day one by the whole banked plans history. —
+    fin_byday = {}
+    for r in rows:
+        p = json.loads(r["plan"])
+        if ((p.get("objective") or {}).get("date")) != cur_goal:
+            continue
+        ft = (p.get("feasibility") or {}).get("finish_time") or {}
+        if not ft.get("seconds"):
+            continue
+        band = ft.get("band") or {}
+        fin_byday[r["for_date"]] = {"date": r["for_date"], "p50": ft["seconds"],
+                                    "hms": ft.get("hms"),
+                                    "lo": band.get("lo_seconds"), "hi": band.get("hi_seconds"),
+                                    "at_ctl": ft.get("at_ctl"), "at_evo2": ft.get("at_evo2")}
+    finish_drift = [fin_byday[k] for k in sorted(fin_byday)]
+
     # — scorecard: synthesize the four series into one 'who's winning' verdict (§6b, settle the
     #   score). Deterministic numbers + templated language — the engine owns the score, no LLM
     #   drifting it. Three axes measured AT TODAY, all against the SAME founding road (the anchor):
@@ -7901,7 +8512,7 @@ def api_plandrift():
                         else round((arrived - race_found) - fit_seam, 1))
         act, race_status = _race_day_activity(db, obj.get("date"), obj.get("type"))
         goal_s = _parse_goal_seconds(obj.get("target"), obj.get("type"))
-        actual_s = act["duration"] if (act and race_status == "finished") else None
+        actual_s = _race_seconds(act) if (act and race_status == "finished") else None
         reckoning = {
             "fitness": {"projected": race_found, "arrived": arrived, "gap": fit_reck_gap,
                         "state": _state(fit_reck_gap, 2.0)},
@@ -7909,6 +8520,9 @@ def api_plandrift():
                        "actual_seconds": actual_s, "actual": _fmt_hms(actual_s), "found": bool(act),
                        "dnf_km": (round(act["distance"], 1) if race_status == "dnf" else None),
                        "beat": (None if (goal_s is None or actual_s is None) else actual_s <= goal_s)},
+            # §FT4 — the engine's own bet, settled: the final pre-race prediction vs the clock
+            # (same scorer resolve_passed_races persists into the outcome record).
+            "prediction": _ft_prediction_score(db, obj.get("date"), obj.get("type"), actual_s),
         }
 
     PHRASE = {                                            # completes "The rebuild is ___." — the two
@@ -7946,6 +8560,11 @@ def api_plandrift():
             res_clause = (f"goal {rr['goal']}, you ran {rr['actual']} "
                           f"({'beat it by ' + _fmt_hms(-delta) if rr['beat'] else 'missed by ' + _fmt_hms(delta)})")
         headline = f"{race_name} is run. On fitness, {fit_clause}; on the clock, {res_clause}."
+        pred = reckoning.get("prediction")
+        if pred and pred.get("in_band") is not None:      # §FT4 — the product's own bet, settled
+            headline += (f" The engine's final call was {pred['lo_hms']}–{pred['hi_hms']} — the clock "
+                         f"{'landed inside' if pred['in_band'] else 'fell outside'} the band "
+                         f"(median off by {abs(pred['err_pct']):g}%).")
     elif settled:                                        # race passed, reckoning withheld (public view)
         headline = f"{obj.get('label') or 'The race'} is complete."
     elif is_current:
@@ -8030,6 +8649,7 @@ def api_plandrift():
         ctl={"initial": init_ctl, "actual": actual_ctl, "current": cur_ctl},
         effort={"initial": init_eff, "actual": actual_eff, "current": cur_eff},
         outcome=outcome,
+        finish_drift=finish_drift,       # §FT4 — the prediction ledger series (P50 + band envelope)
         scorecard=scorecard,
         counterfactual=counterfactual,
         duplicate_count=dup_count,
@@ -8260,6 +8880,7 @@ def api_plan():
     plan = json.loads(row["plan"]) if row else None
     if plan and READONLY:
         plan.pop("adjustment", None)   # the adjustment carries free-text/medical context — withhold
+        plan.pop("cold_start", None)   # §33f-5 — the seeds carry AGE + an HRmax prior in bpm (H7-class)
         _strip_av_public(plan)         # §AV — away days never reach the public box
     return jsonify(plan)
 
@@ -11784,9 +12405,14 @@ function renderPlan(p){
   // and it gets faster with more runway). The headline time is already woven into the feas note prose;
   // this is the at-a-glance now→+4w→+8w curve underneath it.
   const FT = p.feasibility && p.feasibility.finish_time;
+  // §FT3 — the RANGE is the headline (owner-decided: a point invites anchoring on false
+  // precision); the median rides as the trend detail, the curve stays the runway-trend strip.
+  const FTB = FT && FT.band;
+  const ftPts = (FT&&FT.curve||[]).map(c=>({lab: c.plus_weeks===0?(FTB?'median now':'now'):'+'+c.plus_weeks+'w', hms: c.hms, now: c.plus_weeks===0}));
   const finishCurve = FT ? `<div class="finishcurve">
-      <span class="fclabel">Projected ${esc(FT.distance)} finish</span>
-      ${(FT.curve||[]).map((c,i)=>`<span class="fcpt${i===0?' now':''}">${i===0?'now':'+'+c.plus_weeks+'w'}: <b>${esc(c.hms)}</b></span>`)
+      <span class="fclabel">Projected ${esc(FT.distance)} finish
+        ${FTB?`<b>${esc(FTB.lo_hms)}–${esc(FTB.hi_hms)}</b>`:`<b>${esc(FT.hms)}</b>`}</span>
+      ${ftPts.map(c=>`<span class="fcpt${c.now?' now':''}">${c.lab}: <b>${esc(c.hms)}</b></span>`)
         .join('<span class="fcsep">→</span>')}
       ${qhint(FT.note)}
     </div>` : "";
@@ -12057,10 +12683,18 @@ function scorecardHTML(sc, r){
     else if(rr.goal_seconds==null){ resMain=esc(rr.actual||"finished"); resSub="finished"; }
     else { resMain=`${esc(rr.goal)} → ${esc(rr.actual)}`; resCls=rr.beat?"ahead":"behind";
            resSub=rr.beat?"beat the goal":"missed the goal"; }
+    const rp=sc.reckoning.prediction;   // §FT4 — the engine's own settled bet, when a scorable plan exists
+    const predRow = rp ? scoreRow("Engine's call",
+        rp.lo_hms?`${esc(rp.lo_hms)}–${esc(rp.hi_hms)}`:esc(rp.p50_hms||"—"),
+        rp.in_band==null?`median ${esc(rp.p50_hms||"—")} · ${rp.err_pct>0?"+":""}${rp.err_pct}%`
+                        :(rp.in_band?`inside the band · median ${rp.err_pct>0?"+":""}${rp.err_pct}%`
+                                    :`outside the band · median ${rp.err_pct>0?"+":""}${rp.err_pct}%`),
+        rp.in_band==null?"level":(rp.in_band?"ahead":"behind")) : "";
     return `<div class="scorecard"><div class="sc-head">How the race went</div>`+
       `<div class="sc-rows">`+
         scoreRow("Fitness arrived", fitMain, "vs the plan's projection", rf.state)+
         scoreRow(r&&r.label?r.label:"Result", resMain, resSub, resCls)+
+        predRow+
       `</div><div class="sc-verdict">${esc(sc.headline)}</div></div>`;
   }
   const v=sc.volume, f=sc.fitness, rc=sc.race;
@@ -12226,6 +12860,15 @@ async function loadDrift(){
   ];
   // 4 — projected race-day fitness, version over version
   const outLines=[{pts:(d.outcome||[]).map(p=>({date:p.date,val:p.ctl})), cls:"actual", color:ACC, label:"Projected race CTL"}];
+  // 5 — §FT4 the prediction ledger: predicted finish per regen, P50 + the 80% band envelope
+  const fd=d.finish_drift||[];
+  const fmtT=v=>{const tm=Math.round(v/60);return Math.floor(tm/60)+":"+String(tm%60).padStart(2,"0")};
+  const finLines=[
+    {pts:fd.filter(p=>p.hi!=null).map(p=>({date:p.date,val:p.hi})), cls:"init", dash:true, color:MUTED, label:"80% band"},
+    {pts:fd.filter(p=>p.lo!=null).map(p=>({date:p.date,val:p.lo})), cls:"init", dash:true, color:MUTED, label:"80% band"},
+    {pts:fd.map(p=>({date:p.date,val:p.p50})), cls:"actual", color:ACC, label:"Predicted finish (median)"},
+  ];
+  const finLegend=[finLines[2],finLines[0]];
   const a=d.anchor, r=d.race;
   let cap=`Baseline: plan of <b style="color:var(--text)">${a.for_date}</b>`+
     (a.is_current?` — just sealed (the first complete road); drift accrues from here`:"")+
@@ -12248,11 +12891,15 @@ async function loadDrift(){
       <span id="lg-ctl">${driftLegend(ctlLines)}</span><div id="drift-ctl"></div></div>
     <div class="driftblock"><h3 id="h-out">Projected race-day fitness</h3>
       <p class="note" id="note-out">The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?</p>
-      <span id="lg-out">${driftLegend(outLines)}</span><div id="drift-out"></div></div>`;
+      <span id="lg-out">${driftLegend(outLines)}</span><div id="drift-out"></div></div>
+    ${fd.length?`<div class="driftblock"><h3>Predicted finish · the ledger</h3>
+      <p class="note">The finish the engine predicted at each re-plan — the product watching itself. Lower is faster; the dashed envelope is the 80% band (it starts where plans began carrying one) and should narrow as the race nears. Steps in the line are model upgrades or your shape moving, both honest.</p>
+      <span id="lg-fin">${driftLegend(finLegend)}</span><div id="drift-fin"></div></div>`:""}`;
   const setLg=(id,lines)=>{const e=$(id); if(e) e.innerHTML=driftLegend(lines);};
   const FOUND_OUT_NOTE="The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?";
   const drawFounding=()=>{
     setLg("#lg-dist",distLines); setLg("#lg-eff",effLines); setLg("#lg-ctl",ctlLines); setLg("#lg-out",outLines);
+    if(fd.length) setLg("#lg-fin",finLegend);
     const nout=$("#note-out"); if(nout) nout.textContent=FOUND_OUT_NOTE;
     const hout=$("#h-out"); if(hout) hout.textContent="Projected race-day fitness";
     const ob=$("#drift-out"); if(ob) ob.innerHTML="";
@@ -12260,6 +12907,7 @@ async function loadDrift(){
     mkChart($("#drift-eff"), effLines, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     mkChart($("#drift-ctl"), ctlLines, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     mkChart($("#drift-out"), outLines, {fmt:v=>v.toFixed(0), dots:true});
+    if(fd.length) mkChart($("#drift-fin"), finLines, {fmt:fmtT, dots:true});
     const cav=$("#drift-caveat"); if(cav) cav.style.display="none";
   };
   let cfData=null, cfTried=false;
@@ -12293,6 +12941,7 @@ async function loadDrift(){
       {pts:(cf.ctl||[]).map(p=>({date:p.date,val:p.ctl})), cls:"cf", dash:true, color:ACC2, label:lbl},
     ];
     setLg("#lg-dist",dl); setLg("#lg-eff",el); setLg("#lg-ctl",cl); setLg("#lg-out",[]);
+    const fb=$("#drift-fin"); if(fb) fb.innerHTML=""; setLg("#lg-fin",[]);   // §FT4 ledger is founding-mode only
     mkChart($("#drift-dist"), dl, {zeroBase:true, fmt:v=>v.toFixed(0)+" km", nowT:ISO2T(d.today)});
     mkChart($("#drift-eff"), el, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     mkChart($("#drift-ctl"), cl, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
@@ -16075,9 +16724,9 @@ def _stc_shape_response():
 
 
 def _stc_finish_time():
-    """§PRO7 — the finish-time honesty valve: feasibility projects a marathon finish TIME that gets
+    """§PRO7/§FT1 — the finish-time honesty valve: feasibility projects a finish TIME that gets
     FASTER with more fitness AND more runway (the robust comparative signal), the genuine 'too soon'
-    pathology still fires, and non-marathon races degrade gracefully (no finish_time, verdict intact)."""
+    pathology still fires, and every RACE_KM distance now carries a Daniels/Gilbert time (§FT1)."""
     fail = []
     obj = {"type": "marathon", "label": "Goal"}
     # monotonic in fitness: higher projected CTL ⇒ faster finish
@@ -16098,16 +16747,408 @@ def _stc_finish_time():
     # the genuine too-soon pathology still fires (short runway AND low projected fitness)
     if feasibility(obj, 20, 50, 6, projected_ctl=22)["verdict"] != "too soon":
         fail.append("short-runway+low-fitness should still verdict 'too soon'")
-    # non-marathon degrades gracefully
+    # §FT1 — non-marathon now carries a finish_time too (Daniels/Gilbert duration curve), and a
+    # faster 10k runner projects a faster 10k (strict in eVO₂, no rounding plateau at this step)
     f10 = feasibility({"type": "10k", "label": "T"}, 30, 50, 12, projected_ctl=35)
-    if f10.get("finish_time") is not None:
-        fail.append("non-marathon should not carry a finish_time yet")
+    if not f10.get("finish_time"):
+        fail.append("10k feasibility should carry a finish_time (§FT1 all-distance speed axis)")
+    t10_lo, t10_hi = _project_finish_time(46, 30, "10k", 25), _project_finish_time(52, 30, "10k", 25)
+    if not (t10_lo and t10_hi and t10_hi < t10_lo):
+        fail.append(f"10k time should improve with eVO₂: vo2 52 {t10_hi} !< vo2 46 {t10_lo}")
     return _st("det", "finish-time",
                "finish-time valve: faster with fitness AND runway, 'too soon' still fires, non-marathon "
-               "degrades gracefully",
-               passed=not fail, expect="monotonic↓ in fitness+runway; too-soon intact; 10k⇒no finish_time",
+               "distances carry Daniels/Gilbert times (§FT1)",
+               passed=not fail, expect="monotonic↓ in fitness+runway; too-soon intact; 10k⇒finish_time",
                got={"ctl28": _fmt_hms(t_lo), "ctl48": _fmt_hms(t_hi),
+                    "t10k": _fmt_hms((f10.get("finish_time") or {}).get("seconds")),
                     "curve": [c.get("hms") for c in (ft or {}).get("curve", [])] if ft else None,
+                    "failures": fail or "none"})
+
+
+def _stc_ft_monotone():
+    """§FT1 det/ft-monotone — the invariant that makes 'max safe load = min predicted time' hold by
+    construction (log §33): Model A is STRICTLY monotone in every state axis — CTL (through the whole
+    range, killing the frozen-curve bug class forever), eVO₂, and the long-run ladder — while the
+    below-floor branch reproduces the §PRO7 fade byte-for-byte at neutral inputs (so the §PER1 F2/F3
+    'too soon'/'earn it' verdicts are unchanged), and the shrinkage estimator behaves (empty corpus ⇒
+    exactly 1.0; consistent corpus ⇒ pulled toward the demonstrated ratio, more races ⇒ stronger)."""
+    fail = []
+    # (1) strictly faster in CTL across the WHOLE range — below, across, and far above the floor
+    ctls = [30, 40, 44, 46, 50, 57, 65, 80, 100]
+    ts = [_project_finish_time(50, c, "marathon", 45) for c in ctls]
+    if not all(a > b for a, b in zip(ts, ts[1:])):
+        fail.append(f"not strictly faster in CTL: {list(zip(ctls, ts))}")
+    # (2) the old frozen-curve pathology: CTL 50 vs 57 vs 65 must now give DISTINCT times
+    if len({_project_finish_time(50, c, "marathon", 45) for c in (50, 57, 65)}) != 3:
+        fail.append("curve frozen above the floor (CTL 50/57/65 collapse to one time)")
+    # (3) strictly faster in eVO₂ (marathon path = pace_zones; step wide enough to clear rounding)
+    if not (_project_finish_time(48, 50, "marathon", 45) > _project_finish_time(52, 50, "marathon", 45)):
+        fail.append("not strictly faster in eVO₂")
+    # (4) strictly faster in the ladder at fixed (eVO₂, CTL); unknown ladder is exactly neutral
+    l12, l20, l30 = (_project_finish_time(50, 50, "marathon", 45, long_km=k) for k in (12, 20, 30))
+    if not (l12 > l20 > l30):
+        fail.append(f"not strictly faster in ladder: 12k {l12} / 20k {l20} / 30k {l30}")
+    if _project_finish_time(50, 50, "marathon", 45, long_km=None) != _project_finish_time(50, 50, "marathon", 45):
+        fail.append("unknown ladder should be exactly neutral")
+    # (5) below the floor at neutral inputs the §PRO7 fade LAW is reproduced exactly — now on the
+    #     model's own CONTINUOUS speed axis (§33f-11 dropped the display rounding from
+    #     _ft_base_time) — and it must still land within half a rounding tread of the legacy
+    #     rounded §PRO7 number, so the §PER1 F2/F3 thresholds tested below cannot shift under it.
+    tread = RACE_KM["marathon"]                  # 1 sec/km of display rounding = 42.195 s of finish
+    for ctl in (20, 30, 40):
+        fade = min(1.0 + FADE_PER_CTL * (45 - ctl), FADE_CAP)
+        law = round(_ft_base_time(50, "marathon") * fade)
+        legacy = round(pace_zones(50)["marathon"] * RACE_KM["marathon"] * fade)
+        got = _project_finish_time(50, ctl, "marathon", 45)
+        if got != law:
+            fail.append(f"below-floor fade is not the §PRO7 fade law at CTL {ctl}: {got} != {law}")
+        if abs(got - legacy) > tread / 2:
+            fail.append(f"below-floor fade drifted off legacy §PRO7 at CTL {ctl}: {got} vs {legacy}")
+    # (5b) §33f-11 — the marathon axis is CONTINUOUS. Reading the ROUNDED display pace quantized
+    #      every prediction into 42.2-second treads: real fitness gains vanished for ~0.15 eVO₂ and
+    #      then jumped a tread at once, so the §FT4 ledger drew a staircase its own caption called
+    #      honest movement, and the band's state term (a finite difference across the treads)
+    #      wobbled ±15%. Every small step must move the time, and none may jump a tread.
+    steps = [_project_finish_time(40.60 + 0.02 * i, 58, "marathon", 45) for i in range(12)]
+    if not all(a > b for a, b in zip(steps, steps[1:])):
+        fail.append(f"marathon axis re-quantized — a 0.02 eVO₂ step moved nothing: {steps}")
+    elif max(a - b for a, b in zip(steps, steps[1:])) > tread / 2:
+        fail.append(f"marathon axis has a tread-sized jump: {steps}")
+    # (6) F2/F3 verdicts unchanged at neutral inputs (the §PER1 states the curve must not disturb)
+    if feasibility({"type": "marathon", "label": "R"}, 25.0, 50.0, 6, projected_ctl=30)["verdict"] != "too soon" \
+            or feasibility({"type": "marathon", "label": "R"}, 25.0, 50.0, 20, projected_ctl=30)["verdict"] != "earn it":
+        fail.append("F2/F3 verdicts disturbed at neutral inputs")
+    # (7) shrinkage: empty ⇒ 1.0; consistent 1.2-ratio corpus ⇒ pulled toward 1.2, monotone in n
+    import math as _m
+    c0, c2, c6 = (_ft_shrunk_correction([_m.log(1.2)] * n) for n in (0, 2, 6))
+    if c0 != 1.0 or not (1.0 < c2 < c6 < 1.2):
+        fail.append(f"shrinkage estimator misbehaves: n0 {c0} n2 {c2} n6 {c6}")
+    return _st("det", "ft-monotone",
+               "§FT1 Model A invariant: strictly monotone in CTL/eVO₂/ladder (frozen curve impossible), "
+               "CONTINUOUS marathon axis (no display-rounding treads, §33f-11), below-floor §PRO7 fade "
+               "law + F2/F3 verdicts intact at neutral inputs, shrinkage sane",
+               passed=not fail,
+               expect="strict ↓ in all axes; CTL 50/57/65 distinct; 0.02 eVO₂ always moves the time "
+                      "and never by a 42.2s tread; fade law exact + within ½ tread of legacy; c: 1.0→1.2",
+               got={"ctl_times": [_fmt_hms(t) for t in ts], "ladder": [_fmt_hms(t) for t in (l12, l20, l30)],
+                    "shrink": [round(c, 3) for c in (c2, c6)],
+                    "evo2_steps_s": [steps[i] - steps[i + 1] for i in range(len(steps) - 1)],
+                    "failures": fail or "none"})
+
+
+def _stc_ft_evo2():
+    """§FT2 det — Model B's speed-side projection: truth-anchored (zero remaining weeks ⇒ exactly
+    the measured value — the projection can never drift from reality), a fast responder projects
+    higher than a slow one from the same plan (the anchoring fixtures), the response saturates at
+    the demonstrated ceiling and PLATEAUS above it (more load never predicts a slower runner —
+    monotone-safe with det/ft-monotone), the shrunk response slope behaves (no data ⇒ exactly 1.0,
+    a consistent corpus converges on the measured rate, hard-clamped), and feasibility consumes
+    the projected pair while a caller that omits it gets §FT1 behavior byte-identically."""
+    fail = []
+    # (1) truth-anchor: no remaining weeks ⇒ the measured v₀, exactly
+    if _ft_project_evo2(38.2, [], 51.0) != 38.2:
+        fail.append("zero-week projection should return v0 exactly")
+    # (2) fast vs slow responder, same plan (the spec's anchoring fixtures)
+    plan_t = [300.0] * 12
+    v_fast = _ft_project_evo2(38.0, plan_t, 51.0, resp=1.5)
+    v_slow = _ft_project_evo2(38.0, plan_t, 51.0, resp=0.5)
+    if not (v_fast > v_slow > 38.0):
+        fail.append(f"responder ordering broken: fast {v_fast:.2f} !> slow {v_slow:.2f} !> 38.0")
+    # (3) saturation: bounded by the ceiling under absurd load; at/over the ceiling ⇒ plateau
+    if not (_ft_project_evo2(40.0, [500.0] * 100, 51.0) < 51.0):
+        fail.append("projection exceeded the ceiling")
+    if _ft_project_evo2(51.0, [400.0] * 10, 51.0) != 51.0 or _ft_project_evo2(55.0, [400.0] * 10, 51.0) != 55.0:
+        fail.append("at/over-ceiling should plateau (never decay, never grow)")
+    # (4) monotone in load: a heavier laid plan never projects a slower runner
+    if not (_ft_project_evo2(38.0, [300.0] * 10, 51.0) > _ft_project_evo2(38.0, [150.0] * 10, 51.0)):
+        fail.append("not monotone in weekly TRIMP")
+    # (5) shrunk response slope: empty ⇒ 1.0; consistent 2× corpus pulls up, more pairs pull harder;
+    #     clamped against data trouble
+    import math as _m
+    s0 = _ft_shrunk_slope([])
+    s4 = _ft_shrunk_slope([(0.1, 0.2)] * 4)
+    s40 = _ft_shrunk_slope([(0.1, 0.2)] * 40)
+    if s0 != 1.0 or not (1.0 < s4 < s40 < 2.0):
+        fail.append(f"response-slope shrinkage misbehaves: {s0} / {s4:.3f} / {s40:.3f}")
+    if _ft_shrunk_slope([(0.1, 5.0)] * 500) != 2.5 or _ft_shrunk_slope([(0.1, -5.0)] * 500) != 0.25:
+        fail.append("response-slope clamp missing")
+    # (6) feasibility consumes the pair: projected speed ⇒ strictly faster; omitted ⇒ §FT1 identical
+    obj = {"type": "marathon", "label": "R"}
+    f_frozen = feasibility(obj, 30.0, 40.0, 20, projected_ctl=50)
+    f_proj = feasibility(obj, 30.0, 40.0, 20, projected_ctl=50, projected_vo2max=44.0,
+                         vo2_curve={0: 44.0, 4: 44.5, 8: 45.0})
+    if not (f_proj["finish_time"]["seconds"] < f_frozen["finish_time"]["seconds"]):
+        fail.append("projected speed axis should predict faster than frozen")
+    if f_frozen["finish_time"]["at_evo2"] is not None or \
+            f_frozen["finish_time"]["seconds"] != _project_finish_time(40.0, 50, "marathon", 45):
+        fail.append("caller omitting the projection should get §FT1 behavior byte-identically")
+    if not (f_proj["finish_time"]["curve"][0]["hms"] != f_proj["finish_time"]["curve"][2]["hms"]):
+        fail.append("projected curve should move across +4/+8 weeks")
+    return _st("det", "ft-evo2",
+               "§FT2 Model B speed side: truth-anchored projection, fast>slow responder, ceiling "
+               "plateau (monotone-safe), shrunk response slope, feasibility consumes the pair",
+               passed=not fail,
+               expect="v0 exact at 0wk; fast>slow; ≤ceiling; slope 1.0→measured, clamped; pair wired",
+               got={"fast": round(v_fast, 2), "slow": round(v_slow, 2),
+                    "slopes": [round(s, 3) for s in (s4, s40)],
+                    "frozen_vs_proj": [f_frozen["finish_time"]["hms"], f_proj["finish_time"]["hms"]],
+                    "failures": fail or "none"})
+
+
+def _stc_ft_band():
+    """§FT3 det — the band IS the prediction: present and ordered around the P50, multiplicative-
+    symmetric in log-time, wide on a cold corpus BY DESIGN, and it narrows exactly the way the
+    'never frustrates the runner' clause promises — as races calibrate (n up), as the runway
+    shrinks (weeks down), and as the projected speed gain is realized into measurement (Δv → 0,
+    the truth-anchor working). Copy check: every verdict's prose leads with the range, never a
+    bare point."""
+    fail = []
+    P, W = 17433, 19
+    b = _ft_band(P, W, sigma_race=0.066, n_races=4, dv_gain=2.7, sens_per_pt=0.025)
+    # (1) ordered + multiplicative-symmetric in log
+    if not (b["lo_seconds"] < P < b["hi_seconds"]):
+        fail.append(f"band not around P50: {b['lo_seconds']} / {P} / {b['hi_seconds']}")
+    if abs(math.log(P / b["lo_seconds"]) - math.log(b["hi_seconds"] / P)) > 0.001:
+        fail.append("band not symmetric in log-time")
+    # (2) narrows on every §FT3 axis: races banked, runway burned, projected gain realized
+    sig = lambda **kw: _ft_band(P, kw.pop("W", W), **kw)["sigma_log"]
+    base = dict(sigma_race=0.066, n_races=4, dv_gain=2.7, sens_per_pt=0.025)
+    if not (sig(**{**base, "n_races": 12}) < sig(**base)):
+        fail.append("more raced datapoints should narrow the band")
+    if not (sig(**{**base, "W": 0}) < sig(**base)):
+        fail.append("a burned-down runway should narrow the band")
+    if not (sig(**{**base, "dv_gain": 0.0}) < sig(**base)):
+        fail.append("a realized speed projection should narrow the band")
+    # (3) cold corpus: wide by design, exact prior width at zero races (floor never below it)
+    cold = _ft_band(P, 0)
+    exp_cold = math.sqrt(FT3_SIGMA_RACE_COLD ** 2 + (FT3_SIGMA_RACE_COLD ** 2) / FT_SHRINK_K)
+    if abs(cold["sigma_log"] - round(exp_cold, 4)) > 0.0005:
+        fail.append(f"cold width off: {cold['sigma_log']} vs {exp_cold:.4f}")
+    if _ft_band(P, 0, sigma_race=0.001, n_races=50)["components"]["race"] != FT3_SIGMA_RACE_FLOOR:
+        fail.append("race-noise floor missing (no corpus is ±0.1% clean)")
+    # (4) feasibility payload carries it + the copy leads with the range (no bare-point headline)
+    f = feasibility({"type": "marathon", "label": "R"}, 30.0, 50.0, 20, projected_ctl=50)
+    ft = f["finish_time"]
+    if not (ft.get("band") and ft["band"]["lo_seconds"] < ft["seconds"] < ft["band"]["hi_seconds"]):
+        fail.append("feasibility finish_time missing an ordered band")
+    if ft["band"]["lo_hms"] not in f["note"] or f"**{ft['hms']}**" in f["note"]:
+        fail.append("verdict prose must lead with the range, never a bold bare point")
+    return _st("det", "ft-band",
+               "§FT3 band: ordered, log-symmetric, narrows with races/runway/realized projection, "
+               "cold-start wide by design, payload + range-first copy wired",
+               passed=not fail,
+               expect="lo<P50<hi; σ↓ on all three axes; cold = prior width; prose range-first",
+               got={"sigma": b["sigma_log"], "cold_sigma": cold["sigma_log"],
+                    "band": [b["lo_hms"], b["hi_hms"]], "failures": fail or "none"})
+
+
+def _stc_ft_ledger():
+    """§FT4 det — the ledger settles: the scorer picks the LAST pre-race plan anchored on THIS race
+    (post-race plans and other goals' plans never score), a banded plan settles in_band + a finite
+    Gaussian log score with the right error sign, a pre-band plan degrades to a P50-only score,
+    resolve_passed_races persists the score into the outcome record AND backfills races that
+    resolved before the hook existed — idempotently (the second pass is a no-op). Constructed
+    in-memory fixture; pure of the ambient DB."""
+    import sqlite3 as _sq
+    if READONLY:
+        return _st("det", "ft-ledger", "resolver is a no-op on the read-only mirror", skipped=True)
+    fail = []
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    today = datetime.now().date()
+    rd = (today - timedelta(days=10)).isoformat()          # race day, past grace
+    other_rd = (today + timedelta(days=60)).isoformat()
+    mkplan = lambda date, obj_date, secs, band: json.dumps({
+        "objective": {"date": obj_date, "type": "marathon", "label": "L"},
+        "feasibility": {"finish_time": ({"seconds": secs, "hms": _fmt_hms(secs), "band": band}
+                                        if secs else None)}})
+    band = lambda lo, hi, sig: {"lo_seconds": lo, "hi_seconds": hi, "lo_hms": _fmt_hms(lo),
+                                "hi_hms": _fmt_hms(hi), "sigma_log": sig}
+    rows = [
+        ("2026-01-01", rd, 15000, None),                          # old, bandless (pre-§FT3 payload)
+        ("2026-01-10", rd, 16000, band(14000, 18000, 0.09)),      # THE final pre-race call
+        ("2026-01-11", other_rd, 12000, band(11000, 13000, 0.05)),  # other goal — never this score
+        (rd, rd, 10000, band(9000, 11000, 0.05)),                 # for_date == race day ⇒ not pre-race
+    ]
+    for fd, od, secs, b in rows:
+        mem.execute("INSERT INTO plans(created_at, for_date, inputs, plan) VALUES(?,?,?,?)",
+                    (fd + "T20:00:00+00:00", fd, "{}", mkplan(fd, od, secs, b)))
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                "VALUES('marathon','L',?,'finish','A','upcoming',?)", (rd, _now_iso()))
+    mem.execute("INSERT INTO activities(id,date,sport,distance,duration,elapsed_time) "
+                "VALUES(1,?, 'Running', 42.3, 17000, 17100)", (rd,))
+    mem.commit()
+    trans = resolve_passed_races(mem, today)
+    oc = json.loads(mem.execute("SELECT outcome FROM objectives").fetchone()["outcome"])
+    pred = oc.get("prediction")
+    if not pred:
+        fail.append("resolver did not persist a prediction score")
+    else:
+        if pred["p50_seconds"] != 16000:
+            fail.append(f"scorer picked plan with p50 {pred['p50_seconds']} (want the final pre-race 16000)")
+        if pred["in_band"] is not True or not isinstance(pred["log_score"], float):
+            fail.append(f"banded score wrong: in_band {pred['in_band']} log_score {pred['log_score']}")
+        # §33f-4 — the fixture's GUN clock is 17100 (moving 17000): 17100/16000 − 1 = +6.9%, sign =
+        # ran slower. The bound is deliberately tight enough to fail if scoring slips back to
+        # moving time — the corpus that calibrated the prediction is gun-to-mat.
+        if not (6.5 < pred["err_pct"] < 7.3):
+            fail.append(f"err_pct off: {pred['err_pct']} (want ≈ +6.9 on the gun clock)")
+    if resolve_passed_races(mem, today):                   # idempotent: everything settled, no-op
+        fail.append("second resolver pass was not a no-op")
+    # backfill: a race that resolved before the hook existed (outcome w/o prediction) gains one
+    mem.execute("UPDATE objectives SET outcome=?", (json.dumps(
+        {"status": "finished", "actual_seconds": 17000}),))
+    mem.commit()
+    back = resolve_passed_races(mem, today)
+    oc2 = json.loads(mem.execute("SELECT outcome FROM objectives").fetchone()["outcome"])
+    if not (back and back[0].get("backfilled_prediction") and oc2.get("prediction")):
+        fail.append("backfill did not settle a pre-hook outcome")
+    if resolve_passed_races(mem, today):
+        fail.append("backfill not idempotent")
+    # bandless final plan ⇒ P50-only score, no crash
+    mem.execute("DELETE FROM plans WHERE for_date != '2026-01-01'")
+    p50only = _ft_prediction_score(mem, rd, "marathon", 17000)
+    if not (p50only and p50only["in_band"] is None and p50only["log_score"] is None
+            and p50only["p50_seconds"] == 15000):
+        fail.append(f"bandless plan should score P50-only: {p50only}")
+    mem.execute("DELETE FROM plans")
+    if _ft_prediction_score(mem, rd, "marathon", 17000) is not None:
+        fail.append("no scorable plan should yield None, not a fabricated score")
+    mem.close()
+    return _st("det", "ft-ledger",
+               "§FT4 ledger settles: last pre-race same-goal plan scored (in_band + proper log "
+               "score), pre-band degrades to P50-only, resolver persists + backfills, idempotent",
+               passed=not fail,
+               expect="final pre-race plan wins; +6.9% gun-clock err in band; backfill once; None when unscorable",
+               got={"pred": (pred and {k: pred[k] for k in ("p50_seconds", "err_pct", "in_band", "log_score")}),
+                    "failures": fail or "none"})
+
+
+def _stc_ft_coldstart():
+    """§FT5 det — the "any runner" cold start: a bare db (one hard 10k + an objective, NO shape
+    snapshot) generates a real CAUTION plan seeded by VDOT inversion (round-trip locked), the
+    cold_start seeds are surfaced in the payload, the §PER1 verdict machinery owns the low seed
+    ('earn it', not a crash and not a promise), the band is cold-wide, the age→HRmax Tanaka prior
+    fills only a data-less pool, and the GENERALITY fixtures hold: a young fast-responder and an
+    older rebuilder cold-started from the IDENTICAL 10k get the identical day-one seed and
+    prediction — they diverge only through their measured data (history ⇒ ceiling, response pairs
+    ⇒ slope), which is the whole §FT thesis. Constructed in-memory fixtures."""
+    import sqlite3 as _sq
+    fail = []
+    # (1) VDOT inversion round-trips on the strictly-monotone speed axis
+    v10 = _ft_vo2_from_race(3000, "10k")                    # a 50:00 10k
+    if not (v10 and 33 < v10 < 45 and abs(_ft_base_time(v10, "10k") - 3000) <= 5):
+        fail.append(f"inversion off: v={v10} t={v10 and _ft_base_time(v10, '10k')}")
+    if _ft_vo2_from_race(0, "10k") or _ft_vo2_from_race(3000, "nope"):
+        fail.append("nonsense inversion inputs should yield None")
+
+    def colddb(vo2_raw=()):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(SCHEMA)
+        today = datetime.now().date()
+        d = (today - timedelta(days=1)).isoformat()
+        # hr_max 191 ≠ Tanaka(34)=184 ON PURPOSE (§33f-9): with the two equal, the "measured beats
+        # the prior" assertion below passes whichever branch runs, and tests nothing.
+        mem.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,elapsed_time,"
+                    "hr_avg,hr_max,trimp,raw) VALUES(1,?,?, 'Running',10.05,3000,3010,172,191,95,'{}')",
+                    (d, d + "T09:00"))
+        for i, (iso, vx) in enumerate(vo2_raw):
+            mem.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw) "
+                        "VALUES(?,?,?,'Running',8,2400,60,?)",
+                        (100 + i, iso, iso + "T09:00", json.dumps({"use_vo2max": True, "vo2max": vx})))
+        mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                    "VALUES('marathon','CS',?,'finish','A','upcoming',?)",
+                    ((today + timedelta(weeks=20)).isoformat(), _now_iso()))
+        mem.commit()
+        return mem
+
+    # (2) the bare intake generates a real caution plan with surfaced seeds + a cold-wide band
+    mem = colddb()
+    p = generate_plan(mem)
+    cs = p.get("cold_start") or {}
+    if not p.get("ok"):
+        fail.append(f"cold start did not generate: {p.get('error')}")
+    else:
+        if (p.get("regime") or {}).get("mode") != "caution":
+            fail.append("cold start must begin in caution (the safe-learning path)")
+        if not (cs.get("race_type") == "10k" and abs((cs.get("vo2_seed") or 0) - v10) < 0.5):
+            fail.append(f"cold_start seeds wrong/absent: {cs}")
+        f = p.get("feasibility") or {}
+        if f.get("verdict") != "earn it":
+            fail.append(f"low cold seed should verdict 'earn it' (got {f.get('verdict')})")
+        band = (f.get("finish_time") or {}).get("band") or {}
+        if not ((band.get("sigma_log") or 0) >= 0.08):
+            fail.append(f"cold band should be wide by design: σ {band.get('sigma_log')}")
+    # (3) age→HRmax prior fills ONLY a data-less pool (a measured strap beats it instantly)
+    mem.execute("INSERT INTO meta(key,value) VALUES('set:athlete_age','34')")
+    if _robust_hrmax(mem) != 191:                           # the 10k's real hr_max wins
+        fail.append(f"measured hr_max should beat the age prior: {_robust_hrmax(mem)}")
+    mem.execute("UPDATE activities SET hr_max=NULL")
+    if _robust_hrmax(mem) != 184:                           # Tanaka 208−0.7·34 = 184.2 → 184
+        fail.append(f"age prior should anchor a data-less pool: {_robust_hrmax(mem)}")
+    mem.close()
+
+    # (4) generality: the SAME 10k seeds the SAME day-one state for two very different runners — a
+    # young one whose only block is CURRENT and low, and an older rebuilder whose only block is a
+    # fast one from 2 years ago — and they diverge ONLY through measured data (recent weeks ⇒ CTL₀,
+    # history ⇒ ceiling, response pairs ⇒ slope). §33f-9: the young fixture now CARRIES eVO₂ rows —
+    # with raw='{}' its speed state was (None, None, 1.0) and every ceiling assertion below was dead.
+    today = datetime.now().date()
+    fresh_low = [((today - timedelta(weeks=12) + timedelta(weeks=w)).isoformat(), 36.0 + 0.05 * w)
+                 for w in range(12)]                         # a young runner's CURRENT block
+    old_peak = [((today - timedelta(weeks=104) + timedelta(weeks=w)).isoformat(), 48.0 - 0.1 * w)
+                for w in range(12)]                          # an older rebuilder's 2-year-old block
+    young, rebuilder = colddb(vo2_raw=fresh_low), colddb(vo2_raw=old_peak)
+    s_y, s_r = _ft_cold_start(young), _ft_cold_start(rebuilder)
+    if not (s_y and s_r and s_y["vo2_seed"] == s_r["vo2_seed"]):
+        fail.append("identical 10k must give the identical cold seed")
+    elif _project_finish_time(s_y["vo2_seed"], 30.0, "marathon", 45) != \
+            _project_finish_time(s_r["vo2_seed"], 30.0, "marathon", 45):
+        fail.append("the same seed at the same state must give the same day-one prediction")
+    if not (s_y["ctl0"] > s_r["ctl0"]):                       # truth over prior: recent weeks are
+        fail.append(f"recent measured weeks should out-seed a decayed old block: "
+                    f"{s_y['ctl0']} vs {s_r['ctl0']}")        # fitness, a 2-yr-old block has decayed
+    _, ceil_y, _ = _ft_speed_state(young)
+    v0_r, ceil_r, _ = _ft_speed_state(rebuilder)
+    if not (ceil_y and ceil_r and ceil_r > 46 > ceil_y):
+        fail.append(f"history should set the ceiling apart: young {ceil_y} rebuilder {ceil_r}")
+    # §33f-1 — and NEITHER runner's ceiling may pin to their own v₀: a runner sitting at their
+    # all-time EWMA high must still have somewhere to go, or the speed axis re-freezes (§31, again)
+    for who, v0_x, ceil_x in (("young", _ft_speed_state(young)[0], ceil_y), ("rebuilder", v0_r, ceil_r)):
+        if not (ceil_x and v0_x and ceil_x > v0_x):
+            fail.append(f"{who}: ceiling {ceil_x} pinned to v0 {v0_x} — the speed axis is frozen")
+    v_fast = _ft_project_evo2(36.0, [300.0] * 16, ceil_y or 41.4, resp=1.4)  # low ceiling, fast slope
+    v_reb = _ft_project_evo2(36.0, [300.0] * 16, ceil_r or 48.0, resp=1.0)
+    if not (v_fast > 36.0 and v_reb > 36.0 and v_fast != v_reb):
+        fail.append("the two runners should diverge through measured data, both improving")
+
+    # (5) §33f-6 — the LIVE wiring: everything above exercises feasibility() directly, so nothing
+    # caught a generate_plan that quietly stopped threading §FT into the payload it actually serves.
+    # Over a vo2-carrying db the served finish_time must carry Model A's ladder + correction AND
+    # Model B's projected speed, on the headline and on every curve point.
+    pw = generate_plan(young)
+    ftw = ((pw.get("feasibility") or {}).get("finish_time") or {})
+    if not pw.get("ok"):
+        fail.append(f"vo2-carrying cold db did not generate: {pw.get('error')}")
+    else:
+        gone = [k for k in ("at_evo2", "long_km", "correction", "band") if ftw.get(k) is None]
+        if gone:
+            fail.append(f"generate_plan → feasibility dropped §FT wiring: {gone}")
+        elif not all(c.get("evo2") for c in ftw.get("curve") or []):
+            fail.append(f"served curve carries no projected eVO₂ per point: {ftw.get('curve')}")
+    young.close(); rebuilder.close()
+    return _st("det", "ft-coldstart",
+               "§FT5 cold start: VDOT inversion round-trips, bare intake ⇒ caution plan + surfaced "
+               "seeds + 'earn it' + wide band, Tanaka prior only when data-less, generality fixtures "
+               "(identical 10k ⇒ identical seed; divergence only via measured data), no ceiling "
+               "pinned to v₀, and generate_plan actually serves the §FT wiring",
+               passed=not fail,
+               expect="v(50:00 10k)≈37; caution+earn-it+σ≥0.08; measured 191 > prior 184; seeds "
+                      "equal, ceilings apart + above v₀; served payload carries at_evo2/long_km/"
+                      "correction/band + per-point curve eVO₂",
+               got={"v10": round(v10 or 0, 1), "seed": cs.get("vo2_seed"),
+                    "ceil": [ceil_y, ceil_r],
+                    "served": {k: ftw.get(k) for k in ("at_evo2", "long_km", "correction")},
                     "failures": fail or "none"})
 
 
@@ -16258,8 +17299,13 @@ def _stc_regime_plan():
     # tolerance 0.005: feow here is RECONSTRUCTED from rounded surfaces (proj_acwr 3dp · proj_ctl 1dp,
     # worst-case ±0.004 — same artifact the eased-cap check below absorbs at 0.01); the engine governs
     # on the unrounded value. A real breach is 0.02+; sub-0.005 is arithmetic fog, not load.
+    # §PRO10 amended contract (same as det/regime-assertive): a week the progression floor lifted
+    # (prog_ridden) may legally ride to ACWR_HARD; every other week stays ≤ ACWR_SOFT. This det
+    # missed the amendment — latent until 2026-07-27, when the half-real-clock fixture first laid
+    # prog_ridden weeks and flagged the hard cap being obeyed exactly (caught during §FT4 verify).
     overs = [round(feow(w), 3) for w in all_weeks(p)
-             if w.get("proj_acwr") and feow(w) > ACWR_SOFT + 0.005]
+             if w.get("proj_acwr")
+             and feow(w) > (ACWR_HARD if w.get("prog_ridden") else ACWR_SOFT) + 0.005]
     if overs:
         fails.append(f"ACWR ceiling breached (floored): {overs[:4]}")
     # §PRO6 — the tissue limiter holds ACROSS phase boundaries on the BASE/BUILD grind (NOT just one
@@ -18364,7 +19410,9 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_long_run_step(), lambda: _stc_eq_km(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
-                 lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_polarized(),
+                 lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
+                 lambda: _stc_ft_evo2(), lambda: _stc_ft_band(), lambda: _stc_ft_ledger(),
+                 lambda: _stc_ft_coldstart(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
@@ -18605,7 +19653,8 @@ runClient();
 # re-plan, drill-downs) can be exercised end-to-end — the gap an isolated CSS harness can't
 # cover. Doubles as an open-source demo: `python SparingHorse.py seed` then run with SH_DB
 # pointed at the seeded file. Synthetic data only — no personal/real numbers.
-def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past_race=False):
+def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past_race=False,
+                      cold=False):
     import random
     rnd = random.Random(seed)
     today = _date(end) if end else datetime.now().date()
@@ -18614,6 +19663,26 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
               "readiness", "session_log", "ignored_activities", "adjustments", "trackcache"):
         db.execute(f"DELETE FROM {t}")
     db.execute("DELETE FROM meta WHERE key IN ('last_sync', 'rebase_start')")
+
+    if cold:
+        # §FT5 — the cold-start fixture, exactly the spec's "any runner" intake: ONE hard 10k
+        # (with HR fields, no per-run vo2max — the corpus EWMA must stay empty) + one objective +
+        # NO snapshots, NO history. generate_plan must seed itself from the intake alone.
+        d = (today - timedelta(days=1)).isoformat()
+        db.execute("INSERT INTO activities(id,date,date_time,sport,sport_id,distance,duration,"
+                   "elapsed_time,hr_avg,hr_max,trimp,raw,synced_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (1, d, d + "T09:00:00+00:00", "Running", RUNNING_SPORT, 10.05, 3000.0, 3010.0,
+                    172, 184, 95.0, json.dumps({"id": 1, "distance": 10.05, "duration": 3000.0,
+                                                "hr_avg": 172, "hr_max": 184}), _now_iso()))
+        db.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                   "VALUES('marathon','Cold-Start Marathon',?,'finish','A','upcoming',?)",
+                   ((today + timedelta(weeks=20)).isoformat(), _now_iso()))
+        set_meta(db, "last_sync", _now_iso())
+        set_meta(db, "synthetic_seed", "1")
+        db.commit()
+        plan = regenerate(db)
+        return {"activities": 1, "snapshots": 0, "plan_ok": bool(plan and plan.get("ok")),
+                "from": d, "to": d}
 
     # last run lands yesterday, so 'today' is a fresh planning day
     last_day = today - timedelta(days=1)
@@ -18814,7 +19883,8 @@ if __name__ == "__main__":
                       f"wipe and reseed it.")
                 sys.exit(2)
             info = seed_synthetic_db(db, with_objective="--no-objective" not in sys.argv,
-                                     past_race="--past-race" in sys.argv)
+                                     past_race="--past-race" in sys.argv,
+                                     cold="--cold" in sys.argv)   # §FT5 — one 10k + objective, no history
         print(f"Seeded {target}: {info['activities']} activities, {info['snapshots']} daily "
               f"snapshots, history {info['from']} → {info['to']}.")
         print(f"Run it:  SH_DB={target} RUNALYZE_TOKEN= python SparingHorse.py   "

@@ -12,6 +12,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-27
+
+The plan and the prediction become one object. The engine now says what it thinks you will run —
+as a **range**, projected along the build it is actually laying for you — and then keeps score of
+its own bets when the race settles.
+
+### Added
+
+- **The predicted finish is a model, not a frozen number (§FT1).** The old estimate stopped
+  responding to fitness above a certain threshold: three different projected fitness levels could
+  return the same finish time to the second, which made the whole "more training → faster race"
+  story unfalsifiable. The prediction now reads three state axes — projected race-day fitness, the
+  projected long-run ladder, and the speed axis — and is **strictly monotone in every one of them**,
+  which is asserted by a permanent invariant test. A more demanding (but still safely governed)
+  plan can therefore never predict a slower race, by construction. Below the healthy-finish floor
+  the old conservative fade is preserved exactly, so the "too soon" / "earn it" verdicts are
+  unchanged.
+- **A per-runner correction, learned from your own races (§FT1).** Every race in your history is
+  re-predicted from the state you actually carried into it, and the ratio between prediction and
+  clock becomes a shrunk personal correction — one noisy race nudges it, a consistent history moves
+  it. With no raced history the population model stands unchanged.
+- **The speed axis projects along the build (§FT2).** Your aerobic capacity is no longer frozen at
+  today's value for a race months away. It is projected week by week through the load the plan
+  actually prescribes, saturating toward your own demonstrated ceiling, with the response rate
+  shrunk from the population prior toward your measured one. Every regeneration re-bases the
+  projection on the **measured** value, so a fast or slow responder can never drift away from
+  reality.
+- **The band IS the prediction (§FT3).** The headline is now an 80% range; the median is reported
+  as the trend detail. The width is composed from real sources — race-day noise, how well your
+  corpus has calibrated the model, how much of the projected gain is still unrealized, and how much
+  runway remains — so it narrows honestly as runs land, races bank, and the race approaches. A cold
+  start gets a wide band by design.
+- **The prediction ledger — the product watches itself (§FT4).** Every saved plan already carried a
+  prediction, so the plan table was a retroactive ledger of every bet the engine has made. A new
+  chart draws it: predicted finish per regeneration, with the band envelope. When a race resolves,
+  the last pre-race prediction is scored against the clock — inside the band or not, plus a **proper**
+  log score, so an over-tight band is punished exactly as hard as an over-wide one and the band
+  cannot cheat its way to looking calibrated. Races that settled before scoring existed are
+  backfilled.
+- **Cold start: an age, one race effort, and an objective (§FT5).** A brand-new database with no
+  fitness snapshot can now generate a real plan. A recent race-distance effort seeds the speed axis
+  by inversion, whatever training history exists reconstructs the fitness seeds (truth beats a magic
+  constant), and an optional age in Settings anchors a heart-rate prior until real data lands. The
+  plan starts in its conservative mode by construction and every seed is replaced by measurement as
+  runs arrive.
+
+### Fixed
+
+- **Today's high can no longer freeze tomorrow's projection.** A runner sitting at their own
+  all-time best had their ceiling pinned to that value, which made the projected gain exactly zero —
+  the same frozen-curve failure 0.17.0 fixed on the fitness axis, re-grown on the speed axis. The
+  ceiling now always keeps headroom above the current value, at every history size.
+- **The predicted finish moved in 42-second steps.** The model read race pace off the *displayed*
+  pace grid, which is rounded to a whole second per kilometre — over a marathon that quantized every
+  prediction into 42-second treads. Fitness could improve measurably with the predicted time frozen,
+  and then jump a whole tread at once, so the ledger chart drew a staircase and the band's
+  state-uncertainty term wobbled by ±15% depending on where the rounding fell. The model now
+  evaluates the same pace fraction continuously. Displayed training zones are untouched.
+- **Duplicate and manually-ignored activities reached the speed model.** Every other consumer of
+  your history drops them; the new speed series did not, so a duplicated row could drag the current
+  value, the ceiling and the response fit.
+- **The cold-start seed could come from a personal best years ago.** It now requires a race effort
+  from the last twelve months, so the seeded pace and the reconstructed fitness describe the same
+  runner rather than contradicting each other.
+- **Race scoring used moving time while calibration used elapsed time.** A race result is
+  gun-to-mat. The two had drifted apart, so every stopped second read back as prediction error.
+  There is now one definition, shared by the corpus that calibrates the model and the ledger that
+  scores it — including races recorded in several chunks.
+- **Projected load double-counted the current week.** The remaining weekly load is now summed from
+  the sessions still ahead, so days already run this week are not counted twice on top of the
+  measured value they already produced, and race day itself is no longer counted as training for
+  the race. The response calibration is also restricted to runs, matching the run-only load the
+  plan prescribes.
+- **The public read-only view could serve cold-start seeds** (an age and a heart-rate prior). It
+  no longer does, matching the existing privacy posture for personal signals.
+- **The prediction ledger's band tooltip** showed a dangling value with no label on hover.
+
 ## [0.18.0] - 2026-07-24
 
 The recovery cadence learns coordination — the tissue limiter re-phases the plan's own down weeks

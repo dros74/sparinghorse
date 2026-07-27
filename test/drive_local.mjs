@@ -162,12 +162,28 @@ async function runEmpty() {
   await page.screenshot({ path: `${SHOTS}/04-firstrun-empty.png`, fullPage: true });
 }
 
+async function runCold() {
+  // §FT5 — cold start: one 10k + an objective, NO snapshot. API-level (DOM-free) assertions:
+  // the seeded plan exists, carries the cold_start seeds, runs in caution, and the §FT3 band
+  // is present + wide by design. Page itself must load without errors (checked globally).
+  const plan = await page.evaluate(() => fetch('/api/plan').then(r => r.json()));
+  ok('cold-start plan generated + persisted', !!(plan && plan.ok));
+  const cs = plan && plan.cold_start;
+  ok('cold_start seeds surfaced (vo2 from the 10k)', !!(cs && cs.vo2_seed > 25 && cs.race_type === '10k'));
+  ok('regime starts caution (the safe-learning path)',
+     ((plan && plan.regime) || {}).mode === 'caution');
+  const band = (((plan || {}).feasibility || {}).finish_time || {}).band;
+  ok('prediction is a band, wide by design (cold σ)', !!(band && band.sigma_log >= 0.08));
+  await page.screenshot({ path: `${SHOTS}/05-coldstart.png`, fullPage: true });
+}
+
 try {
   console.log(`\n→ driving ${BASE}  (mode=${MODE})\n`);
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   if (MODE === 'empty') await runEmpty();
   else if (MODE === 'noplan') await runNoplan();
   else if (MODE === 'settled') await runSettled();
+  else if (MODE === 'cold') await runCold();
   else await runFull();
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));
