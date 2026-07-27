@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-07-27
+
+The finish projection stops answering a question nobody asked, and starts answering the one every
+runner actually has: **what does this block buy me?**
+
+### Changed
+
+- **The finish strip now shows what the training buys.** It used to read `now → +4w → +8w`, which
+  looks like a timeline but is not one: those points price a **later race date** at the same
+  training, a hypothetical nobody asked about. Worse, before the projection was un-frozen in 0.19.0
+  the three values were often identical, so the strip read as *"eight more weeks of training changes
+  nothing."* It now runs the same model at **today's measured state** — current speed axis, current
+  fitness, and the long-run ladder actually behind you — against the race-day projection, and names
+  the difference: *off today's shape 5:32 → by race day 4:45, the build buys 47 min.* The runway
+  points move into the hover, labelled as the what-if they always were.
+
+  The framing stays honest when the answer is not flattering: a runway that is mostly taper reads
+  *"this runway costs 6 min"*, and one that projects nowhere reads *"holds today's shape"* rather
+  than implying movement. The 80% range remains the headline; this pair is the trend detail.
+
+### Fixed
+
+- **A correction learned at one race distance no longer leaks into another.** The engine learns a
+  personal correction from your own race results. Because its speed axis and the classic reference
+  construction diverge by an amount that **grows with race duration** — roughly 1% at 5k rising to
+  4.4% at the marathon — a correction learned on marathons carried marathon-specific scale error
+  into a 10k prediction, and vice versa. That deviation was previously assumed to be a constant,
+  which would have cancelled harmlessly; it is not. The correction is now carried across distances
+  explicitly, stripping the tilt of the distances it was learned on and applying the target
+  distance's own. This is **exactly neutral** when your races and your objective are the same
+  distance, and when you have no raced history at all, so the established path and the cold-start
+  prior are both unchanged — only genuine cross-distance transfer moves.
+- **Race-day noise is no longer overstated for a mixed-distance history.** The band's race-noise
+  term pooled results across distances without accounting for the same tilt, booking the gap between
+  distances as day-to-day variability the runner never produced. It is now measured on a common
+  scale. A single-distance history is unaffected.
+
 ## [0.19.0] - 2026-07-27
 
 The plan and the prediction become one object. The engine now says what it thinks you will run —

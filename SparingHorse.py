@@ -14,6 +14,7 @@ Run locally:   RUNALYZE_TOKEN=... python3 SparingHorse.py   # http://127.0.0.1:8
 Production:    waitress-serve --listen=0.0.0.0:8770 SparingHorse:app
 """
 import base64
+import functools
 import html
 import io
 import json
@@ -5538,6 +5539,57 @@ def _ft_base_time(vo2max, typ):
     return t * 60.0
 
 
+FT_TILT_REF_VDOT = 45      # §33e — reference VDOT for the distance tilt (see _ft_scale_tilt)
+
+
+def _ft_daniels_time(vo2max, typ):
+    """§33e reference construction — the CANONICAL Daniels/Gilbert race time: discount the VO₂
+    (VDOT · p(t)) and then invert the oxygen-demand curve for velocity. This is NOT our axis; it
+    exists only as a yardstick for `_ft_scale_tilt`. None on nonsense inputs."""
+    km = RACE_KM.get(typ)
+    if not km or not vo2max:
+        return None
+    t = km * 1000.0 / _v_at_vo2max(vo2max)                  # minutes, seeded at 100% vVO₂max
+    for _ in range(200):
+        p = 0.8 + 0.1894393 * math.exp(-0.012778 * t) + 0.2989558 * math.exp(-0.1932605 * t)
+        t_new = km * 1000.0 / _v_at_vo2max(vo2max * p)      # ← the discount lands on the VO₂, not the velocity
+        if abs(t_new - t) < 1e-9:
+            break
+        t = t_new
+    return t * 60.0
+
+
+@functools.lru_cache(maxsize=None)
+def _ft_scale_tilt(typ):
+    """§33e — how far OUR speed axis sits from the canonical Daniels construction at `typ`, as a
+    time ratio (>1 = our axis predicts slower). We apply the %-vs-duration curve to VELOCITY, which
+    keeps the whole shipped pace_zones grid (velocity fractions) and the axis self-consistent under
+    inversion; Daniels discounts the VO₂. The two are NOT a constant apart — the gap grows with race
+    duration (≈ +1% at 5k, +2% at 10k, +3.4% at half, +4.4% at the marathon), which is exactly why
+    it does NOT simply "wash into c" as §33e first assumed: a per-runner correction learned on
+    MARATHONS carries ~4.4% of marathon-specific tilt, and applying it unmodified to a 10k
+    prediction imports ~2% of error that has nothing to do with the runner.
+
+    Evaluated at a FIXED reference VDOT so this is a pure function of DISTANCE. The tilt also drifts
+    mildly with fitness (marathon: 4.2% at VDOT 40 → 4.9% at 52), but folding that in would move a
+    same-distance correction too, and the whole point here is that same-distance transfer must be
+    EXACTLY neutral. Second-order, deliberately left out."""
+    ours, ref = _ft_base_time(FT_TILT_REF_VDOT, typ), _ft_daniels_time(FT_TILT_REF_VDOT, typ)
+    return (ours / ref) if (ours and ref) else 1.0
+
+
+def _ft_transfer_correction(c, tilt_corpus, typ):
+    """§33e — carry a correction learned on one set of race distances onto another. `c` measures the
+    runner's demonstrated offset from the model, but it also absorbed the DISTANCE TILT of whatever
+    the corpus was made of; re-scaling by tilt(target)/tilt(corpus) strips that part out and re-adds
+    the target distance's own. Exactly 1.0 (byte-identical) when the corpus and the target are the
+    same distance, or when there is no corpus at all — so the established all-marathon path and the
+    cold-start prior are both untouched, and only genuine cross-distance transfer moves."""
+    if not c or not tilt_corpus or typ not in RACE_KM:
+        return c
+    return c * _ft_scale_tilt(typ) / tilt_corpus
+
+
 def _ft_endurance(ctl, floor, long_km=None, race_km=None):
     """§FT1 durability axis — endurance factor over (race-day CTL, long-run readiness). Below the
     floor: exactly the §PRO7 fade (capped), so 'too soon'/'earn it' states read identically. Above:
@@ -5616,13 +5668,26 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
         # projection risk needs the model's local time-sensitivity to a point of eVO₂ (numeric,
         # at the projected state) and the projected gain vs the measured v₀ (band_inputs).
         bi = band_inputs or {}
+        # §FT6 — what the BUILD buys: the same model read at TODAY's measured state (current speed
+        # axis, current fitness, the ladder actually behind the runner) set against the race-day
+        # projection. This is the question a runner actually has — "what is this block FOR?" — and
+        # the +4/+8-week runway curve never answered it: that curve prices a LATER RACE DATE, a
+        # counterfactual nobody asked about, which reads as a timeline and (while the curve was
+        # frozen) as "training changes nothing". None when today's state isn't knowable.
+        v_now = bi.get("v0") or (None if projected_vo2max else vo2max)
+        t_today = _project_finish_time(v_now, round(ctl0), typ, floor,
+                                       bi.get("long_km_now"), correction)
+        today_read = ({"seconds": t_today, "hms": _fmt_hms(t_today),
+                       "at_ctl": round(ctl0), "at_evo2": round(v_now, 1),
+                       "long_km": (round(bi["long_km_now"], 1) if bi.get("long_km_now") else None),
+                       "gain_seconds": t_today - fin_now} if t_today else None)
         dv_gain = (v_race - bi["v0"]) if (projected_vo2max and bi.get("v0")) else 0.0
         t_up = _project_finish_time(v_race + 1, proj, typ, floor, race_long_km, correction)
         sens = math.log(fin_now / t_up) if t_up else 0.0
         band = _ft_band(fin_now, weeks_away, bi.get("sigma_race"), bi.get("n_races") or 0,
                         dv_gain, sens)
         finish_time = {"distance": typ, "seconds": fin_now, "hms": _fmt_hms(fin_now),
-                       "at_ctl": proj, "curve": curve, "band": band,
+                       "at_ctl": proj, "curve": curve, "band": band, "today": today_read,
                        "at_evo2": (round(v_race, 1) if projected_vo2max else None),
                        "long_km": (round(race_long_km, 1) if race_long_km else None),
                        "correction": round(correction, 3),
@@ -5760,23 +5825,33 @@ def _ft_shrunk_correction(log_ratios, k=FT_SHRINK_K):
 
 def _ft_correction(db):
     """§FT1/§FT3 — the runner's personal speed-vs-VDOT correction, shrunk toward the population
-    prior, PLUS the band's race-noise inputs: returns (c, sigma_race, n_races). Predictions at
-    each race use the PRIOR model (c=1) at the reconstructed race-morning state, so the estimator
-    is well-defined (never fit against itself). sigma_race = the log-residual spread about the
-    corpus's own mean (None below 2 races — the cold prior takes over). Owner's corpus
-    2026-07-26: 4 marathons → c≈1.255, sigma_race≈0.066."""
-    lrs = []
+    prior, PLUS the band's race-noise inputs: returns (c, sigma_race, n_races, tilt_corpus).
+    Predictions at each race use the PRIOR model (c=1) at the reconstructed race-morning state, so
+    the estimator is well-defined (never fit against itself). sigma_race = the log-residual spread
+    about the corpus's own mean (None below 2 races — the cold prior takes over). Owner's corpus
+    2026-07-26: 4 marathons → c≈1.255, sigma_race≈0.066.
+
+    §33e — `tilt_corpus` is the geometric-mean distance tilt of the races that produced `c`, handed
+    to `_ft_transfer_correction` so a marathon-learned correction can be carried onto a 10k without
+    importing marathon-specific scale error. The spread is measured on DE-TILTED residuals for the
+    same reason: pooling a 10k and a marathon raw would book the ~2.4% gap between their tilts as
+    race-day noise the runner never produced. Both are exactly neutral on a single-distance corpus
+    (a constant shift moves no spread), so the owner's all-marathon numbers are byte-identical."""
+    lrs, tilts = [], []
     for race in _ft_race_corpus(db):
         vo2, ctl, long_km = _ft_state_at(db, race["date"])
         pred = _project_finish_time(vo2, ctl, race["type"], FT_MIN_CTL.get(race["type"], 0), long_km)
         if pred:
             lrs.append(math.log(race["seconds"] / pred))
+            tilts.append(math.log(_ft_scale_tilt(race["type"])))
     n = len(lrs)
     sigma_race = None
     if n >= 2:
-        m = sum(lrs) / n
-        sigma_race = math.sqrt(sum((r - m) ** 2 for r in lrs) / n)
-    return _ft_shrunk_correction(lrs), sigma_race, n
+        free = [r - t for r, t in zip(lrs, tilts)]      # residuals on one common scale
+        m = sum(free) / n
+        sigma_race = math.sqrt(sum((r - m) ** 2 for r in free) / n)
+    tilt_corpus = math.exp(sum(tilts) / n) if n else None
+    return _ft_shrunk_correction(lrs), sigma_race, n, tilt_corpus
 
 
 # ── §FT2 — Model B speed side: project eVO₂ along the build, truth-anchored every regen ─────────
@@ -6726,7 +6801,11 @@ def generate_plan(db, force_regime=None):
         # day; the +4/+8-week curve points keep training at the build's peak weekly load. Falls back
         # to the frozen effective value only when the corpus is empty (fresh/synthetic db).
         race_long = _ft_plan_race_long(plan, anchor.get("date"))
-        ft_corr, ft_sigma, ft_n = _ft_correction(db)
+        _, _, long_now = _ft_state_at(db, today.isoformat())   # §FT6 — the ladder already behind him
+        ft_corr, ft_sigma, ft_n, ft_tilt = _ft_correction(db)
+        # §33e — carry the correction onto THIS race's distance. Neutral (byte-identical) when the
+        # corpus is the same distance as the objective, which is the established path.
+        ft_corr = _ft_transfer_correction(ft_corr, ft_tilt, (anchor.get("type") or "").lower())
         v0, v_ceil, v_resp = _ft_speed_state(db)
         vo2_star, vo2_curve = None, None
         if v0:
@@ -6739,7 +6818,7 @@ def generate_plan(db, force_regime=None):
                                           race_long_km=race_long, correction=ft_corr,
                                           projected_vo2max=vo2_star, vo2_curve=vo2_curve,
                                           band_inputs={"sigma_race": ft_sigma, "n_races": ft_n,
-                                                       "v0": v0})
+                                                       "v0": v0, "long_km_now": long_now})
         # §6q/§PRO7b — annotate each chain race with its own projected race fitness (the PEAK CTL carried
         # into that race's taper). Map by the segment's taper KEY (chain index i → "taper"/"taper{i}"),
         # not the human label, since two races can share a label.
@@ -10181,6 +10260,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .fcpt b{font-family:var(--mono);color:var(--text);font-weight:600}
   .fcpt.now b{color:var(--accent)}
   .fcsep{opacity:.5}
+  .fcgain{font-family:var(--serif);font-style:italic;color:var(--accent);opacity:.9}
   .regimebar{display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;margin:2px 0 14px;
     padding:9px 12px;border-radius:10px;font-size:12px;line-height:1.4;
     border:1px solid var(--line);background:var(--surface2)}
@@ -12401,20 +12481,36 @@ function renderPlan(p){
       </div>`
     : `<div class="objline"><span class="race">Maintenance</span>
         <span class="away" style="color:var(--muted)">no objective — holding fitness</span></div>`;
-  // §PRO7 — finish-time projection strip (the honesty valve: a short runway ⇒ a slower projected time,
-  // and it gets faster with more runway). The headline time is already woven into the feas note prose;
-  // this is the at-a-glance now→+4w→+8w curve underneath it.
+  // §PRO7/§FT6 — finish-time strip. It used to read now→+4w→+8w, which prices a LATER RACE DATE —
+  // a counterfactual nobody asked about, and one that reads like a timeline ("am I training for the
+  // next 8 weeks?"). It now answers the question a runner actually has: what does this BLOCK buy?
+  // Today's measured shape → the race-day projection, with the gain named. The runway curve is not
+  // lost — it moves into the hover, labelled as the what-if it always was.
   const FT = p.feasibility && p.feasibility.finish_time;
-  // §FT3 — the RANGE is the headline (owner-decided: a point invites anchoring on false
-  // precision); the median rides as the trend detail, the curve stays the runway-trend strip.
-  const FTB = FT && FT.band;
-  const ftPts = (FT&&FT.curve||[]).map(c=>({lab: c.plus_weeks===0?(FTB?'median now':'now'):'+'+c.plus_weeks+'w', hms: c.hms, now: c.plus_weeks===0}));
+  // §FT3 — the RANGE is the headline (owner-decided: a point invites anchoring on false precision);
+  // the median rides as the trend detail.
+  const FTB = FT && FT.band, FTT = FT && FT.today;
+  const ftPts = FTT
+    ? [{lab:"off today's shape", hms:FTT.hms}, {lab:"by race day", hms:FT.hms, now:true}]
+    : (FT&&FT.curve||[]).map(c=>({lab: c.plus_weeks===0?(FTB?'median now':'now'):'+'+c.plus_weeks+'w',
+                                  hms: c.hms, now: c.plus_weeks===0}));
+  const fcMin=s=>{const m=Math.round(Math.abs(s)/60);
+    return m>=60?`${Math.floor(m/60)}h ${String(m%60).padStart(2,"0")}min`:`${m} min`};
+  // Named honestly in BOTH directions — a taper-only or detraining runway must not be dressed up
+  // as a gain, and a flat one says so rather than implying movement.
+  const gain = FTT && FTT.gain_seconds;
+  const gainTxt = !FTT ? "" : gain>60 ? `the build buys ${fcMin(gain)}`
+    : gain<-60 ? `this runway costs ${fcMin(gain)}` : "holds today's shape";
+  const runway = (FT&&FT.curve||[]).filter(c=>c.plus_weeks>0)
+    .map(c=>`+${c.plus_weeks}w → ${c.hms}`).join(" · ");
+  const fcHint = FT ? (FT.note||"") + (runway?` If the race were later (same training): ${runway}.`:"") : "";
   const finishCurve = FT ? `<div class="finishcurve">
       <span class="fclabel">Projected ${esc(FT.distance)} finish
         ${FTB?`<b>${esc(FTB.lo_hms)}–${esc(FTB.hi_hms)}</b>`:`<b>${esc(FT.hms)}</b>`}</span>
-      ${ftPts.map(c=>`<span class="fcpt${c.now?' now':''}">${c.lab}: <b>${esc(c.hms)}</b></span>`)
+      ${ftPts.map(c=>`<span class="fcpt${c.now?' now':''}">${esc(c.lab)}: <b>${esc(c.hms)}</b></span>`)
         .join('<span class="fcsep">→</span>')}
-      ${qhint(FT.note)}
+      ${gainTxt?`<span class="fcgain">${esc(gainTxt)}</span>`:''}
+      ${qhint(fcHint)}
     </div>` : "";
   // §PRO3/§PRO5 — training-regime posture: which regime drove the plan + why, and (assertive) how hard
   // it's riding the safe ceiling given his measured-vs-projected response. Surfaced so the auto-gate is
@@ -17024,6 +17120,65 @@ def _stc_ft_ledger():
                     "failures": fail or "none"})
 
 
+def _stc_ft_scale():
+    """§33e det — the distance tilt and the correction transfer. Our speed axis applies the
+    Daniels/Gilbert %-vs-duration curve to VELOCITY (keeping the shipped pace_zones grid coherent
+    and the axis self-consistent under inversion); canonical Daniels discounts the VO₂. §33e first
+    recorded that gap as something that "washes into c" — it does NOT, because it is not a constant:
+    it GROWS with race duration, so a correction learned on marathons carries marathon-specific
+    scale error onto a 10k. This battery pins the tilt's shape, and pins the transfer to be exactly
+    neutral on the two paths that must never move (same-distance corpus, and no corpus at all)."""
+    fail = []
+    # (1) the tilt is real, ordered, and GROWS with duration — the reason it can't wash into c
+    t5, t10, th, tm = (_ft_scale_tilt(k) for k in ("5k", "10k", "half", "marathon"))
+    if not (1.0 < t5 < t10 < th < tm):
+        fail.append(f"tilt should grow with race duration: 5k {t5} 10k {t10} half {th} mara {tm}")
+    if not (1.005 < t5 < 1.02 and 1.03 < tm < 1.06):
+        fail.append(f"tilt magnitudes off the measured band: 5k {t5} marathon {tm}")
+    # (2) the reference construction really is the other one: Daniels discounts VO₂, we discount
+    #     velocity, so ours predicts SLOWER at the same VDOT — and round-trips on its own axis
+    if not (_ft_daniels_time(45, "marathon") < _ft_base_time(45, "marathon")):
+        fail.append("reference should be faster than ours at equal VDOT (we discount velocity)")
+    if _ft_daniels_time(45, "nope") is not None or _ft_daniels_time(0, "10k") is not None:
+        fail.append("nonsense inputs should yield None, not a fabricated reference time")
+    # (3) THE TWO NEUTRALITY GUARANTEES: same-distance transfer is byte-identical, and no corpus
+    #     leaves the cold-start prior exactly alone
+    if _ft_transfer_correction(1.25503, tm, "marathon") != 1.25503:
+        fail.append("same-distance transfer must be EXACTLY neutral (byte-identical)")
+    if _ft_transfer_correction(1.25503, None, "marathon") != 1.25503 \
+            or _ft_transfer_correction(1.0, None, "10k") != 1.0:
+        fail.append("an empty corpus must leave the correction untouched (cold-start prior)")
+    # (4) genuine cross-distance transfer strips the corpus's tilt and re-adds the target's
+    c_m = 1.25503
+    c_10 = _ft_transfer_correction(c_m, tm, "10k")
+    if not (c_10 < c_m and abs(c_10 - c_m * t10 / tm) < 1e-12):
+        fail.append(f"marathon→10k transfer wrong: {c_10} (want {c_m * t10 / tm})")
+    if not (_ft_transfer_correction(1.1, t10, "marathon") > 1.1):
+        fail.append("10k→marathon transfer should move the other way")
+    # (5) the sigma de-tilt: a SINGLE-distance corpus shifts by a constant, so its spread — and
+    #     therefore the owner's banded numbers — cannot move; a MIXED corpus sheds the between-
+    #     distance gap it was booking as race-day noise the runner never produced
+    spread = lambda xs: (lambda m: math.sqrt(sum((x - m) ** 2 for x in xs) / len(xs)))(sum(xs) / len(xs))
+    one = [0.10, 0.20, 0.35]
+    if abs(spread(one) - spread([x - math.log(tm) for x in one])) > 1e-12:
+        fail.append("de-tilting a single-distance corpus must not move its spread")
+    mixed = [0.20 + math.log(tm), 0.21 + math.log(tm), 0.20 + math.log(t10), 0.21 + math.log(t10)]
+    detilted = [mixed[0] - math.log(tm), mixed[1] - math.log(tm),
+                mixed[2] - math.log(t10), mixed[3] - math.log(t10)]
+    if not (spread(detilted) < spread(mixed) / 2):
+        fail.append(f"mixed corpus should shed the tilt gap: {spread(mixed)} → {spread(detilted)}")
+    return _st("det", "ft-scale",
+               "§33e distance tilt + correction transfer: tilt grows with duration (so it cannot "
+               "wash into c), same-distance transfer byte-identical, empty corpus untouched, "
+               "cross-distance strips the corpus tilt, sigma de-tilt moves only a mixed corpus",
+               passed=not fail,
+               expect="1 < 5k < 10k < half < marathon tilt; same-distance + no-corpus exactly "
+                      "neutral; marathon→10k = c·t10/tm; single-distance spread unmoved",
+               got={"tilt": {k: round(v, 5) for k, v in
+                             (("5k", t5), ("10k", t10), ("half", th), ("marathon", tm))},
+                    "c_marathon": c_m, "c_to_10k": round(c_10, 5), "failures": fail or "none"})
+
+
 def _stc_ft_coldstart():
     """§FT5 det — the "any runner" cold start: a bare db (one hard 10k + an objective, NO shape
     snapshot) generates a real CAUTION plan seeded by VDOT inversion (round-trip locked), the
@@ -17131,7 +17286,7 @@ def _stc_ft_coldstart():
     if not pw.get("ok"):
         fail.append(f"vo2-carrying cold db did not generate: {pw.get('error')}")
     else:
-        gone = [k for k in ("at_evo2", "long_km", "correction", "band") if ftw.get(k) is None]
+        gone = [k for k in ("at_evo2", "long_km", "correction", "band", "today") if ftw.get(k) is None]
         if gone:
             fail.append(f"generate_plan → feasibility dropped §FT wiring: {gone}")
         elif not all(c.get("evo2") for c in ftw.get("curve") or []):
@@ -19412,7 +19567,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_band(), lambda: _stc_ft_ledger(),
-                 lambda: _stc_ft_coldstart(), lambda: _stc_polarized(),
+                 lambda: _stc_ft_coldstart(), lambda: _stc_ft_scale(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),
                  lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
