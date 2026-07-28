@@ -92,12 +92,14 @@ async function runFull() {
   // innerText reflects CSS text-transform (the .dh banner is uppercased) → match case-insensitively
   ok('Generate plan re-plans (diff banner)', /re-planned/i.test(await page.locator('#plan .diff').innerText()));
 
-  // ── Plan-drift view renders its four charts (now ≥1 plan version) ─────────
+  // ── Plan-drift view renders its five charts (now ≥1 plan version) ─────────
+  // FIVE, not four: §FT4 added the prediction ledger (#drift-fin). The old count of four passed
+  // vacuously once the ledger shipped — it never named the chart it was missing.
   await page.waitForFunction(
     () => { const d = document.querySelector('#drift'); return d && !/Loading/.test(d.innerText); },
     { timeout: 15000 });
-  ok('plan-drift view renders 4 charts',
-     await page.locator('#drift-dist, #drift-eff, #drift-ctl, #drift-out').count() === 4);
+  ok('plan-drift view renders 5 charts (incl. the §FT4 prediction ledger)',
+     await page.locator('#drift-dist, #drift-eff, #drift-ctl, #drift-out, #drift-fin').count() === 5);
 
   await page.screenshot({ path: `${SHOTS}/06-flows.png`, fullPage: true });
 
@@ -129,8 +131,12 @@ async function runSettled() {
     { timeout: 15000 });
   const txt = (await page.locator('#drift').innerText()).replace(/\s+/g, ' ');
   ok('scorecard reckons the race ("How the race went")', /how the race went/i.test(txt));
-  ok('result verdict shows goal vs actual', /goal 3:45.*ran 3:52/i.test(txt));
-  ok('result missed-the-goal read', /missed by 7:00/i.test(txt));
+  ok('result verdict shows goal vs actual', /goal 3:45.*ran 3:52:30/i.test(txt));
+  // The GUN clock, not moving time (§33f `_race_seconds`). The fixture encodes the difference on
+  // purpose: duration 13920 s = 3:52:00, elapsed_time 13950 s = 3:52:30. A race is timed by the
+  // clock on the gantry, so the read must be 3:52:30 / missed by 7:30 — reading 7:00 here would
+  // mean the reckoning had quietly gone back to moving time.
+  ok('result missed-the-goal read is on the gun clock', /missed by 7:30/i.test(txt));
   ok('fitness reckoning present', /arrived at CTL/i.test(txt));
   await page.screenshot({ path: `${SHOTS}/07-reckoning.png`, fullPage: true });
 }
@@ -157,7 +163,11 @@ async function runEmpty() {
   const frText = await page.locator('#firstrun').innerText();
   ok('step ① "Connect Runalyze" is the active step',
      await page.locator('#firstrun .fr-step.active .fr-label').innerText().then(t => /Connect Runalyze/.test(t)));
-  ok('token step is instructional (mentions RUNALYZE_TOKEN)', /RUNALYZE_TOKEN/.test(frText));
+  // The token lives in the private SH_SECRETS_DB store and is applied live — so the card must send
+  // the runner to Settings, NOT tell them to export an env var and restart. Naming RUNALYZE_TOKEN
+  // here would be actively wrong advice now, which is why the absence is asserted too.
+  ok('token step sends the runner to Settings', /token in Settings/i.test(frText));
+  ok('token step does not tell the runner to set an env var', !/RUNALYZE_TOKEN/.test(frText));
   ok('later steps present but pending', await page.locator('#firstrun .fr-step').count() === 3);
   await page.screenshot({ path: `${SHOTS}/04-firstrun-empty.png`, fullPage: true });
 }

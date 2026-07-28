@@ -3894,10 +3894,17 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # CTL-gated by the same EOW ACWR governor (his big 18–30km long runs rode CTL 80–100; off today's
 # CTL ~24 the safe peak long run is ~12–13km, which his own data confirms — his 22–35km runs ran at
 # ACWR 1.26, right at the 1.25 cap). Safety is unchanged: only the EOW ACWR governor bounds load, and
-# it's untouched. NOTE: no explicit intraweek-peak-ACWR guard is needed *because the long run is
-# CTL-limited to ~12km here* (single-day spike stays ~1.3); if this is ever combined with the volume
-# push (option-1 sibling), the long run grows and that unguarded intraweek spike reopens — add a peak
-# guard then. The re-base (the pure-easy, post-illness restart) keeps its ORIGINAL conservative cap
+# it's untouched. NOTE (2026-06-20): "no explicit intraweek-peak-ACWR guard is needed *because the
+# long run is CTL-limited to ~12km here*; if this is ever combined with the volume push the long run
+# grows and that unguarded spike reopens — add a peak guard then."
+# ✅ THAT CONDITION HAS SINCE ARRIVED, AND THE GUARD EXISTS (audited 2026-07-28). Off CTL 51→58 the
+# long run now reaches ~17.5 km, well past the ~12 km this note assumed. `_max_week_trimp` bounds
+# in-week PEAK ACWR ≤ ACWR_HARD (§H1) as well as EOW ≤ cap, and it BINDS: across the block the peak
+# tops out at exactly 1.300 = ACWR_HARD. So the guard this note asks a future reader to add is
+# already in place and holding — do not add a second one. What is worth watching instead is that
+# §PRO10's progression floor legitimately rides weeks PAST the 1.25 soft cap up to that hard cap, so
+# the hard cap is the cruising altitude on building weeks, not a rare backstop (3 up : 1 down).
+# The re-base (the pure-easy, post-illness restart) keeps its ORIGINAL conservative cap
 # (REBASE_LONG_CAP) so it stays byte-identical — the recalibration is for the marathon-prep phases.
 LONG_RUN_MAX_FRAC = 0.50
 REBASE_LONG_CAP = 0.35     # pure-easy blocks (re-base) keep the original cap — leave the cautious restart untouched
@@ -4163,8 +4170,12 @@ BUILD_INTERVAL_FRAC = 0.12   # VO₂ intervals (interval zone) — the hard slic
 BUILD_MP_FRAC = 0.07         # marathon-pace long-run finish (marathon zone, attached to the long run)
 
 # Peak / sharpen — trimmed volume, race specificity. The long run is at its largest the runway
-# allows (bounded by LONG_RUN_MAX_FRAC of the week + the ACWR ceiling — honest about a detrained
-# masters runway: ~12–13 km, CTL-gated, not a textbook 32–35 km), with race-pace work + light sharpening.
+# allows (bounded by PEAK_LONG_FRAC of the week + the ACWR ceiling — honest about a detrained
+# masters runway, CTL-gated, not a textbook 32–35 km). The "~12–13 km" figure this note used to
+# quote was measured off CTL ~24 (2026-06-20); at the CTL 51→58 of the current block it lands at
+# ~17 km. The number tracks CTL — it is not a constant, and it is not a suppressed cap: the binding
+# constraint is the weekly volume the ACWR governor allows, NOT LONG_RUN_MAX_FRAC (audited
+# 2026-07-28, peak long ran 44–45% of the week against a 50% ceiling that never bound).
 PEAK_WEEKLY_RAMP = -0.04     # trim volume into race specificity
 PEAK_LONG_FRAC = 0.48        # raised 0.35→0.48 (2026-06-20) — push the long run to its CTL-safe ceiling
 PEAK_MP_FRAC = 0.10
@@ -5245,7 +5256,38 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             offsets = av_days if av_days is not None else _run_days(wk["runs"])
             today_off = (today - wk_start_d).days
             rem = [o for o in offsets if o >= today_off]
-            full, _ = _distribute_week(wk, wk_start_d, intent_trimp, easy_pace_sec, zones,
+            # §PRO13 — the straddling week's INTENT is the one this regime actually lays, not the
+            # skeleton. §6o/§6o-B were written against the caution model (`chosen = min(intent,
+            # allowed)`), where `wk["km"]` IS the intent. §PRO2's assertive regime RIDES the ceiling
+            # (`chosen = allowed`), so on an assertive week `wk["km"]` understates the real intent by
+            # ~40% — and every mid-week regeneration silently re-laid the current week at the caution
+            # shape, then let that dip propagate: the light week depresses projected CTL, forward
+            # volume is CTL-responsive, and the whole road to the race shifts down (measured on his
+            # 2026-07-28 DB: 740 → 653 km, race-day CTL 59 → 54, finish 4:50:22 → 5:01:32 — purely
+            # from regenerating on a Tuesday instead of a Monday).
+            # This computes the SAME target the full-week path below would choose, and uses it as the
+            # basis for the elapsed display, the §6e-FREQ/§6o-B "already covered" tests, and the
+            # remainder prorate. It moves the INTENT only — `chosen = min(prorate, allowed)` still
+            # binds the remainder to the today-onward ACWR ceiling, so no safety bound is relaxed.
+            # §PRO6/§PRO11 (forced deload / re-phase) are deliberately NOT reproduced here: they
+            # mutate `shape`, and the straddling week is already underway.
+            # Caution keeps `intent_trimp`/`wk["km"]` verbatim ⇒ byte-identical.
+            wk_intent_trimp, wk_intent_km = intent_trimp, (wk.get("km") or 0)
+            if assertive and not _is_taper(wk.get("intent")):
+                _sd, _sp = _is_down(wk.get("intent")), \
+                    str(wk.get("intent") or "").lower().startswith("peak")
+                _prog = ((1 + PROG_RAMP) * last_nondown
+                         if (last_nondown and eff_cap >= ACWR_SOFT - 1e-9
+                             and not _sd and not _sp) else None)
+                _full_allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones,
+                                                ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                                                days_override=av_days, av_blocked=av_off,
+                                                prog_floor=_prog)
+                _target = ((BUILD_DOWN_FRAC * last_nondown)
+                           if (_sd and last_nondown) else _full_allowed)
+                wk_intent_trimp = min(_target, _full_allowed)
+                wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
+            full, _ = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec, zones,
                                        days_override=av_days, av_blocked=av_off)
             elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
             # §6e-FREQ + §6o-B — what this week's ACTUALS already cover. freq_met: run COUNT *and* km
@@ -5257,11 +5299,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             freq_met = vol_met = False
             if rem and week_actuals is not None:
                 a_runs, a_km = week_actuals
-                left_tr = max(0.0, (wk.get("km") or 0) - a_km) * TRIMP_PER_KM
+                # §PRO13 — these read the week's REAL intent too: an assertive week is not "already
+                # covered" at the skeleton's km, or the remainder would fall to optional rest while
+                # the plan still intended a third of the week's volume.
+                left_tr = max(0.0, wk_intent_km - a_km) * TRIMP_PER_KM
                 min_left = 0.0 if _is_taper(wk.get("intent")) else \
                     RUN_MIN_KM * (easy_pace_sec / 60.0) * EASY_TRIMP_PER_MIN
-                freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= (wk.get("km") or 0)
-                vol_met = (wk.get("km") or 0) > 0 and left_tr <= min_left
+                freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= wk_intent_km
+                vol_met = wk_intent_km > 0 and left_tr <= min_left
                 if freq_met or vol_met:
                     rem = []
             if rem:
@@ -5283,13 +5328,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §AV — the denominator is the TEMPLATE's run count (== len(offsets) without §AV, so
                 # byte-identical): an av-shed week's blocked days contribute nothing, they don't
                 # concentrate the intent into the surviving days.
-                prorate = intent_trimp * len(rem) / max(1, wk["runs"])
+                prorate = wk_intent_trimp * len(rem) / max(1, wk["runs"])
                 if week_actuals is not None:
                     # §6o-B — charge the ACTUAL km already run against the week's intent: the
                     # remainder may never re-prescribe volume he has already done. One-way (min), so
                     # an under-run early week still gets only its day-prorated share — a missed day
-                    # is never crammed into the back of the week.
-                    prorate = min(prorate, max(0.0, (wk.get("km") or 0) - week_actuals[1]) * TRIMP_PER_KM)
+                    # is never crammed into the back of the week. (§PRO13: charged against the
+                    # regime's real intent, not the skeleton.)
+                    prorate = min(prorate, max(0.0, wk_intent_km - week_actuals[1]) * TRIMP_PER_KM)
                 chosen = min(prorate, allowed)
                 rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, use_zones,
                                              days_override=rem, av_blocked=av_off, q_days=q_ahead)
@@ -14750,6 +14796,59 @@ def _stc_within_week():
                     "rem_trimp_lo": lo[0]["trimp_total"], "rem_trimp_hi": hi[0]["trimp_total"]})
 
 
+def _stc_straddle_intent():
+    """§PRO13 — the week straddling `today` must lay the intent ITS REGIME holds, not the skeleton.
+    §6o/§6o-B were written against the caution model (`chosen = min(intent, allowed)`), where the
+    shape's `km` IS the intent; §PRO2's assertive regime RIDES the ceiling, so on an assertive week
+    the skeleton understates the real intent badly. The regression this pins: BEFORE the fix an
+    assertive straddling week laid EXACTLY what a caution one did (measured 18.5 km vs 18.5 km, while
+    its own full week intended 45.8) — the regime was silently dropped for the current week, and the
+    resulting dip propagated down the whole road via the CTL-responsive forward volume. Pure."""
+    from datetime import date, timedelta
+    easy = 425
+    # skeleton km deliberately far BELOW what assertive would ride, so the two intents are separable
+    shape = {"wk": 1, "km": 20, "runs": 5, "long": 6, "strides": 0, "intent": "General — aerobic"}
+    mon = date(2026, 8, 3)
+    today = mon + timedelta(days=1)          # Tuesday — Monday elapsed
+    ctl0, atl0 = 50.0, 45.0
+    acts = (1, 5.0)                          # one run, 5 km already banked this week
+    fails = []
+    c_full, _ = generate_block([dict(shape)], mon, ctl0, atl0, easy, regime="caution")
+    a_full, _ = generate_block([dict(shape)], mon, ctl0, atl0, easy, regime="assertive",
+                               last_nondown=400.0)
+    c_strd, _ = generate_block([dict(shape)], mon, ctl0, atl0, easy, today=today,
+                               week_actuals=acts, regime="caution")
+    a_strd, _ = generate_block([dict(shape)], mon, ctl0, atl0, easy, today=today,
+                               week_actuals=acts, regime="assertive", last_nondown=400.0)
+    cf, af, cs, as_ = (c_full[0]["km"], a_full[0]["km"], c_strd[0]["km"], a_strd[0]["km"])
+    if not (af > cf * 1.5):                  # sanity: the regimes must differ on a FULL week at all
+        fails.append(f"fixture too weak — assertive full {af} not clearly above caution full {cf}")
+    # THE REGRESSION: pre-fix these were equal, because both read the skeleton.
+    if not (as_ > cs * 1.5):
+        fails.append(f"assertive straddle {as_}km ≈ caution straddle {cs}km — the regime was dropped "
+                     f"for the straddling week (skeleton intent, not the ridden ceiling)")
+    # …but it may never exceed what the full assertive week itself intended (it is day-prorated).
+    if as_ > af + 0.05:
+        fails.append(f"assertive straddle {as_}km exceeds its own full week {af}km")
+    # CAUTION CONTRACT unchanged: never rides past the skeleton intent.
+    if cs > shape["km"] + 0.05:
+        fails.append(f"caution straddle {cs}km rode past its skeleton intent {shape['km']}km")
+    # SAFETY: the intent moved, the ceiling did not — EOW ACWR still bounded on both paths.
+    for tag, w in (("caution", c_strd[0]), ("assertive", a_strd[0])):
+        if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
+            fails.append(f"{tag} straddle breached EOW ACWR cap: {w.get('proj_acwr')}")
+        if not w.get("partial"):
+            fails.append(f"{tag} straddle not flagged partial")
+    return _st("det", "straddle-intent",
+               "§PRO13 the straddling week follows its REGIME's intent, not the shape skeleton: an "
+               "assertive mid-week regen keeps riding the ceiling (pre-fix it collapsed to the caution "
+               "lay); never exceeds its own full week; caution stays at the skeleton; EOW ACWR still capped",
+               passed=not fails,
+               expect="assertive straddle >> caution straddle, ≤ assertive full; caution ≤ skeleton; ACWR ≤ cap",
+               got={"violations": fails or "none", "caution_full": cf, "assertive_full": af,
+                    "caution_straddle": cs, "assertive_straddle": as_})
+
+
 def _stc_doubles_log():
     """§ doubles v1 — block_log keeps a day's runs INDIVIDUAL: a double surfaces both halves as a
     per-run breakdown (each map-linkable) while plan-vs-actual + 'ran so far' use the daily SUM; a
@@ -20000,7 +20099,8 @@ def run_server_selftest(db, categories=None):
     """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
-                 lambda: _stc_within_week(), lambda: _stc_bonus_affordance(),
+                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
+                 lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
                  lambda: _stc_multi_a_chain(),

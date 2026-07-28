@@ -12,6 +12,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-07-28
+
+Regenerating a plan part-way through the week no longer quietly shrinks the rest of the season.
+
+### Fixed
+
+- **A plan regenerated mid-week no longer collapses the week in progress — or every week after it.**
+  The engine runs one of two regimes: a cautious one, which treats the planned week's volume as
+  written, and an assertive one — unlocked by consistently well-absorbed training — which
+  deliberately rides the safe ceiling above that figure. The logic handling the week you are
+  currently in predates the assertive regime and only ever knew the cautious rule, so it re-laid the
+  remainder of that week at the cautious volume no matter which regime the plan was actually
+  running. On an assertive plan that is roughly a third less training than intended. The damage did
+  not stop at the one week: the plan projects fitness forward from wherever it currently stands, and
+  later volume tracks that projection, so the shortfall propagated down the entire road to race day,
+  fading only slowly and never fully recovering. Because a plan regenerates daily, most
+  regenerations land mid-week — this was the ordinary case, not an edge case. The week in progress
+  now follows the intent its own regime holds. **Safety is unchanged:** the acute-load ceiling still
+  bounds the remaining days exactly as it did before, and on a constrained week it still binds; only
+  the target being bounded was wrong, and it is the target that changed.
+- **The days already run this week are shown at the volume that was actually prescribed for them.**
+  The same mistaken figure drove the display of the elapsed part of the week, so a day you had
+  already completed could be listed at a shorter distance than the plan had asked for. The two
+  related checks that decide whether a week's training is "already covered" — and therefore whether
+  the remaining days become optional — read the corrected intent too, so an assertive week is no
+  longer declared complete a third of the way short.
+
 ## [0.21.0] - 2026-07-28
 
 The prediction gets stricter about what counts as evidence — and the plan stops forgetting what you

@@ -7,12 +7,22 @@
 #   ./test/run_local_test.sh
 #
 # Env knobs: PY (python, default venv/bin/python), PORT (base, default 8801),
-#            NODE_PATH (default /usr/lib/node_modules), KEEP=1 to keep the temp dir.
+#            NODE_PATH (default: a user-global install if present, else /usr/lib/node_modules),
+#            KEEP=1 to keep the temp dir.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PY="${PY:-venv/bin/python}"
 PORT="${PORT:-8801}"
+# Playwright may be installed system-wide (sudo) or user-global (npm prefix=~/.local, no sudo —
+# the only option on a box where pacman is wedged). Prefer whichever actually exists so the caller
+# doesn't have to remember; an explicit NODE_PATH still wins.
+if [ -z "${NODE_PATH:-}" ]; then
+  for cand in "$HOME/.local/lib/node_modules" /usr/lib/node_modules; do
+    [ -d "$cand/playwright" ] && { NODE_PATH="$cand"; break; }
+  done
+  export NODE_PATH="${NODE_PATH:-/usr/lib/node_modules}"
+fi
 WORK="$(mktemp -d)"
 PIDS=()
 
