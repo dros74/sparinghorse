@@ -12,6 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-28
+
+A saved plan now tells you when it was built by an older version of the app.
+
+### Added
+
+- **Plans carry the version of the engine that generated them, and say so when that is no longer
+  the version running.** A plan is a versioned artifact: updating the application deliberately does
+  not rebuild the plans already saved, because the weeks you have lived are frozen on purpose. The
+  consequence is that immediately after an upgrade the app serves a plan produced by code that is no
+  longer installed — same numbers as yesterday, computed by an engine that has since been corrected.
+  There was a warning for this, but it worked by recognising the *shape* of one specific older
+  payload, so it could only ever catch the breakage it had been written for; a plan that was merely
+  one release behind slipped past it silently, showing stale figures with nothing to indicate it.
+  Every generated plan is now stamped with its engine's version, the served plan is compared against
+  the version actually running, and any difference raises a banner above the plan explaining that
+  the weeks below — and everything derived from them — are exactly as they were generated, with a
+  prompt to regenerate. The comparison is a plain match rather than an ordering, so a rollback is
+  reported just as clearly as an upgrade, and a plan predating the stamp entirely is correctly
+  treated as out of date. An internal check ties the stamp to this changelog, so a release cannot be
+  published with the version marker left behind.
+
 ## [0.21.1] - 2026-07-28
 
 Regenerating a plan part-way through the week no longer quietly shrinks the rest of the season.

@@ -190,6 +190,21 @@ def cadence_is_halved(source):
 # that predate the bump are re-fetched instead of served stale. v2 = elevation; v3 = route path (lat/long).
 PROFILE_VERSION = 3
 
+# §PRO14 — the engine's own identity, stamped onto every plan it generates so a SAVED plan can say
+# whether the engine that made it is the one now running. Plans are versioned artifacts and a deploy
+# never regenerates them (§6f Step E), so after an upgrade the app serves a plan built by code that
+# no longer exists — with no way for the view to know. §FT7 half-covered this by sniffing for a
+# PRE-§FT payload shape (no band and no `today`), which by construction cannot see a plan that is
+# merely one release old: on 2026-07-28 a 0.21.0 plan rendered under 0.21.1 with no marker at all,
+# and the owner reasonably read the unchanged numbers as a failed deploy. A shape sniff can only ever
+# recognise the breakages it was written for; an identity comparison catches every future one.
+# WHY A CONSTANT, not a CHANGELOG parse: the container ships SparingHorse.py alone (see Dockerfile),
+# so there is no changelog to read at runtime. WHY NOT A SOURCE HASH: it would fire on comment-only
+# releases and train the owner to ignore the marker, which is the failure it exists to prevent.
+# Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
+# and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
+ENGINE_VERSION = "0.22.0"
+
 
 def activity_profile(activity_id, n=120):
     """Downsampled pace/HR/cadence/elevation-vs-distance profile for one activity (via MCP streams).
@@ -3904,6 +3919,16 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # already in place and holding — do not add a second one. What is worth watching instead is that
 # §PRO10's progression floor legitimately rides weeks PAST the 1.25 soft cap up to that hard cap, so
 # the hard cap is the cruising altitude on building weeks, not a rare backstop (3 up : 1 down).
+# ✅ SETTLED 2026-07-28 — THE OWNER'S EXPLICIT CALL: "I want to cruise the hard cap." So this is the
+# intended posture, not drift, and NO code change was made: §PRO10 already rides to ACWR_HARD and
+# must keep doing so. Do not "restore" the soft cap as the assertive ceiling — that would silently
+# revoke a decision he made with the numbers in front of him (building weeks measured at 1.296–1.300
+# against soft 1.25 / hard 1.30, on a 3-up-1-down cadence with down weeks falling to ~1.12–1.18).
+# THE CONSEQUENCE HE OWNS, stated plainly so nobody has to rediscover it: with the backstop adopted
+# as the target, there is no longer any ACWR headroom ABOVE normal operation. ACWR_HARD is now both
+# the ceiling and the aim, so it can no longer also serve as the margin that absorbs a bad week —
+# any future emergency brake has to come from a different axis (readiness, §PRO5's ride-cap easing,
+# or the biomechanical eq_km governor), never from room inside this one.
 # The re-base (the pure-easy, post-illness restart) keeps its ORIGINAL conservative cap
 # (REBASE_LONG_CAP) so it stays byte-identical — the recalibration is for the marathon-prep phases.
 LONG_RUN_MAX_FRAC = 0.50
@@ -6999,6 +7024,10 @@ def generate_plan(db, force_regime=None, today=None):
     plan = {
         "ok": True,
         "generated_at": _now_iso(),
+        # §PRO14 — which engine built this artifact. Compared at serve time against the running
+        # ENGINE_VERSION so the view can say "regenerate to re-read" instead of silently showing
+        # numbers from code that is no longer deployed.
+        "engine_version": ENGINE_VERSION,
         # §FT5 — present only on a cold-started plan: WHAT seeded the state (the runner can see the
         # engine's assumptions; each seed is replaced by measurement as data lands). None otherwise.
         **({"cold_start": cold} if cold else {}),
@@ -9280,6 +9309,12 @@ def api_plan():
     db = get_db()
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     plan = json.loads(row["plan"]) if row else None
+    # §PRO14 — annotate at SERVE time with the engine actually running, so the view can compare it
+    # against the stamp baked into the artifact. Serve-time only: never stored, so it cannot make a
+    # saved plan disagree with itself. A plan generated before §PRO14 has no stamp at all, which is
+    # exactly the mismatch we want it to report.
+    if plan:
+        plan["engine_running"] = ENGINE_VERSION
     if plan and READONLY:
         plan.pop("adjustment", None)   # the adjustment carries free-text/medical context — withhold
         plan.pop("cold_start", None)   # §33f-5 — the seeds carry AGE + an HRmax prior in bpm (H7-class)
@@ -10585,6 +10620,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .fcsep{opacity:.5}
   .fcgain{font-family:var(--serif);font-style:italic;color:var(--accent);opacity:.9}
   .fcstale{font-family:var(--serif);font-style:italic;color:var(--warn,#b45309);opacity:.95}
+  /* §PRO14 — plan-level staleness. Deliberately a BANNER, not the finish strip's inline chip: the
+     numbers a stale plan misreports are the weeks themselves, which is where the eye goes first. */
+  .stalebanner{margin:2px 0 12px;padding:10px 13px;border-radius:10px;font-size:12.5px;
+    line-height:1.5;border:1px solid color-mix(in oklab,var(--warn,#b45309),transparent 55%);
+    background:color-mix(in oklab,var(--warn,#b45309),transparent 92%);color:var(--text)}
   .regimebar{display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;margin:2px 0 14px;
     padding:9px 12px;border-radius:10px;font-size:12px;line-height:1.4;
     border:1px solid var(--line);background:var(--surface2)}
@@ -12821,6 +12861,11 @@ function renderPlan(p){
   // the §FT6 runway hover printed three identical times immediately after promising "more runway →
   // faster". Say it is stale, and never assert a trend the numbers don't show.
   const fcHms = (FT&&FT.curve||[]).map(c=>c.hms);
+  // §PRO14 — the GENERAL staleness signal: this artifact's engine stamp vs the engine now running.
+  // Any mismatch means regenerate, in either direction (an upgrade, or a rollback) — comparing for
+  // equality rather than ordering keeps that honest without pretending to understand version order.
+  // A pre-§PRO14 plan carries no stamp, so it reads stale, which is correct.
+  const planStale = !!(p.engine_running && p.engine_version !== p.engine_running);
   const ftStale = !!FT && !FTB && !FTT;
   const ftFrozen = fcHms.length>1 && new Set(fcHms).size===1;
   // §FT9 — the speed anchor is older than the window in which it could describe TODAY (a layoff).
@@ -12850,7 +12895,7 @@ function renderPlan(p){
       ${ftPts.map(c=>`<span class="fcpt${c.now?' now':''}">${esc(c.lab)}: <b>${esc(c.hms)}</b></span>`)
         .join('<span class="fcsep">→</span>')}
       ${gainTxt?`<span class="fcgain">${esc(gainTxt)}</span>`:''}
-      ${ftStale?`<span class="fcstale">⟳ saved by an earlier engine — regenerate to re-read</span>`:''}
+      ${(ftStale||planStale)?`<span class="fcstale">⟳ saved by an earlier engine — regenerate to re-read</span>`:''}
       ${ftAnchor?`<span class="fcstale">◷ last measured ${ftAnchor.age_days}d ago — today's shape unread</span>`:''}
       ${qhint(fcHint)}
     </div>` : "";
@@ -12884,6 +12929,10 @@ function renderPlan(p){
     </h3>
     ${weeks}`;
   host.innerHTML=`
+    ${planStale?`<div class="stalebanner">⟳ <b>This plan was built by an earlier version of the engine.</b>
+      Updating the app does not rebuild saved plans — the weeks below, and every number derived from
+      them, are exactly as they were generated${p.engine_version?` by v${esc(p.engine_version)}`:''}.
+      Hit <b>Generate plan</b> to re-read them on v${esc(p.engine_running)}.</div>`:''}
     ${diffBanner(LASTDIFF)}
     ${objManager(p)}
     ${header}
@@ -14794,6 +14843,42 @@ def _stc_within_week():
                passed=not fails, expect="partial · EOW≤cap · absorption · full week when today=None",
                got={"violations": fails or "none",
                     "rem_trimp_lo": lo[0]["trimp_total"], "rem_trimp_hi": hi[0]["trimp_total"]})
+
+
+def _stc_engine_version():
+    """§PRO14 — ENGINE_VERSION is what every generated plan is stamped with and what the view compares
+    against to decide whether a saved plan predates the running engine. A constant that silently
+    stops tracking releases would make that marker LIE — worse than not having it, because the plan
+    would then assert currency it does not have. So: it must be a plausible semver, it must be
+    stamped onto a generated plan, and it must MATCH the newest CHANGELOG heading. The changelog is
+    not shipped in the container (Dockerfile copies SparingHorse.py alone), so the comparison is
+    skipped where the file is absent rather than failing an in-container selftest for its absence."""
+    import re
+    from pathlib import Path
+    fails = []
+    if not re.fullmatch(r"\d+\.\d+\.\d+", ENGINE_VERSION or ""):
+        fails.append(f"ENGINE_VERSION {ENGINE_VERSION!r} is not an x.y.z version")
+    ch = Path(__file__).with_name("CHANGELOG.md")
+    newest, compared = None, False
+    if ch.exists():
+        for line in ch.read_text(encoding="utf-8").splitlines():
+            mt = re.match(r"^## \[(\d+\.\d+\.\d+)\]", line.strip())
+            if mt:
+                newest = mt.group(1); break
+        compared = newest is not None
+        if not compared:
+            fails.append("CHANGELOG.md present but no '## [x.y.z]' heading found")
+        elif newest != ENGINE_VERSION:
+            fails.append(f"ENGINE_VERSION {ENGINE_VERSION} != newest CHANGELOG entry {newest} — "
+                         f"a release was cut without bumping the stamp (or vice versa)")
+    return _st("det", "engine-version",
+               "§PRO14 the engine's identity stamp is a real version AND matches the newest CHANGELOG "
+               "entry (skipped where the changelog isn't shipped, e.g. in-container), so the "
+               "'saved by an earlier engine' marker can never be driven by a stale constant",
+               passed=not fails,
+               expect="semver, and == newest CHANGELOG heading when that file is present",
+               got={"violations": fails or "none", "engine_version": ENGINE_VERSION,
+                    "changelog_newest": newest, "compared": compared})
 
 
 def _stc_straddle_intent():
@@ -20100,6 +20185,7 @@ def run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
+                 lambda: _stc_engine_version(),
                  lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
