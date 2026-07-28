@@ -241,11 +241,33 @@ not faster. The conservative regime keeps its gentler classic mix unchanged; onl
 > to the athlete's data, not prescriptions issued by any of these authors.
 
 ### Honest about the *goal*, not just the week
-For a marathon the engine projects a **finish time** from the fitness you're on track to carry *into* the
-race, with a short runway curve (now / +4 / +8 weeks). If the timeline makes the objective a survival-shuffle
-rather than a race, it tells you — and shows what a bigger, still safety-governed build would buy — instead of
-quietly prescribing a plan that leaves you under-built. It never refuses the goal; it makes the trade-off
-visible, so the choice is yours.
+For a marathon the engine predicts a **finish time**, and the prediction is a **range, not a number** —
+an 80 % band, with the median shown as the trend signal beneath it. A single bold time would claim a
+precision nobody has.
+
+The prediction and the plan are one object: the plan is the most load the safety model will let you
+carry, and the prediction is what that load is worth on the day. So the headline answers the question a
+runner actually has — *what does this block buy me?*
+
+```
+Projected marathon finish 3:35:10–4:33:05
+  off today's shape: 4:28:10  →  by race day: 4:02:45   · the build buys 25 min
+```
+
+Both axes move: projected fitness (chronic load and the long-run ladder you'll have built) and
+projected speed, each re-anchored on what you have actually run every time the plan regenerates, so the
+projection can never drift away from reality. The band narrows as races calibrate it and as the horizon
+shortens — its width at a given horizon is measured from your own history, not assumed.
+
+It is honest when it cannot answer. A prediction saved by an older version of the engine says so and
+asks to be regenerated. If your last measured run is too old to describe your shape today, the
+"off today's shape" line is withheld rather than quietly quoting a number from before a layoff. And if
+the timeline makes the objective a survival-shuffle rather than a race, it tells you — and shows what a
+bigger, still safety-governed build would buy — instead of quietly prescribing a plan that leaves you
+under-built. It never refuses the goal; it makes the trade-off visible, so the choice is yours.
+
+Every prediction is also **scored against the result** once the race is run — in the band or not, and by
+a proper log score — and the record is kept where you can see it.
 
 ## Self-test
 `python SparingHorse.py selftest` runs the deterministic engine battery (and the key-gated LLM checks where a

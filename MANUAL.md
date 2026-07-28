@@ -41,6 +41,13 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
   the re-base block from your recent training. Nothing is assumed.
 - **The road moves in both directions.** Run well and earn fitness → the plan expands to use it. Run poorly
   or miss sessions → it eases toward an honest goal. Every regeneration is diff-able against the last.
+- **A plan is the road *ahead*.** Weeks you have already lived are carried verbatim and shown locked
+  (🔒) for as long as they are part of the current block — but when a block ends and the road
+  re-anchors, the plan starts from the new block and those older weeks are no longer in it. Nothing
+  is lost: every plan ever generated is kept, and the parts of the app that judge you against what
+  was prescribed (your banked-week evidence, the effort monitor) read from that whole history, not
+  from the road currently on screen. The plan document answers "where am I going", not "where have
+  I been" — the drift scorecard and the prediction ledger answer that.
 - **Safety is a hard ceiling, not a suggestion.** Every planned week is bounded by a hard ACWR cap
   (acute:chronic workload ratio) of **1.30**, with **1.25** the conservative planning target the rebuild
   sticks to. Once your data *earns* the assertive build (see §6) the week rides between the two, and further
@@ -178,10 +185,50 @@ scorecard keeps reckoning the race for ~12 weeks. The plan itself never trains t
 Enter a target like `3:30` (marathon/half, `H:MM`) or `21:00` (5k/10k, `MM:SS`), or just `finish`. The
 feasibility verdict reads your target honestly: it separates **finish healthy** (realistic off a rebuild)
 from a **time target** that the runway's chronic load won't support, and it re-reads this every block as
-real fitness returns. For a marathon it also shows a **projected finish time** from the fitness you're on
-track to carry into the race, with a short **runway curve** (now / +4 / +8 weeks) — a short runway isn't a
-refusal, it's a slower projected time that improves with more weeks, and the plan says so rather than
-quietly leaving you under-built.
+real fitness returns.
+
+### The finish projection
+
+For a marathon the engine also predicts a finish time. **The prediction is a range, not a number** — an
+80 % band, headlined as such, with the median underneath as the trend signal. A bare bold time would
+claim a precision that does not exist, so the interface does not print one.
+
+The strip answers *what the block buys you*:
+
+```
+Projected marathon finish 3:35:10–4:33:05
+  off today's shape: 4:28:10  →  by race day: 4:02:45   · the build buys 25 min
+```
+
+- **off today's shape** — the same model run at your *current* measured state: today's speed, today's
+  chronic load, the longest long actually behind you.
+- **by race day** — the same model at the state the laid plan projects you into.
+- **the build buys** — the difference, named honestly in both directions. A taper-only runway reads
+  *"this runway costs 6 min"*; a flat one reads *"holds today's shape"*.
+- Hovering shows the **what-if** the strip used to lead with: if the race were later, on the same
+  training, +4 and +8 weeks. That prices a *later race date*, not your timeline — which is why it is a
+  footnote now and not the headline.
+
+Both axes move. Projected fitness comes from the plan's own chronic load and the long-run ladder it
+builds; projected speed is your measured aerobic profile carried forward through the laid weeks. Both
+are re-anchored on what you have actually run at every regeneration, so the projection cannot drift
+away from reality — a fast or slow responder bends the curve, but neither can wander off it.
+
+**How wide the band is, and why.** Three things widen it: how variably you have raced before, how few
+races the engine has to calibrate on, and how far away the race is. The horizon part is *measured* from
+your own history — how far the projection has actually strayed over 2, 4, 8, 19 weeks — not assumed, and
+it grows slowly, because fitness is mean-reverting: week 20 adds far less uncertainty than week 2 did.
+The band narrows as races land and as race day approaches.
+
+**When it will not answer.** A prediction saved by an older version of the engine is labelled
+*"saved by an earlier engine — regenerate to re-read"* rather than presented as current — plans are
+versioned artifacts, and updating the app deliberately does not rewrite them. And if your most recent
+measured running is older than about eight weeks, the *"off today's shape"* line is withheld entirely,
+because a value from before a layoff is not a description of today. Run, and it re-anchors on its own.
+
+**It keeps score.** Every prediction is recorded, and once you race, settled against the result: whether
+the outcome fell inside the band, and a proper log score for how well-placed it was. The drift page
+plots the whole ledger, so the projection's own track record is visible rather than quietly forgotten.
 
 ---
 
@@ -231,10 +278,16 @@ its own **feasibility verdict** — so you see where *each* peak lands, not just
 A-race omits the strip; the headline verdict already covers it.)
 
 ### Plan drift / the scorecard
-*The road vs. the road as it stands.* Four charts (distance, effort/TRIMP, CTL, race-outcome) compare your
-**founding road** (the first plan saved for this goal) to where it stands now, plus a one-line verdict on
-three axes: **volume**, **fitness**, and the **race-day projection**.
+*The road vs. the road as it stands.* Five charts (distance, effort/TRIMP, CTL, race-outcome, and the
+**prediction ledger**) compare your **founding road** (the first plan saved for this goal) to where it
+stands now, plus a one-line verdict on three axes: **volume**, **fitness**, and the **race-day
+projection**.
 
+- The **prediction ledger** plots every finish prediction the engine has ever made for this goal —
+  median plus the 80 % envelope — against the day it was made. Steps in the line are model upgrades or
+  your shape moving; both are honest, and both are on the record. Once the race is run, the outcome is
+  scored against the prediction standing before it (in the band or not, plus a proper log score) and
+  the reckoning names the engine's call.
 - For a **multi-A** build the scorecard breaks out **each peak's** founding→now projection and trend, and
   the headline names the **next peak** still ahead.
 - Once a race **passes**, the scorecard stops projecting and **reckons**: the fitness you actually arrived
@@ -246,8 +299,10 @@ three axes: **volume**, **fitness**, and the **race-day projection**.
 derived lactate-threshold HR where that's trustworthy, otherwise your grade-adjusted pace vs an
 aerobic-threshold (LT1) bar (with an HR-redline backstop either way). A 0–100 easy-discipline score plus per-run verdicts (on / hot / too
 hard); each run's `anchor` names the basis it used. Prescribed quality sessions are matched to your runs
-within ±2 days and excluded from the easy score, so an anticipated or postponed session isn't misread. The
-**public** view is sanitized to a pace-based score with no HR, no critique.
+within ±2 days and excluded from the easy score, so an anticipated or postponed session isn't misread. A
+**rest day is not a session**: a run you take on one isn't matched to it, it's simply held to the easy
+bar — the standard it would have been given had it been prescribed. The **public** view is sanitized to a
+pace-based score with no HR, no critique.
 
 **Quality sessions get a per-rep read** where the run's detected structure (the "Read back" line) is
 available: the verdict is graded on the **work reps only** — warm-up, floats and cool-down excluded —
@@ -505,6 +560,11 @@ API keys and tokens are **never** included in either file — they live in a sep
 - **Re-base (Phase 0)** — the gentle restart block that re-establishes the easy-aerobic habit before the real build.
 - **Founding road** — the first plan saved for your current goal; what the drift scorecard measures "now" against.
 - **Reckoning** — the post-race settle-up: fitness you arrived with vs. projected, finish vs. goal (private only).
+- **Prediction band** — the 80 % range the finish projection is quoted as. Widened by how variably you've
+  raced, how few races there are to calibrate on, and how far off race day is; the horizon part is measured
+  from your own history rather than assumed. The median under it is the trend signal, not a promise.
+- **Prediction ledger** — the running record of every finish prediction made for a goal, and how each one
+  scored once the race was run.
 - **Earned levers** — opt-in, ACWR-capped progressions (faster build / 6th run / faster Phase-0 exit) unlocked by banked solid weeks.
 
 ---

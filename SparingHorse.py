@@ -2375,6 +2375,7 @@ TE_HARD_CORROBORATE = 3.5   # Training Effect backing a too-hard HR read → 'hi
 EASY_PACE_GRACE = 0.03      # public PACE read: allow GAP up to 3% quicker than the easy ceiling = 'on'
 AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (his documented failure mode)
 EFFORT_MATCH_DAYS = 2       # a session shuffled within ±2 days reads as a reschedule, not a new run
+NON_SESSION_KINDS = ("rest",)   # plan entries that prescribe NO run — never matchable as executed work
 
 # ── §SJ split sessions ("1+1") — several recordings, one session (PROJECT_LOG §30) ─────
 # The owner deliberately records a mixed session as separate parts (easy body saved, fresh recording
@@ -2853,13 +2854,10 @@ def _sq_read(db, reps, n, sets, pace, date_iso):
     between reps (a creeping floor = rest ran short). Count verdict vs the prescribed set band:
     `strides: S` prescribes S sets of 4–6. Display/verdict only — no training lever consumes this."""
     out = {"n": n, "sets": sets, "pace": pace}
-    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
-    presc = None
-    if row:
-        for w in _plan_all_weeks(json.loads(row["plan"])):
-            for s in w.get("sessions", []):
-                if s.get("date") == date_iso and s.get("strides"):
-                    presc = int(s["strides"])
+    # §PRO12 — resolved across plan history, so a road that has moved past this date still knows
+    # what it prescribed (the latest road alone silently drops the count verdict).
+    laid = _laid_sessions(db, date_iso, (_date(date_iso) + timedelta(days=1)).isoformat())
+    presc = int(laid[date_iso]["strides"]) if laid.get(date_iso, {}).get("strides") else None
     if presc:
         lo, hi = 4 * presc, 6 * presc
         out["prescribed"] = [lo, hi]
@@ -2920,9 +2918,17 @@ def _match_prescriptions(run_dates, prescribed, match_days=EFFORT_MATCH_DAYS):
       • each prescription is claimed by at most ONE run (closest wins, deterministic tie-break), so two
         runs can't both inherit one session and a moved session is matched once;
       • a run with nothing in range falls back to 'easy' (the polarized default).
+    A REST day is not a session and is dropped before any of this. It was being claimed like one, so
+    a run taken on a rest day inherited kind 'rest' and graded `too_easy` — a sentence that makes no
+    sense about a run (it was never asked for, so it cannot have been run too gently), and it also
+    consumed the slot, distorting the nearest-match for its neighbours. Dropped, such a run falls to
+    the 'easy' default and is judged on the easy bar: the standard it WOULD have been held to had it
+    been prescribed, which is the honest comparison for an unasked-for extra run.
+
     Pure function over date strings → list of kinds aligned to `run_dates` (for testability)."""
     from datetime import date as _date
     out = [None] * len(run_dates)
+    prescribed = [(pd, pk) for pd, pk in prescribed if pk not in NON_SESSION_KINDS]
     by_date = {}
     for i, (pd, pk) in enumerate(prescribed):
         by_date.setdefault(pd, []).append(i)
@@ -2974,13 +2980,10 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     since = (datetime.now().date() - timedelta(days=window_days)).isoformat()
     drop = dropped_ids(db)
-    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
-    plan = json.loads(row["plan"]) if row else {}
-    prescribed = []                                       # [(date, kind)] across all phases
-    for w in _plan_all_weeks(plan):   # the whole road — chain bridge/peak/taper segments included
-        for s in w.get("sessions", []):
-            if s.get("date") and s.get("kind"):
-                prescribed.append((s["date"], s["kind"]))
+    # §PRO12 — across PLAN HISTORY, not the latest road: a road that has advanced past these dates
+    # (a re-base re-anchor) would otherwise hide the very quality sessions this monitor must exclude
+    # from the easy score, re-grading them against the easy bar.
+    prescribed = [(d, s["kind"]) for d, s in _laid_sessions(db, since).items() if s.get("kind")]
     rows = [r for r in db.execute(
         "SELECT id, date, date_time, distance, duration, elapsed_time, hr_avg, raw FROM activities "
         "WHERE " + RUN_FAMILY_SQL + " AND date>=? ORDER BY date DESC", (since,)).fetchall()
@@ -4835,27 +4838,127 @@ def rebase_banking(db, block_start, today):
             "effective_len": len(REBASE_SHAPE) - graduate}
 
 
+BANK_LOOKBACK_WEEKS = 26   # §PRO12 — how far back the evidence walk may look for a week's prescription
+BANK_PLAN_SCAN = 80        # … and how many saved plans it may consult to find one
+
+
+def _prescription_history(db, prior_plan, wanted):
+    """§PRO12 — {week start → the prescription most recently LAID for it} over the `wanted` starts.
+
+    A SAVED PLAN IS THE ROAD AHEAD, not a ledger of the whole goal (his decision, 2026-07-28). So a
+    plan legitimately stops covering weeks it has advanced past — a re-base block expiring on a
+    Monday re-anchors the road to that Monday, and the weeks already lived are simply no longer part
+    of the road being described. That is correct and deliberate. What was NOT correct was reading
+    the evidence off it: a week's prescription is what `_week_banked` judges actual runs against, it
+    lives only inside plan artifacts, and sourcing it from the current road made six weeks of banked
+    evidence evaporate the day the road moved (streak 5→0, regime assertive→caution, race-day CTL
+    60→26). Plan history is therefore the PERMANENT home of that lookup, not a workaround for a bug
+    to be fixed upstream — do not "repair" `_rebase_start` to keep the past; the past is not its job.
+    Newest plan carrying a week wins;
+    the prior plan wins outright. Scans back through saved plans only until every wanted start is
+    covered, so the normal case (the road still carries its own past) reads one plan and stops.
+    No cross-call state: a regen that has just saved a plan must not see a stale map."""
+    out, need = {}, set(wanted)
+    if db is not None and need:
+        try:
+            rows = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT ?",
+                              (BANK_PLAN_SCAN,)).fetchall()
+        except Exception:
+            rows = []
+        for r in rows:
+            try:
+                p = json.loads(r["plan"])
+            except (ValueError, TypeError):
+                continue
+            for w in _plan_all_weeks(p):
+                s = w.get("start")
+                if s in need:
+                    out[s] = w
+                    need.discard(s)
+            if not need:
+                break
+    for w in _plan_all_weeks(prior_plan or {}):       # the live road is the freshest word
+        if w.get("start"):
+            out[w["start"]] = w
+    return out
+
+
+def _laid_sessions(db, since_iso, until_iso=None):
+    """§PRO12 — {date → the session prescribed for it}, resolved across PLAN HISTORY, for dates in
+    [since_iso, until_iso). The sibling of `_prescription_history` at the session grain, and it
+    exists for the same reason: a saved plan is the ROAD AHEAD (see there), so it stops covering
+    dates it has advanced past — by design — while a prescription lives only inside plan artifacts.
+    Reading it off the current road therefore loses it exactly when the road moves. Live 2026-07-27:
+    the re-base block expired, the road re-anchored to that Monday, and the effort monitor's 28-day
+    window went from 19 prescriptions (3 of them interval sessions: 06-30, 07-14, 07-22) to ONE.
+    Prescribed quality dates are matched and EXCLUDED from the easy score, so losing them silently
+    re-graded his hardest sessions against the easy bar.
+
+    Newest plan carrying a date wins (elapsed weeks are frozen verbatim by §6f Step E, so the newest
+    carrier holds the as-lived prescription). The scan stops as soon as a plan's road starts at or
+    before `since_iso` — such a plan covers the whole window, so nothing older can add to it — and
+    is bounded by BANK_PLAN_SCAN regardless. No cross-call state."""
+    out = {}
+    if db is None:
+        return out
+    try:
+        rows = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT ?",
+                          (BANK_PLAN_SCAN,)).fetchall()
+    except Exception:
+        return out
+    for r in rows:
+        try:
+            p = json.loads(r["plan"])
+        except (ValueError, TypeError):
+            continue
+        weeks = _plan_all_weeks(p)
+        for w in weeks:
+            for s in w.get("sessions", []):
+                d = s.get("date")
+                if d and d >= since_iso and (until_iso is None or d < until_iso):
+                    out.setdefault(d, s)
+        starts = [w["start"] for w in weeks if w.get("start")]
+        if starts and min(starts) <= since_iso:      # this road spans the window; older can't add
+            break
+    return out
+
+
 def _banked_streak(db, today, prior_plan):
-    """The banked STREAK over the prior plan's fully-ELAPSED weeks (all phases, calendar order, same
-    `_week_banked` test as graduation; down weeks neutral; resets on any miss) + whether the latest
-    readiness is ok (not red/heavy). The single shared evidence both §6e upward levers read — the
-    volume lift (`earned_state`) and the frequency advance (`freq_state`) judge a week identically.
+    """The banked STREAK of fully-ELAPSED weeks walking BACK from today (same `_week_banked` test as
+    graduation; down weeks neutral; stops at the first miss) + whether the latest readiness is ok
+    (not red/heavy). The single shared evidence both §6e upward levers read — the volume lift
+    (`earned_state`) and the frequency advance (`freq_state`) judge a week identically.
+
+    §PRO12 — the walk is over the CALENDAR, and each week's prescription is looked up across plan
+    history (`_week_prescription`), not read off the current road. Sourcing it from the road alone
+    silently zeroed the ratchet whenever the road advanced past its own past: on 2026-07-27 the
+    re-base block expired, `_rebase_start` re-anchored to that Monday, and the saved plan went from
+    26 weeks (back to 06-15) to 20 weeks starting that day. The next regen therefore found NO elapsed
+    weeks at all — streak 5 → 0, regime assertive → caution, projected race-day CTL 60 → 26, finish
+    4:59 → 6:35 — and, since that regen also saved a past-less plan, the reset sustained itself. A
+    week we have no prescription for ends the walk: unknown is not evidence, in either direction.
     Returns (streak, ready_ok)."""
     from datetime import timedelta
     drop = dropped_ids(db)
     today_d = _date(today) if isinstance(today, str) else today
-    elapsed = []
-    for w in _plan_all_weeks(prior_plan or {}):    # the whole road — chain segments count as evidence too
-        ws = _date(w["start"]); we = ws + timedelta(days=6)
-        if we < today_d:                           # only fully-completed weeks are evidence
-            elapsed.append((ws, we, w))
-    elapsed.sort(key=lambda t: t[0])
+    # the most recent week whose 7-day window has fully closed, then backwards a bounded distance
+    ws = _monday(today_d) - timedelta(weeks=1)
+    while ws + timedelta(days=6) >= today_d:
+        ws -= timedelta(weeks=1)
+    walk = [(ws - timedelta(weeks=i)).isoformat() for i in range(BANK_LOOKBACK_WEEKS)]
+    presc = _prescription_history(db, prior_plan, walk)
     streak = 0
-    for ws, we, w in elapsed:
-        if _is_down(w.get("intent")):
-            continue                               # down week is neutral (as in graduation)
-        banked, *_ = _week_banked(db, ws, we, w.get("intent_km", w.get("km")), w.get("runs"), drop)
-        streak = streak + 1 if banked else 0
+    for start_iso in walk:
+        ws = _date(start_iso)
+        w = presc.get(start_iso)
+        if not w:
+            break                                  # no prescription ⇒ nothing to judge ⇒ stop
+        if not _is_down(w.get("intent")):          # down week is neutral (as in graduation)
+            banked, *_ = _week_banked(db, ws, ws + timedelta(days=6),
+                                      w.get("intent_km", w.get("km")), w.get("runs"), drop)
+            if not banked:
+                break
+            streak += 1
     rd = db.execute("SELECT energy, stop_symptom FROM readiness "
                     "ORDER BY date DESC LIMIT 1").fetchone()
     ready_ok = not (rd and (rd["stop_symptom"] or rd["energy"] == "heavy"))
@@ -5465,6 +5568,15 @@ FT_LADDER_RHO = 0.40    # his whole race corpus sits at 0.71, so the ladder SHAP
 FT_LADDER_L = 0.25      # a corpus fit: ~+8% at ratio 0.28 (12 km longs) vs 0.71 (30 km longs)
 FT_SHRINK_K = 2         # shrinkage prior strength: the population curve counts as K pseudo-races
 FT_LADDER_TRAIL_DAYS = 56   # trailing window for "longest long" race-readiness (§PRO9's lever)
+# §FT9 — the SAME window governs how recent the speed anchor must be to describe TODAY. The two
+# state axes must agree on what "recent" means: the ladder already degrades honestly past this
+# window (no qualifying long ⇒ long_km_now None ⇒ Λ exactly 1.0, the neutral prior), while v₀ used
+# to be the last EWMA point at ANY age — so a runner back after a layoff was shown a pre-layoff
+# value as "off today's shape". His own corpus cannot calibrate a detraining decay to fix that
+# properly (4 gaps ≥14 days, max 21, re-measurement scattering −9.5 to +0.1 pts per 30 days), and
+# inventing one would be exactly the guess this engine refuses. So the model does not decay a stale
+# anchor — it declines to call it today.
+FT_ANCHOR_TRAIL_DAYS = FT_LADDER_TRAIL_DAYS
 FT_MARA_TOL = 0.04      # historical race auto-detect: distance within ±4% of the marathon
 FT_MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}   # healthy-finish floors (§PER1)
 
@@ -5481,25 +5593,63 @@ FT_MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}   # healthy-finis
 FT3_Z = 1.2816              # 80% central band (P10–P90)
 FT3_SIGMA_RACE_FLOOR = 0.05  # never claim a race varies less than ±5% — no corpus is that clean
 FT3_SIGMA_RACE_COLD = 0.08   # population race-noise prior when no raced datapoint exists yet
-FT3_RESP_ERR = 0.5          # the projected speed gain could be ±50% off (2024-replay-informed)
-FT3_RUNWAY_PER_WK = 0.003   # log-time completion risk per remaining week of unbuilt build
+# §FT10 — ONE measured term replaces the two invented ones. §FT3 carried `state` (∝ the projected
+# speed gain, ±50%) and `runway` (0.003 log-time per remaining week): a guess at how wrong the
+# projection might be, plus a guess at completion risk, both invented and — as it turned out —
+# double-counting each other, since the measured dispersion of that projection IS the total error of
+# that same projection. Sweeping every contiguous window of his corpus (log §38) and removing the
+# EWMA's own reading noise (σ≈0.894 pts, a mid-week-vs-neighbours estimator; it stays out because
+# σ_race already carries "the model's read of the runner on race day is imperfect" — putting it here
+# too would double-count) gives the speed axis's genuine forecast dispersion:
+#
+#     h wk:     2     3     4     6     8    12    16    19    24    30
+#     σ pts: 1.34  1.48  1.55  1.83  1.81  2.10  2.17  2.31  2.63  3.03      σ ≈ A·h^P
+#     fit  : 1.33  1.48  1.59  1.76  1.89  2.09  2.25  2.35  2.49  2.63      A=1.12, P=0.25
+#
+# Sub-random-walk — dispersion grows like the FOURTH ROOT of horizon, not linearly: fitness is
+# mean-reverting, so week 20 adds far less uncertainty than week 2 did. The retired term was 2.7×
+# too narrow at 4 weeks and 1.7× too wide at 30, and accidentally about right at the 19-week horizon
+# he happens to race at — which is why it never looked wrong. §38's first cut read P≈0.42 from a
+# crude two-point log-log slope over OVERLAPPING windows; fitting properly (weighted by effective
+# independent windows n/h) gives P=0.25 at rms 0.025 in log.
+# ⚠ h=1 is EXCLUDED from the fit and from the per-runner measurement. De-noising removes 76% of its
+# variance (raw 1.45² − 2·0.894² = 0.50), so it is hostage to the reading-noise estimate rather than
+# informative about the horizon; including it drags P to 0.46 and wrecks the fit (rms 0.140 vs
+# 0.025). P is structural and shared; A is measured per runner and shrunk toward the population
+# value (the `c`/`resp` posture: a corpus earns its own coefficient, a cold start inherits the prior
+# exactly, and the prior is itself his fit — so his own shrinkage reads as neutral).
+FT10_DISP_P = 0.25          # horizon exponent — structural, shared by every runner
+FT10_DISP_A0 = 1.12         # population coefficient (eVO₂ pts of dispersion at h=1 week)
+FT10_DISP_K = 40            # shrinkage strength: the prior counts as K effective windows
+# Horizons sampled per runner. h=1 excluded (above); h>19 dropped too — with P fixed, the per-runner
+# fit is only for A, whose weight is n/h, so h=24/30 contribute effective counts of 4.2 and 2.5
+# against 109 at h=2 while costing the most inner steps. They anchored the EXPONENT, which is now
+# structural, so measuring them every regen buys nothing.
+FT10_DISP_H = (2, 3, 4, 6, 8, 12, 16, 19)
+FT10_DISP_MIN_W = 30        # a horizon needs this many windows before it may inform the estimate
 
 
-def _ft_band(pred_s, weeks_away, sigma_race=None, n_races=0, dv_gain=0.0, sens_per_pt=0.0):
+def _ft_band(pred_s, weeks_away, sigma_race=None, n_races=0, sens_per_pt=0.0, disp_a=FT10_DISP_A0):
     """§FT3 — the 80% predictive band around a P50 finish time (pure, det-testable). Returns the
     payload dict; multiplicative in time (symmetric in log). Components rounded in for honesty —
-    the UI can show WHY the band is wide (cold corpus vs long runway vs big projected gain)."""
+    the UI can show WHY the band is wide (cold corpus vs long horizon).
+
+    §FT10 — `horizon` is the speed axis's MEASURED forecast dispersion at `weeks_away`, converted to
+    log-time by the model's own local sensitivity: it replaces §FT3's `state` and `runway` pair,
+    which guessed at the projection's error and at completion risk separately while in fact
+    double-counting one another. Zero at zero weeks is correct here and not an optimism: a race run
+    today has no unbuilt training left to go wrong, and how well the model reads a runner ON the day
+    is exactly what σ_race measures."""
     sr = max(sigma_race if (sigma_race is not None and n_races > 0) else FT3_SIGMA_RACE_COLD,
              FT3_SIGMA_RACE_FLOOR)
     sc = sr / math.sqrt(n_races + FT_SHRINK_K)
-    ss = abs(dv_gain) * FT3_RESP_ERR * sens_per_pt
-    sw = FT3_RUNWAY_PER_WK * max(0, weeks_away or 0)
-    sig = math.sqrt(sr * sr + sc * sc + ss * ss + sw * sw)
+    sh = disp_a * (max(0, weeks_away or 0) ** FT10_DISP_P) * sens_per_pt
+    sig = math.sqrt(sr * sr + sc * sc + sh * sh)
     lo, hi = round(pred_s * math.exp(-FT3_Z * sig)), round(pred_s * math.exp(FT3_Z * sig))
     return {"lo_seconds": lo, "hi_seconds": hi, "lo_hms": _fmt_hms(lo), "hi_hms": _fmt_hms(hi),
             "level": 80, "sigma_log": round(sig, 4),
             "components": {"race": round(sr, 4), "calibration": round(sc, 4),
-                           "state": round(ss, 4), "runway": round(sw, 4)}}
+                           "horizon": round(sh, 4), "disp_a": round(disp_a, 3)}}
 
 
 def _fmt_hms(sec):
@@ -5674,23 +5824,33 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
         # the +4/+8-week runway curve never answered it: that curve prices a LATER RACE DATE, a
         # counterfactual nobody asked about, which reads as a timeline and (while the curve was
         # frozen) as "training changes nothing". None when today's state isn't knowable.
+        # §FT9 — "off today's shape" is a claim about TODAY, and it needs a measurement recent
+        # enough to be about today. v₀ is the last EWMA point at ANY age, so a runner back from a
+        # layoff would otherwise be shown their pre-layoff speed as their current one. Past
+        # FT_ANCHOR_TRAIL_DAYS — the same window past which the ladder axis already goes neutral —
+        # the read is WITHHELD rather than decayed: his corpus cannot calibrate a detraining rate
+        # (4 gaps ≥14 days, max 21, scatter −9.5…+0.1 pts/30d) and a guessed one would be worse
+        # than silence. The race-day projection still stands; it is a projection and says so.
+        v_age = bi.get("v0_age_days")
+        anchor_stale = v_age is not None and v_age > FT_ANCHOR_TRAIL_DAYS
         v_now = bi.get("v0") or (None if projected_vo2max else vo2max)
-        t_today = _project_finish_time(v_now, round(ctl0), typ, floor,
-                                       bi.get("long_km_now"), correction)
+        t_today = None if anchor_stale else _project_finish_time(
+            v_now, round(ctl0), typ, floor, bi.get("long_km_now"), correction)
         today_read = ({"seconds": t_today, "hms": _fmt_hms(t_today),
                        "at_ctl": round(ctl0), "at_evo2": round(v_now, 1),
                        "long_km": (round(bi["long_km_now"], 1) if bi.get("long_km_now") else None),
                        "gain_seconds": t_today - fin_now} if t_today else None)
-        dv_gain = (v_race - bi["v0"]) if (projected_vo2max and bi.get("v0")) else 0.0
         t_up = _project_finish_time(v_race + 1, proj, typ, floor, race_long_km, correction)
         sens = math.log(fin_now / t_up) if t_up else 0.0
         band = _ft_band(fin_now, weeks_away, bi.get("sigma_race"), bi.get("n_races") or 0,
-                        dv_gain, sens)
+                        sens, bi.get("disp_a", FT10_DISP_A0))
         finish_time = {"distance": typ, "seconds": fin_now, "hms": _fmt_hms(fin_now),
                        "at_ctl": proj, "curve": curve, "band": band, "today": today_read,
                        "at_evo2": (round(v_race, 1) if projected_vo2max else None),
                        "long_km": (round(race_long_km, 1) if race_long_km else None),
                        "correction": round(correction, 3),
+                       "anchor_stale": ({"age_days": v_age, "as_of": bi.get("v0_as_of")}
+                                        if anchor_stale else None),
                        "note": ("a range, not a promise: it assumes the laid build completes, and race "
                                 "day rides fuelling, pacing, weather and the day's legs. The median is "
                                 "the trend signal — more runway → higher fitness → faster — and the band "
@@ -5855,43 +6015,92 @@ def _ft_correction(db):
 
 
 # ── §FT2 — Model B speed side: project eVO₂ along the build, truth-anchored every regen ─────────
-# The model's speed axis is the PER-RUN-CORPUS scale: the α=0.25 EWMA over `use_vo2max` per-run
+# The model's speed axis is the PER-RUN-CORPUS scale: the α=0.25 EWMA over `use_vo2max` per-SESSION
 # values — the exact scale the §FT1 race-corpus states are stated in, so calibration and prediction
 # can never scale-drift. (Runalyze's `effective_vo2max` snapshot applies the user's correction
 # factor and its own smoothing — a DIFFERENT vocabulary, kept for training zones; the two are never
-# mixed inside Model A/B.) Response model, calibrated 2026-07-26 on his 224 consecutive training
+# mixed inside Model A/B.) Response model, RE-calibrated 2026-07-28 on his 225 consecutive training
 # week-pairs (2021→2026): dv/wk = R·resp·(T_wk/100)·max(0, 1 − v/ceiling) — intensity-weighted
 # load drives the response (TRIMP is composition-sensitive by construction: the §T2 quality mix is
 # what lifts a week's TRIMP at equal km), saturating toward the runner's demonstrated ceiling.
-# Replays: 2023 build actual 40.6→44.2 vs model 44.6; rmse 1.64/wk (weekly noise → the §FT3 band).
+# Fit + replay are 1-week-ahead OLS through the origin; rmse 1.45/wk (weekly noise → the §FT3 band).
+# §FT10 — an earlier note here claimed the model "undershoots sustained builds" (−2.5 over 4 weeks).
+# WITHDRAWN: that measured windows selected BECAUSE they rose, which is conditioning on the outcome.
+# Swept over every contiguous window the model is unbiased (mean +0.09 / +0.18 / +0.30 eVO₂ at 4 / 8
+# / 12 weeks); rising windows read −2.15 and falling ones +3.35, which is exactly what an unbiased
+# predictor must do. The real finding that sweep produced was about the BAND, not the point — see
+# FT10_DISP_* and log §38.
 # Truth-anchoring is structural: every regen re-bases v₀ on the MEASURED corpus EWMA and projects
 # only the remaining weeks — a fast- or slow-responder can never drift from reality (§PRO9-style),
 # and the shrunk response factor pulls the population rate toward the runner's own measured slope.
-FT2_R = 0.169            # eVO₂ pts/wk per 100 weekly TRIMP at zero saturation (his-corpus fit)
+# §FT8 — R was refit when the series became per-SESSION (0.169 → 0.139, rmse 1.64 → 1.45/wk). It is
+# a POPULATION PRIOR: leaving the old value would have let his personal shrinkage silently absorb
+# the change (his slope fell 1.00 → 0.83, the same rate wearing a different hat) while every runner
+# with an empty corpus — who gets resp = 1.0 exactly — inherited a rate fit to a series that no
+# longer exists. Refit restores his slope to 1.000, which is the self-consistency check: he IS the
+# calibration population, so his own shrinkage must read as neutral.
+FT2_R = 0.139            # eVO₂ pts/wk per 100 weekly TRIMP at zero saturation (his-corpus fit)
 FT2_CEIL_HEADROOM = 1.15  # ceiling floor: never below v₀ × this, so today's high can't freeze the axis
 FT2_SHRINK_K = 8         # response-factor prior strength (pseudo week-pairs at slope 1.0)
+FT2_EWMA_A = 0.25        # per-SESSION smoothing of the per-run estimates (see §FT8 below)
+# §FT8 — what may inform the speed axis at all. The per-run VO₂max estimate is a pace-vs-HR
+# inference, and it needs a steady state to infer FROM. A short part of a split session is the one
+# recording that never has one: in this corpus those parts are overwhelmingly STRIDE sets (§RD reads
+# them back as such — "13× strides @4:59/km" inside a 1.3 km recording), i.e. bursts at 3:40–5:00/km
+# threaded through jog floats, with HR lagging the bursts it is being divided by. The resulting
+# estimate is not noisy so much as meaningless, and it scatters BOTH ways: 26.0 and 26.0 on two
+# stride sets, 50.1 on a 1.3 km piece, 51.2 on a 1.9 km one. Measured against the EWMA of everything
+# before it, his corpus splits hard at 4 km — robust spread (MAD) 4.2–6.2 below vs 1.25–1.44 at and
+# above, a 3–4× collapse — and the duration axis agrees (break at ~20–25 min) but blunter, so
+# distance is the gate. Its ceiling is the shortest distance the model must never lose:
+# min(RACE_KM) = 5 km, so a 5 km race still anchors the axis it is direct evidence for.
+# (§RD's own `kind` would be the finer gate — strides/interval fragments refused by name — but a
+# cached structure needs streams and a token, so it is not always there; distance always is.)
+FT_VO2_MIN_KM = 4.0      # a recording under this may not inform the speed axis (calibrated 2026-07-28)
 
 
 def _ft_vo2_series(db):
-    """The model-scale eVO₂ series: (date, EWMA α=0.25 over `use_vo2max` per-run values), full
-    history, oldest-first. The single source for v₀ (truth-anchor), the ceiling, the response
-    factor and the §FT1 race-corpus states — one scale, no mixing. De-duped against `dropped_ids`
-    like every other projector consumer (2258): a duplicated row would otherwise double-step the
-    EWMA and drag v₀, the ceiling and the response fit off the owned truth."""
+    """The model-scale eVO₂ series: (date, EWMA over `use_vo2max` per-SESSION values), full history,
+    oldest-first. The single source for v₀ (truth-anchor), the ceiling, the response factor and the
+    §FT1 race-corpus states — one scale, no mixing. De-duped against `dropped_ids` like every other
+    projector consumer (2258): a duplicated row would otherwise double-step the EWMA and drag v₀,
+    the ceiling and the response fit off the owned truth.
+
+    §FT8 — the unit is the SESSION, not the recording, for exactly that reason. He deliberately
+    splits a session into parts (§SJ), so a raw-row EWMA steps twice for one training day and lands
+    on whichever fragment was saved last: on 2026-07-27 a 1.3 km STRIDE set recorded 87 s after a
+    6 km easy run carried an estimate of 26.0 and, being last, WAS v₀ — dragging the anchor
+    38.0 → 34.4 and the race-day median 4:45:41 → 4:59:00 on thirteen 20-second bursts. The read
+    side already knew what that recording was (§RD: "13× strides"); the speed axis was the one
+    consumer that never asked. Parts are grouped by the same §SJ rule
+    the read side uses (one definition), each part must clear FT_VO2_MIN_KM to contribute, and the
+    session's value is the distance-weighted mean of the parts that do — evidence in proportion to
+    how much running it is. A session with no qualifying part steps the EWMA not at all: the honest
+    reading of a day we cannot measure is silence, not a guess (and a runner whose whole history is
+    short recordings gets an empty series ⇒ the §FT5 cold start, which is what that path is for)."""
     drop = dropped_ids(db)
+    rows = [r for r in db.execute(
+        "SELECT id, date, date_time, distance, duration, elapsed_time, raw FROM activities WHERE " +
+        RUN_FAMILY_SQL + " ORDER BY date ASC").fetchall() if r["id"] not in drop]
     out, sm = [], None
-    for r in db.execute("SELECT id, date, raw FROM activities WHERE " + RUN_FAMILY_SQL +
-                        " ORDER BY date ASC").fetchall():
-        if r["id"] in drop:
+    for grp in _session_groups(rows):
+        num = den = 0.0
+        for r in grp:
+            km = r["distance"] or 0.0
+            if km < FT_VO2_MIN_KM:
+                continue
+            try:
+                d = json.loads(r["raw"])
+            except (ValueError, TypeError):
+                continue
+            if d.get("use_vo2max") and d.get("vo2max"):
+                num += float(d["vo2max"]) * km
+                den += km
+        if not den:
             continue
-        try:
-            d = json.loads(r["raw"])
-        except (ValueError, TypeError):
-            continue
-        if d.get("use_vo2max") and d.get("vo2max"):
-            v = float(d["vo2max"])
-            sm = v if sm is None else sm + 0.25 * (v - sm)
-            out.append((r["date"], sm))
+        v = num / den
+        sm = v if sm is None else sm + FT2_EWMA_A * (v - sm)
+        out.append((grp[0]["date"], sm))
     return out
 
 
@@ -5959,11 +6168,14 @@ def _ft_project_evo2(v0, weekly_trimps, ceiling, resp=1.0):
 def _ft_speed_state(db):
     """The model-scale speed state for this regen: (v₀ = current corpus-EWMA eVO₂, ceiling =
     demonstrated historical peak sampled at week boundaries — one number shared by the projection
-    AND the response-pair fit, response factor = shrunk measured slope). (None, ...) on an empty
-    corpus — the caller falls back to the frozen effective value."""
+    AND the response-pair fit, response factor = shrunk measured slope, and the DATE v₀ was last
+    measured on). (None, ...) on an empty corpus — the caller falls back to the frozen effective
+    value. §FT9 — the date is returned because the anchor's age is part of its meaning: v₀ is the
+    last EWMA point whatever its age, so without it the caller cannot tell a value measured today
+    from one measured before a layoff."""
     series = _ft_vo2_series(db)
     if not series:
-        return None, None, 1.0
+        return None, None, 1.0, None
     v0 = series[-1][1]
     wk_v, wk_t = _ft_weekly_series(db)
     # §33f-1 — the ceiling is the demonstrated peak but NEVER v₀ itself: a runner sitting at their
@@ -5973,7 +6185,63 @@ def _ft_speed_state(db):
     # depend on run count — an undocumented cliff); a runner whose measured peak already clears
     # v₀ × headroom keeps that peak, so a real history still owns the ceiling.
     ceiling = max(max(wk_v.values()), v0 * FT2_CEIL_HEADROOM)
-    return v0, ceiling, _ft_shrunk_slope(_ft_weekly_response_pairs(wk_v, wk_t, ceiling))
+    return (v0, ceiling, _ft_shrunk_slope(_ft_weekly_response_pairs(wk_v, wk_t, ceiling)),
+            series[-1][0])
+
+
+def _ft_reading_noise(wk_v, weeks):
+    """§FT10 — the eVO₂ series' own READING noise (pts), from local smoothness: a week compared with
+    the mean of its two neighbours. If true fitness is locally linear that residual is pure noise,
+    and var(residual) = 1.5σ². Kept OUT of the band (σ_race already carries race-day read error) but
+    needed here, so a runner's measured dispersion isn't inflated by the ruler."""
+    res = [wk_v[b] - 0.5 * (wk_v[a] + wk_v[c])
+           for a, b, c in zip(weeks, weeks[1:], weeks[2:])
+           if (_date(b) - _date(a)).days == 7 and (_date(c) - _date(b)).days == 7]
+    if len(res) < 10:
+        return None
+    m = sum(res) / len(res)
+    return math.sqrt(sum((x - m) ** 2 for x in res) / len(res) / 1.5)
+
+
+def _ft_dispersion(db):
+    """§FT10 — this runner's speed-axis forecast-dispersion coefficient A, shrunk toward the
+    population FT10_DISP_A0. σ(h) = A·h^FT10_DISP_P eVO₂ points, so a residual standardised by
+    h^P has sd A whatever the horizon — pooled across horizons, that is one estimate from all of
+    them. Windows OVERLAP (every start, not every h-th): overlap makes the samples correlated, not
+    the variance biased, so it is the efficient estimator — but each horizon is then weighted by its
+    EFFECTIVE independent count n/h, or a thin corpus counting the same seasons h times over would
+    outvote the prior. The reading noise comes out in quadrature at both endpoints (the projection
+    starts from a noisy read and is judged against another). Empty/thin corpus ⇒ exactly the prior,
+    which is what a cold start must inherit."""
+    wk_v, wk_t = _ft_weekly_series(db)
+    weeks = sorted(wk_v)
+    if len(weeks) < FT10_DISP_MIN_W:
+        return FT10_DISP_A0
+    ceiling = max(wk_v.values())
+    sig_read = _ft_reading_noise(wk_v, weeks)
+    if sig_read is None:
+        return FT10_DISP_A0
+    num = den = 0.0
+    for h in FT10_DISP_H:
+        e2s = []
+        for i in range(len(weeks) - h):
+            seq = weeks[i + 1:i + 1 + h]
+            if len(seq) < h or any((_date(b) - _date(a)).days != 7
+                                   for a, b in zip([weeks[i]] + seq, seq)):
+                continue
+            v = wk_v[weeks[i]]
+            for w in seq:
+                v += FT2_R * (wk_t.get(w, 0.0) / 100.0) * max(0.0, 1.0 - v / ceiling)
+            e2s.append((v - wk_v[seq[-1]]) ** 2)
+        if len(e2s) < FT10_DISP_MIN_W:
+            continue
+        g2 = max(0.0, sum(e2s) / len(e2s) - 2 * sig_read * sig_read)   # de-noise the ruler out
+        n_eff = len(e2s) / h                                  # overlap ⇒ correlated, not free
+        num += n_eff * g2 / (h ** (2 * FT10_DISP_P))
+        den += n_eff
+    if den <= 0:
+        return FT10_DISP_A0
+    return math.sqrt((num + FT10_DISP_K * FT10_DISP_A0 ** 2) / (den + FT10_DISP_K))
 
 
 def _ft_plan_weekly_trimps(plan, today, race_date_iso):
@@ -6230,11 +6498,12 @@ def _rebase_start(db, today):
 RACE_RECOVERY_WEEKS = {"5k": 3, "10k": 3, "half": 4, "marathon": 6, "custom": 4}
 RACE_RECOVERY_DEFAULT = 4
 
-# §6s — post-race reckoning. Standard race distances (km) for matching the race-day activity to the
-# objective, and a best-effort goal-time parser (the `target` field is free-form: 'finish', '3:45',
-# '42:00', 'sub-45'). H:MM vs MM:SS is disambiguated by race type (marathon/half = hours, 5k/10k =
-# minutes); unparseable goals (incl. 'finish') return None and the result is shown without a delta.
-RACE_KM = {"5k": 5.0, "10k": 10.0, "half": 21.0975, "marathon": 42.195}
+# §6s — post-race reckoning. Matches the race-day activity to the objective on the standard race
+# distances (RACE_KM, defined once with the §FT1 speed axis that also solves against them — this
+# used to be a second, identical literal here, so a distance added to one would silently not exist
+# for the other), plus a best-effort goal-time parser (the `target` field is free-form: 'finish',
+# '3:45', '42:00', 'sub-45'). H:MM vs MM:SS is disambiguated by race type (marathon/half = hours,
+# 5k/10k = minutes); unparseable goals (incl. 'finish') return None, shown without a delta.
 RECKON_WINDOW_WEEKS = 12   # §6s — how long after a race the scorecard keeps reckoning it
 
 
@@ -6553,12 +6822,16 @@ def _trim_post_race(plan, chain, block_start):
                                  if not (R < _date(s["date"]) <= wk_end)]
 
 
-def generate_plan(db, force_regime=None):
+def generate_plan(db, force_regime=None, today=None):
     """Engine entry point (§6b): a pure function of (today, current shape, objectives), with the
     PAST frozen (§6f Step E). Re-periodizes forward to the nearest A-race; falls back to a
     maintenance block when no objective remains. Every call is re-runnable and versioned, so
     adding/removing an objective reshapes the road ahead and the change is diff-able against the
-    prior version — while weeks already lived are carried verbatim from the last saved plan."""
+    prior version — while weeks already lived are carried verbatim from the last saved plan.
+
+    `today` overrides the clock. Production never passes it; the integration dets do, so a fixture
+    built around a fixed date is judged on that date instead of half-pinned against the real clock —
+    the gap that let §PRO12 (and, in §33d, a §PRO10 contract breach) reach a saved plan unseen."""
     snap = db.execute(
         "SELECT effective_vo2max, fitness, fatigue FROM shape_snapshots "
         "ORDER BY snapshot_date DESC LIMIT 1"
@@ -6582,7 +6855,7 @@ def generate_plan(db, force_regime=None):
         atl0 = snap["fatigue"] or 0.0
     zones = pace_zones(vo2)
 
-    today = datetime.now().date()
+    today = today or datetime.now().date()
     block_start = _rebase_start(db, today)
     adj = active_adjustment(db, today.isoformat())   # §6c — clamped directive or None
     adj_dir = adj["directive"] if adj else None
@@ -6806,7 +7079,9 @@ def generate_plan(db, force_regime=None):
         # §33e — carry the correction onto THIS race's distance. Neutral (byte-identical) when the
         # corpus is the same distance as the objective, which is the established path.
         ft_corr = _ft_transfer_correction(ft_corr, ft_tilt, (anchor.get("type") or "").lower())
-        v0, v_ceil, v_resp = _ft_speed_state(db)
+        v0, v_ceil, v_resp, v_asof = _ft_speed_state(db)
+        # §FT9 — how old the anchor is, in the same window the ladder axis already uses
+        v0_age = (today - _date(v_asof)).days if v_asof else None
         vo2_star, vo2_curve = None, None
         if v0:
             wk_trimps = _ft_plan_weekly_trimps(plan, today, anchor.get("date"))
@@ -6818,7 +7093,9 @@ def generate_plan(db, force_regime=None):
                                           race_long_km=race_long, correction=ft_corr,
                                           projected_vo2max=vo2_star, vo2_curve=vo2_curve,
                                           band_inputs={"sigma_race": ft_sigma, "n_races": ft_n,
-                                                       "v0": v0, "long_km_now": long_now})
+                                                       "v0": v0, "long_km_now": long_now,
+                                                       "v0_age_days": v0_age, "v0_as_of": v_asof,
+                                                       "disp_a": _ft_dispersion(db)})
         # §6q/§PRO7b — annotate each chain race with its own projected race fitness (the PEAK CTL carried
         # into that race's taper). Map by the segment's taper KEY (chain index i → "taper"/"taper{i}"),
         # not the human label, since two races can share a label.
@@ -12500,6 +12777,10 @@ function renderPlan(p){
   const fcHms = (FT&&FT.curve||[]).map(c=>c.hms);
   const ftStale = !!FT && !FTB && !FTT;
   const ftFrozen = fcHms.length>1 && new Set(fcHms).size===1;
+  // §FT9 — the speed anchor is older than the window in which it could describe TODAY (a layoff).
+  // The engine withheld the "off today's shape" read rather than decaying a number it cannot
+  // calibrate a decay for; say WHY it is missing, or the strip just looks like the pre-§FT6 one.
+  const ftAnchor = FT && FT.anchor_stale;
   const ftPts = FTT
     ? [{lab:"off today's shape", hms:FTT.hms}, {lab:"by race day", hms:FT.hms, now:true}]
     : (FT&&FT.curve||[]).map(c=>({lab: c.plus_weeks===0?(FTB?'median now':'now'):'+'+c.plus_weeks+'w',
@@ -12515,7 +12796,8 @@ function renderPlan(p){
     .map(c=>`+${c.plus_weeks}w → ${c.hms}`).join(" · ");
   const fcHint = !FT ? "" : (FT.note||"")
     + (runway?` If the race were later (same training): ${runway}.`:"")
-    + (ftStale?" This prediction was saved by an earlier version of the engine — regenerate the plan to re-read it on the current model.":"");
+    + (ftStale?" This prediction was saved by an earlier version of the engine — regenerate the plan to re-read it on the current model.":"")
+    + (ftAnchor?` Your last measured speed is ${ftAnchor.age_days} days old (${esc(ftAnchor.as_of)}), so there is no honest read of today's shape to compare against — run, and it re-anchors on its own.`:"");
   const finishCurve = FT ? `<div class="finishcurve">
       <span class="fclabel">Projected ${esc(FT.distance)} finish
         ${FTB?`<b>${esc(FTB.lo_hms)}–${esc(FTB.hi_hms)}</b>`:`<b>${esc(FT.hms)}</b>`}</span>
@@ -12523,6 +12805,7 @@ function renderPlan(p){
         .join('<span class="fcsep">→</span>')}
       ${gainTxt?`<span class="fcgain">${esc(gainTxt)}</span>`:''}
       ${ftStale?`<span class="fcstale">⟳ saved by an earlier engine — regenerate to re-read</span>`:''}
+      ${ftAnchor?`<span class="fcstale">◷ last measured ${ftAnchor.age_days}d ago — today's shape unread</span>`:''}
       ${qhint(fcHint)}
     </div>` : "";
   // §PRO3/§PRO5 — training-regime posture: which regime drove the plan + why, and (assertive) how hard
@@ -17004,16 +17287,113 @@ def _stc_ft_evo2():
                     "failures": fail or "none"})
 
 
+def _stc_ft_sessions():
+    """§FT8 det — what may anchor the speed axis. The unit is the SESSION (§SJ grouping, one
+    definition shared with the read side), so a deliberately split training day steps the EWMA ONCE
+    instead of landing v₀ on whichever fragment was saved last; a part under FT_VO2_MIN_KM cannot
+    contribute at all (a stride set's per-run VO₂max is a pace-vs-HR read of bursts-and-floats, not
+    an estimate of anything); a session's value is the distance-weighted mean of its qualifying
+    parts; and a day with nothing qualifying steps the EWMA not at all rather than guessing."""
+    import sqlite3
+    fail = []
+
+    def series(rows):
+        mem = sqlite3.connect(":memory:"); mem.row_factory = sqlite3.Row
+        mem.executescript(
+            "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+            " distance REAL, duration REAL, elapsed_time REAL, trimp REAL, raw TEXT);"
+            "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
+        mem.executemany("INSERT INTO activities VALUES(?,?,?,'Running',?,?,?,0,?)", [
+            (i, dt[:10], dt, km, sec, sec, json.dumps({"use_vo2max": True, "vo2max": v}))
+            for i, (dt, km, sec, v) in enumerate(rows, 1)])
+        return _ft_vo2_series(mem)
+
+    # (1) THE REAL 2026-07-27 SHAPE — the defect this det exists for. A 6.02 km easy run, then the
+    #     strides recording 87 s later: 1.30 km whose per-run estimate is 26.03. One session ⇒ ONE
+    #     step, carrying the easy run's value; the fragment may not touch v₀.
+    day = [("2026-07-20T18:00:00+01:00", 10.0, 3600, 38.0035),
+           ("2026-07-27T18:43:04+01:00", 6.02, 3193, 34.96),
+           ("2026-07-27T19:37:44+01:00", 1.30, 632, 26.03)]
+    s = series(day)
+    want = 38.0035 + FT2_EWMA_A * (34.96 - 38.0035)
+    if len(s) != 2:
+        fail.append(f"split session should step the EWMA once, got {len(s)} points: {s}")
+    elif abs(s[-1][1] - want) > 1e-9:
+        fail.append(f"v0 {s[-1][1]:.4f} != {want:.4f} — the stride fragment reached the anchor")
+    # the pre-§FT8 behaviour, pinned so the regression is visible if the gate is ever removed
+    raw2 = 38.0035 + FT2_EWMA_A * (34.96 - 38.0035)
+    if abs((raw2 + FT2_EWMA_A * (26.03 - raw2)) - 34.4395) > 1e-3:
+        fail.append("fixture drifted: it no longer reproduces the 34.44 anchor it was written for")
+    # (2) the gate is a PART test, not a session-total one: two sub-gate parts summing past it still
+    #     contribute nothing (three 1.5 km fragments are not a 4.5 km steady state)
+    if series([("2026-07-27T18:00:00+01:00", 1.5, 500, 26.0),
+               ("2026-07-27T18:10:00+01:00", 1.5, 500, 50.0),
+               ("2026-07-27T18:20:00+01:00", 1.5, 500, 26.0)]) != []:
+        fail.append("a session of only sub-gate parts must not step the EWMA")
+    # (3) qualifying parts combine distance-weighted (evidence ∝ how much running it is)
+    s2 = series([("2026-07-27T18:00:00+01:00", 12.0, 3600, 42.0),
+                 ("2026-07-27T19:05:00+01:00", 4.0, 1200, 36.0)])
+    exp = (42.0 * 12.0 + 36.0 * 4.0) / 16.0
+    if len(s2) != 1 or abs(s2[0][1] - exp) > 1e-9:
+        fail.append(f"two qualifying parts should merge distance-weighted to {exp:.3f}: {s2}")
+    # (4) hours apart is a genuine double, not a split — it must step twice
+    if len(series([("2026-07-27T07:00:00+01:00", 8.0, 2400, 40.0),
+                   ("2026-07-27T18:00:00+01:00", 8.0, 2400, 42.0)])) != 2:
+        fail.append("a real morning/evening double must step the EWMA twice")
+    # (5) an all-fragment history yields an EMPTY series ⇒ the §FT5 cold start, which is the path
+    #     for "no measurable speed axis" — never a guess assembled from unreadable pieces
+    if series([("2026-07-01T18:00:00+01:00", 2.0, 600, 30.0),
+               ("2026-07-08T18:00:00+01:00", 3.0, 900, 48.0)]) != []:
+        fail.append("a history of only short recordings must leave the series empty (cold start)")
+    # (6) STRUCTURAL: the gate may never grow into the shortest distance the model is asked to
+    #     predict — a 5 km race is direct evidence for the axis it would otherwise be denied.
+    if FT_VO2_MIN_KM >= min(RACE_KM.values()):
+        fail.append(f"FT_VO2_MIN_KM {FT_VO2_MIN_KM} would gate out a {min(RACE_KM.values())}km race")
+    # (7) §FT9 — the anchor carries its DATE, and "off today's shape" is withheld once that date is
+    #     older than the window in which it could describe today. Both axes agree on "recent":
+    #     past FT_ANCHOR_TRAIL_DAYS the ladder is already neutral, so the speed axis must not go on
+    #     asserting a current value. Fresh anchor ⇒ the read is present and unchanged.
+    obj = {"type": "marathon", "label": "R"}
+    kw = dict(projected_ctl=50, projected_vo2max=44.0, vo2_curve={0: 44.0, 4: 44.5, 8: 45.0})
+    fresh = feasibility(obj, 30.0, 40.0, 20, band_inputs={"v0": 42.0, "v0_age_days": 3}, **kw)
+    stale = feasibility(obj, 30.0, 40.0, 20, band_inputs={"v0": 42.0, "as_of": "2025-01-01",
+                                                          "v0_age_days": FT_ANCHOR_TRAIL_DAYS + 1}, **kw)
+    edge = feasibility(obj, 30.0, 40.0, 20,
+                       band_inputs={"v0": 42.0, "v0_age_days": FT_ANCHOR_TRAIL_DAYS}, **kw)
+    if not fresh["finish_time"]["today"] or fresh["finish_time"]["anchor_stale"]:
+        fail.append("a fresh anchor must still read today's shape")
+    if stale["finish_time"]["today"] or not stale["finish_time"]["anchor_stale"]:
+        fail.append("a stale anchor must withhold today's read AND say so")
+    if not edge["finish_time"]["today"]:
+        fail.append("the staleness gate must be inclusive at exactly FT_ANCHOR_TRAIL_DAYS")
+    if stale["finish_time"]["seconds"] != fresh["finish_time"]["seconds"]:
+        fail.append("staleness must not move the race-day projection — only the today claim")
+    if FT_ANCHOR_TRAIL_DAYS != FT_LADDER_TRAIL_DAYS:
+        fail.append("the two state axes disagree on what 'recent' means")
+    return _st("det", "ft-sessions",
+               "§FT8 speed-axis intake: one SESSION one EWMA step (§SJ grouping, so a split day "
+               "can't land v₀ on its last fragment), sub-FT_VO2_MIN_KM parts can't contribute, "
+               "qualifying parts merge distance-weighted, nothing qualifying ⇒ no step (cold start), "
+               "and the gate can never reach the shortest race distance",
+               passed=not fail,
+               expect="07-27 pair ⇒ 1 point at 37.24 (not 34.44); part-gate not session-total; "
+                      "12+4km ⇒ 40.5; double ⇒ 2 steps; all-short ⇒ []; gate < min(RACE_KM)",
+               got={"split_session_v0": round(s[-1][1], 4) if s else None,
+                    "pre_ft8_would_be": 34.4395, "weighted": round(s2[0][1], 3) if s2 else None,
+                    "gate_km": FT_VO2_MIN_KM, "failures": fail or "none"})
+
+
 def _stc_ft_band():
     """§FT3 det — the band IS the prediction: present and ordered around the P50, multiplicative-
     symmetric in log-time, wide on a cold corpus BY DESIGN, and it narrows exactly the way the
-    'never frustrates the runner' clause promises — as races calibrate (n up), as the runway
-    shrinks (weeks down), and as the projected speed gain is realized into measurement (Δv → 0,
-    the truth-anchor working). Copy check: every verdict's prose leads with the range, never a
-    bare point."""
+    'never frustrates the runner' clause promises — as races calibrate (n up) and as the horizon
+    shrinks (weeks down). Copy check: every verdict's prose leads with the range, never a bare
+    point. §FT10 — the horizon term is the speed axis's MEASURED dispersion (A·h^P), so this det
+    also locks the shape the old linear-from-zero term got wrong: concave in weeks, and materially
+    wider at a short horizon than 0.003/wk ever was."""
     fail = []
     P, W = 17433, 19
-    b = _ft_band(P, W, sigma_race=0.066, n_races=4, dv_gain=2.7, sens_per_pt=0.025)
+    b = _ft_band(P, W, sigma_race=0.066, n_races=4, sens_per_pt=0.025)
     # (1) ordered + multiplicative-symmetric in log
     if not (b["lo_seconds"] < P < b["hi_seconds"]):
         fail.append(f"band not around P50: {b['lo_seconds']} / {P} / {b['hi_seconds']}")
@@ -17021,13 +17401,38 @@ def _stc_ft_band():
         fail.append("band not symmetric in log-time")
     # (2) narrows on every §FT3 axis: races banked, runway burned, projected gain realized
     sig = lambda **kw: _ft_band(P, kw.pop("W", W), **kw)["sigma_log"]
-    base = dict(sigma_race=0.066, n_races=4, dv_gain=2.7, sens_per_pt=0.025)
+    base = dict(sigma_race=0.066, n_races=4, sens_per_pt=0.025)
     if not (sig(**{**base, "n_races": 12}) < sig(**base)):
         fail.append("more raced datapoints should narrow the band")
     if not (sig(**{**base, "W": 0}) < sig(**base)):
-        fail.append("a burned-down runway should narrow the band")
-    if not (sig(**{**base, "dv_gain": 0.0}) < sig(**base)):
-        fail.append("a realized speed projection should narrow the band")
+        fail.append("a burned-down horizon should narrow the band")
+    # §FT10 — the SHAPE. Strictly increasing in horizon, but CONCAVE: dispersion is mean-reverting,
+    # so week 2 must add more than week 20 does. The replaced term was linear (every week equal),
+    # which is what made it 2.6× too narrow near-term and 1.5× too wide far out.
+    if not all(sig(**{**base, "W": w}) < sig(**{**base, "W": w + 1}) for w in range(0, 30)):
+        fail.append("band must widen with every additional week of horizon")
+    # SUB-LINEAR growth is the whole point: dispersion is mean-reverting, so a further week adds
+    # less than the one before. Measured as the implied exponent across a 6× span, which is
+    # scale-free and immune to the payload's 4-dp rounding — the retired linear term implies
+    # exactly 1.0 and fails this, whatever coefficient it is given. (Concavity of the quadrature
+    # TOTAL is not the property under test: a constant race term under a square root makes the
+    # total convex near zero no matter how the horizon term behaves.)
+    c4 = _ft_band(P, 4, **base)["components"]["horizon"]
+    c24 = _ft_band(P, 24, **base)["components"]["horizon"]
+    p_implied = math.log(c24 / c4) / math.log(6.0)
+    if not (0.0 < p_implied < 0.95):
+        fail.append(f"horizon term must grow sub-linearly (implied exponent {p_implied:.3f})")
+    # the defect that motivated §FT10: at a SHORT horizon the measured shape is materially wider
+    # than the retired 0.003/wk line — a 4-week-out race was quoted under half its honest width
+    short_new = FT10_DISP_A0 * (4 ** FT10_DISP_P) * 0.025
+    if not (short_new > 2.0 * (0.003 * 4)):
+        fail.append(f"short-horizon dispersion no longer exceeds the retired linear term: {short_new:.4f}")
+    # a runner with no corpus inherits the population coefficient EXACTLY (cold-start generality)
+    _mem = sqlite3.connect(":memory:"); _mem.row_factory = sqlite3.Row
+    _mem.executescript(SCHEMA)
+    if _ft_dispersion(_mem) != FT10_DISP_A0:
+        fail.append("an empty corpus must inherit FT10_DISP_A0 exactly")
+    _mem.close()
     # (3) cold corpus: wide by design, exact prior width at zero races (floor never below it)
     cold = _ft_band(P, 0)
     exp_cold = math.sqrt(FT3_SIGMA_RACE_COLD ** 2 + (FT3_SIGMA_RACE_COLD ** 2) / FT_SHRINK_K)
@@ -17276,8 +17681,8 @@ def _stc_ft_coldstart():
     if not (s_y["ctl0"] > s_r["ctl0"]):                       # truth over prior: recent weeks are
         fail.append(f"recent measured weeks should out-seed a decayed old block: "
                     f"{s_y['ctl0']} vs {s_r['ctl0']}")        # fitness, a 2-yr-old block has decayed
-    _, ceil_y, _ = _ft_speed_state(young)
-    v0_r, ceil_r, _ = _ft_speed_state(rebuilder)
+    _, ceil_y, _, _ = _ft_speed_state(young)
+    v0_r, ceil_r, _, _ = _ft_speed_state(rebuilder)
     if not (ceil_y and ceil_r and ceil_r > 46 > ceil_y):
         fail.append(f"history should set the ceiling apart: young {ceil_y} rebuilder {ceil_r}")
     # §33f-1 — and NEITHER runner's ceiling may pin to their own v₀: a runner sitting at their
@@ -17447,9 +17852,9 @@ def _stc_regime_plan():
                     (_now_iso(), today.isoformat(), "{}",
                      json.dumps({"base": {"weeks": wks}, "phases": [{"key": "base"}]})))
         mem.commit()
-        return generate_plan(mem)
+        return generate_plan(mem, today=today), mem
 
-    p = build()
+    p, _mem = build()
     fails = []
     if (p.get("regime") or {}).get("mode") != "assertive":
         fails.append(f"regime not assertive: {(p.get('regime') or {}).get('reason')}")
@@ -17494,7 +17899,7 @@ def _stc_regime_plan():
     # §PRO5 — a prior projection far ABOVE realised CTL ⇒ behind ⇒ generate_plan eases the WHOLE plan's
     # ceiling (max proj_acwr well under the full 1.25), proving ride_cap threads end-to-end, not just in
     # a bare generate_block.
-    pe = build(prior_proj_ctl=200.0)
+    pe, _pemem = build(prior_proj_ctl=200.0)
     eased_cap = (pe.get("shape_response") or {}).get("ride_cap")
     # §PRO8 — eased ride is bounded on the FLOORED eow (the governor's actual decision), not the raw
     # ratio, which rides up to the hard cap on any week whose CTL fell below the soft floor.
@@ -17521,12 +17926,37 @@ def _stc_regime_plan():
         fails.append(f"race fitness {race_fit} should anchor on the pre-taper CTL {pre_taper_ctl}")
     if taper_bottom is not None and not (race_fit > taper_bottom + 2):
         fails.append(f"race fitness {race_fit} should be well above the taper trough {taper_bottom}")
+    # §PRO12 — THE ROAD MAY ADVANCE PAST ITS OWN PAST; THE EVIDENCE MAY NOT VANISH WITH IT.
+    # Live 2026-07-27: the re-base block expired, `_rebase_start` re-anchored the road to that
+    # Monday, and the saved plan went 26 weeks (back to 06-15) → 20 weeks starting that day. The
+    # next regen read the banked streak off that road, found NO elapsed weeks, and dropped
+    # assertive → caution (race-day CTL 60 → 26, finish 4:59 → 6:35) — then saved another past-less
+    # plan, so the reset sustained itself. Re-save the SAME fixture with a road that starts today
+    # and assert the streak survives out of plan history.
+    p2, mem2 = build()
+    road_today = json.dumps({"base": {"weeks": [{"start": today.isoformat(), "intent_km": 30,
+                                                 "km": 30, "runs": 5, "intent": "Easy aerobic base"}]},
+                             "phases": [{"key": "base"}]})
+    mem2.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                 (_now_iso(), today.isoformat(), "{}", road_today))
+    mem2.commit()
+    streak_after, _ = _banked_streak(mem2, today, json.loads(road_today))
+    if streak_after < REGIME_BANK_AT:
+        fails.append(f"§PRO12 regression: a road starting today zeroed the banked streak "
+                     f"({streak_after} < {REGIME_BANK_AT}) — evidence must survive in plan history")
+    p3 = generate_plan(mem2, today=today)
+    if (p3.get("regime") or {}).get("mode") != "assertive":
+        fails.append(f"§PRO12 regression: regime fell to "
+                     f"{(p3.get('regime') or {}).get('mode')} after the road advanced past its past")
     return _st("det", "regime-plan",
-               "assertive generate_plan: re-base skipped, ACWR held every week, taper scales from the "
-               "realised peak (§PRO4 chaining) — a real cut-back, not a fixed-ramp collapse",
-               passed=not fails, expect="assertive, no re-base, acwr≤cap, build peak≫caution, taper from peak",
+               "assertive generate_plan (CLOCK-PINNED — the fixture's date is the engine's date): "
+               "re-base skipped, ACWR held every week, taper scales from the realised peak (§PRO4 "
+               "chaining), and §PRO12 — a road that starts today keeps its banked evidence",
+               passed=not fails, expect="assertive, no re-base, acwr≤cap, build peak≫caution, taper "
+                                        "from peak, streak survives a re-anchored road",
                got={"build_peak": round(build_pk, 1),
                     "taper": [round(w["km"], 1) for w in taper_wks], "acwr_over": overs or "none",
+                    "streak_after_reanchor": streak_after,
                     "failures": fails or "none"})
 
 
@@ -18374,6 +18804,26 @@ def _stc_effort_discipline(db):
     qrow = next((r for r in md["runs"] if r["date"] == qd), {})
     if qrow.get("seg_read"):                      # no structure cached yet ⇒ whole-run read stands
         fails.append("seg read claimed without a cached structure")
+    # §PRO12 — A ROAD THAT HAS MOVED PAST A DATE STILL KNOWS WHAT IT PRESCRIBED THERE. Live
+    # 2026-07-27: the re-base block expired, the road re-anchored to that Monday, and this monitor's
+    # 28-day window fell from 19 prescriptions (3 of them intervals) to ONE — so his 07-22 VO₂
+    # session was re-graded against the EASY bar (`easy`/`too_hard` instead of `interval`/`on`) and
+    # leaked into the easy score. Save a NEWER plan whose road starts today, i.e. covering neither
+    # date, and require both prescriptions to survive out of plan history.
+    mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                ("now", tdy.isoformat(), "{}", json.dumps(
+                    {"build": {"weeks": [{"start": tdy.isoformat(),
+                                          "sessions": [{"date": tdy.isoformat(), "kind": "easy"}]}]},
+                     "phases": [{"key": "build"}]})))
+    mem.commit()
+    md2 = effort_discipline(mem)
+    kinds2 = {r["date"]: r["kind"] for r in md2["runs"]}
+    if kinds2.get(qd) != "interval" or kinds2.get(ed) != "easy":
+        fails.append(f"§PRO12 regression: the road advancing past a date lost its prescription "
+                     f"({qd}→{kinds2.get(qd)}, {ed}→{kinds2.get(ed)})")
+    if md2["easy_counts"]["judged"] != 1:
+        fails.append(f"§PRO12 regression: quality leaked into the easy score after the road moved "
+                     f"(judged={md2['easy_counts']['judged']})")
     # §RD × §6m — the per-rep quality read. With a detected structure cached, the interval run must
     # be graded on its WORK reps vs the prescribed zone band (HRmax grid here: 95th-pct 190 ⇒ Z5
     # starts 171): reps @175 ⇒ on/moderate + seg_read; the same reps @140 ⇒ too_easy (sandbagged —
@@ -19579,7 +20029,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
-                 lambda: _stc_ft_evo2(), lambda: _stc_ft_band(), lambda: _stc_ft_ledger(),
+                 lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
+                 lambda: _stc_ft_ledger(),
                  lambda: _stc_ft_coldstart(), lambda: _stc_ft_scale(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),

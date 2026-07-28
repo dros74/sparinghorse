@@ -12,6 +12,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-28
+
+The prediction gets stricter about what counts as evidence — and the plan stops forgetting what you
+have already banked.
+
+### Changed
+
+- **A short recording can no longer move your speed estimate.** The model's speed axis is built from
+  per-run aerobic estimates, which are inferred from pace against heart rate and therefore need a
+  steady effort to mean anything. A stride set recorded separately from the run it belongs to has no
+  steady effort in it at all — bursts threaded through jogged floats, with heart rate lagging the
+  bursts it is being divided by — and such fragments were scattering estimates in both directions.
+  Two changes: the unit is now the **session**, not the recording, so a deliberately split training
+  day counts once instead of twice and cannot leave your current speed sitting on whichever piece
+  you saved last; and a recording below a minimum distance cannot inform the axis at all. That floor
+  is calibrated, not chosen — measured against the smoothed history, short recordings scatter three
+  to four times as widely as full ones — and it is locked below the shortest race distance the model
+  predicts, so a 5 km race always still counts as evidence for the axis it is evidence for.
+- **The prediction band's width is measured rather than assumed.** The band widened by a fixed
+  amount per remaining week, which is not how forecast error actually behaves: fitness is
+  mean-reverting, so uncertainty rises quickly at first and then slowly. Measured against your own
+  history — how far the projection has really strayed over two, four, eight, nineteen weeks — the
+  old rule was more than twice too narrow for a race a month out and half again too wide for one far
+  off. It is now one measured term in place of the two estimated ones it replaces (which were also
+  double-counting each other), with the shape shared across runners and the size learned from each
+  runner's own record, falling back to the population value until there is enough history to earn
+  its own.
+- **A speed estimate from before a layoff no longer presents itself as today's shape.** The
+  projection compares where you are now against where the plan takes you, but "now" was simply the
+  most recent estimate on file, however old. If your most recent measured running is older than
+  about eight weeks — the same window past which the long-run readiness measure already goes neutral
+  — the comparison is withheld and labelled, rather than quoting a pre-layoff number as current. It
+  is not decayed by some assumed rate of detraining: there is no honest way to calibrate that yet,
+  and silence beats a guess. Running re-anchors it automatically. The race-day projection itself is
+  unaffected.
+
+### Fixed
+
+- **Evidence of your completed weeks survives the plan moving on.** A plan describes the road ahead,
+  so when a training block ends the road re-anchors to the new block and weeks already lived are no
+  longer part of it. That is deliberate — but the gates that reward consistent training were reading
+  their evidence from that document, so on the day a block ended they found no completed weeks at
+  all. A build that had earned its assertive posture dropped back to caution, projected race-day
+  fitness fell sharply with it, and because the next plan saved was equally short, the reset
+  sustained itself. Those gates now read the whole plan history instead. Where the plan still covers
+  its own past — the ordinary case — the result is unchanged.
+- **The effort monitor no longer loses prescriptions when the plan re-anchors.** The same fault, in
+  the place a runner would actually notice it: prescribed quality sessions are matched to your runs
+  and excluded from the easy-day score, and with those prescriptions invisible your hardest sessions
+  were re-graded against the easy bar and marked too hard. It also reads the full history now.
+- **A run on a rest day is graded like a run, not like a rest day.** Taking a run on a day the plan
+  left free had it matched to the rest day itself and marked "too easy" — a verdict that cannot be
+  true of a run nobody asked for — and it consumed the match, distorting the nearby
+  moved-session matching. A rest day is no longer treated as a session to execute; such a run is
+  simply held to the easy bar, the standard it would have been given had it been prescribed.
+
+### Documentation
+
+- The manual and README described the finish projection as it looked before it became a range, and
+  never mentioned the prediction band at all. Both are rewritten for what the engine actually does:
+  the range as the headline, what the block buys you, how the band's width is composed, when the
+  engine declines to answer and why, and the ledger that scores every prediction against the result.
+  The manual also states what a plan document is — the road ahead, not a record of the past — and
+  where the past is kept instead.
+
 ## [0.20.1] - 2026-07-27
 
 A prediction saved by an older engine now says so, instead of quietly presenting itself as current.
