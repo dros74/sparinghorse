@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-07-28
+
+The notice added in 0.22.0 could not appear immediately after regenerating — the one moment it most
+needed to be trustworthy.
+
+### Fixed
+
+- **The "built by an earlier version" notice was suppressed for the whole render that follows a
+  regeneration.** The check compares the version stamped into the plan against the version of the
+  engine serving it. That second value was attached only to the request the page makes when it
+  loads — but after you regenerate, the page renders the response of the regeneration itself and
+  never makes that request. With nothing to compare against, the comparison quietly resolved to
+  "current", so the notice could not be shown no matter what was true. It looked correct, because
+  regenerating a plan does normally make it current; it would have stayed just as silent on a plan
+  that had failed to save. A warning that cannot be wrong cannot be relied on to be right. Both
+  responses now carry the serving version, from a single shared place rather than one path each, so
+  the notice is driven by real data whichever way the plan reached the screen. As before, the
+  serving version is attached only on the way out and is never written into the saved plan.
+
 ## [0.22.0] - 2026-07-28
 
 A saved plan now tells you when it was built by an older version of the app.

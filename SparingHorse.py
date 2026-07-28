@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.22.0"
+ENGINE_VERSION = "0.22.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -9281,7 +9281,10 @@ def api_plan_generate():
     plan = regenerate(db)
     if not plan.get("ok"):
         return jsonify(plan), 400
-    return jsonify(plan)
+    # §PRO14 — the UI renders THIS response directly (refreshPlan(p) skips the GET), so it must
+    # carry the running engine too or the staleness banner silently can't evaluate. Annotated after
+    # save_plan has already serialized the artifact, so the stamp never reaches the stored row.
+    return jsonify(_plan_for_view(plan))
 
 
 @app.post("/api/plan/explain")
@@ -9290,6 +9293,23 @@ def api_plan_explain():
     d = body()
     out = explain_plan(get_db(), d.get("diff"))
     return jsonify(out), (200 if out.get("ok") else 502)
+
+
+def _plan_for_view(plan):
+    """§PRO14 — stamp the SERVED payload with the engine actually running, so the view can compare it
+    against the `engine_version` baked into the artifact. Serve-time only: never persisted, so a
+    saved plan can never disagree with itself.
+
+    ONE definition, because the first cut had two paths and only annotated one. `/api/plan` got it;
+    the `/api/plan/generate` response did not — and the UI renders that response DIRECTLY
+    (`refreshPlan(p)` skips the GET). So `engine_running` was undefined for the whole render after a
+    regeneration, `planStale` fell to false, and the banner was suppressed UNCONDITIONALLY — it
+    looked correct only because a regeneration usually does make the plan current. A staleness
+    marker that cannot be wrong is not a marker; that is the exact failure §PRO14 exists to prevent.
+    Every path that hands a plan to a client goes through here."""
+    if plan:
+        plan["engine_running"] = ENGINE_VERSION
+    return plan
 
 
 def _strip_av_public(plan):
@@ -9309,12 +9329,7 @@ def api_plan():
     db = get_db()
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     plan = json.loads(row["plan"]) if row else None
-    # §PRO14 — annotate at SERVE time with the engine actually running, so the view can compare it
-    # against the stamp baked into the artifact. Serve-time only: never stored, so it cannot make a
-    # saved plan disagree with itself. A plan generated before §PRO14 has no stamp at all, which is
-    # exactly the mismatch we want it to report.
-    if plan:
-        plan["engine_running"] = ENGINE_VERSION
+    _plan_for_view(plan)   # §PRO14 — one definition, shared with /api/plan/generate
     if plan and READONLY:
         plan.pop("adjustment", None)   # the adjustment carries free-text/medical context — withhold
         plan.pop("cold_start", None)   # §33f-5 — the seeds carry AGE + an HRmax prior in bpm (H7-class)

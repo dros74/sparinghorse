@@ -92,6 +92,20 @@ async function runFull() {
   // innerText reflects CSS text-transform (the .dh banner is uppercased) → match case-insensitively
   ok('Generate plan re-plans (diff banner)', /re-planned/i.test(await page.locator('#plan .diff').innerText()));
 
+  // ── §PRO14 — BOTH plan endpoints must stamp the running engine ────────────
+  // The UI renders the generate RESPONSE directly (refreshPlan(p) skips the GET), so a stamp
+  // present only on /api/plan leaves the staleness banner unable to evaluate for the entire
+  // post-regeneration render — it reads "current" no matter what. That shipped once; pin it.
+  const stamps = await page.evaluate(async () => {
+    const g = await fetch('/api/plan').then(r => r.json());
+    const p = await fetch('/api/plan/generate', { method: 'POST' }).then(r => r.json());
+    return { get: g.engine_running, post: p.engine_running, ver: p.engine_version };
+  });
+  ok('GET /api/plan stamps the running engine', !!stamps.get);
+  ok('POST /api/plan/generate stamps it too (same value)',
+     !!stamps.post && stamps.post === stamps.get);
+  ok('a plan just generated reads as current, not stale', stamps.ver === stamps.post);
+
   // ── Plan-drift view renders its five charts (now ≥1 plan version) ─────────
   // FIVE, not four: §FT4 added the prediction ledger (#drift-fin). The old count of four passed
   // vacuously once the ledger shipped — it never named the chart it was missing.
