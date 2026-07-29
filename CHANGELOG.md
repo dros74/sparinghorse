@@ -12,6 +12,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-29
+
+The limit on how much a plan may build moves off the heart-rate axis and onto the biomechanical one.
+Plans now grow to a genuine marathon volume instead of sitting flat for months.
+
+### Changed
+
+- **The ceiling that decides how much a week may carry is no longer an acute-to-chronic heart-rate
+  ratio.** That ratio was read on the last day of the week — which is the long-run day, the biggest
+  session there is. At an identical, perfectly flat weekly load the reading moves from 0.97 to 1.51
+  depending only on *where in the week the long run sits*. Judged against a fixed ceiling, most of the
+  room for progression was being spent on the calendar rather than on training, and the long run —
+  being the spike that inflated the reading — was effectively taxing itself. Two limits replace it,
+  both measuring tissue load rather than cardiac load: no single session may jump beyond a set step
+  over the largest session of the previous four weeks, and the week's total tissue load may not jump
+  beyond its own ceiling. This follows the evidence rather than convention: in a study of over five
+  thousand runners, sharp increases in the **longest single run** predicted injury, while increases in
+  weekly mileage did not. The heart-rate reading is still computed, still shown, and is still one of
+  the limits — it is simply no longer the one deciding the volume, and it is now read in a way that
+  does not depend on which weekday you look at.
+- **The long run is now capped at 30% of weekly volume, in line with mainstream marathon coaching.**
+  It was previously allowed up to half the week. Counter-intuitively this makes plans *larger*, not
+  smaller: the long run is the single biggest session, so capping its share frees tissue-load headroom
+  that flows into more easy running. It also brings the long run inside the usual duration guidance of
+  two-and-a-half to three hours for most runners. It still grows every week, on a ladder that never
+  adds more than ten percent over the longest run of the past four weeks.
+- **The mid-week safety check that could strip a week of its quality session now triggers only at the
+  problem it was written for.** It was set at a threshold ordinary training weeks routinely reach, so
+  it had quietly become a volume limiter rather than the rare rescue it was designed to be.
+
+### Fixed
+
+- **A plan regenerated mid-week no longer shrinks the long run along with everything else.** The
+  remaining days of a partly-run week are governed as a share of what is left, and the long run was
+  taking that reduction like any other session. Because the long-run ladder measures itself against
+  recent long runs, one shortened long run then held the ceiling down for weeks afterwards. The long
+  run is now sized against the week as a whole; when the remainder cannot carry everything, an easy
+  day is dropped instead.
+- **The long-run progression ceiling now covers every run in the week, not only the one labelled
+  "long".** With the long run taking a smaller share of a larger week, an ordinary easy day could be
+  laid longer than the long run itself — and therefore above the ceiling — while the session named
+  "long" sat safely under it. The ceiling applies to the longest run of the week whatever it is
+  called, which is what it always meant.
+
 ## [0.22.1] - 2026-07-28
 
 The notice added in 0.22.0 could not appear immediately after regenerating — the one moment it most
