@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.23.0"
+ENGINE_VERSION = "0.23.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -7347,6 +7347,7 @@ def generate_plan(db, force_regime=None, today=None):
         # taper as pure detraining and hid the build's payoff. This is what feasibility/finish-time use.
         peak_ctl = rb["end_ctl"]
         earned_applied = False
+        freq_would = 0   # §6e2 — weeks the 6th-run opt-in would visibly move (the offer, measured)
         race_proj = {}   # §6q — projected end-CTL at each race (end of its taper), for the surfaces
         for ph in phases:
             kind, key, n_wk = ph["kind"], ph["key"], ph["weeks"]
@@ -7370,9 +7371,26 @@ def generate_plan(db, force_regime=None, today=None):
             # §6e — earned FREQUENCY advance: the 6th run on non-down building weeks (not Peak/Taper).
             # Orthogonal to the volume lifts (changes `runs`, not km), applied per phase since `runs`
             # isn't carried through `cur_km`. Constant volume; governor caps.
+            # §6e2 — MEASURE the offer, never assert it. The opt-in banner carried a hardcoded "it
+            # stays at 5 runs until your volume is high enough … so it's quiet for now": true at the
+            # ~20 km/wk he ran when that copy was written, false ever since, and contradicted ON THE
+            # SAME SCREEN by §PRO9's cap spread — which lays a 6th easy day of its own, so the week
+            # card reads "6 runs" while the note below it promises 5 (`runs` is the honest laid
+            # count, :5807). A static string cannot describe a volume-floored lever. So ask the
+            # lever: lay the phase, then count the weeks he would actually SEE change — the shape
+            # would advance AND the laid week is still at BASE_RUNS. A week §PRO9 has already spread
+            # to 6 days must NOT be counted: opting in would not move its day count, and claiming it
+            # would is the same species of lie in the other direction.
             if building:
-                sh = _apply_freq_advance(sh, freq["active"])
+                adv = _apply_freq_advance(sh, True)
+                would = [i for i, (a, b) in enumerate(zip(sh, adv)) if b["runs"] != a["runs"]]
+                sh = adv if freq["active"] else sh
             block, end_ctl = _gen_phase(key, cur_start, sh, zones, regime, ride_cap, soft_floor)
+            if building and not freq["active"]:
+                wks = block.get("weeks") or []
+                freq_would += sum(1 for i in would
+                                  if i < len(wks) and (wks[i].get("runs") or 0) == BASE_RUNS
+                                  and not (wks[i].get("frozen") or wks[i].get("elapsed")))
             plan[key] = block
             cur_start = cur_start + timedelta(weeks=n_wk)
             # §PRO4 — chain the next phase off the volume this phase actually REACHED. In caution that's
@@ -7391,6 +7409,11 @@ def generate_plan(db, force_regime=None, today=None):
                 race_proj[key] = peak_ctl  # §PRO7b — the fitness carried INTO this taper (not its trough)
             else:
                 peak_ctl = end_ctl         # building/peak phases raise the carried race fitness
+
+        # §6e2 — the offer, measured on the plan just laid. 0 when the lever is already ON (the
+        # advance is applied; there is nothing left to offer) and 0 when the volume floor genuinely
+        # keeps it dormant — the surface tells those apart by `active`, not by this count alone.
+        freq["would_advance"] = freq_would
 
         # §6f Step E / §PRO7b — feasibility re-reads the engine's REAL projected race fitness — the PEAK
         # CTL carried into the final taper (chained through every segment under the ceiling), realized on
@@ -13074,6 +13097,9 @@ function renderPlan(p){
   // §6e — earned FREQUENCY advance (the 6th run). Sibling of the volume lift above, its own opt-in:
   // banked weeks earn a 6th weekly run on the hard Base/Build weeks at the SAME volume (shorter runs,
   // more frequency for durability — honestly a tradeoff: more loading cycles, not "easier").
+  // §6e2 — the offer sentence is DATA, not copy: `would_advance` counts the weeks the opt-in would
+  // visibly move (engine-side, measured on the laid plan). A plan saved before §6e2 carries no such
+  // count ⇒ the sentence is OMITTED rather than guessed — an old plan cannot know, so it says nothing.
   const Q = p.freq || {};
   const freqNote = SH_READONLY ? "" : (
     Q.active
@@ -13081,7 +13107,7 @@ function renderPlan(p){
     : Q.opted_in
       ? `<div class="legend" style="margin-top:6px">▲ Earned 6th run is on — ${Q.banked_streak>=Q.bank_at?(Q.ready_ok?'applying now':'paused until readiness is green'):`${Q.bank_at-Q.banked_streak} more banked week${Q.bank_at-Q.banked_streak===1?'':'s'} to unlock`}. <a href="#" id="freqToggle" data-on="0">turn off</a></div>`
     : Q.banked_streak>=Q.bank_at
-      ? `<div class="gradnote">▲ You've banked ${Q.banked_streak} solid weeks — you can opt into an <b>earned 6th weekly run</b> on the hard Base/Build weeks: same weekly volume, spread over one more day (shorter, more frequent runs for durability), recovery weeks and the ACWR ceiling protected. It stays at 5 runs until your volume is high enough that the 6th run is real training (~4 km+), so it's quiet for now. <a href="#" id="freqToggle" data-on="1">opt in</a></div>`
+      ? `<div class="gradnote">▲ You've banked ${Q.banked_streak} solid weeks — you can opt into an <b>earned 6th weekly run</b> on the hard Base/Build weeks: same weekly volume, spread over one more day (shorter, more frequent runs for durability), recovery weeks and the ACWR ceiling protected. ${Q.would_advance==null ? `` : Q.would_advance ? `It would add a 6th day to <b>${Q.would_advance}</b> Base/Build week${Q.would_advance===1?'':'s'} of this block, at the same weekly volume.` : `Your easy runs are still short enough that a 6th would be junk (the bar is ~4 km), so it would stay at 5 runs for now.`} <a href="#" id="freqToggle" data-on="1">opt in</a></div>`
     : "");
   const tuneTxt = (p.tune_ups&&p.tune_ups.length)
     ? `<div class="legend" style="margin-top:8px">Tune-ups before the peak: ${p.tune_ups.map(t=>`${esc(t.label)} (${t.date}, ${t.priority})`).join(" · ")}</div>` : "";
@@ -19453,13 +19479,36 @@ def _stc_freq_advance(db):
                 fails.append(f"{key} volume moved#{w['wk']}")      # frequency must not change km
             if w.get("runs") == BASE_RUNS + 1:
                 moved += 1
+    # §6e2 — THE OFFER MUST BE THE TRUTH. The opt-in copy used to hardcode "it stays at 5 runs …
+    # quiet for now": unfalsifiable, and false for every week §PRO9's spread had already taken to 6.
+    # The replacement is a measured count, so it is now checkable — and this is the check: the number
+    # the banner shows must equal what flipping the lever ACTUALLY does to his visible day counts.
+    seen_move = 0
+    for key in ("base", "build", "bridge"):
+        offw = {w["wk"]: w for w in (off.get(key) or {}).get("weeks", [])}
+        for w in (on.get(key) or {}).get("weeks", []):
+            ow = offw.get(w["wk"])
+            if ow and (w.get("runs") or 0) != (ow.get("runs") or 0):
+                seen_move += 1
+    offer = (off.get("freq") or {}).get("would_advance")
+    if offer is None:
+        fails.append("plan carries no would_advance offer")
+    elif offer != seen_move:
+        fails.append(f"offer lies: promises {offer} weeks move, flipping it moves {seen_move}")
+    if (on.get("freq") or {}).get("would_advance"):
+        fails.append("offer non-zero while the lever is already ON (nothing left to offer)")
+    # ANTI-VACUITY (§43): an equality between two zeroes proves nothing. The fixture must actually
+    # move a week, or this det has quietly stopped testing the claim it is named for.
+    if seen_move == 0:
+        fails.append("fixture no longer moves any week — the offer check has gone vacuous")
     return _st("det", "freq-advance",
                "earned 6th run is opt-in, volume-floored & bounded: inactive no-op, floor suppresses "
                "low-volume weeks + opens high-volume ones, down + Peak/Taper stay 5, volume constant, "
                "ACWR held, live off ⇒ 5",
                passed=not fails, expect="opt-in · floored · non-down Base/Build only · constant volume",
                got={"violations": fails or "none", "advanced_hi_vol": advanced_hi,
-                    "advanced_e2e_fixture": moved}, output={"freq_live": f})
+                    "advanced_e2e_fixture": moved, "offer_vs_reality": f"{offer} == {seen_move}"},
+               output={"freq_live": f})
 
 
 def _stc_effort_discipline(db):

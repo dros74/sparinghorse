@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-07-29
+
+### Fixed
+
+- **The note offering the earned sixth weekly run no longer describes itself as dormant when it
+  isn't.** It ended in a fixed sentence promising the plan would stay at five runs until weekly
+  volume grew enough for a sixth run to be real training rather than a token one. That was true when
+  the sentence was written, at low volume — and it was never revisited, so as volume grew the offer
+  went on calling itself quiet while accepting it would in fact have added a day to most building
+  weeks. It could also sit directly above a week already showing six runs, because when the long-run
+  ceiling holds a long run back the surplus distance is spread onto an extra easy day — a different
+  mechanism entirely, with nothing to do with the opt-in. The offer is now measured rather than
+  asserted: the engine counts the weeks whose run count would genuinely change and says how many,
+  and it excludes weeks that already carry a sixth day for that other reason, since accepting would
+  not move those. A plan saved before this release carries no such count, so the sentence is left out
+  rather than guessed. No plan numbers change.
+
 ## [0.23.0] - 2026-07-29
 
 The limit on how much a plan may build moves off the heart-rate axis and onto the biomechanical one.
