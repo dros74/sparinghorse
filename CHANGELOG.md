@@ -12,6 +12,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-07-31
+
+### Fixed
+
+- **A plan generated on a day you had already trained no longer believes you were rested.** The
+  projection that decides how much a week may carry rolls forward from today, so the state it starts
+  from has to be the state at the end of *yesterday*. It was instead taking the fitness/fatigue
+  reading dated today — and that reading has already moved through today with whatever training had
+  been recorded when it was taken. Taken before an evening run it reads the day as a rest day, so the
+  day was counted twice: once as rest, once as the session. Fatigue decays about a quarter in a day,
+  so the plan was consistently handed a figure well below the truth, saw headroom that was not there,
+  and offered a week roughly twice the size it should have. Taken after the run it failed the other
+  way round, the day's load being counted once by the reading and once again by the projection.
+  Thirteen of the forty-one plans generated in July were built this way, every one of them in the
+  direction that inflates the week — and because there is one reading per day, a later sync
+  overwrites the row, so nothing afterwards showed what a plan had actually been built from. The
+  state is now taken from the last settled day and rolled forward over the training actually
+  recorded, which makes it independent of when any reading happened to be taken. A day whose reading
+  never arrived is bridged by the same arithmetic rather than by treating an older figure as current,
+  and a saved plan now records which day it was seeded from and how many days it had to bridge.
+- **A day you have already trained now reaches the projection as what you ran, not as what was
+  prescribed.** With the seed correctly stopping at the end of yesterday, today's load arrived only
+  through today's prescription — and once you have run, that prescription is beside the point. On the
+  evening this was found the plan had prescribed rest and the run had been an hour of work, so the
+  projected in-week peak read 1.13 against a measured 1.47, and the rest of the week was bounded
+  against load already spent. Today's recorded load is now applied as a floor: it can only ever raise
+  the projected figure, so it can only ever make the plan more cautious, and it goes into the
+  projection alone — what the plan asks of you is unchanged. Across the four days checked, the
+  projected peak now lands within 0.03 of the independently measured value, where before it sat up to
+  0.37 below it.
+- **The note that says a week's volume is already run now quotes the figure the decision was actually
+  made on.** It was printing the skeleton weekly target while the engine had decided against a larger
+  one — "32km of 22km planned", where the number that closed the week was 25.6. Both readings were
+  honest arithmetic; only one of them was the one being used.
+- The week currently underway is the part that changes: on the day this was found, that week's
+  allowance went from 51 km to 25 km, closer to the 32 km already run. Season totals barely move
+  (1138 → 1070 km, projected finish 4:17:06 → 4:18:09), which is the expected shape — the error was
+  concentrated in the week being laid, and later blocks re-derive from their own carried state. Plans
+  built from a reading that was already settled are unaffected.
+
 ## [0.23.1] - 2026-07-29
 
 ### Fixed

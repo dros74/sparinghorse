@@ -23,8 +23,17 @@ services:
       - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
       - SH_HOUSE_URL=${SH_HOUSE_URL:-}
       - SH_HOUSE_NAME=${SH_HOUSE_NAME:-}
-      # Private-only: nightly-sync timezone, LLM athlete context, fresh-DB seed objective.
+      # Private-only: nightly-sync timezone + hour, LLM athlete context, fresh-DB seed objective.
+      # SH_SYNC_AT (HH:MM in SH_TZ, default 22:00) must land AFTER the day's last run has been
+      # ingested upstream — the nightly job syncs and then re-plans, so a job that fires while a run
+      # is still landing re-plans a week whose actuals it cannot see. §PRO20 removed the SEED's
+      # dependence on this (the seed is end-of-yesterday, whenever it is read), but `week_actuals`
+      # still reads the day. This pass-through was MISSING: the value was set in .env and never
+      # reached the container, so the hardcoded 22:00 default ran regardless — which on
+      # Europe/Luxembourg is 20:00Z, exactly when every scheduled plan in his history is stamped.
+      # ⚠ An env change needs a container RECREATE (`docker compose up -d`), not just a rebuild.
       - SH_TZ=${SH_TZ:-}
+      - SH_SYNC_AT=${SH_SYNC_AT:-}
       - SH_ATHLETE_CONTEXT=${SH_ATHLETE_CONTEXT:-}
       - SH_SEED_OBJECTIVE=${SH_SEED_OBJECTIVE:-}
       # "More info" link on pushed Suunto guides (default: the project repo).

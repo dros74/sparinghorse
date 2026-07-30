@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.23.1"
+ENGINE_VERSION = "0.23.2"
 
 
 def activity_profile(activity_id, n=120):
@@ -2360,6 +2360,75 @@ def current_model(db):
     modeled = hist[-1] if hist else None
     snap = latest_snapshot(db)
     return modeled, (dict(snap) if snap else None)
+
+
+# ── §PRO20 — the plan's seed is END-OF-YESTERDAY, not "today's snapshot" ──────────────────────
+# `generate_block` rolls the projection from `today` INCLUSIVE — its own docstring states the
+# contract: "only TODAY-ONWARD days are governed and projected from today (model A — no
+# double-count)". That needs a seed that STOPS at the end of yesterday. Runalyze's snapshot for
+# `today` does not: it has already advanced the EWMA through today with whatever TRIMP had landed
+# when it was captured. So today gets applied TWICE — once by Runalyze, once by the roll.
+#
+# MEASURED on his live DB (2026-07-30), exact to the decimal — this is arithmetic, not inference:
+#   07-28 settled at ATL 80. The 07-29 snapshot was captured 20:00Z, BEFORE that evening's run, and
+#   read ATL 60 == _ewma_step(80, 0, 7) — i.e. today already applied as a REST day. Plan #70 was
+#   seeded from it and the week's allowance came out 50.9 km (laid 47.3, with a 9.4 km Sunday long);
+#   seeded from the settled state the same code allows 25.4 km. A 22-point ATL under-read doubled
+#   the week, and he was then told he had "over-run" it.
+#   The settled 07-29 snapshot later read ATL 82 == _ewma_step(80, 88, 7) with his real 88-TRIMP run
+#   — and OVERWROTE the row (one row per day), erasing the evidence. `plans.inputs` is the only
+#   surviving record of what a plan was actually built from.
+# 13 of the 41 plans generated in July 2026 were built from an ATL the same-day snapshot later
+# contradicted by 17–30 points — EVERY ONE in the same direction (seed low ⇒ ACWR low ⇒ week
+# inflated). Never once the other way. A systematic bias, not sync noise.
+# Post-run it fails the other way rather than not at all: a snapshot captured after the day's run
+# already holds that load, and the roll then re-applies today, so the projection reads the week
+# freer than it is (plan #71: wk1 proj_acwr 0.561, decaying a 93-TRIMP day it had already counted).
+#
+# FIX: seed from the newest snapshot dated STRICTLY BEFORE today, rolled forward over the locally
+# known daily TRIMP to end-of-yesterday. Independent of WHEN any snapshot was captured, so the whole
+# class dies rather than the one case — no clock races, no "is the day settled yet" heuristic.
+# ⚠ Direction of the correction is NOT uniformly safe-ward, so it is measured, never assumed: pre-run
+# it RAISES the seed ATL (tightens the governor), post-run it lowers it by one day's decay while also
+# stopping the roll from double-decaying that day. See PROJECT_LOG §55 for the measured before/after.
+# eVO₂max deliberately still comes from the NEWEST snapshot: it is a fitness read, not a load EWMA
+# the roll re-applies, so the freshest is the right one — and pace zones (a pure function of it)
+# stay put, keeping this change confined to the load axis.
+def plan_seed(db, today):
+    """§PRO20 — the (vo2, ctl0, atl0, meta) a plan generated on `today` must be seeded from: the load
+    state at the END OF YESTERDAY, which is what generate_block's roll-from-today-inclusive needs.
+
+    A missing snapshot day (a failed sync) is BRIDGED by measurement — rolled forward over the local
+    daily TRIMP with the same `_ewma_step` the projector is validated on — never by reading an older
+    row as if it were "now". `meta` records the day seeded from and how many days were bridged, so the
+    plan can say so instead of asserting freshness it can't know.
+
+    Returns None when there is no snapshot at all (the caller's §FT5 cold-start path owns that case).
+    When there is no snapshot dated BEFORE today (a first day / fresh install), falls back to the
+    newest row verbatim — the pre-§PRO20 behaviour — and says so in meta["fallback"]."""
+    newest = latest_snapshot(db)
+    if not newest:
+        return None
+    vo2 = newest["effective_vo2max"]
+    prior = db.execute(
+        "SELECT snapshot_date, fitness, fatigue FROM shape_snapshots WHERE snapshot_date < ? "
+        "ORDER BY snapshot_date DESC LIMIT 1", (today.isoformat(),)).fetchone()
+    if not prior:
+        return (vo2, newest["fitness"] or 0.0, newest["fatigue"] or 0.0,
+                {"from": newest["snapshot_date"], "bridged_days": 0,
+                 "fallback": "no snapshot before today — seeded from the newest row"})
+    ctl, atl = prior["fitness"] or 0.0, prior["fatigue"] or 0.0
+    seeded_from, yday = _date(prior["snapshot_date"]), today - timedelta(days=1)
+    bridged = 0
+    if seeded_from < yday:
+        daily = daily_trimp_series(db)
+        cur = seeded_from + timedelta(days=1)
+        while cur <= yday:
+            t = daily.get(cur.isoformat(), 0.0)
+            ctl, atl = _ewma_step(ctl, t, TAU_CTL), _ewma_step(atl, t, TAU_ATL)
+            cur, bridged = cur + timedelta(days=1), bridged + 1
+    return (vo2, ctl, atl,
+            {"from": prior["snapshot_date"], "bridged_days": bridged, "fallback": None})
 
 
 def project_forward(planned, ctl0, atl0, start_date):
@@ -4661,7 +4730,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     return sessions, day_trimps
 
 
-def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
+def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor=None):
     """Roll the projector across one full week (Mon–Sun). Returns
     (end_ctl, end_atl, eow_acwr, peak_acwr). The PRIMARY governor bound is END-OF-WEEK ACWR
     against the SOFT cap — the settled weekly state, the natural planning cadence — and normal
@@ -4671,11 +4740,25 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
     touches normal-CTL weeks, so the EOW-only soft bound above stands for the common case.
     project_forward only spans to the last planned day, so we extend rest days to Sunday.
     `roll_from` (default = week_start) is where the roll BEGINS: for a partially-elapsed week (§6o)
-    pass `today` and seed (ctl, atl) with today's snapshot — the elapsed days' load is already in
-    that seed, so we project only today-onward `day_trimps`, never double-counting them."""
+    pass `today` and seed (ctl, atl) with the §PRO20 end-of-yesterday state — the elapsed days' load is
+    already in that seed, so we project only today-onward `day_trimps`, never double-counting them.
+
+    §PRO20b — `actual_floor` ({date: TRIMP}, default None ⇒ byte-identical) raises a day's projected
+    load to what was ACTUALLY recorded on it. It exists for one day: TODAY. §PRO20 stops the seed at
+    end-of-yesterday, so today's load reaches the projection only through today's PRESCRIPTION — and
+    once he has already run, the prescription is moot (on 2026-07-30 it was a rest day, 0 TRIMP,
+    against a real 93). Under-reading today's load makes the rest of the week look freer than it is,
+    the same direction as the §PRO20 defect. A FLOOR, not a replacement: it can only ever RAISE
+    projected load, so it can only ever tighten the governor, and it is unioned in (a day the plan
+    left out entirely still gets charged)."""
     from datetime import timedelta
     end = _date(week_start) + timedelta(days=6)
     start_iso = roll_from or week_start                 # where the roll begins (today for a partial week)
+    if actual_floor:
+        day_trimps = dict(day_trimps or {})
+        for _d, _t in actual_floor.items():
+            if start_iso <= _d <= end.isoformat():      # only inside the rolled span
+                day_trimps[_d] = max(day_trimps.get(_d, 0.0), _t or 0.0)
     curve = project_forward(day_trimps, ctl, atl, start_iso) if day_trimps else []
     last = max(_date(d) for d in day_trimps) if day_trimps else _date(start_iso) - timedelta(days=1)
     cc, aa = (curve[-1]["ctl"], curve[-1]["atl"]) if curve else (ctl, atl)
@@ -4709,7 +4792,7 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None):
 def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None,
                     days_override=None, ramp_max=None, soft_ctl_floor=None, av_blocked=None,
                     q_days=None, prog_floor=None, shape_neutral=False,
-                    session_eq_cap=None, week_eq_cap=None, long_km_cap=None):
+                    session_eq_cap=None, week_eq_cap=None, long_km_cap=None, actual_floor=None):
     """Binary-search the largest weekly TRIMP whose END-OF-WEEK projected ACWR stays ≤ cap AND whose
     in-week PEAK ACWR stays ≤ ACWR_HARD (§H1). Distributes WITH the week's quality (via `zones`) so
     the bound is on the real, intensity-distributed week. The peak/hard bound only bites at low CTL,
@@ -4742,7 +4825,10 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         _sess, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones,
                                      days_override=days_override, av_blocked=av_blocked,
                                      q_days=q_days, long_km_cap=long_km_cap)
-        endctl, endatl, eow, peak, eow_flat, m_ctl = _project_week(ctl, atl, start, dt, roll_from=roll_from)
+        # §PRO20b — the search must charge today's ACTUAL load, or the allowance it hands back is
+        # bounded against a week he has already partly outrun. Floor-only ⇒ it can only tighten.
+        endctl, endatl, eow, peak, eow_flat, m_ctl = _project_week(
+            ctl, atl, start, dt, roll_from=roll_from, actual_floor=actual_floor)
         # §PRO16 — judge the SOFT test on the SHAPE-NEUTRAL reading (mean acute / mean chronic across
         # the week) instead of the last-day sample, which is the long-run day and carries a structural
         # offset of ~+16% that is placement, not stress. The PEAK test below is untouched and stays on
@@ -5407,7 +5493,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
                    recent_eq=None, week_actual_long=None, week_actual_eq=None, blocked=None,
-                   recent_session_eq=None):
+                   recent_session_eq=None, today_trimp=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -5431,7 +5517,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     and the EOW ACWR ceiling still holds. §6o-B: when `week_actuals` is supplied, the km already RUN
     this week is also charged against the week's km intent (one-way — it only ever reduces the
     remainder), so an over-run week stops laying sessions on the remaining days instead of
-    re-prescribing volume as if the week were fiction. Default None = full-week behaviour."""
+    re-prescribing volume as if the week were fiction. Default None = full-week behaviour.
+    §PRO20b — `today_trimp` (default None ⇒ byte-identical) is the TRIMP actually recorded today. With
+    the §PRO20 seed stopping at end-of-yesterday, today's load would otherwise reach the projection
+    only via today's prescription, which is moot once he has run. Applied as a FLOOR on today's
+    projected load, so it can only ever tighten the governor — never as a change to what is laid."""
     from datetime import timedelta
     weeks = []
     ctl, atl = ctl0, atl0
@@ -5457,6 +5547,12 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     # The straddling week contributes TRUTH-aware values (`week_actual_long`/`week_actual_eq` — what was
     # really run so far, plus the governed remainder): its elapsed planned days are display-only and may
     # never anchor the +10% step (the athlete may have out- or under-run them).
+    # §PRO20b — today's ACTUAL load, as a floor on today's PROJECTED load. Built once and handed to
+    # every week: `_project_week` range-checks it against the week it is rolling, so only the week
+    # whose window contains today can ever match — the others are byte-identical. Deliberately NOT
+    # scoped to the §6o straddle branch: `wk_start_d < today` is false when the week STARTS today, so a
+    # Monday regeneration takes the full-week path and would have kept the defect one day a week.
+    act_floor = ({today.isoformat(): float(today_trimp)} if (today and today_trimp) else None)
     seed_longs = list(recent_longs or [])
     seed_eq = list(recent_eq or [])            # §3.1 — trailing weekly eq_km (biomechanical chronic baseline)
     seed_seq = list(recent_session_eq or [])   # §PRO17 — trailing LARGEST-SESSION eq_km, same window
@@ -5509,7 +5605,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 _full_allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones,
                                                 ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
                                                 days_override=av_days, av_blocked=av_off,
-                                                prog_floor=_prog, shape_neutral=assertive)
+                                                prog_floor=_prog, shape_neutral=assertive,
+                                                actual_floor=act_floor)
                 _target = ((BUILD_DOWN_FRAC * last_nondown)
                            if (_sd and last_nondown) else _full_allowed)
                 wk_intent_trimp = min(_target, _full_allowed)
@@ -5572,7 +5669,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT,
                                           zones=use_zones, roll_from=today.isoformat(), days_override=rem,
                                           soft_ctl_floor=soft_ctl_floor, av_blocked=av_off,
-                                          q_days=q_ahead, shape_neutral=assertive)
+                                          q_days=q_ahead, shape_neutral=assertive,
+                                          actual_floor=act_floor)
                 # §AV — the denominator is the TEMPLATE's run count (== len(offsets) without §AV, so
                 # byte-identical): an av-shed week's blocked days contribute nothing, they don't
                 # concentrate the intent into the surviving days.
@@ -5599,9 +5697,17 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                  free_from=today_off)
             elif freq_met or vol_met:                      # week already covered → optional, never forced
                 a_runs, a_km = week_actuals
+                # §6e3 — quote the intent that MADE the decision, not the shape skeleton. Both tests
+                # above compare against `wk_intent_km` (§PRO13 fixed that deliberately, because an
+                # assertive week is not "already covered" at the skeleton's km); the sentence went on
+                # printing `wk["km"]`. On his 2026-07-30 plan that read "32.0km of 22km planned" while
+                # the number the engine actually decided on was 25.6 — making the week look easier to
+                # have cleared than it was. §6e2's defect, one release later: a sentence asserting
+                # something adjacent to what was measured.
+                _int_km = round(wk_intent_km, 1)
                 what = (f"✓ Week's frequency met — {a_runs}/{wk.get('runs')} runs, "
-                        f"{a_km}km ≥ {wk.get('km')}km planned." if freq_met else
-                        f"✓ Week's volume already run — {a_km}km of {wk.get('km')}km planned, "
+                        f"{a_km}km ≥ {_int_km}km planned." if freq_met else
+                        f"✓ Week's volume already run — {a_km}km of {_int_km}km planned, "
                         f"in {a_runs} runs.")
                 rem_s = [{"date": today.isoformat(), "kind": "rest", "optional": True,
                           "km": 0.0, "minutes": 0, "trimp": 0.0,
@@ -5612,11 +5718,16 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 chosen, rem_s, dt = 0.0, [], {}
             adjusted = _apply_adjustment(rem_s, dt, adjust)
             rem_s, dt = adjusted["sessions"], adjusted["dt"]
-            ctl, atl, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt, roll_from=today.isoformat())
+            ctl, atl, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
+                                                             roll_from=today.isoformat(),
+                                                             actual_floor=act_floor)
             sessions = sorted(elapsed + rem_s, key=lambda s: s["date"])
             # km + trimp_total cover the SAME set (elapsed-planned + governed remainder) so the week
             # summary is internally consistent; proj_acwr/peak come from the remaining-only `dt` rolled
-            # from today's seed (the safety number — elapsed load is in the seed, never double-counted).
+            # from the §PRO20 end-of-yesterday seed (the safety number — elapsed load is in the seed,
+            # never double-counted), with §PRO20b flooring today at what was actually run. The DISPLAY
+            # numbers stay the prescription: km/trimp_total are what the plan asks for, the projection
+            # is what the governor is held to. Same split the elapsed days already use.
             pweek = {**wk, "start": wk_start, "sessions": sessions,
                      "km": round(sum(s["km"] for s in sessions), 1),
                      "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
@@ -5700,7 +5811,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                   soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off,
                                   prog_floor=prog, shape_neutral=assertive,
                                   session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
-                                  long_km_cap=long_km_cap)
+                                  long_km_cap=long_km_cap, actual_floor=act_floor)   # §PRO20b
         if assertive and not is_taper:
             # ride the layered ceiling on building weeks; hold a proportional recovery trough on down
             # weeks (BUILD_DOWN_FRAC of the last realised non-down load), always governor-capped. The
@@ -5735,7 +5846,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                         long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off)
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
-        ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt)
+        ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
+                                                             actual_floor=act_floor)   # §PRO20b
         # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
         # the governor cannot shrink; at low CTL that floor's mid-week spike pushes PEAK ACWR past the
         # hard cap even while end-of-week stays under the soft cap. When it does, drop THIS week's
@@ -5777,7 +5889,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if breach or eroded or bio_over:
             pre_total = sum(dt.values())
             allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
-                                      ramp_max=ramp, days_override=av_days, av_blocked=av_off)
+                                      ramp_max=ramp, days_override=av_days, av_blocked=av_off,
+                                      actual_floor=act_floor)   # §PRO20b
             # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
             chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
             if av_frac < 1.0:
@@ -5789,7 +5902,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                             days_override=av_days, av_blocked=av_off)
             adjusted = _apply_adjustment(sessions, dt, adjust)
             sessions, dt = adjusted["sessions"], adjusted["dt"]
-            ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt)
+            ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
+                                                                 actual_floor=act_floor)   # §PRO20b
         ctl, atl = ctl_n, atl_n  # carry forward the FINAL distribution, stepped exactly once
         if assertive:
             recovery_wk = is_down or forced_deload or is_taper
@@ -7022,13 +7136,17 @@ def _prior_weeks_all(prior_plan):
 def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, prior_by_start, today,
                   week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                   consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
-                  recent_eq=None, db=None, pace_zones=None, blocked=None, recent_session_eq=None):
+                  recent_eq=None, db=None, pace_zones=None, blocked=None, recent_session_eq=None,
+                  today_trimp=None):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
     start date), so a mid-block regeneration never rewrites weeks already lived. Today-onward weeks
-    are generated FRESH from `gen_seed` — the LIVE CTL/ATL as of today (Runalyze's snapshot already
-    embodies what the frozen past actually did, so the future seeds from today's real state, not
-    from re-simulating history). An elapsed week with no prior record (e.g. a rebuilt DB) is
+    are generated FRESH from `gen_seed` — the §PRO20 END-OF-YESTERDAY CTL/ATL, which embodies what the
+    frozen past actually did, so the future seeds from measured state rather than from re-simulating
+    history. (It used to be "today's snapshot", which had already advanced the EWMA through today and
+    therefore applied today TWICE once the roll added it again — §PRO20, log §55.) `today_trimp` is the
+    TRIMP actually recorded today, floored into the projection by §PRO20b.
+    An elapsed week with no prior record (e.g. a rebuilt DB) is
     regenerated best-effort and flagged elapsed-but-not-frozen. Each week is tagged {elapsed, frozen}
     for the surfaces (Step F). Returns (weeks_in_order, end_ctl, end_atl, generated_any)."""
     from datetime import timedelta
@@ -7111,6 +7229,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                                         recent_longs=fresh_seed, recent_eq=fresh_seed_eq,  # §PRO9/§3.1 caps
                                         recent_session_eq=recent_session_eq,               # §PRO17
                                         week_actual_long=wal, week_actual_eq=wae,
+                                        today_trimp=today_trimp,                     # §PRO20b today's actual
                                         blocked=blocked)                             # §AV — away days
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True
@@ -7153,12 +7272,12 @@ def generate_plan(db, force_regime=None, today=None):
     `today` overrides the clock. Production never passes it; the integration dets do, so a fixture
     built around a fixed date is judged on that date instead of half-pinned against the real clock —
     the gap that let §PRO12 (and, in §33d, a §PRO10 contract breach) reach a saved plan unseen."""
-    snap = db.execute(
-        "SELECT effective_vo2max, fitness, fatigue FROM shape_snapshots "
-        "ORDER BY snapshot_date DESC LIMIT 1"
-    ).fetchone()
+    today = today or datetime.now().date()
+    # §PRO20 — seed = end-of-yesterday (see plan_seed). Resolved BEFORE the seed read because the
+    # seed is now a function of `today`; nothing else here depended on the old ordering.
+    seed = plan_seed(db, today)
     cold = None
-    if not snap:
+    if not seed:
         # §FT5 — the cold-start path: no snapshot yet, but one qualifying race-distance effort
         # seeds the state (VDOT inversion + reconstructed CTL₀). Regime starts caution by
         # construction (nothing banked), the §FT3 band is wide by design, and every truth-anchor
@@ -7170,13 +7289,11 @@ def generate_plan(db, force_regime=None, today=None):
                                            "the last 12 months and set an objective; age in Settings "
                                            "sharpens the HR prior)")}
         vo2, ctl0, atl0 = cold["vo2_seed"], cold["ctl0"], cold["atl0"]
+        seed_meta = None
     else:
-        vo2 = snap["effective_vo2max"]
-        ctl0 = snap["fitness"] or 0.0
-        atl0 = snap["fatigue"] or 0.0
+        vo2, ctl0, atl0, seed_meta = seed
     zones = pace_zones(vo2)
 
-    today = today or datetime.now().date()
     block_start = _rebase_start(db, today)
     adj = active_adjustment(db, today.isoformat())   # §6c — clamped directive or None
     adj_dir = adj["directive"] if adj else None
@@ -7241,6 +7358,12 @@ def generate_plan(db, force_regime=None, today=None):
     # not just the same key, so a week that crossed a phase boundary (calendar drift) is still carried
     # verbatim instead of being regenerated from today's CTL.
     week_actuals = _current_week_actuals(db, today)   # §6e-FREQ — runs+km logged this calendar week
+    # §PRO20b — the TRIMP actually recorded today. With the §PRO20 seed stopping at end-of-yesterday,
+    # today's load would otherwise reach the projection only as a PRESCRIPTION, which is moot once he
+    # has already run (2026-07-30: prescribed rest, ran 93 TRIMP). Floored into the projection only —
+    # never into what is laid — so it can only tighten the governor. None on a day with no runs yet
+    # ⇒ byte-identical.
+    today_trimp = daily_trimp_series(db).get(today.isoformat()) or None
     # §PRO8 — the live ASSERTIVE plan floors the SOFT-cap CTL denominator at low chronic load so the
     # ceiling can build instead of pinning at ~maintenance; caution passes None (byte-identical). The
     # re-base is always caution, so it never receives it.
@@ -7258,6 +7381,7 @@ def generate_plan(db, force_regime=None, today=None):
                                                              recent_session_eq=live["recent_session_eq"],
                                                              db=db, pace_zones=zones,  # §PRO9/§3.1 — elapsed
                                                              # weeks anchor the caps on ACTUALS, not plan
+                                                             today_trimp=today_trimp,  # §PRO20b
                                                              blocked=av_blocked)       # §AV — away days
         if gen:
             live["ctl"], live["atl"], live["started"] = ec, ea, True
@@ -7285,7 +7409,11 @@ def generate_plan(db, force_regime=None, today=None):
         # §FT5 — present only on a cold-started plan: WHAT seeded the state (the runner can see the
         # engine's assumptions; each seed is replaced by measurement as data lands). None otherwise.
         **({"cold_start": cold} if cold else {}),
-        "shape": {"effective_vo2max": vo2, "ctl": ctl0, "atl": atl0},
+        # §PRO20 — say which day the load state was seeded from, and how many missing snapshot days
+        # had to be bridged by measurement. A saved plan then carries its own provenance instead of
+        # leaving "what was this built from?" answerable only by forensics on `plans.inputs`.
+        "shape": {"effective_vo2max": vo2, "ctl": ctl0, "atl": atl0,
+                  **({"seed": seed_meta} if seed_meta else {})},
         "pace_zones": {k: f"{fmt_pace(v)}/km" for k, v in zones.items()},
         "rebase": {**rb, "banked_streak": bank["banked_streak"], "graduated": bank["graduate"],
                    "grad_at": REBASE_GRAD_AT, "full_len": len(REBASE_SHAPE)},
@@ -14278,6 +14406,12 @@ if(SH_READONLY){
 # and on the NAS (under waitress too, since it starts at import). Default 22:00 Luxembourg time
 # (late enough to catch the day's runs). Inert on the read-only/tokenless public container.
 _scheduler_started = False
+# The hour the nightly job fires, in SH_TZ. It must land AFTER the day's last run has been ingested
+# UPSTREAM, not merely after the run ends: the job syncs and then re-plans, so firing early re-plans
+# the current week from actuals it cannot see yet. §PRO20 took the SEED off this clock (it is
+# end-of-yesterday whenever it is read), but `week_actuals` — which decides whether the week's volume
+# is already run — still reads the day. Overridable via SH_SYNC_AT (validated in start_scheduler).
+SYNC_AT_DEFAULT = "22:00"
 # Fire the nightly sync at your wall-clock hour, not the container's. Set SH_TZ to your IANA zone
 # (e.g. "Europe/Lisbon", "America/New_York"); defaults to UTC. Falls back to UTC on a bad name.
 try:
@@ -14353,7 +14487,18 @@ def start_scheduler():
         return
     if os.environ.get("SH_SCHEDULE", "1").lower() not in ("1", "true", "yes"):
         return
-    hhmm = os.environ.get("SH_SYNC_AT", "22:00")
+    # An UNSET compose pass-through (`- SH_SYNC_AT=${SH_SYNC_AT:-}`) arrives as an EMPTY string, not as
+    # absent — so `.get(key, default)` would hand "" straight to `_seconds_until`, whose split(":")
+    # raises inside the daemon thread and takes the whole nightly sync down silently. Blank or
+    # malformed ⇒ fall back to the default and SAY SO, rather than dying quietly at 22:00.
+    hhmm = (os.environ.get("SH_SYNC_AT") or "").strip() or SYNC_AT_DEFAULT
+    try:
+        _h, _m = (int(x) for x in hhmm.split(":"))
+        if not (0 <= _h <= 23 and 0 <= _m <= 59):
+            raise ValueError(hhmm)
+    except (ValueError, TypeError):
+        print(f"[scheduler] SH_SYNC_AT={hhmm!r} is not HH:MM — falling back to {SYNC_AT_DEFAULT}")
+        hhmm = SYNC_AT_DEFAULT
     threading.Thread(target=_scheduler_loop, args=(hhmm,), daemon=True).start()
     _scheduler_started = True
     print(f"Sparing Horse → scheduled daily sync at {hhmm} {SYNC_TZ.key}")
@@ -17035,6 +17180,186 @@ def _stc_building_load_integrity():
                got={"spike_capped_weeks": spike_caps, "failures": fail or "none"})
 
 
+def _stc_plan_seed():
+    """§PRO20 — the plan's load seed is END-OF-YESTERDAY, never "today's snapshot". `generate_block`
+    rolls the projection from `today` INCLUSIVE (its docstring: "model A — no double-count"), so a seed
+    that has already advanced through today applies today TWICE. Runalyze's same-day row does exactly
+    that: captured before the day's run it reads today as a REST day (his real 2026-07-29 row: ATL
+    60 == _ewma_step(80, 0, 7) off a settled 80); captured after, it holds the day's load. MEASURED
+    consequence: plan #70 was seeded 60 and its week allowance came out 50.9 km; from the settled 80 the
+    same code allows 25.4 km. 13 of the 41 plans generated in July 2026 carried the bias, every one in
+    the same direction (seed low ⇒ week inflated). Pure/in-memory; never touches the real DB."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta
+    today, yday = date(2026, 7, 30), date(2026, 7, 29)
+
+    def mkdb(snaps, acts=()):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(SCHEMA)
+        for d, vo2, ctl, atl in snaps:
+            mem.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,fitness,"
+                        "fatigue) VALUES(?,?,?,?,?)", (d, d + "T20:00:00+00:00", vo2, ctl, atl))
+        for d, tr in acts:
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                        "VALUES(?,?,?,?,?,?)", (d, d + "T18:00", RUNNING_SPORT, 8.0, 2900, tr))
+        mem.commit()
+        return mem
+
+    SETTLED, PRERUN, VO2_OLD, VO2_NEW = 80.0, 60.0, 34.4, 34.8
+    fail = []
+    # ANTI-VACUITY 0 — the fixture must reproduce the arithmetic it claims, or every case below is
+    # fiction dressed as a regression. PRERUN must BE the rest-day decay of SETTLED.
+    if round(_ewma_step(SETTLED, 0.0, TAU_ATL), 6) != PRERUN:
+        fail.append(f"fixture invalid: a rest day off ATL {SETTLED} is not {PRERUN}")
+
+    # (a) THE DEFECT ITSELF — today's row is the newest BY DATE, so the pre-§PRO20 read picked it.
+    db = mkdb([(yday.isoformat(), VO2_OLD, 55.0, SETTLED),
+               (today.isoformat(), VO2_NEW, 53.0, PRERUN)])
+    if latest_snapshot(db)["snapshot_date"] != today.isoformat():
+        fail.append("anti-vacuity: today's row is not the newest — the old read would not have taken it")
+    vo2, ctl0, atl0, meta = plan_seed(db, today)
+    if round(atl0, 3) != SETTLED:
+        fail.append(f"seed applies today TWICE: took ATL {round(atl0, 3)} (today's pre-run row) instead "
+                    f"of yesterday's settled {SETTLED} — and {PRERUN} IS {SETTLED} decayed as a rest day")
+    if round(ctl0, 3) != 55.0 or meta.get("from") != yday.isoformat():
+        fail.append(f"seed provenance/CTL wrong: ctl={ctl0} from={meta.get('from')}")
+    if vo2 != VO2_NEW:
+        fail.append(f"eVO₂max must stay on the NEWEST row (a fitness read, not a load EWMA the roll "
+                    f"re-applies — pace zones must not move with this change): got {vo2}")
+
+    # (b) IT HAS TEETH — the two seeds must lay DIFFERENT weeks, else (a) asserts nothing that reaches
+    # him. Same straddling shape either way; only the seed changes.
+    shape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 0, "intent": "Base — aerobic volume"}]
+    bs = today - timedelta(days=3)                     # today lands mid-week ⇒ the §6o straddle path
+
+    def laid(atl):
+        wks, _ = generate_block(shape, bs, 55.0, atl, 428.0, today=today,
+                                regime="assertive", zones=pace_zones(VO2_NEW))
+        return round(wks[0]["km"], 1)
+
+    inflated, honest = laid(PRERUN), laid(SETTLED)
+    if not inflated > honest:
+        fail.append(f"anti-vacuity: the under-read seed lays no more than the settled one "
+                    f"({inflated}km vs {honest}km) — this fixture cannot show the defect")
+    if laid(atl0) != honest:
+        fail.append(f"the corrected seed does not lay the honest week: {laid(atl0)}km vs {honest}km")
+
+    # (c) A MISSED SYNC DAY IS BRIDGED BY MEASUREMENT — never by reading an older row as if it were now.
+    d3 = today - timedelta(days=3)
+    acts = [((today - timedelta(days=2)).isoformat(), 90.0), (yday.isoformat(), 100.0)]
+    _v, _c, a_b, m_b = plan_seed(mkdb([(d3.isoformat(), VO2_OLD, 55.0, SETTLED)], acts), today)
+    exp = SETTLED
+    for _d, _t in acts:
+        exp = _ewma_step(exp, _t, TAU_ATL)
+    if m_b.get("bridged_days") != 2:
+        fail.append(f"bridge did not run: bridged_days={m_b.get('bridged_days')}, expected 2")
+    if round(a_b, 3) != round(exp, 3):
+        fail.append(f"bridged ATL {round(a_b, 3)} != the rolled truth {round(exp, 3)}")
+    if round(a_b, 3) == SETTLED:
+        fail.append("anti-vacuity: the bridge left the seed on the stale row's value")
+
+    # (d) UNCONDITIONAL — a today-row captured AFTER the run (so it genuinely HOLDS today's load) is
+    # still not the seed. The rule is "end of yesterday", not a captured_at race the clock can lose.
+    post = round(_ewma_step(82.0, 93.0, TAU_ATL))       # his real 2026-07-30: settled 82 + a 93-TRIMP day
+    _v, _c, a_p, _m = plan_seed(mkdb([(yday.isoformat(), VO2_OLD, 57.0, 82.0),
+                                      (today.isoformat(), VO2_NEW, 58.0, post)],
+                                     [(today.isoformat(), 93.0)]), today)
+    if round(a_p, 3) != 82.0:
+        fail.append(f"post-run seed took today's row ({a_p}) — today's load is then rolled a second time")
+
+    # (e) FALLBACK — no settled day before today ⇒ pre-§PRO20 behaviour VERBATIM. This is what keeps
+    # every today-only fixture in this suite byte-identical, so it is asserted, not assumed.
+    _v, c_f, a_f, m_f = plan_seed(mkdb([(today.isoformat(), VO2_NEW, 53.0, PRERUN)]), today)
+    if (round(a_f, 3), round(c_f, 3)) != (PRERUN, 53.0) or not m_f.get("fallback"):
+        fail.append(f"fallback changed behaviour or did not say so: atl={a_f} fallback={m_f.get('fallback')}")
+    if plan_seed(mkdb([]), today) is not None:
+        fail.append("no snapshot at all must return None — the §FT5 cold-start path owns that case")
+
+    # (f) INTEGRATION — generate_plan must DELIVER it, not merely have plan_seed available (the "canned
+    # harness proves DESIGN not INTEGRATION" lesson): the plan's own shape carries seed + provenance.
+    db = mkdb([(yday.isoformat(), VO2_OLD, 55.0, SETTLED),
+               (today.isoformat(), VO2_NEW, 53.0, PRERUN)])
+    db.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+               "VALUES(?,?,?,?,?,?,?)",
+               ("marathon", "Goal", (today + timedelta(weeks=20)).isoformat(), "finish", "A",
+                "upcoming", _now_iso()))
+    db.commit()
+    sh = (generate_plan(db, today=today) or {}).get("shape") or {}
+    if round(sh.get("atl") or 0, 3) != SETTLED:
+        fail.append(f"generate_plan did not use the settled seed: shape.atl={sh.get('atl')}")
+    if (sh.get("seed") or {}).get("from") != yday.isoformat():
+        fail.append("generate_plan did not surface the seed provenance")
+
+    return _st("det", "plan-seed",
+               "§PRO20 the load seed is END-OF-YESTERDAY: today's snapshot (pre-run = today applied as "
+               "REST, post-run = today's load already in) is never the seed, so the roll-from-today "
+               "cannot double-apply today; the under-read seed provably lays a bigger week (teeth); a "
+               "missed sync day is bridged by measurement; eVO₂max stays on the newest row; no settled "
+               "day ⇒ pre-§PRO20 fallback; no snapshot ⇒ None for the cold-start path",
+               passed=not fail, expect="seed=yesterday settled; bridge rolls; fallback verbatim",
+               got={"seeded_atl": round(atl0, 3), "todays_row_atl": PRERUN,
+                    "week_km_inflated_vs_honest": [inflated, honest],
+                    "bridged_days": m_b.get("bridged_days"), "failures": fail or "none"})
+
+
+def _stc_today_actual():
+    """§PRO20b — today's ACTUAL load floors today's PROJECTED load. §PRO20 stops the seed at
+    end-of-yesterday, so today reaches the projection only through today's PRESCRIPTION — which is
+    moot once he has already run (2026-07-30: prescribed rest, ran 93 TRIMP; the projected in-week peak
+    read 1.132 against Runalyze's measured 1.466). A FLOOR, so it can only ever RAISE projected load
+    and therefore only ever TIGHTEN the governor, and it goes into the PROJECTION only — never into
+    what is laid. Covers BOTH paths: the §6o straddle AND the full-week path, which is what a Monday
+    regeneration takes (`wk_start_d < today` is false when the week starts today) and where scoping
+    this to the straddle branch would have left the defect one day in seven. Pure/in-memory."""
+    from datetime import date
+    today, mon = date(2026, 7, 30), date(2026, 7, 27)   # Thursday, and its Monday
+    shape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 0, "intent": "Base — aerobic volume"}]
+    zones = pace_zones(34.8)
+    BIG, SMALL = 150.0, 30.0        # BIG > any prescribed day; SMALL < it (floor must be inert)
+
+    def gen(bs, tt):
+        wks, _ = generate_block(shape, bs, 55.0, 60.0, 428.0, today=today,
+                                regime="assertive", zones=zones, today_trimp=tt)
+        return wks[0]
+
+    def today_trimp_laid(w):
+        return [s.get("trimp") for s in w["sessions"] if s["date"] == today.isoformat()]
+
+    fail = []
+    for label, bs in (("straddle", mon), ("full-week/Monday", today)):
+        off, small, big = gen(bs, None), gen(bs, SMALL), gen(bs, BIG)
+        # ANTI-VACUITY — BIG must genuinely exceed what the plan prescribed for today, or the floor is
+        # a no-op and every assertion below passes for the wrong reason.
+        pres = today_trimp_laid(off)
+        if not (pres and BIG > pres[0]):
+            fail.append(f"{label}: anti-vacuity — BIG {BIG} does not exceed the prescribed {pres}")
+        # a floor BELOW the prescription must change nothing at all
+        if (small["km"], small["trimp_total"], small["peak_acwr"]) != \
+           (off["km"], off["trimp_total"], off["peak_acwr"]):
+            fail.append(f"{label}: a floor below the prescription changed the week — it is a FLOOR, "
+                        f"it may only raise: {small['km']}km vs {off['km']}km")
+        # a floor ABOVE it must raise the projected peak and tighten the lay
+        if not big["peak_acwr"] > off["peak_acwr"]:
+            fail.append(f"{label}: today's real load did not reach the projection "
+                        f"(peak {big['peak_acwr']} vs {off['peak_acwr']}) — the week is bounded "
+                        f"against load he has already outrun")
+        if not big["km"] < off["km"]:
+            fail.append(f"{label}: the tightened projection did not tighten the lay "
+                        f"({big['km']}km vs {off['km']}km)")
+        # …and it must NOT leak into what is laid: the floor is a safety number, the sessions are the
+        # prescription. Internal consistency of the week summary must survive too.
+        if any(s.get("trimp") == BIG for s in big["sessions"]):
+            fail.append(f"{label}: the floor leaked into a laid session's TRIMP")
+        if round(sum(s.get("trimp", 0.0) for s in big["sessions"]), 1) != big["trimp_total"]:
+            fail.append(f"{label}: week summary no longer matches its own sessions")
+    return _st("det", "today-actual",
+               "§PRO20b today's actual load floors today's PROJECTED load (never the lay): a floor "
+               "below the prescription is inert, above it raises the projected peak and tightens the "
+               "week, and it applies on the full-week/Monday path as well as the §6o straddle",
+               passed=not fail, expect="below⇒inert; above⇒peak up + lay tighter; never in the lay",
+               got={"failures": fail or "none"})
+
+
 def _stc_frequency_met():
     """§6e-FREQ + §6o-B — the CURRENT week's actuals govern its remainder. Count AND km both met ⇒
     optional rest (frequency_met). Km intent already RUN — even with the count short — ⇒ optional
@@ -17093,6 +17418,37 @@ def _stc_frequency_met():
     sf_partial = [w for w in sf_weeks if w.get("partial")]
     if not (sf_partial and sf_partial[0].get("frequency_met")):
         fail.append("_split_freeze did not propagate week_actuals → frequency_met")
+    # §6e3 — the optional-rest NOTE must quote the intent that MADE the decision. Both tests compare
+    # against `wk_intent_km`, which on an ASSERTIVE week is far above the shape skeleton's km (§PRO13);
+    # the sentence printed the skeleton. His 2026-07-30 plan read "32.0km of 22km planned" while the
+    # engine had decided on 25.6 — making the week look easier to have cleared than it was. Needs an
+    # assertive week, since on caution intent == skeleton and the two numbers coincide.
+    a_shape = [{"wk": 1, "km": 15, "runs": 4, "long": 6, "strides": 0,
+                "intent": "Base — aerobic volume"}]
+    a_wks, _ = generate_block(a_shape, bs, 55.0, 60.0, 428.0, today=today,
+                              regime="assertive", zones=pace_zones(34.8), week_actuals=(4, 60.0))
+    a_note = next((s.get("note") or "" for s in a_wks[0]["sessions"]
+                   if s.get("kind") == "rest"), "")
+    # ANTI-VACUITY — this assertive shape must genuinely intend MORE than its skeleton, or the note has
+    # nothing to get wrong. Read it off the same shape laid as a FULL week (assertive rides the
+    # ceiling ⇒ laid km ≫ the skeleton's 15). NB the week's own `intent_km` field cannot be used here:
+    # it is ALSO the skeleton (see the straddle branch) — the same defect in data rather than prose,
+    # recorded in log §55c and deliberately NOT changed, since several surfaces diff on it.
+    a_full, _ = generate_block(a_shape, today, 55.0, 60.0, 428.0,
+                               regime="assertive", zones=pace_zones(34.8))
+    if not a_full[0]["km"] > a_shape[0]["km"] + 1.0:
+        fail.append(f"§6e3: anti-vacuity — this shape intends {a_full[0]['km']}km vs a skeleton of "
+                    f"{a_shape[0]['km']}km, so the note has nothing to get wrong")
+    if not a_note:
+        fail.append("§6e3: assertive over-run week laid no optional-rest note to check")
+    else:
+        # both branches quote it: vol_met "of Xkm planned", freq_met "≥ Xkm planned"
+        _m = re.search(r"(?:of|≥) ([\d.]+)km planned", a_note)
+        if not _m:
+            fail.append(f"§6e3: could not read the planned km out of the note — {a_note.strip()[:80]}")
+        elif abs(float(_m.group(1)) - a_shape[0]["km"]) < 1e-9:
+            fail.append(f"§6e3: the note quotes the shape skeleton ({_m.group(1)}km), not the intent the "
+                        f"decision was made on — it makes the week look easier to have cleared than it was")
     return _st("det", "frequency-met",
                "current week's actuals govern its remainder: count+km met ⇒ optional rest; km OVER-RUN "
                "(count short) ⇒ optional rest too, never re-forced (§6o-B); partial over-run charges "
@@ -20796,6 +21152,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(), lambda: _stc_building_load_integrity(),
+                 lambda: _stc_plan_seed(), lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
                  lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
