@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.3] - 2026-07-31
+
+### Fixed
+
+- **The app's log messages now actually appear in `docker logs`.** Container output is a pipe rather
+  than a terminal, so Python held everything the app printed in an 8 KB buffer that a long-running
+  server never fills — while the web server's own logging, which goes to a different stream, kept
+  scrolling past. The result was a log that looked healthy with the application's voice missing from
+  it entirely, including the warning that explains why an unreadable nightly-sync time fell back to
+  the default. The container now runs unbuffered. No training or plan behaviour changes.
+
 ## [0.23.2] - 2026-07-31
 
 ### Fixed

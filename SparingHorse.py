@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.23.2"
+ENGINE_VERSION = "0.23.3"
 
 
 def activity_profile(activity_id, n=120):
@@ -15321,6 +15321,63 @@ def _stc_engine_version():
                     "changelog_newest": newest, "compared": compared})
 
 
+def _stc_log_visible():
+    """§55e — the app's own voice has to reach `docker logs`, or every `print()` guard in it is
+    decorative. Container stdout is a PIPE, so Python block-buffers it (8 KB) and a long-running
+    server never fills that buffer: startup and diagnostic lines sit there indefinitely. Meanwhile
+    `waitress` logs through the `logging` module to STDERR, which is unbuffered — so the log looks
+    perfectly alive while nothing the app itself says ever appears. That is what silently disarmed
+    §55b, whose defence against a blank/malformed `SH_SYNC_AT` is to fall back to the default and
+    PRINT why; the fallback works, the explanation is unreachable. Verified empirically before this
+    det was written: the same script piped to `cat` shows nothing by default and the line immediately
+    under `PYTHONUNBUFFERED=1` (log §55e).
+
+    Static, because the invariant lives in the BUILD RECIPE, not in running code — and the battery
+    runs in-process inside the container, where spawning a probe process to re-derive CPython's
+    buffering rule would cost more than it proves. The Dockerfile is not shipped in the image
+    (it copies `SparingHorse.py` alone), so its absence SKIPS the comparison rather than failing an
+    in-container run — same contract as `det/engine-version`.
+
+    ANTI-VACUITY (§43): comment lines are stripped before matching, so this docstring's own mention of
+    `PYTHONUNBUFFERED` — or any prose about it — cannot satisfy the check; and the file must still
+    look like a build recipe (`FROM` + `CMD`), so a truncated or renamed Dockerfile reports as
+    uncompared instead of quietly passing."""
+    import re
+    from pathlib import Path
+    fails = []
+    df = Path(__file__).with_name("Dockerfile")
+    guaranteed, how, compared = None, None, False
+    if df.exists():
+        code = "\n".join(ln for ln in df.read_text(encoding="utf-8").splitlines()
+                         if not ln.lstrip().startswith("#"))
+        compared = bool(re.search(r"^\s*FROM\s", code, re.M) and re.search(r"^\s*CMD\s", code, re.M))
+        # `PYTHONUNBUFFERED=0` is the one value that does NOT unbuffer — anything else non-empty does.
+        if re.search(r"^\s*ENV\s+PYTHONUNBUFFERED[= ]\s*(?!0\s*$)\S+", code, re.M):
+            guaranteed, how = True, "ENV PYTHONUNBUFFERED"
+        # Both CMD forms: shell (`python -u ...`) and exec (`["python", "-u", ...]`), where the
+        # separator is `", "` and not whitespace — the first cut missed the exec form entirely and
+        # would have failed a perfectly correct Dockerfile. Caught by writing the revert test.
+        elif re.search(r"python[\d.]*[\"'\s,]+-u\b", code):
+            guaranteed, how = True, "python -u"
+        else:
+            guaranteed = False
+        if not compared:
+            fails.append("Dockerfile present but has no FROM+CMD — this is not the build recipe the "
+                         "check thinks it is reading, so its verdict means nothing")
+        elif not guaranteed:
+            fails.append("the Dockerfile no longer guarantees unbuffered stdout (no ENV "
+                         "PYTHONUNBUFFERED, no `python -u`) — every print() in the app, including "
+                         "§55b's SH_SYNC_AT fallback warning, would be withheld from `docker logs`")
+    return _st("det", "log-visible",
+               "§55e the build recipe forces unbuffered stdout, so the app's own print() diagnostics "
+               "reach `docker logs` instead of dying in an 8 KB pipe buffer behind waitress's stderr "
+               "(skipped where the Dockerfile isn't shipped, e.g. in-container)",
+               passed=not fails,
+               expect="ENV PYTHONUNBUFFERED (or `python -u`) present when the Dockerfile is readable",
+               got={"violations": fails or "none", "guaranteed": guaranteed, "via": how,
+                    "compared": compared})
+
+
 # §PRO16/§PRO17 — the GOVERNED reading is regime-dependent now. Assertive is bound on the
 # SHAPE-NEUTRAL ratio (mean acute / mean chronic; `proj_acwr` is the raw last-day sample, which is the
 # long-run day and carries a structural offset that is placement, not load), and its per-day ceiling
@@ -21135,7 +21192,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
-                 lambda: _stc_engine_version(),
+                 lambda: _stc_engine_version(), lambda: _stc_log_visible(),
                  lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
