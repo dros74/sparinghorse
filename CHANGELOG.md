@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Your plan now tells you when it was built from an older reading of your shape.** A plan is seeded
+  from where your fitness and fatigue stood at the end of the previous day, so the plan waiting for
+  you in the morning was built for yesterday. When that starting point has since moved, the plan says
+  so and shows both readings, so you can decide whether to regenerate. It reports only that the
+  starting point changed — never that your sessions would change, which is a different and much more
+  expensive question. If the new reading is the same as the old one, nothing is shown.
+
 ## [0.23.3] - 2026-07-31
 
 ### Fixed

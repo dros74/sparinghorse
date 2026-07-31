@@ -9700,10 +9700,65 @@ def api_plan_explain():
     return jsonify(out), (200 if out.get("ok") else 502)
 
 
-def _plan_for_view(plan):
+def _seed_now(db, plan, today=None):
+    """§56 — the OTHER way a saved plan goes stale: not the engine moving under it (§PRO14), but the
+    DAY moving. A plan is seeded from the load state at the end of the day before it was generated
+    (§PRO20), so once tomorrow arrives that seed describes a state the athlete has since left. The
+    nightly regenerates at 22:30, which is the right time to INGEST the day's runs and the wrong time
+    to be the plan you wake up to — on 2026-07-31 the 22:30 plan correctly read the week as spent and
+    laid nothing for the weekend, while the same engine run on Saturday morning brought back Sat easy
+    7.4 km + Sun long 9.4 km. Nothing was broken; the plan was simply built for the previous day.
+
+    ⛔ WHAT THIS DELIBERATELY DOES NOT CLAIM. It compares the SEED — the input — and says only that
+    the input has moved. It does NOT claim the sessions would change, because knowing that costs a
+    full counterfactual `generate_plan` (measured on the owner's DB at 1.6–2.0 s) and this runs on
+    every dashboard load, behind a 4-thread server already seen queuing to depth 9. `plan_seed` is
+    0.1 ms. A cheap true statement beats an expensive one served slowly, and beats a cheap false one
+    absolutely — §6e2's hardcoded sentence is the standing lesson here.
+
+    TRIGGERED ON VALUES, NOT PROVENANCE, and that distinction is the whole honesty of it: if the seed
+    is drawn from a different DAY but reads the same to the displayed precision, NOTHING has moved and
+    firing would be crying wolf — the exact failure §PRO14's docstring warns trains the owner to
+    ignore the marker. So a new day alone does not fire it; a new day whose numbers differ does.
+
+    Returns None — and the banner is then OMITTED, never guessed — when the plan predates §PRO20 (no
+    `shape.seed` to compare) or came from the §FT5 cold-start path (no snapshot at all). Same
+    discipline as §6e2: a marker that cannot know says nothing rather than asserting a default."""
+    saved = (plan.get("shape") or {}).get("seed")
+    if not saved:
+        return None
+    cur = plan_seed(db, today or datetime.now().date())
+    if not cur:
+        return None
+    vo2, ctl, atl, meta = cur
+    sh = plan.get("shape") or {}
+
+    def _num(x, nd):
+        try:
+            return round(float(x), nd)
+        except (TypeError, ValueError):
+            return None
+    now = {"effective_vo2max": _num(vo2, 2), "ctl": _num(ctl, 1), "atl": _num(atl, 1)}
+    was = {"effective_vo2max": _num(sh.get("effective_vo2max"), 2),
+           "ctl": _num(sh.get("ctl"), 1), "atl": _num(sh.get("atl"), 1)}
+    # eVO₂max rides along because it IS part of the seed tuple (§PRO20 keeps it on the newest row) and
+    # it moves the pace zones — a changed fitness read is as much a reason to re-read today as a
+    # changed load state. Compared at the precision each is shown at, so an invisible last-decimal
+    # wobble never fires a banner the owner cannot see the cause of.
+    return {"from": meta.get("from"), "bridged_days": meta.get("bridged_days"),
+            "fallback": meta.get("fallback"), "was_from": saved.get("from"),
+            "moved": now != was, **now, "was": was}
+
+
+def _plan_for_view(plan, db=None):
     """§PRO14 — stamp the SERVED payload with the engine actually running, so the view can compare it
     against the `engine_version` baked into the artifact. Serve-time only: never persisted, so a
     saved plan can never disagree with itself.
+
+    §56 — carries the day-staleness read (`seed_now`) for the same reason and by the same route: it is
+    a serve-time comparison against live state, so it must never be baked into the artifact, and it
+    must be attached HERE so both the GET and the generate response evaluate it. That second point is
+    not theoretical — it is precisely the bug §PRO14's own note records.
 
     ONE definition, because the first cut had two paths and only annotated one. `/api/plan` got it;
     the `/api/plan/generate` response did not — and the UI renders that response DIRECTLY
@@ -9714,6 +9769,11 @@ def _plan_for_view(plan):
     Every path that hands a plan to a client goes through here."""
     if plan:
         plan["engine_running"] = ENGINE_VERSION
+        try:
+            plan["seed_now"] = _seed_now(db or get_db(), plan)
+        except Exception as e:      # a staleness read must never cost the owner his plan
+            print(f"[§56] seed staleness read skipped: {e}")
+            plan["seed_now"] = None
     return plan
 
 
@@ -13289,6 +13349,11 @@ function renderPlan(p){
   // equality rather than ordering keeps that honest without pretending to understand version order.
   // A pre-§PRO14 plan carries no stamp, so it reads stale, which is correct.
   const planStale = !!(p.engine_running && p.engine_version !== p.engine_running);
+  // §56 — the DAY moved under the plan. `moved` is computed server-side against live state; a plan
+  // that predates §PRO20, or came from the cold-start path, yields seed_now:null and says NOTHING
+  // rather than guessing. Deliberately makes no claim about the sessions — only that the seed moved.
+  const SN = p.seed_now;
+  const seedStale = !!(SN && SN.moved);
   const ftStale = !!FT && !FTB && !FTT;
   const ftFrozen = fcHms.length>1 && new Set(fcHms).size===1;
   // §FT9 — the speed anchor is older than the window in which it could describe TODAY (a layoff).
@@ -13356,6 +13421,12 @@ function renderPlan(p){
       Updating the app does not rebuild saved plans — the weeks below, and every number derived from
       them, are exactly as they were generated${p.engine_version?` by v${esc(p.engine_version)}`:''}.
       Hit <b>Generate plan</b> to re-read them on v${esc(p.engine_running)}.</div>`:''}
+    ${seedStale?`<div class="stalebanner">⟳ <b>This plan was built from an older reading of your shape.</b>
+      Generated ${p.generated_at?esc(new Date(p.generated_at).toLocaleString()):'earlier'}, seeded from
+      your ${esc(SN.was_from||'earlier')} state (CTL ${esc(SN.was.ctl)} · ATL ${esc(SN.was.atl)}). Your
+      settled ${esc(SN.from)} state${SN.bridged_days?`, rolled forward ${SN.bridged_days}
+      day${SN.bridged_days>1?'s':''} by measurement,`:''} now reads CTL ${esc(SN.ctl)} · ATL
+      ${esc(SN.atl)}. Hit <b>Generate plan</b> to re-read today off it.</div>`:''}
     ${diffBanner(LASTDIFF)}
     ${objManager(p)}
     ${header}
@@ -17235,6 +17306,86 @@ def _stc_building_load_integrity():
                "taper/race week is never falsely flagged",
                passed=not fail, expect="healthy: long≥min, uncapped; spiked: relabel+flag+recover; taper: never flagged",
                got={"spike_capped_weeks": spike_caps, "failures": fail or "none"})
+
+
+def _stc_seed_stale():
+    """§56 — the day-staleness banner must fire when the seed has actually MOVED and stay silent when
+    it has not. Both halves are the test: a marker that fires every day is one the owner learns to
+    scroll past, which is the failure §PRO14's own docstring names, and this is the second marker
+    stacked in the same slot — so it has to earn each appearance.
+
+    THE CRYING-WOLF CASE (c) IS THE POINT: a seed drawn from a DIFFERENT DAY that reads the SAME to
+    displayed precision must NOT fire. Triggering on provenance would have been the easy
+    implementation and would have made the banner permanent furniture.
+
+    Pure/in-memory; never touches the real DB."""
+    import sqlite3 as _sq
+    from datetime import date
+    fail = []
+
+    def mkdb(snaps):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(SCHEMA)
+        for d, vo2, ctl, atl in snaps:
+            mem.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,"
+                        "fitness,fatigue) VALUES(?,?,?,?,?)", (d, d + "T20:00:00+00:00", vo2, ctl, atl))
+        mem.commit()
+        return mem
+
+    def mkplan(frm, vo2, ctl, atl, bridged=0):
+        return {"shape": {"effective_vo2max": vo2, "ctl": ctl, "atl": atl,
+                          "seed": {"from": frm, "bridged_days": bridged, "fallback": None}}}
+
+    D29, D30, D31 = "2026-07-29", "2026-07-30", "2026-07-31"
+    AUG1 = date(2026, 8, 1)
+
+    # (a) FRESH — the plan's seed IS what plan_seed returns now ⇒ silent.
+    db = mkdb([(D30, 34.79, 58.0, 85.0), (D31, 34.79, 56.0, 64.0)])
+    r = _seed_now(db, mkplan(D31, 34.79, 56.0, 64.0), AUG1)
+    if not r or r["moved"]:
+        fail.append(f"fires on a plan already seeded from the current state: {r}")
+    # ANTI-VACUITY: the fixture must really be offering a newer row, or (a) proves nothing.
+    if plan_seed(db, AUG1)[3]["from"] != D31:
+        fail.append("anti-vacuity: plan_seed is not reading 07-31 — (a) is vacuous")
+
+    # (b) THE REAL CASE — his own 2026-07-31 numbers. A plan seeded 07-30 (CTL 58 · ATL 85), read on
+    # 08-01 when the settled 07-31 row (56 · 64) is available ⇒ must fire.
+    r = _seed_now(db, mkplan(D30, 34.79, 58.0, 85.0), AUG1)
+    if not r or not r["moved"]:
+        fail.append(f"SILENT on the real case: a plan seeded 07-30 (58/85) read on 08-01 (56/64): {r}")
+    elif (r["ctl"], r["atl"], r["was"]["atl"], r["from"]) != (56.0, 64.0, 85.0, D31):
+        fail.append(f"fires but misreports the numbers it shows him: {r}")
+
+    # (c) ⭐ CRYING WOLF — a DIFFERENT source day whose values are identical must stay SILENT.
+    db2 = mkdb([(D30, 34.79, 56.0, 64.0), (D31, 34.79, 56.0, 64.0)])
+    r = _seed_now(db2, mkplan(D30, 34.79, 56.0, 64.0), AUG1)
+    if not r:
+        fail.append("no read at all on the identical-values case")
+    elif r["moved"]:
+        fail.append("CRIES WOLF: fires on a new source day whose CTL/ATL/eVO₂ are unchanged — this is "
+                    "provenance-triggering, and it makes the banner permanent furniture")
+    elif r["from"] == r["was_from"]:
+        fail.append("anti-vacuity: (c) is not actually testing a different source day")
+
+    # (d) eVO₂max ALONE moves ⇒ fires (it is part of the seed tuple and it moves the pace zones).
+    db3 = mkdb([(D30, 34.40, 56.0, 64.0), (D31, 34.79, 56.0, 64.0)])
+    r = _seed_now(db3, mkplan(D30, 34.40, 56.0, 64.0), AUG1)
+    if not r or not r["moved"]:
+        fail.append(f"silent when the fitness read moved (34.40 → 34.79) — pace zones move with it: {r}")
+
+    # (e) CANNOT KNOW ⇒ SAYS NOTHING (§6e2/§PRO14 discipline), never a guessed default.
+    if _seed_now(db, {"shape": {"ctl": 58.0, "atl": 85.0}}, AUG1) is not None:
+        fail.append("a pre-§PRO20 plan (no shape.seed) must yield None so the banner is OMITTED")
+    if _seed_now(mkdb([]), mkplan(D30, 34.79, 58.0, 85.0), AUG1) is not None:
+        fail.append("a cold start (no snapshot at all) must yield None, not a fabricated comparison")
+
+    return _st("det", "seed-stale",
+               "§56 the day-staleness banner fires when the SEED moved (his real 07-30→07-31 case, and "
+               "on eVO₂max alone), stays silent when the plan is already current, stays silent when a "
+               "new source day carries identical numbers (no crying wolf), and says NOTHING at all "
+               "when it cannot know (pre-§PRO20 artifact / cold start)",
+               passed=not fail, expect="fires on movement only; silent otherwise; None when unknowable",
+               got={"violations": fail or "none"})
 
 
 def _stc_plan_seed():
@@ -21193,6 +21344,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(),
+                 lambda: _stc_seed_stale(),
                  lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
