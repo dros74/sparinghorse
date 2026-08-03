@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.24.0"
+ENGINE_VERSION = "0.24.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -883,19 +883,27 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
 def _zones_asof(db, date_iso=None):
     """Pace zones AS OF a date — the snapshot VO2max on/just before it, so an old run is read
     against the fitness the runner HAD, not today's. Falls back forward (earliest snapshot) for
-    runs predating the history, then to the latest snapshot."""
-    row = None
-    if date_iso:
-        row = db.execute("SELECT effective_vo2max FROM shape_snapshots WHERE snapshot_date<=? "
-                         "AND effective_vo2max IS NOT NULL ORDER BY snapshot_date DESC LIMIT 1",
-                         (date_iso[:10],)).fetchone()
+    runs predating the history, then to the latest snapshot.
+    §PRO22 — returns {} rather than raising when the snapshot table is absent or unreadable. This is a
+    read-only lookup used to SCORE history; every caller has a fallback (`_zones_asof(...) or zones`),
+    and since §PRO22 put it on the biomechanical hot path it is reached from in-memory fixtures that
+    build only the tables they care about. A history read must never be able to take the plan down."""
+    import sqlite3 as _sq
+    try:
+        row = None
+        if date_iso:
+            row = db.execute("SELECT effective_vo2max FROM shape_snapshots WHERE snapshot_date<=? "
+                             "AND effective_vo2max IS NOT NULL ORDER BY snapshot_date DESC LIMIT 1",
+                             (date_iso[:10],)).fetchone()
+            if not row:
+                row = db.execute("SELECT effective_vo2max FROM shape_snapshots WHERE effective_vo2max "
+                                 "IS NOT NULL ORDER BY snapshot_date ASC LIMIT 1").fetchone()
         if not row:
-            row = db.execute("SELECT effective_vo2max FROM shape_snapshots WHERE effective_vo2max "
-                             "IS NOT NULL ORDER BY snapshot_date ASC LIMIT 1").fetchone()
-    if not row:
-        snap = latest_snapshot(db)
-        return pace_zones(snap["effective_vo2max"]) if snap else {}
-    return pace_zones(row["effective_vo2max"])
+            snap = latest_snapshot(db)
+            return pace_zones(snap["effective_vo2max"]) if snap else {}
+        return pace_zones(row["effective_vo2max"])
+    except _sq.OperationalError:      # no such table/column — degrade to the caller's fallback zones
+        return {}
 
 
 def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S):
@@ -5091,26 +5099,73 @@ def _week_eq_km(sessions):
     return round(sum(_session_eq_km(s) for s in (sessions or [])), 2)
 
 
+def _eq_factor(gap_pace_sec, zones):
+    """§3.1/§PRO22 — the damage weight f for an ACTUAL run's grade-adjusted pace, INTERPOLATED between
+    the EQ_KM_FACTOR anchors instead of bucketed into the fastest zone the pace met.
+
+    The bucketed form was a step function: `gap_pace <= zone_pace` at 1 s/km granularity, so two runs a
+    single second apart differed by a whole factor (1.0 → 1.4 at the marathon edge, +40%). Because the
+    zone paces are derived from eVO₂max, the edges MOVE, and a run that has already happened can cross
+    one. Measured on his own data (2026-08-03): his 07-22 run sat at GAP exactly 377 s/km with the
+    marathon anchor at 377; a good evening run nudged eVO₂max 35.00 → 35.29, the anchor moved to 376,
+    and that run's eq_km fell 8.95 → 6.39. It was the trailing window's largest bout, so
+    `session_eq_cap` fell 11.635 → 11.05, the week's long bout (11.30) no longer fitted, and the
+    governor's binary search cut the week from 49.7 to 42.6 km — a 15% swing off one second of pace.
+
+    Damage per km rises CONTINUOUSLY with speed (loading cycles × load-per-step); there is no step at
+    marathon pace. So f is piecewise-linear in pace between the anchors, flat outside them. The anchors
+    and their values are UNCHANGED — at any anchor pace this returns exactly what the buckets returned,
+    so §PRO17's calibration points still read the same. What changes is BETWEEN anchors, and it changes
+    in the honest direction: a run at 6:43/km with easy 7:16 and marathon 6:17 scored 1.0 (as if it were
+    a recovery jog) and now scores ~1.22. That under-count was systematic for him — his easy runs run
+    hot (8 of the last 14 judged "hot"), so the axis meant to see biomechanical cost was blind to
+    exactly the habit that generates it. ⚠ The calibration percentiles move with this; re-measured on
+    the full corpus, see PROJECT_LOG §58."""
+    if not gap_pace_sec or not zones:
+        return EQ_KM_FACTOR["easy"]
+    anchors = sorted(((float(zones[z]), EQ_KM_FACTOR[z])
+                      for z in ("easy", "marathon", "threshold", "interval") if zones.get(z)),
+                     key=lambda a: -a[0])                  # slowest pace first ⇒ f ascending
+    if not anchors:
+        return EQ_KM_FACTOR["easy"]
+    p = float(gap_pace_sec)
+    if p >= anchors[0][0]:
+        return anchors[0][1]                               # at/slower than the easy anchor ⇒ f = 1.0
+    if p <= anchors[-1][0]:
+        return anchors[-1][1]                              # at/faster than the interval anchor
+    for (p_slow, f_slow), (p_fast, f_fast) in zip(anchors, anchors[1:]):
+        if p_fast <= p <= p_slow:
+            span = p_slow - p_fast
+            return f_slow + ((p_slow - p) / span) * (f_fast - f_slow) if span else f_fast
+    return EQ_KM_FACTOR["easy"]
+
+
 def _run_eq_km(km, gap_pace_sec, zones):
-    """§3.1 — eq_km for an ACTUAL logged run from its grade-adjusted pace: classify the pace into the
-    fastest training zone it met (interval < threshold < marathon by sec/km) and weight km by that zone's
-    damage factor; slower than marathon pace ⇒ easy (f=1). No pace or no zones ⇒ treat as easy. Used only
-    to SEED the biomechanical baseline from his real recent weeks (assertive skips the re-base)."""
+    """§3.1 — eq_km for an ACTUAL logged run: km weighted by `_eq_factor` at its grade-adjusted pace.
+    No pace or no zones ⇒ treat as easy. Used only to SEED the biomechanical baseline from his real
+    recent weeks (assertive skips the re-base). ⚠ `zones` must be the zones in force WHEN THE RUN
+    HAPPENED (`_zones_asof`), never today's — see _recent_eq_km."""
     if not km:
         return 0.0
-    if gap_pace_sec and zones:
-        for zone in ("interval", "threshold", "marathon"):    # fastest-first; sec/km, smaller = faster
-            zp = zones.get(zone)
-            if zp and gap_pace_sec <= zp:
-                return round(km * EQ_KM_FACTOR[zone], 2)
-    return round(km * EQ_KM_FACTOR["easy"], 2)
+    return round(km * _eq_factor(gap_pace_sec, zones), 2)
 
 
 def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
     """§3.1 — the total eq_km logged in each of the `n_weeks` calendar weeks BEFORE `before`, oldest-first,
     owned data only (each run's eq_km from its grade-adjusted pace via `_run_eq_km`). Seeds the biomechanical
     jump-cap's trailing window from his real recent load — assertive skips the re-base, so the plan's own
-    weeks don't seed it. Empty weeks contribute nothing."""
+    weeks don't seed it. Empty weeks contribute nothing.
+
+    §PRO22 — each run is scored against `_zones_asof(its own date)`, NOT the `zones` passed in. A run's
+    biomechanical cost is a property of the run: it happened at the pace he ran, against the fitness he
+    had that day, and nothing that happens afterwards can change it. Scoring the trailing window with
+    TODAY's zones made the whole baseline a moving target — every intraday Runalyze sync that nudged
+    eVO₂max re-scored weeks of finished training, and §PRO20 deliberately keeps eVO₂max on the NEWEST
+    snapshot row, so today's own run moves it. That is §PRO20's defect class one field over: the seed
+    was fixed to end-of-yesterday, the biomechanical history was not. `_zones_asof` already existed for
+    exactly this, and §PRO17's SESSION_EQ_STEP was CALIBRATED with it ("PERIOD-CORRECT zones") — the
+    calibration assumed this reading; only the runtime path did not do it. `zones` stays in the
+    signature as the fallback for a DB with no usable snapshot history."""
     from datetime import timedelta
     import json as _json
     drop = dropped_ids(db)
@@ -5120,7 +5175,7 @@ def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
         ws = mon0 - timedelta(days=7 * w)
         we = ws + timedelta(days=6)
         rows = db.execute(
-            "SELECT id, distance, duration, raw FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
+            "SELECT id, date, distance, duration, raw FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
             (ws.isoformat(), we.isoformat())).fetchall()
         eq = 0.0
         for r in rows:
@@ -5130,7 +5185,7 @@ def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
             gap = raw.get("gap")                              # grade-adjusted speed (km/h)
             gap_pace = (round(3600.0 / gap) if gap else
                         (round(r["duration"] / r["distance"]) if r["duration"] else None))
-            eq += _run_eq_km(r["distance"], gap_pace, zones)
+            eq += _run_eq_km(r["distance"], gap_pace, _zones_asof(db, r["date"]) or zones)
         if eq:
             out.append(round(eq, 2))
     return out
@@ -5143,7 +5198,11 @@ def _recent_session_eq(db, before, zones, n_weeks=BIO_EQ_WINDOW):
     step cap's trailing window from his real recent training — the plan's own weeks extend it in-phase,
     exactly as §PRO9's window does.
     A logged DAY is the unit, not a recording: §SJ joins minutes-apart parts into one session, so a run
-    plus the strides that follow it are one biomechanical bout, not two. Empty weeks contribute nothing."""
+    plus the strides that follow it are one biomechanical bout, not two. Empty weeks contribute nothing.
+
+    §PRO22 — scored against `_zones_asof(the run's own date)`, not today's; see `_recent_eq_km` for why.
+    This is the function the 2026-08-03 cliff came through: it feeds `session_eq_cap`, the bound that
+    actually bit."""
     from datetime import timedelta
     import json as _json
     drop = dropped_ids(db)
@@ -5163,7 +5222,9 @@ def _recent_session_eq(db, before, zones, n_weeks=BIO_EQ_WINDOW):
             gap = raw.get("gap")
             gap_pace = (round(3600.0 / gap) if gap else
                         (round(r["duration"] / r["distance"]) if r["duration"] else None))
-            by_day[r["date"]] = by_day.get(r["date"], 0.0) + _run_eq_km(r["distance"], gap_pace, zones)
+            by_day[r["date"]] = (by_day.get(r["date"], 0.0)
+                                 + _run_eq_km(r["distance"], gap_pace,
+                                              _zones_asof(db, r["date"]) or zones))
         if by_day:
             out.append(round(max(by_day.values()), 2))
     return out
@@ -5176,7 +5237,11 @@ def _actual_week_caps(db, ws, we, zones):
     the athlete may have out- or under-run it, and the +10% step's doc'd contract is "his real recent
     long runs". Anchoring on prescription let the window slide onto fiction (2026-07-16 live case:
     cap 4.3 = 1.1 × a prescribed 3.9 km long while the actual trailing long was 8.4 km → a 7-run
-    no-rest week spreading the ceiling volume over junk-sized days)."""
+    no-rest week spreading the ceiling volume over junk-sized days).
+    §PRO22 — eq_km per run is scored against `_zones_asof(the run's own date)`, matching
+    `_recent_eq_km`/`_recent_session_eq`: this feeds the SAME trailing windows, so scoring it on
+    today's zones while they score on period-correct ones would put two different rulers in one
+    window."""
     drop = dropped_ids(db)
     rows = [r for r in db.execute(
         "SELECT id, date, date_time, distance, duration, elapsed_time, raw FROM activities "
@@ -5191,7 +5256,7 @@ def _actual_week_caps(db, ws, we, zones):
         gap = raw.get("gap")                                  # grade-adjusted speed (km/h)
         gap_pace = (round(3600.0 / gap) if gap else
                     (round(r["duration"] / r["distance"]) if r["duration"] else None))
-        eq += _run_eq_km(r["distance"], gap_pace, zones)
+        eq += _run_eq_km(r["distance"], gap_pace, _zones_asof(db, r["date"]) or zones)
     return round(longest, 1), round(eq, 2)
 
 
@@ -18423,6 +18488,102 @@ def _stc_long_run_identity():
                     "thin_weeks": len(thin), "failures": fail or "none"})
 
 
+def _stc_eq_stable():
+    """§PRO22 — the biomechanical baseline is a MEASUREMENT, not a moving target. Two independent ways
+    it could move under a finished run, both closed here:
+    (a) CONTINUITY — `_eq_factor` interpolates between the EQ_KM_FACTOR anchors instead of bucketing
+        into the fastest zone met. The bucketed form was a step at 1 s/km granularity, so a run one
+        second either side of an anchor differed by a whole factor. Asserted by sweeping pace across
+        every anchor and bounding the change per second; a bucketed implementation shows a jump of
+        0.4-1.0 at the edges and fails. ANCHOR FIDELITY is asserted too: at each anchor pace the
+        interpolation must return exactly the bucketed value, so §PRO17's calibration points are
+        unmoved and the constant keeps meaning what it was fitted to mean.
+    (b) PERIOD-CORRECTNESS — a logged run is scored against `_zones_asof(its own date)`, so changing
+        TODAY's eVO₂max cannot re-score training that already happened. This is the one that bit:
+        2026-08-03, his 07-22 run at GAP 377 s/km with the marathon anchor at 377; an evening run
+        moved eVO₂max 35.00 → 35.29, the anchor moved to 376, and the run's eq_km fell 8.95 → 6.39.
+        It was the trailing window's largest bout, so session_eq_cap fell 11.635 → 11.05 and the
+        governor cut the week 49.7 → 42.6 km. Asserted by building a DB whose history is fixed and
+        moving ONLY the newest snapshot: the trailing windows must not move at all. Pure/in-memory."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta
+    fail = []
+    z = pace_zones(35.0)
+    anchors = {k: z[k] for k in ("easy", "marathon", "threshold", "interval") if z.get(k)}
+
+    # (a) anchor fidelity — interpolation must agree with the buckets exactly AT each anchor
+    for name, p in anchors.items():
+        got, want = _eq_factor(p, z), EQ_KM_FACTOR[name]
+        if abs(got - want) > 1e-9:
+            fail.append(f"anchor {name}: f({p})={got:.4f}, expected exactly {want}")
+    # (a) continuity — no single second of pace may move f by more than a small step
+    fastest, slowest = int(min(anchors.values())) - 20, int(max(anchors.values())) + 20
+    worst, worst_at = 0.0, None
+    prev = _eq_factor(slowest, z)
+    for p in range(slowest - 1, fastest - 1, -1):
+        cur = _eq_factor(p, z)
+        if abs(cur - prev) > worst:
+            worst, worst_at = abs(cur - prev), p
+        prev = cur
+    if worst > 0.05:
+        fail.append(f"f jumps {worst:.3f} across one second of pace at {worst_at} s/km (a step, not a curve)")
+    # monotone in speed — faster can never be cheaper
+    if any(_eq_factor(p, z) < _eq_factor(p + 1, z) - 1e-9 for p in range(fastest, slowest)):
+        fail.append("f is not monotone: a faster pace scored cheaper than a slower one")
+
+    # (b) period-correctness — fixed history, only the NEWEST snapshot moves
+    def build(today_vo2):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(SCHEMA)
+        base = date(2026, 8, 3)
+        gap = 3600.0 / pace_zones(35.0)["marathon"]   # GAP parked exactly ON the marathon anchor —
+        #                                               the case that actually moved on his own data
+        for i in range(1, 29):                        # 4 full weeks of history before `base`
+            d = (base - timedelta(days=i)).isoformat()
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+                      "VALUES(?,?,?,?)", (d, 35.0, 50.0, 50.0))
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,raw) "
+                      "VALUES(?,?,?,?,?,?)",
+                      (d, d + "T19:00", RUNNING_SPORT, 8.0, 8.0 * 400, json.dumps({"gap": gap})))
+        m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+                  "VALUES(?,?,?,?)", (base.isoformat(), today_vo2, 50.0, 50.0))
+        return m, base
+
+    readings = {}
+    for v in (35.0, 35.29, 36.5, 34.0):
+        m, base = build(v)
+        readings[v] = (_recent_eq_km(m, base, pace_zones(v)),
+                       _recent_session_eq(m, base, pace_zones(v)))
+    ref = readings[35.0]
+    for v, got in readings.items():
+        if got != ref:
+            fail.append(f"today's eVO₂max {v} re-scored finished training: {got} != {ref}")
+    if not any(ref[0]):
+        fail.append("fixture produced no trailing eq_km — case (b) is vacuous")
+    # anti-vacuity: the fixture MUST be one where today's-zones scoring would have differed
+    naive = {v: _run_eq_km(8.0, round(pace_zones(35.0)["marathon"]), pace_zones(v))
+             for v in (35.0, 36.5)}
+    if naive[35.0] == naive[36.5]:
+        fail.append("fixture pace does not straddle an anchor — case (b) could not have failed")
+    # a missing snapshot table degrades instead of raising (it is on the hot path now)
+    bare = _sq.connect(":memory:"); bare.row_factory = _sq.Row
+    try:
+        if _zones_asof(bare, "2026-08-03") != {}:
+            fail.append("_zones_asof on a table-less DB should degrade to {}")
+    except Exception as e:
+        fail.append(f"_zones_asof raised on a table-less DB: {type(e).__name__}")
+    return _st("det", "eq-stable",
+               "§PRO22 the biomechanical axis is continuous in pace (no step at a zone edge, monotone, "
+               "exact at every anchor so §PRO17's calibration is unmoved) AND period-correct (a logged "
+               "run is scored against the zones of ITS OWN day, so today's eVO₂max cannot re-score "
+               "finished training); a snapshot-less DB degrades instead of raising",
+               passed=not fail,
+               expect="f continuous + monotone + anchor-exact; trailing windows invariant to today's eVO₂max",
+               got={"worst_step_per_sec": round(worst, 4), "trailing_eq": ref[0],
+                    "trailing_session_eq": ref[1],
+                    "invariant_across": sorted(readings), "failures": fail or "none"})
+
+
 def _stc_eq_km():
     """§3.1 — the biomechanical load axis (eq_km) + its soft governor. Locks: (a) eq_km MATH — a structured
     session weights each rep's km by its zone's Davis f (easy wu/cd stay 1×, the fast work reps carry the
@@ -21630,7 +21791,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(),
                  lambda: _stc_caution_baseline(), lambda: _stc_ramp_rate(),
                  lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
-                 lambda: _stc_long_run_step(), lambda: _stc_long_run_identity(), lambda: _stc_eq_km(),
+                 lambda: _stc_long_run_step(), lambda: _stc_long_run_identity(), lambda: _stc_eq_km(), lambda: _stc_eq_stable(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),

@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-08-04
+
+### Fixed
+
+- **A good run no longer shrinks the week that follows it.** The plan tracks a second kind of load
+  besides effort — the mechanical pounding a run puts through your legs, which depends on how fast you
+  were going. Two things about how that was measured could make it move on its own. First, pace was
+  sorted into bands with hard edges, so two runs a single second per kilometre apart could be scored
+  40% apart. Second, past runs were re-scored against your *current* fitness estimate, and those band
+  edges shift as that estimate changes — so a run from a fortnight ago could quietly change what it
+  had cost you. Together they bit: a good evening run nudged the fitness reading up, an old run
+  slipped across a band edge, and the following week was cut by 7 km. Pace is now weighted on a smooth
+  curve with no edges to fall off, and every past run is scored against the fitness you had on the day
+  you ran it, so finished training keeps the value it earned. The scale itself is unchanged — the same
+  paces mean the same thing they always did. One side effect worth knowing: a briskly-run easy day
+  used to be recorded as costing no more than a gentle jog, and now it counts for what it was.
+
 ## [0.24.0] - 2026-08-03
 
 ### Fixed
