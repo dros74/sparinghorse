@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.23.3"
+ENGINE_VERSION = "0.24.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -4155,6 +4155,52 @@ MESO_MAX_HARD = 3                      # max consecutive near-ceiling building w
 LONG_RUN_STEP_CAP = 1.10    # max long-run jump vs the trailing-window longest (+10%)
 LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progression baseline
 
+# §PRO21 — the long run has to BE the long run. Every long-run constant above this line is a CEILING
+# (LONG_RUN_MAX_FRAC/BASE_LONG_FRAC = the Daniels/Hansons share cap; LONG_RUN_STEP_CAP = the Aarhus
+# jump cap). Nothing expressed what the long run is FOR, and the only floor was the absolute
+# LONG_RUN_MIN_KM stub check — so a long run could stop functioning as one while sailing past it.
+# §PRO9's clamp bounds every easy day at the SAME +10% ceiling as the long slot: correct on the
+# biomechanical axis (no run may jump), silent on SHAPE. Once weekly budget ÷ running days reaches
+# that ceiling, every day pins to it and the week has no long run left — five identical days, one of
+# them merely labelled. MEASURED on his 2026-08-03 week: cap 11.4 (= 1.10 × his 10.38 km Sunday,
+# itself a 62-min THRESHOLD effort — the ladder's baseline is "longest run", which does not ask what
+# kind of run it was), budget 56.6 km over 5 days = 11.32 ⇒ long 11.4 vs easy 11.3, ratio 1.01. Four
+# such weeks in one block. The long run's physiology is DURATION-dependent — glycogen depletion and
+# fat oxidation, capillary + mitochondrial density, connective-tissue durability under accumulated
+# fatigue — a stimulus repetition cannot supply, so five 80-min runs are not one 80-min long run plus
+# four easy days; they are five easy days. ONE principle — the long run is the week's longest run —
+# carried by TWO levers, chosen by whether §PRO9 has the long run pinned:
+#   · Long run FREE (no cap, or the cap is not binding): RAISE the long share to the least that
+#     clears the target, bounded by `long_cap` (the Daniels/Hansons share ceiling). Costs nothing —
+#     no extra running day, weekly total untouched — so it is the preferred lever and runs in BOTH
+#     regimes. This is what a flat week actually needs: a bigger long run, not smaller easy days.
+#   · Long run PINNED by §PRO9 (his real weeks): the long run cannot rise, so LONG_RUN_EASY_FRAC
+#     bounds each easy day at a fraction of the long run laid and the freed volume spreads onto MORE
+#     easy days — the durability principle §PRO9 already uses in the same block. Weekly total still
+#     untouched, but the week gains a running day. Lives under `long_km_cap` ⇒ assertive-only.
+#   · LONG_RUN_MIN_RATIO (honesty) is the backstop for a week neither lever can fix — `long_cap`
+#     forbids the share the raise needs AND there is no day left to spread onto. Reachable at ≤2 short
+#     easy days: the raise needs R/(n_short+R) = 0.37 at n_short=2, above every long_cap we set, so a
+#     3-run week is capped at ratio 1.077 by construction (seen: re-base wk1, 12.9 km over 3 runs).
+#     Then the plan stops calling it a long run, as _mark_load_integrity already does for a sub-4 stub.
+# ⚠ NOT caution-byte-identical — the raise lever is deliberately regime-independent, because a flat
+# week is not a load question and the §PRO8 template does not apply. MEASURED on his DB: caution block
+# 273.7 → 273.0 km (−0.26%), 66 sessions both, 5 runs/week both, no week gains a day; the whole delta
+# is long runs rising into their share and easy days giving it back. The RE-BASE is load-byte-identical
+# (every km/minute/TRIMP equal — its weeks already sit at REBASE_LONG_CAP), one label moved.
+# The pair is deliberately ordered 1/0.85 = 1.176 > 1.15: BOTH levers aim at 1/LONG_RUN_EASY_FRAC and
+# never at LONG_RUN_MIN_RATIO itself, so the honesty check fires only where the construction genuinely
+# failed and never merely because the final round-to-0.1 km ate the last thousandth.
+# Magnitude 🟡 REASONED, not literature: no source prescribes a long-vs-easy ratio (the textbooks
+# assume the long run dominates and never state it). 0.85 is the LOOSEST fraction that still makes
+# the long run unambiguously the week's longest run while forcing the fewest extra running days —
+# tightening it toward the week's own natural shape (n_short × BASE_LONG_FRAC / (1 − BASE_LONG_FRAC)
+# ⇒ 0.75 at 4 easy days) pushes his current weeks to SEVEN running days, which is the decoupled-clocks
+# problem (CTL-driven weekly volume outrunning the +10% long-run ladder), not this one. Revisit from
+# his own corpus once the ladder has caught up.
+LONG_RUN_EASY_FRAC = 0.85   # max easy-day distance as a fraction of the long run laid that week
+LONG_RUN_MIN_RATIO = 1.15   # below this multiple of the week's longest easy run it is not a long run
+
 # §3.1 — biomechanical load axis (Davis, ENGINE_SCIENCE.md §3.1 + §6.1). eq_km = a DAMAGE-EQUIVALENT
 # distance: km × f(pace), f rising steeply with speed because tissue damage ≈ loading cycles(steps) ×
 # load-per-step(↑ with speed) — fast running does far more damage per km than easy, a biomechanical axis
@@ -4616,6 +4662,25 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         _aim = min(long_km_aim, long_km_cap) if long_km_cap else long_km_aim
         _aim_tr = max(0.0, _aim - mp_km) * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
         long_w = max(long_w, min(_aim_tr / easy_budget, 1.0))
+    # §PRO21 — the long run must BE the week's longest run, and a SHARE does not guarantee that. The
+    # long slot takes `long_w` of the easy budget while each short takes (1−long_w)/n_short, so the two
+    # are EQUAL at long_w = 1/(n_short+1) — and BASE_LONG_FRAC is 0.25 against 3 short easy days, i.e.
+    # exactly there. Measured in the building fixture: easy 6.7 km ×3 and a "long run" of 6.3 km, the
+    # long run SHORTER than every easy day, labelled long and passing the LONG_RUN_MIN_KM floor. Raise
+    # the share to the least that clears LONG_RUN_MIN_RATIO: long_km ≥ R × short_km with the algebra
+    # above gives long_w ≥ R/(n_short+R). Bounded by `long_cap` (the Daniels/Hansons share ceiling) so
+    # this can never buy a long run the doctrine forbids, and only ever RAISES — §PRO9's clip runs
+    # after it and still owns the ceiling, exactly as it does for §PRO15's aim. Where the clip then
+    # binds (his real weeks) the long run cannot rise, so the easy-day clamp below takes over instead:
+    # one principle, two levers, chosen by whether the biomechanical cap has the long run pinned.
+    # BOTH levers aim at the same target — 1/LONG_RUN_EASY_FRAC — and never at LONG_RUN_MIN_RATIO
+    # itself: aiming AT the honesty threshold leaves nothing for the round-to-0.1 km at the end, and a
+    # week built to exactly 1.15 rounds under it and gets relabelled by the very check it satisfied.
+    # (Seen: fixture weeks 5 and 6 built to 1.150 and relabelled.) The margin is the whole reason the
+    # constants are a PAIR rather than one number.
+    if n_short > 0 and easy_budget > 0:
+        _shape_w = 1.0 / LONG_RUN_EASY_FRAC
+        long_w = max(long_w, min(_shape_w / (n_short + _shape_w), long_cap))
     # §PRO9 — long-run progression cap. Clip the long-run SHARE so its distance ≤ `long_km_cap`; the
     # freed budget flows to the short easies through the (1−long_w) split below (weekly total untouched).
     # Needs somewhere to redistribute (n_short>0) and a positive easy budget; the MP-finish km rides on
@@ -4647,6 +4712,21 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         # shorter — not fewer bigger) so the weekly total still lands. `cap_short_trimp` = an easy run
         # at exactly the cap distance; the easy loop hard-clamps each short to it as the final guarantee.
         cap_short_trimp = long_km_cap * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
+        # §PRO21 — the §PRO9 clamp above bounds the shorts at the LONG RUN'S OWN CEILING, so on a week
+        # whose budget reaches that ceiling every day lands on the same number and the long run stops
+        # being one (see LONG_RUN_EASY_FRAC). Bound each short at a fraction of the long run ACTUALLY
+        # LAID instead — `long_w` is final here (the §PRO9 clip above already ran), and the MP finish
+        # rides on top of the easy base, so the long run's real distance is the base share + `mp_km`.
+        # Compared in KM, not TRIMP: an MP km costs more TRIMP than an easy km, and the thing that has
+        # to differ between the long run and an easy day is DURATION. Only ever LOWERS the short cap
+        # (min), so the +10% promise above is untouched; the spread below then lands the same weekly
+        # total across more days. Guarded > 0 — a week whose long slot got no share must not clamp its
+        # easy days to zero (the loop below hard-clamps to `cap_short_trimp` unconditionally).
+        _pro9_short_trimp = cap_short_trimp          # the +10% ceiling, before the shape cap narrows it
+        _long_km_laid = (easy_budget * long_w / EASY_TRIMP_PER_MIN) * 60.0 / easy_pace_sec + mp_km
+        _shape_trimp = (LONG_RUN_EASY_FRAC * _long_km_laid) * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
+        if _shape_trimp > 0:
+            cap_short_trimp = min(cap_short_trimp, _shape_trimp)
         short_budget = easy_budget * (1 - long_w)
         if cap_short_trimp > 0:
             _need = short_budget / cap_short_trimp
@@ -4661,6 +4741,15 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                     and (free_from is None or d >= free_from)]
             while n_short < need_short and len(days) < 7 and free:
                 days.append(free.pop(0)); easy_slots.append(len(days) - 1); n_short += 1
+            # §PRO21 — the spread can run out of days (all 7 used, or §AV blocked the free ones).
+            # Left alone, the shorts would then be hard-clamped below what the budget needs and the
+            # week would silently SHED volume — a load decision taken by a SHAPE rule, which has no
+            # business making one. Relax the shape cap to exactly what lands the weekly total, never
+            # above the §PRO9 ceiling it narrowed. The week stays flat, and _mark_load_integrity's
+            # LONG_RUN_MIN_RATIO check then says so out loud instead of the plan quietly under-training.
+            if 0 < n_short < need_short:
+                cap_short_trimp = max(cap_short_trimp,
+                                      min(_pro9_short_trimp, short_budget / n_short))
     # §JR — junk-run floor: when the governed budget spread over the template's short-easy days
     # would prescribe runs under RUN_MIN_KM, shed short days (nearest the long run first — the
     # freed day doubles as pre-long freshness) until the survivors are real runs. Collapses
@@ -4709,6 +4798,23 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             continue
         mins = round(tr / EASY_TRIMP_PER_MIN)
         km = round(mins * 60 / easy_pace_sec, 1)
+        # §PRO21 — the §PRO9 clip is enforced in TRIMP, but the session is published in km after TWO
+        # roundings (TRIMP → whole minutes → km to 0.1), and rounding up through both can land the long
+        # run just ABOVE the very cap that clipped it. Latent since §PRO9: the overshoot needs the
+        # cap's km to sit near a minute boundary, which no fixture happened to hit — found by scanning
+        # his own block after §PRO21 shifted the ladder (2026-09-07: cap 16.7, laid 16.8, and
+        # det/long-run-step green throughout, because it never constructed the case). The published
+        # number is what he runs and what seeds the next week's baseline, so the promise has to hold
+        # on the PUBLISHED value: step whole minutes off until it does. Shorts cannot reach this — the
+        # shape cap holds them a clear fraction below the ceiling. (`mp_km` is 0 on this path — the MP
+        # long run returns above — so the cap needs no MP allowance here.) `tr` is re-derived from the
+        # minutes actually prescribed: mins is the rounded inverse of tr, so leaving tr behind would
+        # publish a session whose load did not match its own duration.
+        if is_long and long_km_cap:
+            while mins > 0 and km > long_km_cap + 1e-9:
+                mins -= 1
+                km = round(mins * 60 / easy_pace_sec, 1)
+                tr = round(mins * EASY_TRIMP_PER_MIN, 1)
         note = "long easy run" if is_long else "easy run"
         carries_strides = bool(wk["strides"]) and not is_long and i == first_easy
         if carries_strides:
@@ -5460,7 +5566,18 @@ def _mark_load_integrity(w, zones):
     NO LOAD — it never fights what the safety governor decided; it only tells the truth about the clip.
     Down AND taper/race weeks are exempt (deliberately light — a short long run there is the plan
     working, not a cap; flagging it would be a FALSE fatigue attribution, the opposite of honest).
-    Quality long runs (long_mp) are left alone: their structure is governed elsewhere. Mutates + returns w."""
+    Quality long runs (long_mp) are left alone: their structure is governed elsewhere. Mutates + returns w.
+
+    §PRO21 — the km floor above catches a long run clipped to a STUB. A long run can also stop being
+    one WITHOUT shrinking at all: when the week's budget pushes every easy day up to the same ceiling,
+    the Sunday session is the longest run by 0.1 km and identical in every way that matters. Same lie,
+    caught by a relative test instead of an absolute one — LONG_RUN_MIN_RATIO against the week's
+    longest easy run. §PRO21's two levers in _distribute_week normally PREVENT this; the check is what
+    remains honest for the week neither can fix — too few short easy days for the raise to clear the
+    target inside `long_cap`, and no free day left to spread onto (a 3-run week is capped at ratio
+    1.077 by construction). Deliberately NOT attributed to fatigue — the fatigue wording above is a false
+    attribution here, the very failure this function exists to avoid: nothing was clipped, the week
+    simply has no long run to offer yet."""
     intent = w.get("intent")
     if _is_down(intent) or _is_taper(intent):
         return w
@@ -5473,6 +5590,18 @@ def _mark_load_integrity(w, zones):
         w["long_capped"] = True
         if zones is not None:                  # building phase (re-base is the pure-easy zones=None block)
             w["fatigue_capped"] = True
+        return w
+    easies = [s for s in w.get("sessions", []) if s.get("kind") == "easy"]
+    if longs and easies:
+        long_km = longs[0].get("km") or 0.0
+        easy_km = max((s.get("km") or 0.0) for s in easies)
+        if easy_km and long_km < LONG_RUN_MIN_RATIO * easy_km:
+            s = longs[0]
+            s["kind"] = "easy"
+            s.pop("component", None)           # §T2 — no long run, so no economy component to claim
+            s["note"] = ("easy run — no long run this week: at this week's volume and run count "
+                         "no session comes out meaningfully longer than the others")
+            w["long_flat"] = True
     return w
 
 
@@ -18164,6 +18293,136 @@ def _stc_long_run_step():
                     "recent_longs": rl, "failures": fail or "none"})
 
 
+def _stc_long_run_identity():
+    """§PRO21 — the long run must BE the week's longest run, or the plan must stop calling it one.
+    Every other long-run constant is a CEILING; nothing said what the long run is FOR, so a week could
+    lay five identical runs and label one of them 'long'. Locks:
+    (a) PREVENTION, both regimes, every building phase — a week carrying a long/long_mp session has it
+        ≥ LONG_RUN_MIN_RATIO × the week's longest EASY run. Runs in caution too: the raise lever is
+        deliberately regime-independent (a flat week is a shape question, not a load question).
+    (b) TEETH + anti-vacuity, in the same run — the identical shapes laid with the levers neutralised
+        MUST produce flat weeks. A det that only ever sees the fixed behaviour cannot tell a working
+        lever from a fixture that never needed one, so the disabled pass is asserted to FAIL.
+    (c) NO VOLUME SHED — the reshape is a redistribution: weekly km with the levers on matches the
+        disabled lay within rounding. Neither lever may buy shape by quietly under-training the week.
+    (d) §PRO9 STILL OWNS THE CEILING — the raise only ever runs before the clip, so no published long
+        run exceeds its cap. Asserted on the PUBLISHED km with NO tolerance, swept across caps and
+        paces: the km is reached through two roundings (TRIMP → whole minutes → km at 0.1) and rounding
+        up through both put a 16.8 km long run under a 16.7 km cap on his own block while
+        det/long-run-step stayed green — that det allows +0.3 for exactly this rounding, which is what
+        hid it. A promise about the number he actually runs has to be checked on that number.
+    (e) HONESTY BACKSTOP where neither lever can win — at ≤2 short easy days the raise would need
+        R/(n_short+R) = 0.37, above every `long_cap` we set, so a 3-run week is capped at ratio 1.077
+        by construction. Then the session is relabelled off 'long' and the week flagged `long_flat`,
+        and the note must NOT blame fatigue: nothing was clipped, so the fatigue wording carried by the
+        LONG_RUN_MIN_KM path would be a false attribution — the failure _mark_load_integrity exists to
+        avoid. Pure/in-memory."""
+    from datetime import date
+    z = {"easy_top": 360, "easy": 360, "threshold": 270, "interval": 240, "marathon": 300}
+    bs = date(2026, 8, 1)
+    fail = []
+    shapes = (("base", base_shape(8, 30)), ("build", build_shape(6, 34)), ("peak", peak_shape(4, 36)))
+
+    def survey():
+        """(label, long_km, max_easy_km, total_km, relabelled) per non-down laid week, both regimes.
+        `relabelled` matters as much as the ratio: when prevention fails, the honesty pass strips the
+        'long' label, so the week leaves NO long session behind and a ratio-only test skips it — the
+        defect hides inside its own backstop. Both reverts of the raise lever passed a ratio-only
+        version of this det for exactly that reason."""
+        out = []
+        for regime in ("assertive", "caution"):
+            for name, shape in shapes:
+                weeks, _ = generate_block(shape, bs, 30.0, 28.0, 360.0, zones=z, regime=regime,
+                                          recent_longs=[8.0, 8.5, 9.0, 9.5])
+                for w in weeks:
+                    if _is_down(w.get("intent")) or _is_taper(w.get("intent")):
+                        continue
+                    ss = w.get("sessions") or []
+                    ls = [s for s in ss if str(s.get("kind") or "").startswith("long")]
+                    es = [s for s in ss if s.get("kind") == "easy"]
+                    out.append((f"{regime}/{name}/wk{w['wk']}",
+                                max((s.get("km") or 0.0) for s in ls) if ls else 0.0,
+                                max((s.get("km") or 0.0) for s in es) if es else 0.0,
+                                round(sum(s.get("km") or 0.0 for s in ss), 1),
+                                bool(w.get("long_flat"))))
+        return out
+
+    on = survey()
+    # (b) neutralise BOTH levers + the honesty check, and re-survey. A huge EASY_FRAC drives the raise
+    # target to ~0 (no raise) and the easy clamp to +inf (never binds); RATIO 0 silences the relabel.
+    _keep = (LONG_RUN_EASY_FRAC, LONG_RUN_MIN_RATIO)
+    try:
+        globals()["LONG_RUN_EASY_FRAC"] = 1e9
+        globals()["LONG_RUN_MIN_RATIO"] = 0.0
+        off = survey()
+    finally:
+        globals()["LONG_RUN_EASY_FRAC"], globals()["LONG_RUN_MIN_RATIO"] = _keep
+
+    bad = lambda rows: [lbl for lbl, lg, ez, _, rl in rows
+                        if rl or (lg and ez and lg < LONG_RUN_MIN_RATIO * ez)]
+    flat_on, flat_off = bad(on), bad(off)
+    if flat_on:                                                     # (a)
+        fail.append(f"a labelled long run is not the week's longest: {flat_on[:4]}")
+    if not flat_off:                                                # (b) anti-vacuity / teeth
+        fail.append("levers disabled produced NO flat week — the fixture cannot see the defect")
+    if len(on) < 12:
+        fail.append(f"survey too thin to mean anything: {len(on)} weeks")
+    for (lbl, _, _, km_on, _), (_, _, _, km_off, _) in zip(on, off):      # (c)
+        if abs(km_on - km_off) > 0.65:
+            fail.append(f"{lbl}: reshape shed volume {km_off} → {km_on}")
+            break
+    # (a2) the PINNED case — his real weeks, and the only one that exercises the easy-day clamp. The
+    # survey shapes are ~30 km against a 10.45 cap, so §PRO9 never bites there and the clamp is never
+    # asked to do anything; reverting it left a ratio-only det green. This is his 2026-08-03 week: a
+    # 57 km budget over 5 slots against an 11.4 km cap, i.e. 11.3 per day straight into the ceiling.
+    pin = {"wk": 1, "km": 57, "runs": 5, "long": 14, "strides": 0, "quality": []}
+    pin_s, _ = _distribute_week(pin, bs, 445.0, 360.0, z, long_km_cap=11.4)
+    pin_long = max((s.get("km") or 0.0) for s in pin_s if str(s.get("kind") or "").startswith("long"))
+    pin_easy = max((s.get("km") or 0.0) for s in pin_s if s.get("kind") == "easy")
+    pin_km = round(sum(s.get("km") or 0.0 for s in pin_s), 1)
+    if pin_easy and pin_long < LONG_RUN_MIN_RATIO * pin_easy:
+        fail.append(f"cap-pinned week stayed flat: long {pin_long} vs easy {pin_easy}")
+    if pin_km < 55.0:
+        fail.append(f"cap-pinned week shed volume: {pin_km} km of a 57 km intent")
+    # (d) §PRO9 owns the ceiling — published km, no tolerance, swept over the rounding boundaries.
+    wk = {"wk": 1, "km": 60, "runs": 5, "long": 18, "strides": 0, "quality": []}
+    over = []
+    for pace in (330.0, 345.0, 360.0, 375.0, 400.0):
+        for cap10 in range(80, 220, 1):                             # caps 8.0 … 21.9 km
+            cap = cap10 / 10.0
+            ss, _ = _distribute_week(wk, bs, 330.0, pace, z, long_km_cap=cap)
+            longest = max((s.get("km") or 0.0) for s in ss)
+            if longest > cap + 1e-9:
+                over.append((pace, cap, longest))
+    if over:
+        fail.append(f"published long run exceeds its §PRO9 cap ({len(over)} cases, e.g. {over[0]})")
+    # (e) the week neither lever can fix — 3 runs, so the raise cannot clear the target inside long_cap.
+    rb, _ = generate_block(REBASE_SHAPE, bs, 20.0, 18.0, 400.0, zones=None)
+    thin = [w for w in rb if len(w.get("sessions") or []) == 3 and not _is_down(w.get("intent"))]
+    if not thin:
+        fail.append("fixture no longer lays a 3-run week — case (e) is vacuous")
+    for w in thin:
+        if not w.get("long_flat"):
+            fail.append(f"re-base wk{w['wk']}: 3-run week not flagged long_flat")
+        if [s for s in w["sessions"] if s.get("kind") == "long"]:
+            fail.append(f"re-base wk{w['wk']}: still labelled a long run it cannot deliver")
+        notes = " ".join(str(s.get("note") or "") for s in w["sessions"]).lower()
+        if "fatigue" in notes or "acwr" in notes:
+            fail.append(f"re-base wk{w['wk']}: flat week falsely attributed to fatigue")
+    return _st("det", "long-run-identity",
+               "§PRO21 a labelled long run IS the week's longest run — the share is raised where §PRO9 "
+               "leaves it free (both regimes) and the easy days are clamped where §PRO9 has it pinned; "
+               "neutralising the levers provably re-creates flat weeks; no volume is shed; no published "
+               "long run exceeds its cap (swept, zero tolerance); a 3-run week neither lever can fix is "
+               "relabelled + flagged and never blamed on fatigue",
+               passed=not fail,
+               expect=f"every long ≥ {LONG_RUN_MIN_RATIO}× longest easy, or relabelled; disabled ⇒ flat weeks exist",
+               got={"weeks_surveyed": len(on), "flat_with_levers": len(flat_on),
+                    "flat_without_levers": len(flat_off), "pro9_overshoots": len(over),
+                    "pinned_long_vs_easy": f"{pin_long} / {pin_easy} over {pin_km} km",
+                    "thin_weeks": len(thin), "failures": fail or "none"})
+
+
 def _stc_eq_km():
     """§3.1 — the biomechanical load axis (eq_km) + its soft governor. Locks: (a) eq_km MATH — a structured
     session weights each rep's km by its zone's Davis f (easy wu/cd stay 1×, the fast work reps carry the
@@ -21371,7 +21630,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_block_generator(), lambda: _stc_base_phase(),
                  lambda: _stc_caution_baseline(), lambda: _stc_ramp_rate(),
                  lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
-                 lambda: _stc_long_run_step(), lambda: _stc_eq_km(),
+                 lambda: _stc_long_run_step(), lambda: _stc_long_run_identity(), lambda: _stc_eq_km(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),

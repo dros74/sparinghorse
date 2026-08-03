@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-03
+
+### Fixed
+
+- **A long run is now actually longer than your easy days.** Your week is built from a total distance
+  and a ceiling on how far any single run may jump from recent weeks. When those two meet — the week
+  is big enough that dividing it across your running days reaches the ceiling — every day came out the
+  same length, and the plan called one of them a long run anyway. Measured on a real week: four easy
+  days of 11.3 km and a "long run" of 11.4 km. The long run's benefit comes from its duration, from
+  the things that only happen once a run goes on long enough, and five identical runs cannot supply
+  it. The plan now makes the long run bigger where it is free to, holds the easy days below it where
+  the jump ceiling has the long run pinned (spreading the freed distance over an extra easy day, so
+  the weekly total is unchanged), and where the week is too small for either — a three-run week, for
+  instance — it stops calling any of them a long run and says so. Weekly distance is unchanged and
+  the hardest week of the block now peaks lower than before, because the same distance spread over
+  more days is a smaller single-day spike.
+
 ### Added
 
 - **Your plan now tells you when it was built from an older reading of your shape.** A plan is seeded
