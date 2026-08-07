@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.24.1"
+ENGINE_VERSION = "0.25.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -4209,6 +4209,37 @@ LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progress
 LONG_RUN_EASY_FRAC = 0.85   # max easy-day distance as a fraction of the long run laid that week
 LONG_RUN_MIN_RATIO = 1.15   # below this multiple of the week's longest easy run it is not a long run
 
+# §PRO24 — THE EASY DAYS ARE A LADDER, NOT N IDENTICAL RUNS. §PRO21 made the long run the week's
+# longest and §PRO23 made the week grow with it, but the days underneath stayed uniform by
+# construction: every short easy took (1 − long_w)/n_short, so a base week read
+# 10.3 / 10.3 / 10.3 / 10.3 + a quality touch + the long run. That is not a plan a coach would
+# recognise, and it is the residue of the owner's original complaint — the long run stopped being
+# "just another day", and then every other day still was.
+# ⭐ THE NUMBER IS HIS, NOT THE LITERATURE'S — ENGINE_SCIENCE §0: "Davis gives us theory, Duarte's own
+# data decides the numbers." No source states a within-week easy-day distribution, so this was FITTED
+# to his corpus: 150 weeks with ≥4 run-days and ≥30 km, days summed per date (§SJ) and ranked. His
+# median shapes are a clean descending ladder and remarkably stable across week sizes —
+#   5 runs: 33.8 / 19.7 / 17.3 / 15.1 / 12.8 %      6 runs: 27.6 / 18.7 / 16.2 / 13.5 / 11.8 / 9.5 %
+#   7 runs: 25.9 / 16.9 / 14.7 / 12.7 / 11.6 / 10.3 / 8.8 %
+# Least squares over the easy ranks (dropping rank 1 = the long run and the shortest day = the
+# quality/shakeout slot the engine sizes on its own) gives STEP = 0.110, mean-square error 0.00385
+# against 0.00914 for the FLAT split the engine lays today — his own weeks fit a ladder 2.4× better
+# than they fit uniformity. A pooled per-step RATIO (0.935) was rejected: the observed per-rank
+# ratios flatten (0.89 → 0.94 → 0.98 → 0.98), so a geometric model misfits the head and the tail at
+# once, while a LINEAR decrement reproduces all three week sizes.
+# 🟢 OWNER-MEASURED MAGNITUDE / DOCTRINE ORDER, and it moves no magnitude: the weekly total, the long
+# run and every governor bound are untouched — this only redistributes the SHORT easy budget.
+# ⚠ THE ORDER IS NOT CALENDAR ORDER, and the same 161 weeks say so. Each easy day over its week's
+# mean easy day grades hard by SIZE RANK (1.426 / 1.225 / 1.044 / 0.925 / 0.818 / 0.704, R² 0.545)
+# and NOT AT ALL by weekday (1.038 / 1.112 / 0.949 / 1.034 / 1.005 / 0.965, R² 0.054). So the rungs
+# are his and the order is doctrine: longest easy furthest from any long run, short rungs flanking
+# one — which is also the order §JR already sheds in ("nearest the long run first — the freed day
+# doubles as pre-long freshness"), and the one calendar bucket his data does separate (0.929 ± 0.031
+# the day after a long run vs 1.086 ± 0.037 two days out). Laying them in calendar order instead put
+# the head rung on the day the §H1 peak brake pins and cost a live week 6.3 km — see PROJECT_LOG §60.
+EASY_LADDER_STEP = 0.11     # each successive easy day is this much of the longest easy shorter
+EASY_LADDER_FLOOR = 0.15    # ...but never below this fraction of it (the fitted model's own floor)
+
 # §3.1 — biomechanical load axis (Davis, ENGINE_SCIENCE.md §3.1 + §6.1). eq_km = a DAMAGE-EQUIVALENT
 # distance: km × f(pace), f rising steeply with speed because tissue damage ≈ loading cycles(steps) ×
 # load-per-step(↑ with speed) — fast running does far more damage per km than easy, a biomechanical axis
@@ -4578,7 +4609,7 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
 
 def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
                      long_km_cap=None, av_blocked=None, q_days=None, long_km_aim=None,
-                     free_from=None):
+                     free_from=None, ladder=False):
     """Lay `week_trimp` across the week's runs and converting each session's TRIMP back to
     minutes/km. The POLARIZED split (§6f Step C): a `quality` spec carves a small HARD slice of the
     governed weekly TRIMP for structured work (at zone pace), the rest stays easy/long — so total
@@ -4689,6 +4720,24 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     if n_short > 0 and easy_budget > 0:
         _shape_w = 1.0 / LONG_RUN_EASY_FRAC
         long_w = max(long_w, min(_shape_w / (n_short + _shape_w), long_cap))
+    # §PRO23 part 2 — THE LADDER MUST BE REACHED, OR IT IS A FIXED POINT. Part 1 bounds the week at
+    # `long_km_cap / BASE_LONG_FRAC`, which delivers the Daniels/Hansons share ONLY IF the long run
+    # actually rises to the cap. Nothing made it: every lever above aims at a RATIO (§PRO21's
+    # 1/LONG_RUN_EASY_FRAC) or at the skeleton's share, and §PRO9 below only ever LOWERS. So a long run
+    # could settle strictly under its own ceiling — and then `LONG_RUN_STEP_CAP × laid` reproduces the
+    # same ceiling next week, for ever. MEASURED on det/regime-plan's fixture (every seeded run 6.0 km):
+    # laid long 6.0 against a 6.6 ladder ⇒ the base block froze at 26.2 km for TEN weeks at a 22.9%
+    # share, under the floor part 1 was supposed to guarantee. ⭐ THE SAME FIXED POINT that killed the
+    # first cut of part 1 (which bounded on the laid long and froze his real base at 44.3 km / ladder
+    # 12.3 / laid long 11.2 for four weeks) — one level out, and invisible to a share-only test.
+    # So: raise the long run TO its ladder, bounded by `long_cap` — the same Daniels/Hansons share
+    # ceiling every other lever here respects. With part 1 holding the week at ladder/BASE_LONG_FRAC and
+    # this holding the long run at the ladder, the long run lands INSIDE the 25–30% band by construction
+    # and the ladder advances +10%/wk instead of quoting itself. Only ever RAISES; `long_km_cap` is None
+    # outside the assertive regime, so caution never evaluates it ⇒ byte-identical, as for part 1.
+    if long_km_cap and easy_budget > 0 and n_short > 0:
+        _w_ladder = (max(0.0, long_km_cap - mp_km) * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN) / easy_budget
+        long_w = max(long_w, min(_w_ladder, long_cap))
     # §PRO9 — long-run progression cap. Clip the long-run SHARE so its distance ≤ `long_km_cap`; the
     # freed budget flows to the short easies through the (1−long_w) split below (weekly total untouched).
     # Needs somewhere to redistribute (n_short>0) and a positive easy budget; the MP-finish km rides on
@@ -4784,6 +4833,77 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         long_only_cap_tr = max(0.0, long_km_cap - mp_km) * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
         if long_only_cap_tr < easy_budget:
             long_step_capped = True
+    # §PRO24 — the short easies take LADDER shares of their budget instead of 1/n_short each.
+    # Computed HERE, after §JR has finished shedding, so the ladder is laid over the slots that
+    # actually survive (`easy_slots` and `n_short` are kept in step by the shed loop above).
+    # Sums to 1 by construction ⇒ the week's total is identical to the uniform split; this moves
+    # km BETWEEN days and never into or out of the week.
+    # ⚠ OPT-IN, DEFAULT OFF, AND ONLY EVER ON AN ASSERTIVE FULL WEEK — the §PRO8 template.
+    #   · not the §6o REMAINDER. A ladder is a property of a WEEK, and the remainder is not one — it is
+    #     whatever days are left after today (Sat+Sun on his 2026-08-07 regen). §PRO15 states the same
+    #     principle two screens up: "the remainder is not the week".
+    #   · not CAUTION. Every other lever in this function is assertive-only for the same reason, and
+    #     the caution baseline is the byte-identity guard the whole accelerator is measured against.
+    #     Reaching caution ALSO broke it in a way worth recording: caution has no `long_km_cap`, so it
+    #     has no `cap_short_trimp` either — nothing clamps the shorts — and the ladder's head rose
+    #     ABOVE the long run on four base weeks, re-opening the exact defect §PRO21 exists to prevent
+    #     (det/long-run-identity + det/building-load-integrity both caught it).
+    # Default OFF so every det that calls this directly keeps its pre-§PRO24 output, and the flag is
+    # passed explicitly rather than inferred from `long_km_aim`/`long_km_cap` so a future caller can't
+    # switch the shape on or off as a side effect of threading an unrelated argument — and so the
+    # "non-binding cap ≡ no cap" identity in det/long-run-step keeps meaning what it says.
+    _short_slots = [i for i in easy_slots if i != long_idx] if ladder else []
+    # ⚠⚠ THE RUNGS ARE ORDERED BY DISTANCE FROM THE NEAREST LONG RUN — *NOT* BY CALENDAR ORDER.
+    # MEASURED on 161 of his own weeks (≥4 runs, easy km ÷ the week's mean easy km):
+    #   · by SIZE RANK        1.426 / 1.225 / 1.044 / 0.925 / 0.818 / 0.704 → R² = 0.545
+    #   · by calendar weekday 1.038 / 1.112 / 0.949 / 1.034 / 1.005 / 0.965 → R² = 0.054
+    # The ladder is REAL and strong; its supposed calendar DIRECTION is not there at all. The first
+    # cut of this feature laid the rungs in calendar order — unsupported by the data, and it pointed
+    # the heavy end at MONDAY, the single day the §H1 peak-ACWR brake pins (the seed ATL is highest on
+    # day 1 and decays all week). That cost his 2026-08-03 week 39.0 → 32.7 km of INTENT, and because
+    # §6o's remainder is `intent − already run`, all 6.3 km came out of the one day left: the Sunday
+    # long run collapsed 10.0 → 3.7 km and was relabelled a shakeout. A shape rule silently taking a
+    # LOAD decision — measured, not reasoned.
+    # So the magnitudes come from his data and the ORDER comes from doctrine, which his data does at
+    # least not contradict — the one calendar bucket that separates is the day AFTER the long run
+    # (0.929 ± 0.031 vs 1.086 ± 0.037 two days out, ~3σ), i.e. the classic recovery day. Rung 0 (the
+    # longest easy) therefore goes to the day FURTHEST from any long run, and the short rungs fall
+    # either side of it: the day after last week's long run, and the day before this week's — which is
+    # the pre-long freshness principle §JR already applies when it sheds a day. Deterministic tie-break
+    # on the calendar so the lay is reproducible.
+    # ABSOLUTE distance on both sides: §PRO9's spread appends free days to `days`, and on an §AV-shifted
+    # week the long slot is not always the last calendar day — a day landing AFTER it must read as
+    # 1 day from a long run, not −1 (which would sort it to the HEAD of the ladder, the exact opposite
+    # of the recovery principle).
+    _prev_long_off = days[long_idx] - 7        # last week's long run, same slot, one week back
+    _short_slots.sort(key=lambda s: (-min(abs(days[s] - _prev_long_off),
+                                          abs(days[long_idx] - days[s])), days[s]))
+    _lad = [max(EASY_LADDER_FLOOR, 1.0 - EASY_LADDER_STEP * k) for k in range(len(_short_slots))]
+    _lad_tot = sum(_lad) or 1.0
+    short_w = {s: _lad[k] / _lad_tot for k, s in enumerate(_short_slots)}
+    # ⚠⚠ THE LADDER MUST NOT SPILL VOLUME THROUGH §PRO9'S PER-DAY CLAMP. A uniform split either cleared
+    # `cap_short_trimp` on every short day or on none; a ladder puts its HEAD above the clamp first —
+    # and the clamp is a `min()` that DROPS the excess on the floor. Measured on his 2026-08-03 week
+    # before this guard: 30.7 → 22.0 km and the long run gone, because the clipped head was never
+    # given back. WATER-FILL instead: peg the breaching days at the cap and redistribute their surplus
+    # across the rest, repeating until nothing breaches (redistribution can push a survivor over too).
+    if cap_short_trimp is not None and n_short > 0:
+        _pool = easy_budget * (1 - long_w)
+        if _pool > 0:
+            _cap_w, _free = cap_short_trimp / _pool, set(short_w)
+            for _ in range(len(short_w) + 1):
+                _over = [s for s in _free if short_w[s] > _cap_w + 1e-12]
+                if not _over:
+                    break
+                _spill = sum(short_w[s] - _cap_w for s in _over)
+                for s in _over:
+                    short_w[s] = _cap_w
+                    _free.discard(s)
+                _room = sum(short_w[s] for s in _free)
+                if not _free or _room <= 0:
+                    break                       # every day is at the cap — the week genuinely cannot
+                for s in _free:                 # hold it, and §PRO9's ceiling outranks the shape
+                    short_w[s] += _spill * short_w[s] / _room
     first_easy = min(easy_slots) if easy_slots else None
     for i in easy_slots:
         is_long = (i == long_idx)
@@ -4792,7 +4912,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             if long_only_cap_tr is not None:             # §PRO9 — hold the ceiling on a collapsed week
                 tr = min(tr, round(long_only_cap_tr, 1))
         else:
-            tr = round(easy_budget * (1 - long_w) / n_short, 1) if n_short else 0.0
+            tr = round(easy_budget * (1 - long_w) * short_w.get(i, 1.0 / n_short), 1) if n_short else 0.0
             if cap_short_trimp is not None:              # §PRO9 — a short easy may never exceed the cap
                 tr = min(tr, round(cap_short_trimp, 1))
         date = (start_monday + timedelta(days=days[i])).isoformat()
@@ -4903,10 +5023,38 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor
     return curve[-1]["ctl"], curve[-1]["atl"], eow, peak, flat, m_ctl
 
 
+def _eow_soft(eow, eow_flat, m_ctl, endctl, endatl, shape_neutral, soft_ctl_floor):
+    """THE SOFT TEST'S DECISION VARIABLE — the single number the weekly governor compares against the
+    ride cap. Extracted (§PRO23) so the value a week PUBLISHES cannot drift from the value the search
+    DECIDED on: it used to be inline in `_max_week_trimp` and nowhere else, which meant every reader —
+    including det/regime-plan — had to RECONSTRUCT it from rounded published surfaces and could only
+    approximate it. That approximation had a structural error, not a rounding one, and it cost a real
+    debugging session: the det reconstructed the floored ratio with `proj_ctl` (END-of-week CTL) where
+    the governor divides by `m_ctl` (the week's MEAN CTL). On a steep building week at low CTL those
+    differ by ~5% — measured 44.1 vs 42.02 — so a week the governor had correctly held at 1.1496 under
+    a 1.15 eased cap was read back as 1.206 and looked like a breach of §PRO5's brake. It was not.
+    ⭐ THE LESSON: a governor that keeps its decision variable private forces its own tests to guess.
+
+    §PRO16 — assertive judges the SHAPE-NEUTRAL reading (mean acute / mean chronic), because the
+    last-day sample is the long-run day and carries a structural offset that is placement, not stress.
+    §PRO8 — the chronic DENOMINATOR is floored at `soft_ctl_floor` so the settled-week ratio stops
+    being hypersensitive at low CTL. Caution passes neither ⇒ it keeps the original expression, which
+    is reproduced here verbatim (including reading the ROUNDED `eow`) so caution stays byte-identical."""
+    if shape_neutral and eow_flat is not None and m_ctl:
+        if soft_ctl_floor and m_ctl < soft_ctl_floor:
+            return (eow_flat * m_ctl) / soft_ctl_floor
+        return eow_flat
+    out = eow
+    if soft_ctl_floor and endctl is not None and endatl is not None and endctl < soft_ctl_floor:
+        out = endatl / soft_ctl_floor
+    return out
+
+
 def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None,
                     days_override=None, ramp_max=None, soft_ctl_floor=None, av_blocked=None,
                     q_days=None, prog_floor=None, shape_neutral=False,
-                    session_eq_cap=None, week_eq_cap=None, long_km_cap=None, actual_floor=None):
+                    session_eq_cap=None, week_eq_cap=None, long_km_cap=None, actual_floor=None,
+                    ladder=False):
     """Binary-search the largest weekly TRIMP whose END-OF-WEEK projected ACWR stays ≤ cap AND whose
     in-week PEAK ACWR stays ≤ ACWR_HARD (§H1). Distributes WITH the week's quality (via `zones`) so
     the bound is on the real, intensity-distributed week. The peak/hard bound only bites at low CTL,
@@ -4938,7 +5086,9 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         # flat 1.16 against a 1.15 cap). One distribution, evaluated once.
         _sess, dt = _distribute_week(wk, _date(start), mid, easy_pace_sec, zones,
                                      days_override=days_override, av_blocked=av_blocked,
-                                     q_days=q_days, long_km_cap=long_km_cap)
+                                     q_days=q_days, long_km_cap=long_km_cap,
+                                     ladder=ladder)         # §PRO24 — §PRO17's rule: search the week
+        #                                                     that will actually be laid, ladder and all
         # §PRO20b — the search must charge today's ACTUAL load, or the allowance it hands back is
         # bounded against a week he has already partly outrun. Floor-only ⇒ it can only tighten.
         endctl, endatl, eow, peak, eow_flat, m_ctl = _project_week(
@@ -4953,14 +5103,7 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         # The caution branch is TEXTUALLY the original expression, including reading the ROUNDED `eow`
         # rather than recomputing endatl/endctl: recomputing shifts the binary search by a last decimal
         # and caution stops being byte-identical (caught exactly that way — every trimp 0.1 low).
-        if shape_neutral and eow_flat is not None and m_ctl:
-            eow_soft = eow_flat
-            if soft_ctl_floor and m_ctl < soft_ctl_floor:
-                eow_soft = (eow_flat * m_ctl) / soft_ctl_floor
-        else:
-            eow_soft = eow
-            if soft_ctl_floor and endctl is not None and endatl is not None and endctl < soft_ctl_floor:
-                eow_soft = endatl / soft_ctl_floor
+        eow_soft = _eow_soft(eow, eow_flat, m_ctl, endctl, endatl, shape_neutral, soft_ctl_floor)
         too_fast = ramp_max is not None and endctl is not None and endctl > ctl + ramp_max + 1e-9
         # §PRO10 — the soft test can't clip below the progression floor; peak/ramp always can
         soft_bad = eow_soft and eow_soft > cap and (prog_floor is None or mid > prog_floor)
@@ -4982,7 +5125,40 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         _wk_eq = _week_eq_km(_sess)
         bio_bad = ((session_eq_cap and _sess_eq > session_eq_cap + 1e-9)
                    or (week_eq_cap and _wk_eq > week_eq_cap + 1e-9))
-        if soft_bad or bio_bad or (_peak_governs and peak and peak > ACWR_HARD) or too_fast:
+        # §PRO23 — THE TWO CLOCKS. Weekly volume grew on the ACWR/CTL clock; the long run grew on the
+        # Aarhus ladder (LONG_RUN_STEP_CAP × the trailing-window longest). NOTHING TIED THEM, so the
+        # week could outrun the longest run that anchors it and the long run's SHARE — the one number
+        # Daniels/Hansons actually prescribe — was whatever fell out. MEASURED on his 2026-08-07 plan:
+        # base weeks at 20.9 / 22.1 / 22.7 / 23.6% against the 25% doctrine floor, every week pinned to
+        # the ACWR ceiling. That is not a plan with a long run in it; it is a volume distribution that
+        # happens to have a longest day — and because the ceiling is a RATIO of recent load, the week
+        # was a feedback trace of the last fortnight rather than a prescription (two rest days tripled
+        # it). §PRO21 treated the SYMPTOM — the long run reading the same as the easy days — with two
+        # more governors, and bought the ratio by spending the surplus on a sixth running day. This is
+        # the cause: the clocks, coupled.
+        # ONE constraint, NO new constant: the week may not exceed what the ladder can anchor at
+        # BASE_LONG_FRAC — the 0.25 the skeleton already targets (§PRO18, the Daniels/Hansons band).
+        # ⚠⚠ BOUND ON `long_km_cap`, NEVER ON THE LAID LONG RUN. The laid long is a fixed SHARE of the
+        # week, so long/week is constant in the search variable and a laid-long form bites only on a
+        # rounding edge. The first cut did exactly that and DEADLOCKED — base froze at 44.3 km for four
+        # straight weeks (ladder 12.3, laid long 11.2, 1.10 × 11.2 = 12.3 forever: a fixed point where
+        # the long run never reaches its own cap so the cap can never rise). Found by measuring, not by
+        # reading. `long_km_cap` is exogenous and advances +10%/wk off the long runs the block itself
+        # lays, so bounding on IT makes the week grow WITH the long run instead of away from it.
+        # Assertive-only for free — `long_km_cap` is None unless assertive (generate_block), so caution
+        # never evaluates this ⇒ byte-identical, MEASURED (91 leaves, equal md5, 393.6 km), not argued.
+        # Can only ever LOWER the allowance: a pure additional ceiling, the §PRO8 template.
+        # ⚠ FLOORED AT THE SHAPE'S OWN INTENT. The coupling exists to stop the ASSERTIVE path riding the
+        # ACWR ceiling FAR ABOVE the designed trajectory (his base weeks ran 2.2–2.9× their skeleton) —
+        # it is not a licence to cut BELOW the design. Without this floor a low-volume fixture whose
+        # ladder is small (a returning athlete: longest run 5 km ⇒ bound 22 km) has its whole block
+        # crushed, and det/regime-plan caught exactly that: the assertive build peak fell to 28.2 km,
+        # BELOW the caution baseline it is supposed to exceed. The floor costs nothing on his real plan
+        # (every base week's bound sits far above its intent) and keeps the constraint a trimmer.
+        _couple_km = max(long_km_cap / BASE_LONG_FRAC, (wk.get("km") or 0.0)) if long_km_cap else None
+        shape_bad = (bool(long_km_cap) and BASE_LONG_FRAC > 0
+                     and sum((x.get("km") or 0.0) for x in _sess) > _couple_km + 1e-9)
+        if soft_bad or bio_bad or shape_bad or (_peak_governs and peak and peak > ACWR_HARD) or too_fast:
             hi = mid
         else:
             lo = mid
@@ -5800,7 +5976,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                 ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
                                                 days_override=av_days, av_blocked=av_off,
                                                 prog_floor=_prog, shape_neutral=assertive,
-                                                actual_floor=act_floor)
+                                                actual_floor=act_floor, ladder=True)   # §PRO24
                 _target = ((BUILD_DOWN_FRAC * last_nondown)
                            if (_sd and last_nondown) else _full_allowed)
                 wk_intent_trimp = min(_target, _full_allowed)
@@ -5827,7 +6003,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 long_km_aim = _lw * wk_intent_km
             full, _ = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec, zones,
                                        days_override=av_days, av_blocked=av_off,
-                                       long_km_cap=long_km_cap)
+                                       long_km_cap=long_km_cap, ladder=assertive)   # §PRO24
             elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
             # §6e-FREQ + §6o-B — what this week's ACTUALS already cover. freq_met: run COUNT *and* km
             # both logged → the remainder is optional rest (a met-week junk run does nothing for
@@ -5864,7 +6040,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                           zones=use_zones, roll_from=today.isoformat(), days_override=rem,
                                           soft_ctl_floor=soft_ctl_floor, av_blocked=av_off,
                                           q_days=q_ahead, shape_neutral=assertive,
-                                          actual_floor=act_floor)
+                                          actual_floor=act_floor)   # §PRO24 — no ladder: a remainder
                 # §AV — the denominator is the TEMPLATE's run count (== len(offsets) without §AV, so
                 # byte-identical): an av-shed week's blocked days contribute nothing, they don't
                 # concentrate the intent into the surviving days.
@@ -5880,7 +6056,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, use_zones,
                                              days_override=rem, av_blocked=av_off, q_days=q_ahead,
                                              long_km_cap=long_km_cap, long_km_aim=long_km_aim,
-                                             free_from=today_off)
+                                             free_from=today_off)   # §PRO24 — no ladder (remainder)
                 if q_ahead and sum(dt.values()) > chosen + 1.0:
                     # §6o-QF fallback — the governed remainder can't carry the quality session's
                     # fixed TRIMP floor (late week / tiny budget): keep the honest easy-only lay
@@ -5888,7 +6064,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None,
                                                  days_override=rem, av_blocked=av_off,
                                                  long_km_cap=long_km_cap, long_km_aim=long_km_aim,
-                                                 free_from=today_off)
+                                                 free_from=today_off)   # §PRO24 — no ladder (remainder)
             elif freq_met or vol_met:                      # week already covered → optional, never forced
                 a_runs, a_km = week_actuals
                 # §6e3 — quote the intent that MADE the decision, not the shape skeleton. Both tests
@@ -6005,7 +6181,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                   soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off,
                                   prog_floor=prog, shape_neutral=assertive,
                                   session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
-                                  long_km_cap=long_km_cap, actual_floor=act_floor)   # §PRO20b
+                                  long_km_cap=long_km_cap, actual_floor=act_floor,   # §PRO20b
+                                  ladder=assertive)   # §PRO24
         if assertive and not is_taper:
             # ride the layered ceiling on building weeks; hold a proportional recovery trough on down
             # weeks (BUILD_DOWN_FRAC of the last realised non-down load), always governor-capped. The
@@ -6037,11 +6214,12 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # BIO_EQ_STEP × the MAX eq_km of the trailing BIO_EQ_WINDOW weeks (recent actuals seeded + this
         # block's earlier weeks). Assertive-only; caution passes no cap ⇒ byte-identical.
         sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, wk_zones,
-                                        long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off)
+                                        long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off,
+                                        ladder=assertive)   # §PRO24
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
-        ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
-                                                             actual_floor=act_floor)   # §PRO20b
+        ctl_n, atl_n, eow, peak, eow_flat, m_ctl_n = _project_week(ctl, atl, wk_start, dt,
+                                                                   actual_floor=act_floor)   # §PRO20b
         # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
         # the governor cannot shrink; at low CTL that floor's mid-week spike pushes PEAK ACWR past the
         # hard cap even while end-of-week stays under the soft cap. When it does, drop THIS week's
@@ -6084,7 +6262,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             pre_total = sum(dt.values())
             allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
                                       ramp_max=ramp, days_override=av_days, av_blocked=av_off,
-                                      actual_floor=act_floor)   # §PRO20b
+                                      actual_floor=act_floor, ladder=assertive)   # §PRO20b/§PRO24
             # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
             chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
             if av_frac < 1.0:
@@ -6093,7 +6271,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 chosen = min(chosen, pre_total)        # never add volume when suppressing intensity
             sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, None,
                                             long_km_cap=long_km_cap,   # §PRO9 — keep the cap on re-govern
-                                            days_override=av_days, av_blocked=av_off)
+                                            days_override=av_days, av_blocked=av_off,
+                                            ladder=assertive)   # §PRO24
             adjusted = _apply_adjustment(sessions, dt, adjust)
             sessions, dt = adjusted["sessions"], adjusted["dt"]
             ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
@@ -6116,6 +6295,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 "km": round(sum(s["km"] for s in sessions), 1),
                 "trimp_total": round(sum(dt.values()), 1), "proj_acwr": eow, "peak_acwr": peak,
                 "proj_acwr_flat": eow_flat,
+                # §PRO23 — the governor's OWN decision variable, published rather than left to be
+                # reconstructed. `proj_acwr` is the last-day sample and `proj_acwr_flat` the raw
+                # shape-neutral one; NEITHER is what the soft test compared against the ride cap once
+                # §PRO8's floor engages, because that divides by the week's MEAN CTL. Readers that
+                # guessed with `proj_ctl` over-read it by ~5% on a steep low-CTL week.
+                "proj_acwr_soft": (None if eow_flat is None and eow is None else
+                                   round(_eow_soft(eow, eow_flat, m_ctl_n, ctl_n, atl_n,
+                                                   assertive, soft_ctl_floor) or 0.0, 4)),
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
                 "intent_km": wk["km"], "adjusted": adjusted["touched"], "clipped": clipped}
         # §PRO10 — honest label: this week's load sits where the SOFT cap alone wouldn't have put it
@@ -18584,6 +18771,215 @@ def _stc_eq_stable():
                     "invariant_across": sorted(readings), "failures": fail or "none"})
 
 
+def _stc_clock_couple():
+    """§PRO23 — the volume clock and the long-run clock are COUPLED: a week may never grow past what
+    the Aarhus ladder can anchor at BASE_LONG_FRAC. Four teeth, and the third is the one that matters.
+
+    (a) THE BOUND, swept and direct. For a range of `long_km_cap`, the laid week's km must not exceed
+        cap / BASE_LONG_FRAC. This is the constraint stated as itself; reverting the coupling makes the
+        week ride the ACWR ceiling far above the bound and every small cap fails.
+    (b) THE SHARE, on a real multi-week block. Every assertive BUILDING week that carries a long run
+        must give it at least BASE_LONG_FRAC of the week — the Daniels/Hansons floor that §PRO18 already
+        made the skeleton's target and that the assertive path used to override by 2.2–2.9×.
+    (c) ⚠⚠ NO FIXED POINT — the tooth that catches the version of this fix I actually wrote first.
+        Bounding the week on the LAID long run instead of the ladder is arithmetically seductive and
+        DEADLOCKS: the laid long is a fixed share of the week, so long/week is constant in the search
+        variable, the constraint bites only on a rounding edge, and the long run settles strictly BELOW
+        its own cap — whereupon `1.10 × laid` reproduces the same cap forever. Measured on his DB it
+        froze the base block at 44.3 km for four consecutive weeks (ladder 12.3, laid long 11.2). So:
+        the laid long must REACH its ladder on binding weeks, and the long run must not plateau across
+        three consecutive building weeks. A share-only or bound-only det passes the broken version.
+    (d) ANTI-VACUITY. With no cap in force the SAME fixture must produce weeks that breach the bound —
+        otherwise (a) is true of a fixture that could never have shown otherwise.
+
+    Assertive-only by construction (`long_km_cap` is None in caution), so caution keeps its own
+    byte-identity dets; nothing here touches that path. Pure/in-memory."""
+    from datetime import date
+    z = {"easy_top": 400, "easy": 420, "threshold": 320, "interval": 290, "marathon": 360}
+    bs = date(2026, 8, 3)
+    fail = []
+    LONGISH = lambda s: str(s.get("kind") or "").startswith("long")
+
+    # His own situation, which is the whole point: a LOW designed intent (24 km) under an ACWR ceiling
+    # that would happily pay for 2.5× that. The intent floor is therefore slack for every cap ≥ 6.0 and
+    # the LADDER is what governs — if the floor were doing the work this sweep would prove nothing.
+    WK = {"wk": 1, "km": 24, "runs": 5, "long": 6, "strides": 0, "quality": []}
+
+    def lay(cap):
+        tr = _max_week_trimp(60.0, 65.0, WK, bs.isoformat(), 420.0, ACWR_SOFT, z,
+                             shape_neutral=True, long_km_cap=cap)
+        ss, _ = _distribute_week(WK, bs, tr, 420.0, z, long_km_cap=cap)
+        return round(sum(s.get("km") or 0.0 for s in ss), 1)
+
+    # (a) the bound, swept — and (d) the same sweep with the coupling out of force.
+    # The invariant is the FLOORED one: week ≤ max(ladder / BASE_LONG_FRAC, the shape's own intent).
+    over, free_over = [], []
+    for cap10 in range(90, 240, 5):                       # caps 9.0 … 23.5 km
+        cap = cap10 / 10.0
+        lim = max(cap / BASE_LONG_FRAC, WK["km"])
+        bound_km, free_km = lay(cap), lay(None)
+        if bound_km > lim + 0.35:                         # +0.35 = the published round-to-0.1 slack
+            over.append((cap, bound_km, round(lim, 1)))
+        if free_km > lim + 0.35:
+            free_over.append(cap)
+    if over:
+        fail.append(f"week outgrew the ladder it is anchored on ({len(over)} caps, e.g. {over[0]})")
+    if not free_over:
+        fail.append("uncoupled fixture never breached the bound — the sweep cannot see the defect")
+
+    # (b)+(c) a real assertive block: share floor, ladder reached, no plateau
+    weeks, _ = generate_block(base_shape(10, 44), bs, 60.0, 65.0, 420.0, zones=z, regime="assertive",
+                              recent_longs=[10.0, 10.4, 10.9, 11.0])
+    rows = []
+    for w in weeks:
+        ss = w.get("sessions") or []
+        km = round(sum(s.get("km") or 0.0 for s in ss), 1)
+        ls = [s for s in ss if LONGISH(s)]
+        rows.append({"wk": w.get("wk"), "km": km,
+                     "long": round(max((s.get("km") or 0.0) for s in ls), 1) if ls else 0.0,
+                     "down": bool(_is_down(w.get("intent"))), "flat": bool(w.get("long_flat"))})
+    building = [r for r in rows if not r["down"] and r["long"] and not r["flat"]]
+    if len(building) < 5:
+        fail.append(f"block too thin to mean anything: {len(building)} building weeks")
+    below = [(r["wk"], r["long"], r["km"]) for r in building
+             if r["km"] and r["long"] / r["km"] < BASE_LONG_FRAC - 0.005]
+    if below:
+        fail.append(f"long run below its {BASE_LONG_FRAC:.0%} floor: {below[:3]}")
+    longs = [r["long"] for r in building]
+    plateau = [i for i in range(len(longs) - 2)
+               if abs(longs[i] - longs[i + 1]) < 0.05 and abs(longs[i + 1] - longs[i + 2]) < 0.05]
+    if plateau:
+        fail.append(f"long run plateaued across 3 building weeks (ladder fixed point): {longs}")
+    if len(longs) >= 2 and not (longs[-1] > longs[0] + 0.5):
+        fail.append(f"long run never progressed across the block: {longs[0]} → {longs[-1]}")
+    return _st("det", "clock-couple",
+               "§PRO23 the week may not outgrow the long run that anchors it — bounded on the Aarhus "
+               "LADDER (never on the laid long, which deadlocks at its own +10%), so every building "
+               "week keeps the long run at ≥ the Daniels/Hansons share AND the ladder still advances; "
+               "an uncoupled fixture provably breaches the same bound",
+               passed=not fail,
+               expect=f"week ≤ ladder / {BASE_LONG_FRAC}; long ≥ {BASE_LONG_FRAC:.0%} of every building "
+                      f"week; no 3-week long-run plateau; uncoupled ⇒ breaches exist",
+               got={"caps_swept": len(range(90, 240, 5)), "bound_breaches": len(over),
+                    "uncoupled_breaches": len(free_over), "building_weeks": len(building),
+                    "below_floor": len(below), "long_progression": longs[:8],
+                    "failures": fail or "none"})
+
+
+def _stc_easy_ladder():
+    """§PRO24 — the easy days of an assertive week are a LADDER, not five copies of one number, and the
+    shape may never take a LOAD decision. Six teeth.
+
+    (a) GRADED. The short easies of an assertive full week are strictly decreasing in km, and the
+        spread matches the fitted rungs. Reverting to the even split makes them all equal.
+    (b) ⚠⚠ ORDERED BY DISTANCE FROM THE NEAREST LONG RUN — NOT BY CALENDAR. This is the tooth that
+        catches the version I wrote first. His own 161 weeks grade strongly by SIZE RANK (R² 0.545)
+        and not at all by weekday (R² 0.054), so the magnitudes are his and the ORDER is doctrine:
+        rung 0 goes to the day FURTHEST from any long run, and the days flanking a long run (the
+        recovery day after last week's, the freshness day before this week's) take the short rungs.
+        Laying the rungs in calendar order instead put the HEAD on Monday — the one day the §H1
+        peak-ACWR brake pins, because the seed ATL is highest on day 1 and decays all week — and the
+        governed week fell 39.0 → 32.7 km. So: the first day of the week is never the longest easy.
+    (c) ⚠⚠ VOLUME-NEUTRAL. Same `week_trimp` in, same total km out, ladder on or off. This is the
+        guarantee that failed live: a shape rule quietly cost his 2026-08-03 week 6.3 km of intent,
+        and because §6o's remainder is `intent − already run`, ALL of it came out of the one day left
+        — the Sunday long run collapsed 10.0 → 3.7 km and was relabelled a shakeout.
+    (d) §PRO21 SURVIVES. On a real assertive block no easy day may exceed LONG_RUN_EASY_FRAC × the
+        week's long run: the ladder lifts its head rung, and the head is the thing that could overtake
+        the long run. (It did, on caution, before the flag was gated — four base weeks.)
+    (e) DEFAULT OFF. The flag is opt-in: an unflagged lay (every direct caller, and the §6o remainder)
+        is byte-identical to `ladder=False`, so caution and the remainder keep their own baselines.
+    (f) ANTI-VACUITY. With EASY_LADDER_STEP neutralised to 0, teeth (a) and (b) must FAIL — otherwise
+        they are true of a fixture that could never have shown otherwise.
+
+    Pure/in-memory."""
+    from datetime import date
+    z = {"easy_top": 400, "easy": 420, "threshold": 320, "interval": 290, "marathon": 360}
+    bs = date(2026, 8, 3)                                  # a Monday
+    fail = []
+    WK = {"wk": 1, "km": 50, "runs": 6, "long": 14, "strides": 0, "quality": []}
+    DAYS = _run_days(6)                                    # [0,1,2,4,5,6] — long on Sunday
+    LONGISH = lambda s: str(s.get("kind") or "").startswith("long")
+
+    def lay(step, on):
+        """Return (short easies as {weekday: km}, long km, total km) for one lay."""
+        keep = globals()["EASY_LADDER_STEP"]
+        globals()["EASY_LADDER_STEP"] = step
+        try:
+            ss, _ = _distribute_week(WK, bs, 480.0, 420.0, None, long_km_cap=15.0, ladder=on)
+        finally:
+            globals()["EASY_LADDER_STEP"] = keep
+        shorts = {(_date(s["date"]) - bs).days: (s.get("km") or 0.0) for s in ss if not LONGISH(s)}
+        lk = max([(s.get("km") or 0.0) for s in ss if LONGISH(s)] or [0.0])
+        return shorts, lk, round(sum(s.get("km") or 0.0 for s in ss), 1)
+
+    def teeth(step, on):
+        """(a)+(b) as a reusable pair, so anti-vacuity re-runs exactly the assertions it must break."""
+        bad = []
+        shorts, _lk, _tot = lay(step, on)
+        if len(shorts) < 4:
+            return [f"fixture laid only {len(shorts)} short easies — nothing to grade"]
+        vals = sorted(shorts.values(), reverse=True)
+        if any(vals[i] - vals[i + 1] < 0.05 for i in range(len(vals) - 1)):   # (a)
+            bad.append(f"easy days are not graded: {vals}")
+        head = max(shorts, key=lambda d: (shorts[d], -d))
+        if head == min(shorts):                                              # (b)
+            bad.append(f"the longest easy is the week's FIRST day ({head}) — calendar order, "
+                       f"and the day the peak-ACWR brake pins: {shorts}")
+        long_off = DAYS[-1]
+        flank = [d for d in shorts if min(abs(d - (long_off - 7)), abs(long_off - d)) <= 1]
+        if flank and max(shorts[d] for d in flank) >= max(vals) - 0.05:       # (b)
+            bad.append(f"a day flanking a long run took the head rung: {shorts}")
+        return bad
+
+    fail += teeth(EASY_LADDER_STEP, True)
+
+    # (c) the shape moves km BETWEEN days, never into or out of the week
+    _s_on, _l_on, tot_on = lay(EASY_LADDER_STEP, True)
+    _s_off, _l_off, tot_off = lay(EASY_LADDER_STEP, False)
+    if abs(tot_on - tot_off) > 0.35:                       # 0.35 = the published round-to-0.1 slack
+        fail.append(f"the ladder changed the week's VOLUME: {tot_off} → {tot_on} km")
+
+    # (e) opt-in: the default and the explicit off are the same lay
+    _dflt, _ = _distribute_week(WK, bs, 480.0, 420.0, None, long_km_cap=15.0)
+    _off, _ = _distribute_week(WK, bs, 480.0, 420.0, None, long_km_cap=15.0, ladder=False)
+    if [(s["date"], s.get("km"), s.get("trimp")) for s in _dflt] != \
+       [(s["date"], s.get("km"), s.get("trimp")) for s in _off]:
+        fail.append("the ladder is not opt-in — the default lay already carries it")
+
+    # (d) §PRO21 on a real assertive block: the long run stays the longest run, with margin
+    weeks, _ = generate_block(base_shape(10, 44), bs, 60.0, 65.0, 420.0, zones=z, regime="assertive",
+                              recent_longs=[10.0, 10.4, 10.9, 11.0])
+    over = []
+    for w in weeks:
+        ss = w.get("sessions") or []
+        ls = [(s.get("km") or 0.0) for s in ss if LONGISH(s)]
+        es = [(s.get("km") or 0.0) for s in ss if not LONGISH(s) and (s.get("kind") or "") == "easy"]
+        if ls and es and max(es) > LONG_RUN_EASY_FRAC * max(ls) + 0.05:
+            over.append((w.get("wk"), round(max(es), 1), round(max(ls), 1)))
+    if over:
+        fail.append(f"an easy day outgrew {LONG_RUN_EASY_FRAC:.0%} of the long run: {over[:3]}")
+
+    # (f) anti-vacuity — neutralise the step and the graded/ordered teeth must break
+    if not teeth(0.0, True):
+        fail.append("a flat week passed the ladder teeth — they cannot see the defect")
+
+    return _st("det", "easy-ladder",
+               "§PRO24 an assertive week's easy days are a LADDER (his own 161 weeks grade by SIZE "
+               "RANK, R² 0.545, and not by weekday, R² 0.054) ordered by distance from the nearest "
+               "long run — never calendar order, which points the head rung at the day the peak-ACWR "
+               "brake pins; the shape is volume-neutral, opt-in, and never lets an easy day overtake "
+               "the long run; a flattened step provably fails the same teeth",
+               passed=not fail,
+               expect="graded + head away from both long runs + same km as the even split + "
+                      f"easy ≤ {LONG_RUN_EASY_FRAC:.0%} of the long + default off + step 0 ⇒ fails",
+               got={"rungs": {d: round(k, 1) for d, k in sorted(_s_on.items())},
+                    "even_split": {d: round(k, 1) for d, k in sorted(_s_off.items())},
+                    "km_on_vs_off": [tot_on, tot_off], "long_km": round(_l_on, 1),
+                    "block_weeks": len(weeks), "pro21_overshoots": len(over),
+                    "failures": fail or "none"})
+
+
 def _stc_eq_km():
     """§3.1 — the biomechanical load axis (eq_km) + its soft governor. Locks: (a) eq_km MATH — a structured
     session weights each rep's km by its zone's Davis f (easy wu/cd stay 1×, the fast work reps carry the
@@ -19592,6 +19988,15 @@ def _stc_regime_plan():
     # §PRO8 — the governor's guarantee is the FLOORED eow ≤ cap (raw rides up to the hard cap once CTL
     # dips below ACWR_SOFT_CTL_FLOOR); judge the ceiling on the floored eow, as the engine does.
     def feow(w):
+        # §PRO23 — PREFER THE PUBLISHED DECISION VARIABLE. This used to reconstruct the floored ratio
+        # from `proj_acwr_flat × proj_ctl / floor`, and that was wrong in a way the comment below did
+        # not anticipate: the engine divides by the week's MEAN CTL, not its END CTL. On a steep
+        # building week at low CTL the two differ by ~5% (measured 42.02 vs 44.1), so this read a
+        # correctly-governed 1.1496 back as 1.206 and reported a §PRO5 breach that never happened.
+        # The reconstruction is kept only as a fallback for plans saved before the field existed.
+        s = w.get("proj_acwr_soft")
+        if s is not None:
+            return s
         a = w.get("proj_acwr_flat")          # §PRO17 — the governed (shape-neutral) reading
         if a is None:
             a = w.get("proj_acwr") or 0
@@ -21792,6 +22197,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_caution_baseline(), lambda: _stc_ramp_rate(),
                  lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
                  lambda: _stc_long_run_step(), lambda: _stc_long_run_identity(), lambda: _stc_eq_km(), lambda: _stc_eq_stable(),
+                 lambda: _stc_clock_couple(), lambda: _stc_easy_ladder(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),

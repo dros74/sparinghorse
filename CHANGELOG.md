@@ -12,6 +12,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-08-07
+
+### Changed
+
+- **Your easy days are no longer all the same distance.** Every easy run in every planned week came
+  out at exactly the same number — four 7.6 km days in a row, then the long run. No training plan in
+  any book looks like that, and it isn't what you have ever actually run. Your own weeks were the
+  evidence: across 161 of them, easy days grade steeply from longest to shortest (the longest is
+  about 1.4× the week's average easy day, the shortest about 0.7×), and that grading explains more
+  than half of all the variation between your easy runs. What it does *not* depend on is the day of
+  the week — there is no Monday effect, no Friday effect, nothing. So the sizes come from your
+  history, and where each one lands comes from how recovery works: the longest easy run goes on the
+  day furthest from any long run, and the days on either side of a long run — the recovery day after
+  the last one, the freshness day before the next — get the short ones. A week that used to read
+  7.6 / quality / 7.6 / 7.6 / 7.6 / 12.0 long now reads 7.5 / quality / 9.6 / 8.5 / 6.4 / 12.3 long.
+  Nothing about the safety limits was loosened to do this; in fact the highest fatigue ratio anywhere
+  in the plan comes down slightly, because putting the bigger easy day further from your heaviest day
+  costs less under the same brake.
+
+### Fixed
+
+- **Your week can no longer outgrow your longest run.** The plan was tracking two things that should
+  move together and didn't: how much you run in a week, which grew whenever recent fatigue allowed
+  it, and how far your longest run may go, which grows by at most 10% over the previous few weeks.
+  Nothing connected them. So the week rode its fatigue ceiling and the long run, held to its own
+  slower ladder, shrank to whatever share was left — 21–24% of the week, under the 25–30% that
+  distance plans actually prescribe and that this plan's own skeleton was already asking for. That
+  isn't a plan with a long run in it, it's a pile of distance with a longest day. Worse, because the
+  ceiling is a ratio against your *recent* load, the week became a readout of the last fortnight
+  rather than a prescription — two rest days could triple it. The week is now capped at whatever
+  distance the long run can properly anchor, and the long run is raised to its own ceiling instead of
+  being left below it, so the two advance together. Your long run now holds 25–30% of the week all
+  the way through the block.
+- **A weekly safety check was being verified against a slightly wrong number.** The value the volume
+  governor decides on was calculated privately, so everything that reported on it afterwards had to
+  reconstruct it — and the reconstruction used your fitness at the *end* of a week where the engine
+  uses the week's *average*. On a steeply-rising week those differ by about 5%, enough to report a
+  ceiling breach that had not happened. The governor now publishes the number it actually used.
+
 ## [0.24.1] - 2026-08-04
 
 ### Fixed
