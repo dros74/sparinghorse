@@ -12,6 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-08-07
+
+### Fixed
+
+- **Out-running the plan no longer shrinks the current week's headline.** The week in progress
+  summed its *prescribed* elapsed days plus the remaining prescription — so every kilometre you ran
+  beyond a day's prescription made the week's total *smaller*, and a well-run week could read below
+  a recovery week (the owner's case: the card said 35.8 km while the week was really 29.1 already
+  run + 11.3 still ahead = 40.4, above the 38.3 km down week it appeared to sit under). The current
+  week's header now counts days you have already run at their real logged distance and days ahead at
+  their prescription, shows the split ("29.1 run + 11.3 ahead"), and a same-evening replan never
+  counts today twice — the day's prescription is superseded by what you actually ran. Future weeks,
+  down weeks and completed weeks are untouched, and the reduced *remaining* prescription after an
+  over-run is deliberate and unchanged: volume already run is never re-prescribed.
+
 ## [0.25.1] - 2026-08-07
 
 ### Fixed

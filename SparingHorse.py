@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.25.1"
+ENGINE_VERSION = "0.25.2"
 
 
 def activity_profile(activity_id, n=120):
@@ -6236,6 +6236,29 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "clipped": False, "partial": True,
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
+            # §CARD2 — THE STRADDLING WEEK'S HEADER DESCRIBES THE WEEK, NOT THE PRESCRIPTION TRAIL.
+            # The old header summed the PRESCRIBED elapsed days + the governed remainder ("display
+            # numbers stay the prescription"), so every km he ran OVER prescription made the current
+            # week's headline SHRINK by the same amount: on 2026-08-07 his card said 35.8 km while
+            # the week was really 29.1 run + 11.3 ahead = 40.4 — and it read SMALLER than the 38.3
+            # down week, which he rightly called out. Owner overturned that design 2026-08-07
+            # ("yes, do it"): elapsed days count at their ACTUAL distance (the per-session lines
+            # already show "7.1k → 10.9k"; the header now agrees with them), remaining days at their
+            # prescription. A prescription for a day ALREADY RUN is superseded by its actual
+            # (§PRO20b's principle — "once he has already run, the prescription is moot"), so a
+            # same-day regen never counts today twice. `km = round(km_done + km_ahead, 1)` off the
+            # ROUNDED parts, so the header identity det/card-truth asserts is exact by construction.
+            # `week_actuals is None` (direct det fixtures) keeps the prescription-sum header verbatim.
+            if week_actuals is not None:
+                _ahead = [s for s in rem_s if (s.get("kind") or "") != "rest"]
+                if today_trimp:
+                    _ahead = [s for s in _ahead if s["date"] > today.isoformat()]
+                _ahead_km = round(sum(s.get("km") or 0.0 for s in _ahead), 1)
+                pweek.update(
+                    runs_done=week_actuals[0], km_done=week_actuals[1],
+                    runs_ahead=len(_ahead), km_ahead=_ahead_km,
+                    runs=week_actuals[0] + len(_ahead),
+                    km=round(week_actuals[1] + _ahead_km, 1))
             # §PRO9 — surface the ceiling at week level too, exactly as the full-week path does; the
             # straddle branch built `pweek` by hand and never carried it, so a capped straddle week
             # showed the note on the session but nothing on the card.
@@ -13653,10 +13676,13 @@ function weekHtml(w,p,today){
                w.frozen?'<span class="wfz">✓ done</span>':''].filter(Boolean).join(" · ");
   // §3.1 — surface the biomechanical eq_km on quality weeks (where it exceeds raw km); calm/muted.
   const eqkm=(w.eq_km&&w.eq_km>w.km+0.5)?` · <span class="muted mono" title="Biomechanical load: pace-weighted damage-equivalent km (fast running does several times more tissue damage per km than easy). The biomechanical/tissue-damage axis (informed by John Davis), which heart-rate load can't see.">${w.eq_km} eq-km</span>`:'';
+  // §CARD2 — the straddling week's total = actuals so far + prescription ahead; show the split so
+  // the number explains itself (the old prescription-sum header made an over-run week LOOK smaller).
+  const kmSplit=(w.partial&&w.km_done!=null)?` · <span class="muted mono" title="This week straddles today, so its total counts days you've already run at their REAL distance (${w.km_done} km in ${w.runs_done} run${w.runs_done===1?'':'s'}) plus what's still prescribed ahead (${w.km_ahead} km in ${w.runs_ahead}). Days you out-run no longer shrink the week's headline.">${w.km_done} run + ${w.km_ahead} ahead</span>`:'';
   return `<div class="wk ${down?'wdown':''} ${w.frozen?'wfrozen':''} ${cur?'wcur':''}">
       <div class="wn">${w.wk}${w.frozen?'<span class="wlock" title="completed — carried verbatim">🔒</span>':''}</div>
       <div class="wbody">
-        <div><span class="wkm">${w.km} km</span>${eqkm} · ${w.runs} runs${flags?' · '+flags:''}</div>
+        <div><span class="wkm">${w.km} km</span>${eqkm} · ${w.runs} runs${kmSplit}${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
         <div class="wsesslog">${sess}</div>
       </div>
@@ -21453,6 +21479,13 @@ def _stc_card_truth(db):
     # a Thursday: generate_plan's own `today` seam (the §PRO12 lesson) — mid-week ⇒ straddle exists
     anchor = datetime.now().date()
     thursday = anchor + timedelta(days=(3 - anchor.weekday()) % 7)
+    # §CARD2 — ground truth for the straddling week comes from the DB, not from the plan's own
+    # fields: the header must equal (what was actually run) + (what is still prescribed), and
+    # "actually run" is the same Mon–Sun actuals read the engine itself uses.
+    truth_done = _current_week_actuals(db, thursday)
+    ran_today = bool(db.execute(
+        "SELECT 1 FROM activities WHERE date=? AND " + RUN_FAMILY_SQL + " LIMIT 1",
+        (thursday.isoformat(),)).fetchone())
     for regime in ("caution", "assertive"):
         plan = generate_plan(db, force_regime=regime, today=thursday)
         for ph in ("rebase", "base", "build", "peak", "taper"):
@@ -21461,15 +21494,36 @@ def _stc_card_truth(db):
                     continue          # lived history is carried verbatim, headers included (§6f)
                 ss = w.get("sessions") or []
                 n_weeks += 1
-                saw_partial = saw_partial or bool(w.get("partial"))
+                tag = f"{regime}/{ph}/{w.get('start')}"
+                if w.get("partial"):
+                    # §CARD2 — the straddle header is actuals-so-far + prescription-ahead. A
+                    # prescription for a day already run is superseded by its actual, never
+                    # double-counted on a same-day regen.
+                    saw_partial = True
+                    if w.get("km_done") is None:
+                        fails.append(f"{tag}: partial week without the done/ahead split")
+                        continue
+                    if (w.get("runs_done"), w.get("km_done")) != truth_done:
+                        fails.append(f"{tag}: km_done says {(w.get('runs_done'), w.get('km_done'))}, "
+                                     f"the DB says {truth_done}")
+                    ahead = [s for s in NONREST(ss)
+                             if s.get("date") and s["date"] >= thursday.isoformat()
+                             and not (ran_today and s["date"] == thursday.isoformat())]
+                    a_km = round(sum(s.get("km") or 0.0 for s in ahead), 1)
+                    if w.get("runs_ahead") != len(ahead) or abs((w.get("km_ahead") or 0.0) - a_km) > 0.05:
+                        fails.append(f"{tag}: ahead split {w.get('runs_ahead')}/{w.get('km_ahead')} ≠ "
+                                     f"listed remainder {len(ahead)}/{a_km}")
+                    if w.get("runs") != (w.get("runs_done") or 0) + (w.get("runs_ahead") or 0) \
+                            or abs((w.get("km") or 0.0)
+                                   - round((w.get("km_done") or 0.0) + (w.get("km_ahead") or 0.0), 1)) > 1e-9:
+                        fails.append(f"{tag}: header {w.get('km')}km/{w.get('runs')}r ≠ done+ahead")
+                    continue
                 stated, laid = w.get("runs"), len(NONREST(ss))
                 if stated != laid:
-                    fails.append(f"{regime}/{ph}/{w.get('start')}: card says {stated} runs, "
-                                 f"lists {laid}")
+                    fails.append(f"{tag}: card says {stated} runs, lists {laid}")
                 km = round(sum(s.get("km") or 0.0 for s in ss), 1)
                 if abs((w.get("km") or 0.0) - km) > 0.05:
-                    fails.append(f"{regime}/{ph}/{w.get('start')}: card says {w.get('km')} km, "
-                                 f"sessions sum to {km}")
+                    fails.append(f"{tag}: card says {w.get('km')} km, sessions sum to {km}")
         chain = plan.get("chain") or ([{"date": (plan.get("objective") or {}).get("date")}]
                                       if (plan.get("objective") or {}).get("date") else [])
         for c in chain:
@@ -21485,6 +21539,27 @@ def _stc_card_truth(db):
         fails.append("sweep never met a partial (straddle) week — the branch that lied is untested")
     if not saw_trimmed:
         fails.append("sweep never met a race week — §PER1's trim path is untested")
+    # §CARD2 (d) — SAME-DAY REGEN NEVER COUNTS TODAY TWICE, as a CONSTRUCTED fixture: the live-DB
+    # sweep above can only exercise the supersede rule when the real DB happens to hold a run on the
+    # det's forced `today` — it doesn't, so a revert of the rule passed the sweep unseen (the
+    # morning's vacuity shape, again). This is the NIGHTLY path: the 22:00 job regenerates after the
+    # day's run has synced, with today still a prescribed remainder day — without the rule the
+    # header counts today's actual (in km_done) AND today's prescription (in km_ahead).
+    from datetime import date as _dd
+    _shape = {"wk": 1, "km": 30, "runs": 5, "long": 9, "strides": 0, "intent": "General — aerobic"}
+    _wks, *_ = generate_block([_shape], _dd(2026, 8, 3), 50.0, 45.0, 425.0,
+                              today=_dd(2026, 8, 8),          # Saturday — a prescribed run day
+                              week_actuals=(4, 22.0),          # incl. today's already-run session
+                              today_trimp=60.0)
+    _w = _wks[0]
+    _sun_only = [s for s in (_w.get("sessions") or [])
+                 if (s.get("kind") or "") != "rest" and (s.get("date") or "") > "2026-08-08"]
+    if _w.get("km_done") != 22.0 or _w.get("runs_done") != 4:
+        fails.append(f"same-day fixture lost its actuals: {_w.get('runs_done')}/{_w.get('km_done')}")
+    if _w.get("runs_ahead") != len(_sun_only) \
+            or abs((_w.get("km_ahead") or 0.0) - round(sum(s.get("km") or 0.0 for s in _sun_only), 1)) > 0.05:
+        fails.append(f"same-day regen counted today twice: ahead={_w.get('runs_ahead')}/"
+                     f"{_w.get('km_ahead')} vs strictly-future {len(_sun_only)} sessions")
     return _st("det", "card-truth",
                "§CARD a week's header states what its own listing shows: runs == non-rest sessions "
                "and km == the sessions' sum, swept over every published week in both regimes with "
