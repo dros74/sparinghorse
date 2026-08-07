@@ -12,6 +12,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-08-07
+
+### Fixed
+
+- **The taper's "race-pace touch" now actually runs at race pace.** Every taper carried a short
+  sharpening session labelled a race-pace touch — hardcoded to the threshold zone. For a 10k that's
+  about right; for a marathon it prescribed the plan's *only* threshold-zone repetitions, at a pace
+  no session in the previous seventeen weeks had visited, two weeks before the race — at nearly
+  twice the per-kilometre tissue load of the pace the label promised. A marathon taper now sharpens
+  at marathon pace, the pace every marathon-pace long run has rehearsed since the build began; other
+  race distances keep the threshold touch they always had, and in a multi-race plan each taper
+  sharpens at its own race's pace. New `det/taper-touch` checks the published plan, not just the
+  template, and fails if a taper ever debuts a pace the build never rehearsed.
+
+- **A week's card now states what its own listing shows.** The header above each week — "35.8 km ·
+  5 runs" — printed the *template's* run count, while the sessions listed under it came from the
+  governed week, which can shed a day (a crushed budget), add one (spreading a capped long run), or
+  drop the dead days after a race. Three weeks of the current plan were wrong, in both directions:
+  a four-run week titled "5 runs", a six-run week titled "5 runs", and the race week claiming five
+  over the single remaining shakeout. The count, the distance and the load in every week's header
+  are now recomputed from exactly the sessions displayed beneath them, on every path that publishes
+  a week — and a rest note (an eased-away day, an optional-rest card) is never counted as a run.
+  Verified on the rendered page, not just the data. New `det/card-truth` sweeps every published
+  week in both regimes and fails if any header disagrees with its own listing.
+
+- **The plan now runs on your clock, not the server's.** Only one part of the app knew what time zone
+  you live in: the nightly sync, which fires at your wall-clock hour. Everything else simply asked the
+  machine what day it was — and the containers run on UTC. So from midnight until the server's
+  midnight (two hours in summer, one in winter), the whole engine believed it was still yesterday,
+  while your runs arrived carrying their real local date. Two clocks in one database. In practice it
+  meant a plan generated late at night was built for the wrong day, and the daily fitness snapshot was
+  filed under the previous one — 22 of 53 snapshots and 3 of 79 plans in this database were stamped
+  that way. The timezone setting now governs the whole engine's idea of "today", takes effect the
+  moment you save it, and — because leaving it unset means "use whatever clock this machine is on" —
+  changes nothing for anyone who never set it. Its label and help text were misleading about all of
+  this and have been rewritten.
+- **A timezone that cannot be loaded is now refused out loud instead of quietly becoming UTC.** The
+  obvious version of the fix above — setting the container's timezone in the compose file — would have
+  done *nothing at all* on this deployment, and would have done nothing silently: the slim Python image
+  ships without the system timezone database, and when the C library is given a zone name it cannot
+  load it does not fail, it reads the name as an abbreviation with a zero offset and carries on in UTC.
+  The app now supplies the database itself and then checks that the clock actually moved, saying so in
+  the log if it didn't. New `det/one-clock`.
+
 ## [0.25.0] - 2026-08-07
 
 ### Changed

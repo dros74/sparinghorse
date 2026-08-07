@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.25.0"
+ENGINE_VERSION = "0.25.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -1315,6 +1315,101 @@ def _seconds_since(iso):
         return float("inf")
 
 
+# §TZ — ONE CLOCK. "Today" is a CALENDAR DAY, and the engine's day must be the ATHLETE'S day.
+# The scheduler was the only thing that knew that: it reads `SYNC_TZ` and is tz-aware, so the nightly
+# job fires at the right wall-clock hour. Everything ELSE asks the process for the date — 58 naive
+# `datetime.now()` / `date.today()` sites, from `today` in the plan generator down to the key
+# `snapshot_shape` writes rows under — and the containers run UTC. So between 00:00 and 02:00
+# Luxembourg time the whole engine believes it is YESTERDAY, while activity rows carry Runalyze's
+# LOCAL date. Two clocks in one database: the §PRO20 defect class. MEASURED on his DB: 22 of 53
+# shape snapshots (42%) were captured at 22:00–24:00Z — i.e. after local midnight — and filed under
+# the previous day, and 3 of 79 plans were built for the wrong day outright.
+#
+# ⚠⚠ THE OBVIOUS FIX — `TZ=${SH_TZ:-UTC}` in docker-compose.yml — IS INERT IN THIS IMAGE, and would
+# have been inert SILENTLY, exactly the way the missing SH_SYNC_AT pass-through was. `time.tzset()`
+# reads glibc's database at /usr/share/zoneinfo, which python:3.12-slim does not ship (requirements.txt
+# says so in as many words); the `tzdata` PyPI package we depend on serves Python's `zoneinfo` only.
+# Given an unloadable name glibc does not fail — it parses "Europe/Luxembourg" as a POSIX abbreviation
+# with a ZERO offset and runs on UTC, reporting tzname ('Europe', 'Europe'). Verified both ways here.
+# So: point TZDIR at the tzdata package when the system database is absent, and then PROVE the change
+# took by comparing the naive clock against the tz-aware one. A timezone fix that cannot say whether
+# it worked is the same failure one layer up.
+PROCESS_TZ = None        # the zone this process's NAIVE datetimes are on — set only once proven
+PROCESS_TZ_NOTE = None   # why it is not SH_TZ, when it is not (surfaced by det/one-clock)
+
+
+def _glibc_tzdir(system_has_db=None):
+    """Where glibc's tzset() must be pointed to find the IANA database, or None to leave TZDIR as it
+    is. python:3.12-slim ships NO /usr/share/zoneinfo (requirements.txt says so where it declares the
+    `tzdata` wheel), and that wheel serves Python's `zoneinfo` only — so in the container the wheel's
+    own database is the only thing tzset() can read, and without this the whole timezone fix is inert
+    there. `system_has_db` is injectable so the CONTAINER's case can be constructed on a host that has
+    the system database and would otherwise mask this limb entirely (it did: the first revert test
+    passed here and would have failed on his NAS)."""
+    if system_has_db is None:
+        system_has_db = os.path.isdir("/usr/share/zoneinfo")
+    if os.environ.get("TZDIR") or system_has_db:
+        return None                      # already discoverable — never override an explicit TZDIR
+    try:
+        import tzdata
+        d = os.path.join(os.path.dirname(tzdata.__file__), "zoneinfo")
+        return d if os.path.isdir(d) else None
+    except Exception:
+        return None
+
+
+def _process_tz_for(value, source):
+    """The zone the PROCESS clock should be on for a resolved tz setting — None = leave the host clock
+    alone. Extracted so the rule that actually matters is testable on its own rather than implied by
+    an `if` at the call site: an UNCONFIGURED timezone must not move anything. The spec's default is
+    "UTC", and applying that would drag `today` onto UTC on every host whose own clock was already the
+    athlete's — a laptop, a NAS set to local time — which is this very defect pointed backwards."""
+    return None if source == "default" else ((value or "").strip() or None)
+
+
+def _apply_process_tz(tzname):
+    """Put this process's naive clock on `tzname` and return it, or None (leaving the clock alone).
+    Idempotent, and safe to call again when the setting changes. Never raises: a timezone that cannot
+    be applied must degrade to the previous behaviour loudly, never take the app down."""
+    global PROCESS_TZ, PROCESS_TZ_NOTE
+    name = (tzname or "").strip()
+    if not name:
+        return PROCESS_TZ            # nothing requested ⇒ nothing changed, and say so truthfully:
+        #                              clobbering PROCESS_TZ here would report a clock we never moved
+    PROCESS_TZ_NOTE = None
+    try:
+        zone = ZoneInfo(name)
+    except Exception:
+        PROCESS_TZ, PROCESS_TZ_NOTE = None, f"{name!r} is not a resolvable IANA zone"
+        print(f"[tz] {PROCESS_TZ_NOTE} — the engine's 'today' stays on the container clock")
+        return None
+    if not hasattr(time, "tzset"):                    # non-POSIX host (Windows): zoneinfo works, tzset doesn't
+        PROCESS_TZ, PROCESS_TZ_NOTE = None, "time.tzset() is unavailable on this platform"
+        print(f"[tz] {PROCESS_TZ_NOTE} — the engine's 'today' stays on the container clock")
+        return None
+    _tzdir = _glibc_tzdir()
+    if _tzdir:
+        os.environ["TZDIR"] = _tzdir
+    os.environ["TZ"] = name
+    time.tzset()
+    # PROVE IT. glibc silently falls back to UTC for a name it cannot load, so the only honest test is
+    # whether the naive clock now agrees with the tz-aware one. Both reads are microseconds apart and
+    # every real UTC offset is ≥ 15 minutes, so 5 minutes is a wide, unambiguous margin.
+    if abs((datetime.now() - datetime.now(zone).replace(tzinfo=None)).total_seconds()) > 300:
+        PROCESS_TZ, PROCESS_TZ_NOTE = None, (
+            f"tzset() would not load {name!r} (no IANA database on this host) — naive clock left on "
+            f"{time.tzname[0]}")
+        print(f"[tz] {PROCESS_TZ_NOTE}")
+        return None
+    PROCESS_TZ = name
+    return name
+
+
+_apply_process_tz(os.environ.get("SH_TZ", ""))   # bootstrap from env; the settings store re-applies
+#                                                  the stored value once the DB is open (see
+#                                                  apply_settings_overrides), which is authoritative
+
+
 def set_meta(db, key, value):
     db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)", (key, str(value)))
 
@@ -1347,8 +1442,12 @@ SETTINGS_SPEC = [
      # The Settings panel renders a search-and-pick city widget for this; the stored value is the
      # `Name,lat,lon,CODE;…` string this help describes (still the env/API contract).
      "help": "Header weather-widget cities, stored as Name,lat,lon[,CODE];… No cities = widget hidden."},
-    {"key": "tz", "env": "SH_TZ", "label": "Sync timezone", "kind": "line", "default": "UTC",
-     "help": "IANA zone (e.g. Europe/Luxembourg) for the nightly-sync wall clock. Applies on the next sync."},
+    {"key": "tz", "env": "SH_TZ", "label": "Your timezone", "kind": "line", "default": "UTC",
+     "help": "IANA zone (e.g. Europe/Luxembourg). This is the clock the whole plan runs on — which "
+             "calendar day counts as 'today', and the wall-clock hour the nightly sync fires at. Set "
+             "it to where you actually train: a container running UTC while you are two hours ahead "
+             "spends every night thinking it is still yesterday. Applies immediately (the nightly "
+             "job picks it up on its next cycle)."},
     {"key": "private_url", "env": "SH_PRIVATE_URL", "label": "Private console URL", "kind": "url",
      "help": "The 'Log in' link shown on the PUBLIC page, pointing back to this private console. "
              "Stored here (read from the shared DB) so it survives redeploys; the public container "
@@ -1436,11 +1535,23 @@ def apply_settings_overrides(db):
     WEATHER_CITIES = _parse_weather_cities(_resolve_setting(db, SETTINGS_BY_KEY["weather_cities"])[0])
     with _weather_lock:            # cities may have changed → drop the cached bundle so the next
         _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
-    tzname = _resolve_setting(db, SETTINGS_BY_KEY["tz"])[0].strip() or "UTC"
+    tzval, tzsrc = _resolve_setting(db, SETTINGS_BY_KEY["tz"])
+    tzname = tzval.strip() or "UTC"
     try:
         SYNC_TZ = ZoneInfo(tzname)
     except Exception:   # validated on save; a stored zone can still be absent from this host's tzdata
         print(f"[settings] ignoring unresolvable tz {tzname!r}; keeping {SYNC_TZ.key}")
+    # §TZ — the SAME zone owns the engine's calendar day, not just the nightly job's wall clock. This
+    # is the authoritative apply: the import-time bootstrap only sees the env var, and the stored
+    # setting overrides it. Applying it here also means a tz changed in the Settings window moves
+    # "today" for the next request, not only the next scheduled sync.
+    # ⚠ ONLY WHEN IT WAS ACTUALLY CHOSEN. The spec's default is "UTC", and forcing the process onto it
+    # would move `today` on every host whose own clock was ALREADY the athlete's — a developer laptop,
+    # a NAS set to local time — which is the same defect pointed the other way, and not byte-identical.
+    # An unconfigured timezone means "keep the host clock", exactly as before this existed. The
+    # scheduler's UTC default is unchanged and stays where it was: it needs a concrete zone to arm a
+    # wall-clock alarm; the calendar day does not.
+    _apply_process_tz(_process_tz_for(tzval, tzsrc))
 
 
 def _stamp_manual_lthr(db, val):
@@ -3954,7 +4065,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
         {"phase": "Base — aerobic", "weeks": base, "kind": "base", "key": "base", "race": lbl0, "role": role0},
         {"phase": "Build — specific", "weeks": build, "kind": "build", "key": "build", "race": lbl0, "role": role0},
         {"phase": f"Peak → {lbl0}", "weeks": peak0, "kind": "peak", "key": "peak", "race": lbl0, "role": role0},
-        {"phase": f"Taper → {lbl0}", "weeks": taper0, "kind": "taper", "key": "taper", "race": lbl0, "role": role0},
+        {"phase": f"Taper → {lbl0}", "weeks": taper0, "kind": "taper", "key": "taper", "race": lbl0, "role": role0,
+         "type": r0.get("type")},   # §TT — the taper needs to know WHICH race it freshens for
     ]
     for k in range(1, len(chain)):
         rk, prev = chain[k], chain[k - 1]
@@ -3968,7 +4080,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
         phases += [
             {"phase": f"Bridge → {lblk}", "weeks": bridgek, "kind": "bridge", "key": f"bridge{k}", "race": lblk, "role": rolek},
             {"phase": f"Peak → {lblk}", "weeks": peakk, "kind": "peak", "key": f"peak{k}", "race": lblk, "role": rolek},
-            {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek},
+            {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek,
+             "type": rk.get("type")},   # §TT — per-segment: each taper sharpens at ITS race's pace
         ]
     return [p for p in phases if p["weeks"] > 0], weeks_until(chain[-1]["date"], today)
 
@@ -4515,10 +4628,18 @@ def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     return shape
 
 
-def taper_shape(n_weeks, start_km, runs=BASE_RUNS):
+def taper_shape(n_weeks, start_km, runs=BASE_RUNS, race_zone="threshold"):
     """Parametric Taper-phase shape (§6f Step D): volume falls from ~TAPER_TOP to ~TAPER_BOTTOM of
     the peak-end volume over the taper, while a short race-pace touch keeps the legs sharp. The race
-    week (last) is the lightest and carries no structured quality — just easy freshening."""
+    week (last) is the lightest and carries no structured quality — just easy freshening.
+    §TT — `race_zone` is the pace of that touch, and it must BE race pace. It was hardcoded
+    "threshold": right-ish for 10k/HM, WRONG for the marathon — a marathon taper was prescribing the
+    block's only threshold-zone reps, a pace absent from all 17 prior weeks, two weeks before the
+    race, under a label that said "race-pace". The marathon's race pace is the marathon zone — the
+    pace every MP long run has rehearsed for 9 weeks — and at Davis's damage grid it is also the
+    LIGHTER touch (f 1.4 vs 2.5/km), which is what a taper wants. Component stays "ssmax": per
+    ENGINE_SCIENCE §1, SSmax ← MP / HM / sub-threshold work — true at either pace. Default preserves
+    the old zone for every other race type and every legacy caller."""
     shape = []
     for i in range(n_weeks):
         wk = i + 1
@@ -4526,7 +4647,7 @@ def taper_shape(n_weeks, start_km, runs=BASE_RUNS):
         this_km = max(1, round(start_km * frac))
         race_week = (wk == n_weeks)
         quality = [] if race_week else [
-            {"kind": "tempo", "zone": "threshold", "frac": TAPER_SHARP_FRAC,
+            {"kind": "tempo", "zone": race_zone, "frac": TAPER_SHARP_FRAC,
              "structure": "intervals", "rep_min": 2, "rec_min": 2, "label": "short race-pace touch",
              "component": "ssmax"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
@@ -6099,6 +6220,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # numbers stay the prescription: km/trimp_total are what the plan asks for, the projection
             # is what the governor is held to. Same split the elapsed days already use.
             pweek = {**wk, "start": wk_start, "sessions": sessions,
+                     # §CARD — the header counts the sessions it sits above, NOT the skeleton's
+                     # template. `{**wk}` spreads the shape's `runs`, and this branch never overrode
+                     # it, so a §JR shed or a §PRO9 spread put "5 runs" over a 4- or 6-run listing —
+                     # the owner read it off his own card (2026-08-07, week 08-03: "35.8 km · 5 runs"
+                     # above four runs). The full-week path fixed exactly this under §PRO9 ("honest
+                     # count") and this hand-built dict didn't inherit the fix. Rest entries are
+                     # notes, not runs — the freq-met branch's optional-rest card must not count.
+                     "runs": sum(1 for s in sessions if (s.get("kind") or "") != "rest"),
                      "km": round(sum(s["km"] for s in sessions), 1),
                      "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
                      "proj_acwr": eow, "peak_acwr": peak, "proj_ctl": round(ctl, 1),
@@ -6291,7 +6420,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if clipped:
             clipped_any = True
         week = {**wk, "start": wk_start, "sessions": sessions,
-                "runs": len(sessions),        # §PRO9 — honest count (the cap can add easy days to hold volume)
+                # §PRO9 — honest count (the cap can add easy days to hold volume). §CARD — non-rest
+                # only: _apply_adjustment turns a 0×-eased day into a `rest` session, which stays in
+                # the listing as a note but is not a run the header may claim.
+                "runs": sum(1 for s in sessions if (s.get("kind") or "") != "rest"),
                 "km": round(sum(s["km"] for s in sessions), 1),
                 "trimp_total": round(sum(dt.values()), 1), "proj_acwr": eow, "peak_acwr": peak,
                 "proj_acwr_flat": eow_flat,
@@ -7639,8 +7771,20 @@ def _trim_post_race(plan, chain, block_start):
         wk_end = block_start + timedelta(days=((R - block_start).days // 7) * 7 + 6)
         for blk in blocks:
             for w in blk.get("weeks", []):
-                w["sessions"] = [s for s in w.get("sessions", [])
-                                 if not (R < _date(s["date"]) <= wk_end)]
+                kept = [s for s in w.get("sessions", [])
+                        if not (R < _date(s["date"]) <= wk_end)]
+                if len(kept) == len(w.get("sessions", [])):
+                    continue                     # untouched weeks keep their generator-built header
+                w["sessions"] = kept
+                # §CARD — this is a read-model edit, and the header IS part of the read model: the
+                # race week's card kept quoting the untrimmed week ("5 runs" over the single
+                # remaining shakeout, on the owner's live plan). Recompute every summary this
+                # function's own trim invalidated. The CTL projection deliberately stays untrimmed
+                # (see docstring); proj_* fields describe the projection, not the listing, so they
+                # are left alone.
+                w["runs"] = sum(1 for s in kept if (s.get("kind") or "") != "rest")
+                w["km"] = round(sum(s.get("km") or 0.0 for s in kept), 1)
+                w["trimp_total"] = round(sum(s.get("trimp") or 0.0 for s in kept), 1)
 
 
 def generate_plan(db, force_regime=None, today=None):
@@ -7866,7 +8010,15 @@ def generate_plan(db, force_regime=None, today=None):
             # §T2 — the Davis component periodization rides the ASSERTIVE regime only (earned, like
             # every other assertive lever); caution keeps the legacy shapes byte-identical. Taper is
             # regime-agnostic (freshening is freshening).
-            sh = (SHAPERS[kind](n_wk, cur_km) if kind == "taper"
+            # §TT — the taper's sharpening touch runs at the RACE'S pace: marathon → the marathon
+            # zone (rehearsed all build; lighter per-km damage — a taper is no place for the block's
+            # first threshold reps); everything else keeps the threshold touch it always had. Applies
+            # per segment in a §PER1 chain, so a marathon→10k double sharpens each taper differently.
+            # Regime-agnostic like the taper itself ⇒ deliberately NOT caution-byte-identical: the
+            # zone contradicted the session's own label, and both regimes deserve the true race pace.
+            sh = (SHAPERS[kind](n_wk, cur_km,
+                                race_zone=("marathon" if (ph.get("type") or "").lower() == "marathon"
+                                           else "threshold")) if kind == "taper"
                   else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive")))
             # (§6h CTL-responsive floor removed 2026-06-30 — it was a dormant follower: the re-base decay
             # kept it below its activation band in real plans, and the §PRO assertive ride is the proper
@@ -15737,6 +15889,142 @@ def _stc_within_week():
                     "rem_trimp_lo": lo[0]["trimp_total"], "rem_trimp_hi": hi[0]["trimp_total"]})
 
 
+def _stc_one_clock():
+    """§TZ — the engine runs on ONE clock, and it is the athlete's. The nightly scheduler was tz-aware;
+    the other 58 date reads asked the process, and the containers run UTC — so between local midnight
+    and the container's, the whole engine believed it was yesterday while activity rows carried
+    Runalyze's LOCAL date. Five teeth.
+
+    (a) IT APPLIES. After `_apply_process_tz(z)`, the NAIVE clock agrees with the tz-aware clock in z.
+    (b) ⚠⚠ 'TODAY' FOLLOWS IT. Swept across two zones 25 hours apart (UTC+14 / UTC−11), `date.today()`
+        must equal the calendar date IN THAT ZONE — and the two must disagree with each other, which
+        they always do. That is the whole defect stated as a test: a `today` that ignores the setting
+        passes neither half, and a fixture in one zone alone could never show it.
+    (c) ⚠⚠ IT PROVES ITSELF. glibc does NOT fail on a zone it cannot load — it reads the name as a
+        POSIX abbreviation with a zero offset and runs on UTC, which is why `TZ=` in docker-compose
+        would have been inert in python:slim and inert SILENTLY. With TZDIR pointed at nothing,
+        `_apply_process_tz` must REFUSE (return None, leave PROCESS_TZ None, record why).
+    (d) TIMESTAMPS DO NOT MOVE. `_now_iso()` is tz-aware UTC and must read the same instant whatever
+        the process zone is — otherwise a tz change would silently rewrite every `captured_at`.
+    (e) IT RESTORES. The det puts the process back on the zone it found it on; a test that leaves the
+        clock somewhere else would poison every det after it.
+    """
+    import os as _os
+    from datetime import date
+    fails = []
+    had_tz, had_tzdir, had_proc = _os.environ.get("TZ"), _os.environ.get("TZDIR"), PROCESS_TZ
+    try:
+        # (a)+(b) — 25 hours apart, so their calendar dates ALWAYS differ. Etc/GMT-14 is UTC+14 and
+        # Etc/GMT+11 is UTC−11 (the sign is inverted by POSIX convention); both are DST-free and
+        # present in every IANA database, so this cannot flake on a zone rule change.
+        seen = {}
+        for zname in ("Etc/GMT-14", "Etc/GMT+11"):
+            applied = _apply_process_tz(zname)
+            if applied != zname or PROCESS_TZ != zname:
+                fails.append(f"{zname} would not apply (note: {PROCESS_TZ_NOTE})")
+                continue
+            want = datetime.now(ZoneInfo(zname))
+            if abs((datetime.now() - want.replace(tzinfo=None)).total_seconds()) > 300:   # (a)
+                fails.append(f"{zname}: the naive clock did not move to the zone")
+            seen[zname] = date.today()
+            if seen[zname] != want.date():                                                # (b)
+                fails.append(f"{zname}: today is {seen[zname]}, but that zone's date is {want.date()}")
+        if len(seen) == 2 and len(set(seen.values())) != 2:                                # (b)
+            fails.append(f"two zones 25h apart produced the SAME 'today' — it is not following the "
+                         f"setting: {seen}")
+
+        # (c) the guard: an unloadable database must be REFUSED, not silently run on UTC
+        _os.environ["TZDIR"] = "/nonexistent-zoneinfo-for-det"
+        refused = _apply_process_tz("Europe/Luxembourg")
+        if refused is not None or PROCESS_TZ is not None or not PROCESS_TZ_NOTE:
+            fails.append("a zone tzset() cannot load was accepted — the silent-UTC fallback is "
+                         "exactly what this guard exists to catch")
+        _os.environ.pop("TZDIR", None)
+
+        # (d) timestamps are tz-aware UTC and must not move with the process zone
+        _apply_process_tz("Etc/GMT-14")
+        t_far = _now_iso()
+        _apply_process_tz("UTC")
+        if abs(_seconds_since(t_far)) > 300:
+            fails.append(f"_now_iso() moved with the process zone ({t_far}) — timestamps must be UTC")
+
+        # (f) AN UNCONFIGURED TIMEZONE MOVES NOTHING. The spec's default is "UTC", so applying it
+        # unconditionally would drag `today` onto UTC on hosts whose clock was already correct — the
+        # same defect backwards, and not byte-identical. Only a SAVED or ENV value may move the clock.
+        for _val, _src, _want in (("UTC", "default", None), ("Europe/Lisbon", "default", None),
+                                  ("UTC", "env", "UTC"), ("Europe/Lisbon", "saved", "Europe/Lisbon"),
+                                  ("", "saved", None), ("  ", "env", None)):
+            if _process_tz_for(_val, _src) != _want:
+                fails.append(f"tz {_val!r} from {_src!r} resolved to "
+                             f"{_process_tz_for(_val, _src)!r}, expected {_want!r}")
+        # Asked from a KNOWN non-default zone, so "nothing requested ⇒ nothing changed" is checked
+        # against a distinctive value: comparing against whatever the global happened to hold would
+        # pass for a version that answers "UTC" regardless.
+        _apply_process_tz("Etc/GMT-14")
+        _before = date.today()
+        if _apply_process_tz(_process_tz_for("UTC", "default")) != "Etc/GMT-14" \
+                or PROCESS_TZ != "Etc/GMT-14" or date.today() != _before:
+            fails.append("an unconfigured timezone moved the process clock (or misreported it)")
+
+        # (g) ⚠⚠ THE CONTAINER'S CASE, CONSTRUCTED. python:slim has no /usr/share/zoneinfo, so the
+        # tzdata wheel's own database is the only thing tzset() can read there — and on a host that
+        # HAS the system database that limb never executes, which is exactly how a first revert test
+        # passed here while the same revert would have left his NAS on UTC. So inject the container's
+        # answer, and prove the directory it names really is a loadable TZDIR by moving the clock with it.
+        _os.environ.pop("TZDIR", None)
+        wheel = _glibc_tzdir(system_has_db=False)
+        if not wheel or not _os.path.isdir(_os.path.join(wheel, "Europe")):
+            fails.append(f"no IANA database for a system without one — tzset() would silently run on "
+                         f"UTC in the container (got {wheel!r})")
+        if _glibc_tzdir(system_has_db=True) is not None:
+            fails.append("overrode TZDIR on a host that already has a system IANA database")
+        # …and that _apply_process_tz actually CONSULTS it. Asserting the helper alone is not enough:
+        # a revert that deletes the CALL SITE leaves the helper perfectly correct and unused, and this
+        # host's system database then hides the damage while the container quietly runs on UTC. Stub
+        # the helper and require its answer to reach the environment.
+        if wheel:
+            _real, _stub = _glibc_tzdir, (lambda system_has_db=None: wheel)
+            globals()["_glibc_tzdir"] = _stub
+            try:
+                _os.environ.pop("TZDIR", None)
+                ok = _apply_process_tz("Etc/GMT-14")
+                if _os.environ.get("TZDIR") != wheel:
+                    fails.append("_apply_process_tz ignored the IANA database it was handed — in a "
+                                 "container with no system database tzset() would fall back to UTC")
+                if ok != "Etc/GMT-14":
+                    fails.append(f"the wheel's database at {wheel} is not usable as a TZDIR "
+                                 f"(note: {PROCESS_TZ_NOTE})")
+            finally:
+                globals()["_glibc_tzdir"] = _real
+                _os.environ.pop("TZDIR", None)
+    finally:                                                                               # (e)
+        _os.environ.pop("TZDIR", None)
+        if had_tzdir is not None:
+            _os.environ["TZDIR"] = had_tzdir
+        if had_proc:
+            _apply_process_tz(had_proc)
+        elif had_tz is not None:
+            _apply_process_tz(had_tz)
+        else:
+            _os.environ.pop("TZ", None)
+            if hasattr(time, "tzset"):
+                time.tzset()
+            globals()["PROCESS_TZ"], globals()["PROCESS_TZ_NOTE"] = had_proc, None
+
+    return _st("det", "one-clock",
+               "§TZ the engine's 'today' is the ATHLETE'S calendar day, not the container's: the "
+               "configured zone moves the process clock, `today` follows it across two zones 25h "
+               "apart, an IANA database that cannot be loaded is REFUSED instead of silently running "
+               "on UTC (the reason a compose-level TZ= is inert in python:slim), and UTC timestamps "
+               "do not move; the process zone is restored afterwards",
+               passed=not fails,
+               expect="naive clock == zone clock · today == the zone's date · 2 zones ⇒ 2 dates · "
+                      "unloadable zone refused with a reason · _now_iso() unchanged",
+               got={"process_tz": PROCESS_TZ, "note": PROCESS_TZ_NOTE,
+                    "system_zoneinfo": _os.path.isdir("/usr/share/zoneinfo"),
+                    "failures": fails or "none"})
+
+
 def _stc_engine_version():
     """§PRO14 — ENGINE_VERSION is what every generated plan is stamped with and what the view compares
     against to decide whether a saved plan predates the running engine. A constant that silently
@@ -20437,6 +20725,67 @@ def _stc_taper():
                output={"acwr": [w.get("proj_acwr") for w in weeks]})
 
 
+def _stc_taper_touch(db):
+    """§TT — the taper's sharpening touch runs at the RACE'S pace. It was hardcoded to the threshold
+    zone under the label "short race-pace touch": for a marathon that prescribed the block's ONLY
+    threshold-zone reps — a pace absent from all 17 prior weeks — two weeks before the race, at 1.8×
+    the per-km tissue damage of the pace the label promised. Three teeth:
+      (a) SHAPER: `race_zone` reaches the quality dict; the default stays "threshold" (10k/HM and
+          every legacy caller byte-unchanged); the race week stays quality-free either way.
+      (b) ⚠⚠ CALL SITE, on the PUBLISHED plan: this morning's lesson (det/one-clock went vacuous
+          twice) — a revert that stops PASSING the zone leaves the shaper correct and unused, so the
+          det must read the plan, not the helper. Every structured taper touch in the generated plan
+          must run at the anchoring race's pace: marathon anchor ⇒ the marathon zone, any other ⇒
+          threshold. Asserted from the plan's own chain, so the det is valid on any DB it runs on.
+      (c) The touch must not be the block's only visit to its zone out of nowhere: for a marathon
+          anchor, the build phase must already carry sessions in the same zone (the MP long-run
+          finishes) — the taper rehearses, never debuts."""
+    fails = []
+    # (a) pure shaper
+    from datetime import date as _d
+    sh_m = taper_shape(3, 30, race_zone="marathon")
+    sh_d = taper_shape(3, 30)
+    zq = lambda sh: [q["zone"] for w in sh for q in (w.get("quality") or [])]
+    if set(zq(sh_m)) != {"marathon"}:
+        fails.append(f"race_zone did not reach the shaper's quality: {zq(sh_m)}")
+    if set(zq(sh_d)) != {"threshold"}:
+        fails.append(f"default zone moved — legacy callers are no longer byte-identical: {zq(sh_d)}")
+    if (sh_m[-1].get("quality") or sh_d[-1].get("quality")):
+        fails.append("race week grew structured quality")
+    # (b) the published plan
+    plan = generate_plan(db)
+    anchor = ((plan.get("chain") or [{}])[-1].get("type") or
+              (plan.get("objective") or {}).get("type") or "").lower()
+    want = "marathon" if anchor == "marathon" else "threshold"
+    touches = [(w.get("start"), s.get("pace_zone") or "")
+               for k, v in plan.items()
+               if str(k).startswith("taper") and isinstance(v, dict)
+               for w in v.get("weeks", [])
+               for s in w.get("sessions") or [] if s.get("reps")]
+    wrong = [t for t in touches if want not in t[1]]
+    if touches and wrong:
+        fails.append(f"published taper touch not at the race's pace (want {want}): {wrong}")
+    if not touches:
+        fails.append("plan published no structured taper touch — the call-site tooth saw nothing")
+    # (c) rehearsed, not debuted
+    if anchor == "marathon":
+        build_zones = {(s.get("pace_zone") or "").split("/km ")[-1]
+                       for w in (plan.get("build") or {}).get("weeks", [])
+                       for s in w.get("sessions") or []}
+        if "marathon" not in build_zones:
+            fails.append(f"taper sharpens at a pace the build never rehearsed (build zones: "
+                         f"{sorted(z for z in build_zones if z)})")
+    return _st("det", "taper-touch",
+               "§TT the taper's 'race-pace touch' runs at the RACE'S pace — marathon anchor ⇒ the "
+               "marathon zone the build rehearsed for 9 weeks, others keep threshold; asserted on "
+               "the PUBLISHED plan (call site, not just the shaper) and the default is unmoved",
+               passed=not fails,
+               expect="shaper threads race_zone · default untouched · published touches at the "
+                      "anchor's pace · rehearsed in build · race week clean",
+               got={"anchor": anchor or None, "want_zone": want,
+                    "published_touches": len(touches), "failures": fails or "none"})
+
+
 def _stc_freeze_continuity():
     """§6f Step E: a mid-block regeneration FREEZES fully-elapsed weeks verbatim from the prior plan
     and generates today-onward fresh from the live seed. Time-travels `_split_freeze` deterministically:
@@ -21078,6 +21427,74 @@ def _stc_effort_discipline(db):
                output={"easy_score": d.get("easy_score"), "hrmax": d.get("hrmax"),
                        "easy_counts": d.get("easy_counts"),
                        "public_score": pub.get("easy_score"), "public_ceiling": pub.get("easy_pace_ceiling")})
+
+
+def _stc_card_truth(db):
+    """§CARD — every number a week's card asserts is recomputed from the sessions listed under it.
+    The owner read "35.8 km · 5 runs" above a FOUR-run week off his own live card (2026-08-07): the
+    header printed the SKELETON's template count while the listing showed the governed lay. Three
+    publishers, one had the fix (§PRO9's "honest count"), two didn't — the hand-built straddle dict
+    and §PER1's race-week trim, which edits the listing and used to leave the header describing
+    sessions it had just removed. Measured before the fix: 3 of 20 weeks lied, in BOTH directions
+    (5-over-4, 5-over-6, 5-over-1).
+
+    One invariant, swept over the ENTIRE published plan in both regimes, with `today` forced to a
+    mid-week Thursday so the straddle branch is exercised, on a DB whose objective produces a race
+    week so the §PER1 trim is exercised too. Teeth:
+      (a) runs == count of non-rest sessions — rest cards are notes, not runs the header may claim;
+      (b) km == round(Σ session km, 1) within the publish rounding;
+      (c) the sweep must actually SEE the two paths that were broken (≥1 partial week; and, when the
+          plan carries a race, a race-trimmed week) — otherwise (a) passes on a fixture that could
+          never have shown the defect.
+    No slack on (a): a count is exact or it is wrong."""
+    from datetime import timedelta
+    fails, saw_partial, saw_trimmed, n_weeks = [], False, False, 0
+    NONREST = lambda ss: [s for s in ss if (s.get("kind") or "") != "rest"]
+    # a Thursday: generate_plan's own `today` seam (the §PRO12 lesson) — mid-week ⇒ straddle exists
+    anchor = datetime.now().date()
+    thursday = anchor + timedelta(days=(3 - anchor.weekday()) % 7)
+    for regime in ("caution", "assertive"):
+        plan = generate_plan(db, force_regime=regime, today=thursday)
+        for ph in ("rebase", "base", "build", "peak", "taper"):
+            for w in (plan.get(ph) or {}).get("weeks") or []:
+                if w.get("frozen"):
+                    continue          # lived history is carried verbatim, headers included (§6f)
+                ss = w.get("sessions") or []
+                n_weeks += 1
+                saw_partial = saw_partial or bool(w.get("partial"))
+                stated, laid = w.get("runs"), len(NONREST(ss))
+                if stated != laid:
+                    fails.append(f"{regime}/{ph}/{w.get('start')}: card says {stated} runs, "
+                                 f"lists {laid}")
+                km = round(sum(s.get("km") or 0.0 for s in ss), 1)
+                if abs((w.get("km") or 0.0) - km) > 0.05:
+                    fails.append(f"{regime}/{ph}/{w.get('start')}: card says {w.get('km')} km, "
+                                 f"sessions sum to {km}")
+        chain = plan.get("chain") or ([{"date": (plan.get("objective") or {}).get("date")}]
+                                      if (plan.get("objective") or {}).get("date") else [])
+        for c in chain:
+            rd = c.get("date")
+            if not rd:
+                continue
+            for ph in ("taper", "peak", "build", "base"):
+                for w in (plan.get(ph) or {}).get("weeks") or []:
+                    if w.get("start") and w["start"] <= rd <= (_date(w["start"])
+                                                              + timedelta(days=6)).isoformat():
+                        saw_trimmed = True     # the race week passed through _trim_post_race
+    if not saw_partial:
+        fails.append("sweep never met a partial (straddle) week — the branch that lied is untested")
+    if not saw_trimmed:
+        fails.append("sweep never met a race week — §PER1's trim path is untested")
+    return _st("det", "card-truth",
+               "§CARD a week's header states what its own listing shows: runs == non-rest sessions "
+               "and km == the sessions' sum, swept over every published week in both regimes with "
+               "the straddle and race-trim paths provably exercised — the owner caught '5 runs' "
+               "over a 4-run listing on his live card",
+               passed=not fails,
+               expect="0 header/listing mismatches over every week × both regimes; straddle + race "
+                      "week both present in the sweep",
+               got={"weeks_swept": n_weeks, "saw_partial": saw_partial, "saw_race_week": saw_trimmed,
+                    "failures": fails or "none"})
 
 
 def _stc_plan_structure(db):
@@ -22168,7 +22585,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
-                 lambda: _stc_engine_version(), lambda: _stc_log_visible(),
+                 lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),
                  lambda: _stc_seed_stale(),
                  lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
@@ -22206,7 +22623,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_ft_coldstart(), lambda: _stc_ft_scale(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),
-                 lambda: _stc_taper(), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
+                 lambda: _stc_taper(), lambda: _stc_taper_touch(db), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
                  lambda: _stc_availability(), lambda: _stc_av_public_strip(),
                  lambda: _stc_quality_forward(),
                  lambda: _stc_down_weeks(),
@@ -22215,7 +22632,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
                  lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
                  lambda: _stc_post_race_reckoning(),
-                 lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
+                 lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),

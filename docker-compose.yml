@@ -23,7 +23,14 @@ services:
       - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
       - SH_HOUSE_URL=${SH_HOUSE_URL:-}
       - SH_HOUSE_NAME=${SH_HOUSE_NAME:-}
-      # Private-only: nightly-sync timezone + hour, LLM athlete context, fresh-DB seed objective.
+      # §TZ — SH_TZ IS THE WHOLE ENGINE'S CLOCK, not just the nightly job's. Unset, every date the app
+      # reads is the CONTAINER's, and these containers run UTC — so from local midnight until the
+      # container's, the engine believes it is yesterday while activity rows carry Runalyze's LOCAL
+      # date. Set it to where you train. ⛔ Do NOT "fix" this with a plain `TZ=` here instead: glibc's
+      # tzset() reads /usr/share/zoneinfo, which python:slim does not ship (see requirements.txt), and
+      # an unloadable zone does not fail — it runs on UTC silently. The app resolves the zone itself,
+      # borrowing the tzdata wheel's database, and REFUSES rather than pretend (det/one-clock).
+      # Private-only: timezone + nightly-sync hour, LLM athlete context, fresh-DB seed objective.
       # SH_SYNC_AT (HH:MM in SH_TZ, default 22:00) must land AFTER the day's last run has been
       # ingested upstream — the nightly job syncs and then re-plans, so a job that fires while a run
       # is still landing re-plans a week whose actuals it cannot see. §PRO20 removed the SEED's

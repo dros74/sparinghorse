@@ -2,4 +2,6 @@ Flask~=3.0
 waitress~=3.0
 requests~=2.31
 anthropic>=0.69    # LLM adjustment layer (§6c) — optional at runtime, app degrades gracefully without a key
-tzdata             # IANA tz database for zoneinfo (python:slim ships without it) — nightly job fires at Luxembourg time
+tzdata             # IANA tz database (python:slim ships NO /usr/share/zoneinfo). §TZ depends on this
+                   # TWICE: zoneinfo reads it directly, and _glibc_tzdir() points TZDIR at it so
+                   # time.tzset() can move the PROCESS clock onto SH_TZ — the engine's 'today'.
