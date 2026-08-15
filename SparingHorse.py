@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.25.2"
+ENGINE_VERSION = "0.25.3"
 
 
 def activity_profile(activity_id, n=120):
@@ -5744,8 +5744,14 @@ def _banked_streak(db, today, prior_plan):
         if not w:
             break                                  # no prescription ⇒ nothing to judge ⇒ stop
         if not _is_down(w.get("intent")):          # down week is neutral (as in graduation)
+            # §CARD3 — the prescription bar comes from intent_runs/intent_km, never from the header
+            # fields: §CARD2 (and §CARD3's elapsed true-up) rewrite `runs`/`km` to what was actually
+            # run, so judging adherence on them compares actuals against actuals — every week
+            # self-banks and the regime gate goes vacuous. `runs` stays as the fallback for weeks
+            # saved before intent_runs existed (their header still holds the as-laid count).
             banked, *_ = _week_banked(db, ws, ws + timedelta(days=6),
-                                      w.get("intent_km", w.get("km")), w.get("runs"), drop)
+                                      w.get("intent_km", w.get("km")),
+                                      w.get("intent_runs", w.get("runs")), drop)
             if not banked:
                 break
             streak += 1
@@ -6236,6 +6242,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "clipped": False, "partial": True,
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
+            # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to
+            # done+ahead below: this is the bar §6e banking judges the lived week against, and the
+            # header rewrite must never be allowed to become that bar (see _banked_streak).
+            pweek["intent_runs"] = pweek["runs"]
             # §CARD2 — THE STRADDLING WEEK'S HEADER DESCRIBES THE WEEK, NOT THE PRESCRIPTION TRAIL.
             # The old header summed the PRESCRIBED elapsed days + the governed remainder ("display
             # numbers stay the prescription"), so every km he ran OVER prescription made the current
@@ -6460,6 +6470,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                    assertive, soft_ctl_floor) or 0.0, 4)),
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
                 "intent_km": wk["km"], "adjusted": adjusted["touched"], "clipped": clipped}
+        # §CARD3 — the as-laid prescription count. At lay time it equals the header's honest count;
+        # once the week is lived, §CARD3's elapsed true-up rewrites `runs` to actuals and THIS field
+        # keeps the bar the athlete was actually set (what §6e banking judges adherence against).
+        week["intent_runs"] = week["runs"]
         # §PRO10 — honest label: this week's load sits where the SOFT cap alone wouldn't have put it
         # (the progression floor lifted it; the acute brakes cleared it). The soft-test value is
         # recomputed the way the governor judged it (floored denominator when §PRO8 is active).
@@ -7808,6 +7822,54 @@ def _trim_post_race(plan, chain, block_start):
                 w["runs"] = sum(1 for s in kept if (s.get("kind") or "") != "rest")
                 w["km"] = round(sum(s.get("km") or 0.0 for s in kept), 1)
                 w["trimp_total"] = round(sum(s.get("trimp") or 0.0 for s in kept), 1)
+                # §CARD3 — the trimmed listing IS the week's prescription: the dropped tail was
+                # never asked of the athlete, so the adherence bar shrinks with it.
+                w["intent_runs"] = w["runs"]
+
+
+def _card_truth_elapsed(plan, db, today):
+    """§CARD3 — a week whose window has fully closed states what actually HAPPENED: header runs/km
+    are recomputed from the activity log (the same Mon–Sun owned-data read the engine's own evidence
+    tests use) and the done/ahead split settles to done-only. The SESSIONS stay the frozen as-lived
+    prescription (§6f Step E — a plan is the road ahead, past prescriptions come from plan history);
+    this is a read-model edit in _trim_post_race's class, never a history rewrite.
+
+    Motive (the owner's fossil, found 2026-08-15): §CARD/§CARD2 fixed every PUBLISHER, but a week
+    frozen from a pre-fix artifact is carried verbatim past all of them — week 07-27 kept saying
+    "48.6 km · 5 runs" over a 6-session listing he actually ran as 42.4 km, and it would have said
+    so for the life of the block. Recomputing at the read-model seam self-heals every carried week
+    on the next regen (and keeps healing if a late sync adds a run to a past week).
+
+    Evidence is preserved FIRST: intent_runs/intent_km keep the as-laid bar so §6e banking never
+    judges actuals against actuals (see _banked_streak — §CARD2's header rewrite had silently made
+    the frozen straddle's `runs` self-referential there). For pre-§CARD2 weeks the old header IS
+    the only surviving prescription count, so it is banked into intent_runs before being replaced."""
+    from datetime import timedelta
+    if db is None:
+        return
+    for blk in plan.values():
+        if not (isinstance(blk, dict) and blk.get("weeks")):
+            continue
+        for w in blk["weeks"]:
+            ws = w.get("start")
+            if not ws:
+                continue
+            try:
+                wd = _date(ws)
+            except (TypeError, ValueError):
+                continue
+            if wd + timedelta(days=6) >= today:
+                continue                 # straddle + future weeks: §CARD2 / the lay govern those
+            try:
+                runs, km = _current_week_actuals(db, wd)
+            except sqlite3.OperationalError:
+                return                   # §PRO22 — a read of history must never take the plan down
+            if w.get("intent_runs") is None:
+                w["intent_runs"] = w.get("runs")
+            if w.get("intent_km") is None:
+                w["intent_km"] = w.get("km")
+            w.update(runs=runs, km=km, runs_done=runs, km_done=km,
+                     runs_ahead=0, km_ahead=0)
 
 
 def generate_plan(db, force_regime=None, today=None):
@@ -8160,6 +8222,9 @@ def generate_plan(db, force_regime=None, today=None):
                      "(ACWR centred, no taper). Add a race and the engine re-periodizes "
                      "the road ahead toward it."),
         }
+    # §CARD3 — last read-model pass, both branches: every fully-lived week's header states what
+    # actually happened (sessions stay the as-lived prescription; evidence kept in intent_*).
+    _card_truth_elapsed(plan, db, today)
     return plan
 
 
@@ -21472,9 +21537,19 @@ def _stc_card_truth(db):
       (c) the sweep must actually SEE the two paths that were broken (≥1 partial week; and, when the
           plan carries a race, a race-trimmed week) — otherwise (a) passes on a fixture that could
           never have shown the defect.
-    No slack on (a): a count is exact or it is wrong."""
+    No slack on (a): a count is exact or it is wrong.
+
+    §CARD3 (2026-08-15) — the fourth publisher was TIME: a week frozen from a PRE-fix artifact rode
+    past all three fixed publishers verbatim, so the owner's original screenshot week (07-27,
+    "48.6 km · 5 runs" over a week he ran as 42.4) survived the whole §CARD campaign. Lived weeks
+    are now asserted against the LOG (header == Mon–Sun actuals, ahead settled, sessions verbatim),
+    and the as-laid bar must survive in intent_runs — §CARD2's header rewrite had silently made
+    §6e banking judge the straddle's frozen weeks against their own actuals (see _banked_streak).
+    Tooth (e) constructs the fossil and drives it through generate_plan itself, because on a DB
+    whose every frozen week post-dates the fix the live sweep can no longer distinguish a revert."""
     from datetime import timedelta
     fails, saw_partial, saw_trimmed, n_weeks = [], False, False, 0
+    saw_frozen = False
     NONREST = lambda ss: [s for s in ss if (s.get("kind") or "") != "rest"]
     # a Thursday: generate_plan's own `today` seam (the §PRO12 lesson) — mid-week ⇒ straddle exists
     anchor = datetime.now().date()
@@ -21490,11 +21565,27 @@ def _stc_card_truth(db):
         plan = generate_plan(db, force_regime=regime, today=thursday)
         for ph in ("rebase", "base", "build", "peak", "taper"):
             for w in (plan.get(ph) or {}).get("weeks") or []:
-                if w.get("frozen"):
-                    continue          # lived history is carried verbatim, headers included (§6f)
                 ss = w.get("sessions") or []
                 n_weeks += 1
                 tag = f"{regime}/{ph}/{w.get('start')}"
+                # §CARD3 — a fully-lived week states what HAPPENED: header == the DB's Mon–Sun
+                # actuals (the same owned-data read the engine uses), no km still "ahead", and the
+                # as-laid prescription bar survives in intent_runs (frozen sessions stay verbatim —
+                # §6f; only the header is a read-model number). This branch used to be a `continue`
+                # ("carried verbatim, headers included") — the hole the 07-27 fossil lived in.
+                if w.get("start") and _date(w["start"]) + timedelta(days=6) < thursday:
+                    if w.get("frozen"):
+                        saw_frozen = True
+                    tr, tk = _current_week_actuals(db, _date(w["start"]))
+                    if (w.get("runs"), w.get("km")) != (tr, tk):
+                        fails.append(f"{tag}: lived week header {w.get('runs')}r/{w.get('km')}km "
+                                     f"≠ actuals {tr}r/{tk}km")
+                    if w.get("runs_ahead") or (w.get("km_ahead") or 0):
+                        fails.append(f"{tag}: lived week still claims prescription ahead "
+                                     f"({w.get('runs_ahead')}/{w.get('km_ahead')})")
+                    if w.get("intent_runs") is None:
+                        fails.append(f"{tag}: lived week lost its prescription bar (intent_runs)")
+                    continue
                 if w.get("partial"):
                     # §CARD2 — the straddle header is actuals-so-far + prescription-ahead. A
                     # prescription for a day already run is superseded by its actual, never
@@ -21524,6 +21615,11 @@ def _stc_card_truth(db):
                 km = round(sum(s.get("km") or 0.0 for s in ss), 1)
                 if abs((w.get("km") or 0.0) - km) > 0.05:
                     fails.append(f"{tag}: card says {w.get('km')} km, sessions sum to {km}")
+                # §CARD3 — the full-week publisher stamps the as-laid bar at lay time (== runs
+                # here, before the week is lived); asserted directly because the elapsed backfill
+                # would otherwise mask a deleted stamp with the same value.
+                if w.get("intent_runs") != stated:
+                    fails.append(f"{tag}: intent_runs {w.get('intent_runs')} ≠ laid count {stated}")
         chain = plan.get("chain") or ([{"date": (plan.get("objective") or {}).get("date")}]
                                       if (plan.get("objective") or {}).get("date") else [])
         for c in chain:
@@ -21539,6 +21635,8 @@ def _stc_card_truth(db):
         fails.append("sweep never met a partial (straddle) week — the branch that lied is untested")
     if not saw_trimmed:
         fails.append("sweep never met a race week — §PER1's trim path is untested")
+    if not saw_frozen:
+        fails.append("sweep never met a frozen week — §CARD3's true-up path is untested")
     # §CARD2 (d) — SAME-DAY REGEN NEVER COUNTS TODAY TWICE, as a CONSTRUCTED fixture: the live-DB
     # sweep above can only exercise the supersede rule when the real DB happens to hold a run on the
     # det's forced `today` — it doesn't, so a revert of the rule passed the sweep unseen (the
@@ -21560,16 +21658,79 @@ def _stc_card_truth(db):
             or abs((_w.get("km_ahead") or 0.0) - round(sum(s.get("km") or 0.0 for s in _sun_only), 1)) > 0.05:
         fails.append(f"same-day regen counted today twice: ahead={_w.get('runs_ahead')}/"
                      f"{_w.get('km_ahead')} vs strictly-future {len(_sun_only)} sessions")
+    # §CARD3 — the straddle publisher stamps intent_runs BEFORE §CARD2 rewrites `runs` to
+    # done+ahead: the as-laid bar (the listing's non-rest count), asserted on this generate_block
+    # fixture because the elapsed backfill can't reach it here to mask a deleted stamp.
+    _laid_ct = len(NONREST(_w.get("sessions") or []))
+    if _w.get("intent_runs") != _laid_ct:
+        fails.append(f"straddle intent_runs {_w.get('intent_runs')} ≠ laid count {_laid_ct} — "
+                     f"the prescription bar didn't survive the §CARD2 header rewrite")
+    # §CARD3 (e) — THE FOSSIL, as a CONSTRUCTED fixture through generate_plan's own call site (the
+    # live sweep above goes vacuous once every frozen week on the real DB post-dates the fix): a
+    # prior plan carries a week frozen under a PRE-§CARD engine — lying header, no done/ahead split
+    # — over a lived week whose log says (2 runs, 11.2 km). The regen must carry the SESSIONS
+    # verbatim (§6f) yet publish the header as the actuals, bank the old header's count into
+    # intent_runs, and §6e banking must judge adherence on THAT bar — 2 of 5 runs is a miss, so the
+    # streak is 0. A revert of the true-up fails the header teeth; a revert of the intent_runs
+    # evidence chain (either the preservation or _banked_streak's read) self-banks the week and
+    # fails the streak tooth.
+    import sqlite3 as _sq
+    _t = _dd(2026, 6, 1)                                   # a Monday; wk 05-25 is the last closed week
+    _m = _sq.connect(":memory:"); _m.row_factory = _sq.Row
+    _m.executescript(SCHEMA)
+    _m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+               "VALUES(?,?,?,?)", (_t.isoformat(), 45.0, 40.0, 38.0))
+    _m.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+               "VALUES(?,?,?,?,?,?,?)",
+               ("marathon", "Goal", (_t + timedelta(weeks=24)).isoformat(), "finish", "A",
+                "upcoming", _now_iso()))
+    for _d, _km in (("2026-05-25", 5.0), ("2026-05-27", 6.2)):     # what he ACTUALLY ran
+        _m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                   "VALUES(?,?,?,?,?,?)", (_d, _d + "T18:00", RUNNING_SPORT, _km, _km * 400, 40.0))
+    _foss_ss = [{"date": f"2026-05-{d:02d}", "km": 9.7, "kind": "easy"} for d in (25, 26, 28, 30)] \
+        + [{"date": "2026-05-31", "km": 9.8, "kind": "long"}]
+    _foss = {"start": "2026-05-25", "wk": 1, "km": 48.6, "runs": 5, "intent_km": 12,
+             "intent": "Easy aerobic base", "sessions": _foss_ss, "trimp_total": 300.0}
+    _m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+               (_now_iso(), _t.isoformat(), "{}",
+                json.dumps({"base": {"weeks": [_foss]}, "phases": [{"key": "base"}]})))
+    set_meta(_m, "rebase_start", "2026-05-25"); _m.commit()
+    _fp = generate_plan(_m, force_regime="assertive", today=_t)
+    _fw = next((w for w in _plan_all_weeks(_fp) if w.get("start") == "2026-05-25"), None)
+    if _fw is None:
+        fails.append("fossil fixture: the lived week was not carried into the regenerated road")
+    else:
+        if not _fw.get("frozen") or _fw.get("sessions") != _foss_ss:
+            fails.append("fossil fixture: sessions not carried verbatim — the §6f freeze path "
+                         "wasn't the one exercised")
+        if (_fw.get("runs"), _fw.get("km")) != (2, 11.2) or \
+                (_fw.get("runs_done"), _fw.get("km_done")) != (2, 11.2) or _fw.get("runs_ahead"):
+            fails.append(f"fossil header not trued to actuals: {_fw.get('runs')}r/{_fw.get('km')}km "
+                         f"done={_fw.get('runs_done')}/{_fw.get('km_done')} "
+                         f"ahead={_fw.get('runs_ahead')}")
+        if _fw.get("intent_runs") != 5:
+            fails.append(f"fossil prescription bar lost: intent_runs={_fw.get('intent_runs')} "
+                         f"(want the pre-fix header's 5)")
+        _streak, _ = _banked_streak(_m, _t, _fp)
+        if _streak != 0:
+            fails.append(f"§6e banking self-banked the lived week (streak {_streak}, want 0): "
+                         f"2 actual runs must be judged against the 5 prescribed, not against "
+                         f"themselves")
+    _m.close()
     return _st("det", "card-truth",
                "§CARD a week's header states what its own listing shows: runs == non-rest sessions "
                "and km == the sessions' sum, swept over every published week in both regimes with "
                "the straddle and race-trim paths provably exercised — the owner caught '5 runs' "
-               "over a 4-run listing on his live card",
+               "over a 4-run listing on his live card; §CARD3 a week fully LIVED states what "
+               "actually happened (header == the log's Mon–Sun actuals, sessions verbatim, the "
+               "as-laid bar preserved in intent_runs so §6e banking never judges actuals against "
+               "actuals) — incl. a constructed pre-fix fossil carried through generate_plan",
                passed=not fails,
                expect="0 header/listing mismatches over every week × both regimes; straddle + race "
-                      "week both present in the sweep",
+                      "+ frozen weeks all present in the sweep; the fossil trues up and stays "
+                      "unbankable",
                got={"weeks_swept": n_weeks, "saw_partial": saw_partial, "saw_race_week": saw_trimmed,
-                    "failures": fails or "none"})
+                    "saw_frozen": saw_frozen, "failures": fails or "none"})
 
 
 def _stc_plan_structure(db):

@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-08-15
+
+### Fixed
+
+- **Completed weeks now say what you actually ran.** A week already lived kept showing the total
+  that had been *prescribed* for it, carried forward unchanged from the plan it was first laid in —
+  so a card could keep claiming "48.6 km · 5 runs" over a week you really ran as 42.4 km, for the
+  life of the block. Every completed week's header is now recomputed from your training log on each
+  replan; the sessions listed under it remain what the plan asked of you that week, so the per-day
+  plan-vs-reality lines are unchanged. Weeks completed before this release correct themselves on
+  the first replan after deploying.
+- **Adherence is judged against the plan again, not against yourself.** The header fix in 0.25.2
+  had a quiet side effect: the run count the engine checks your completed weeks against — the
+  evidence behind the assertive posture, the earned volume lift and the sixth-run advance — was
+  read from the same field the header rewrite had just set to your *actual* count, so the "did you
+  run within one of the planned runs" test always passed. The prescribed count is now stored
+  separately, survives every header rewrite, and the earn-back evidence reads that bar. Your
+  current posture is unchanged by this — it only bites, honestly, on weeks lived from now on.
+
 ## [0.25.2] - 2026-08-07
 
 ### Fixed
