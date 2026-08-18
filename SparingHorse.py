@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.25.3"
+ENGINE_VERSION = "0.26.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -3864,67 +3864,21 @@ MARATHON_PACE_FRAC = 0.81  # fraction of vVO2max at marathon pace — ONE defini
                            # displayed zone grid (rounded to sec/km) and §FT1's speed axis (unrounded,
                            # §33f-11): the two must never drift apart, they describe the same pace
 
-# §6e — earned faster exit from Phase 0. Upward responsiveness that NEVER touches the ACWR
-# ceiling or the weekly volumes: demonstrated adaptation lets the block GRADUATE sooner (the
-# reward is time, not load), handing the freed week to base-build. Conservative by design for a
-# post-illness rebuild: earned from completed weeks only, reset on any miss, ≤1 week ever shaved
-# (shaving 2 would land the block on the down week), and always subordinate to readiness.
-REBASE_GRAD_AT = 3         # banked completed (non-down) weeks needed to graduate early
-REBASE_MAX_GRADUATE = 1    # most weeks the block can be shortened (keeps a non-down terminal)
-BANK_ADHERENCE = 0.8       # fraction of a week's planned km that must be run to "bank" it
+# (§FORM1 2026-08-18 — the §6e banked-week machinery is GONE: graduation, the earned volume lift,
+# the 6th-run unlock, and the regime's banked-streak clause all judged plan OBEDIENCE, not the body.
+# A travel week — 30.1 km run and cleanly absorbed against a 5-run lay — zeroed a 3-week streak and
+# collapsed the assertive road into a 13 km/wk detraining re-base (live, 2026-08-18). The owner's
+# ruling: the plan follows MEASURED form toward the objective; conservative posture is entered on
+# body evidence only (medical hold / stop-symptom — see training_regime). Volume responsiveness
+# lives in §PRO5's measured-vs-projected ride; frequency spreads live in §PRO9; nothing is "earned"
+# by adherence bookkeeping any more.)
 
-# §6e/§6f — earned upward responsiveness (volume), banking-gated. The deferred sibling of the
-# re-base graduation above: where graduation rewards banked weeks with TIME, this rewards them with
-# a small VOLUME lift on the building phases — but ONLY as an owner-confirmed opt-in, and never in a
-# way that touches the safety math. Three things must ALL hold (any miss → pure no-op):
-#   • the owner has opted in (EARNED_KEY in `meta`, default off — a low ACWR is a ceiling signal,
-#     never a target the engine fills on its own);
-#   • a streak of banked, well-absorbed weeks (same adherence+recovery+not-eased test as graduation,
-#     read over the prior plan's ELAPSED weeks — earned over weeks, not days; resets on any miss);
-#   • latest readiness isn't red/heavy.
-# The lift is a BOUNDED intent step applied to NON-DOWN weeks of the FIRST building phase only (Base,
-# or Build on a short runway); later phases inherit the lifted level through `cur_km` — a SINGLE ~F
-# level-lift across the building road, never an F-per-phase compound that would silently approach F².
-# Down weeks keep their recovery trough (a uniform lift would flatten the 3:1 trough up to the
-# ceiling — ACWR's 7:28 ratio masks it, a masters/post-illness body feels it); Peak/Taper are left as
-# designed; and the ACWR governor still hard-caps every week at ACWR_SOFT. The step SIZE is the
-# limiter (not an open-ended "fill the ceiling"): at the top tier the hardest building weeks DO reach
-# — but never exceed — the 1.25 cap (the default trajectory already floats ~1.17–1.20, so the earned
-# headroom is modest), while lower tiers and the down weeks stay below it. Reaching the cap on hard
-# weeks during an *owner-confirmed, banking-earned* faster build is the sanctioned use of headroom;
-# what the design forbids is doing it automatically or at the cost of the recovery troughs.
-EARNED_KEY = "earned_progression"   # meta toggle — owner opt-in, default off
-EARNED_BANK_AT = 3                  # banked elapsed weeks to UNLOCK the earned volume lift
-EARNED_VOLUME_STEP = 0.08           # per-tier intent lift on non-down building weeks (~+8%)
-EARNED_MAX_TIERS = 2                # cap the lift at ~+16% — bounded; applied once, not per phase
-
-# §6e — earned FREQUENCY advance: the deferred sibling of the volume lift, now built. Where the
-# volume lift adds km to the same days, this adds a 6th weekly RUN to non-down Base/Build weeks at
-# CONSTANT governed volume (the same load spread over one more day → shorter easy runs, not a
-# heavier week — the ACWR governor still caps total load). It is NOT "safer because shorter": more
-# frequency = more loading cycles = more of the connective-tissue stimulus ACWR can't see (§6f
-# ~line 590). So it's its OWN owner opt-in (separate from the volume lift — he may want one, not the
-# other) and earned on a STRICTER bank threshold. Binary, not tiered (5 or 6). 6 runs / 1 rest can't
-# avoid two 3-run streaks, but the cap-3 layout (rest Thu) + `_distribute_week`'s placement keep the
-# two hard sessions (mid-quality + long/long-MP) three days apart — never consecutive (verified in
-# `det/day-spacing` for n=6). Down weeks keep their lower count (the recovery trough stays fewer-not-
-# more); Peak/Taper are untouched.
-FREQ_KEY = "freq_advance"           # meta toggle — owner opt-in for the 6th run, default off
-FREQ_BANK_AT = 4                    # banked elapsed weeks to UNLOCK (stricter than the volume lift's 3)
 RUN_MIN_KM = 2.5   # §JR — no prescribed run below this (owner call 2026-07-05, after the ACWR brake
 #                    crushed a week into 0.3–1.4km stubs): a governed budget too thin for the
 #                    template's run count sheds DAYS instead. Mild by design — it fires only on
 #                    sub-floor stubs, never grows a normal week's runs (the min-dose consolidation
 #                    experiment stays REVERTED), and the ACWR/peak governors still project whatever
-#                    layout results. Sits at his historical junk bar (~2.6km); the stricter 4.0
-#                    FREQ_MIN_EASY_KM below stays the bar for ADDING a 6th run.
-FREQ_MIN_EASY_KM = 4.0              # min-distance FLOOR (owner-chosen 2026-06-21): don't add the 6th run
-                                    # to a week unless its non-long runs would still clear this — i.e.
-                                    # frequency is earned by VOLUME too, so the 6th run is real training,
-                                    # never ~2 km junk. Proxy = (week km − long km) / BASE_RUNS (the
-                                    # non-long runs at BASE_RUNS+1). Below it the week stays at BASE_RUNS;
-                                    # so at his current detrained volume the lever is DORMANT and wakes
-                                    # only as the rebuild grows (~35 km Base).
+#                    layout results. Sits at his historical junk bar (~2.6km).
 
 # Optionally seed a first objective on a fresh DB, so you don't start at a blank screen:
 #   SH_SEED_OBJECTIVE="Berlin Marathon|2026-09-27|marathon|finish|A"  (label|date|type|target|priority)
@@ -5557,126 +5511,13 @@ def _actual_week_caps(db, ws, we, zones):
     return round(longest, 1), round(eq, 2)
 
 
-def _material_ease(row):
-    """§6e — did this adjustment MATERIALLY ease the plan? A positive check-in ("run felt good")
-    persists a NO-OP directive (×1.0, not easy-only, nothing clamped, no medical): that's engagement,
-    not an ease, and must not void a week's banked evidence (live 2026-07 case: a feel-good note
-    silently delayed a real graduation). Anything unreadable or unrecognized stays conservative
-    (counts as an ease); a superseded material ease still voids its week — it was trained under."""
-    if row["medical"]:
-        return True
-    try:
-        d = json.loads(row["directive"] or "")
-    except (TypeError, ValueError):
-        return True
-    if not isinstance(d, dict) or "volume_multiplier" not in d:
-        return True                                     # unknown shape — stay conservative
-    return bool(d.get("medical_flag") or d.get("easy_only") or d.get("clamp")
-                or (d["volume_multiplier"] or 0) < 1.0)
-
-
-def _week_banked(db, ws, we, planned_km, planned_runs, drop):
-    """Shared §6e per-week test: was one fully-elapsed week well-absorbed, from owned data only?
-      • adherence — ran ≥ BANK_ADHERENCE of the week's planned km AND within one of its planned runs;
-      • recovery intact — no stop-symptom and ≤1 'heavy-legs' check-in that week;
-      • the engine wasn't already easing it — no MATERIAL ease/medical adjustment overlapped the
-        week (`_material_ease`; a no-op feel-good check-in doesn't void it).
-    Single source of truth for BOTH the re-base graduation and the earned volume lift, so the two
-    gates judge a week identically. Returns (banked, act_km, act_runs)."""
-    rows = db.execute(
-        "SELECT id, date, distance FROM activities WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL,
-        (ws.isoformat(), we.isoformat())).fetchall()
-    act_km = sum(r["distance"] for r in rows if r["id"] not in drop and r["distance"])
-    act_runs = len({r["date"] for r in rows if r["id"] not in drop and r["distance"]})
-    adh = act_km >= BANK_ADHERENCE * (planned_km or 0) and act_runs >= (planned_runs or 0) - 1
-    rd = db.execute("SELECT energy, stop_symptom FROM readiness WHERE date>=? AND date<=?",
-                    (ws.isoformat(), we.isoformat())).fetchall()
-    recovery = not any(r["stop_symptom"] for r in rd) and \
-        sum(1 for r in rd if r["energy"] == "heavy") <= 1
-    eased = any(_material_ease(r) for r in db.execute(  # a MATERIAL overlap — even one later
-        "SELECT directive, medical FROM adjustments "    # superseded — means the week was eased;
-        "WHERE applies_from<=? AND applies_until>=?",    # a no-op check-in row does NOT void it
-        (we.isoformat(), ws.isoformat())).fetchall())
-    return (adh and recovery and not eased), round(act_km, 1), act_runs
-
-
-def rebase_banking(db, block_start, today):
-    """§6e — read how the COMPLETED re-base weeks actually went and return the earned-progression
-    state (drives the early GRADUATION; the earned volume lift lives in `earned_state`). `banked` is
-    a STREAK that resets to 0 on any miss (earn it back — the post-illness posture); the deliberate
-    **down week neither earns nor resets** it (completing a recovery week easily is expected, not
-    evidence). Only fully-elapsed weeks count, so the forward plan can't wobble day-to-day. This
-    drives a faster exit ONLY — it never changes a volume or the ACWR ceiling."""
-    from datetime import timedelta
-    drop = dropped_ids(db)
-    today_d = _date(today)
-    streak, weeks = 0, []
-    for wk in REBASE_SHAPE:
-        ws = block_start + timedelta(weeks=wk["wk"] - 1)
-        we = ws + timedelta(days=6)
-        if we >= today_d:           # only fully-completed weeks are evidence
-            break
-        banked, act_km, act_runs = _week_banked(db, ws, we, wk["km"], wk["runs"], drop)
-        is_down = wk["wk"] == 4
-        weeks.append({"wk": wk["wk"], "banked": banked, "down": is_down,
-                      "act_km": act_km, "act_runs": act_runs})
-        if is_down:
-            continue                # the down week is neutral — neither banks nor breaks the streak
-        streak = streak + 1 if banked else 0
-    graduate = min(REBASE_MAX_GRADUATE, 1 if streak >= REBASE_GRAD_AT else 0)
-    return {"banked_streak": streak, "graduate": graduate, "weeks": weeks,
-            "effective_len": len(REBASE_SHAPE) - graduate}
-
-
-BANK_LOOKBACK_WEEKS = 26   # §PRO12 — how far back the evidence walk may look for a week's prescription
-BANK_PLAN_SCAN = 80        # … and how many saved plans it may consult to find one
-
-
-def _prescription_history(db, prior_plan, wanted):
-    """§PRO12 — {week start → the prescription most recently LAID for it} over the `wanted` starts.
-
-    A SAVED PLAN IS THE ROAD AHEAD, not a ledger of the whole goal (his decision, 2026-07-28). So a
-    plan legitimately stops covering weeks it has advanced past — a re-base block expiring on a
-    Monday re-anchors the road to that Monday, and the weeks already lived are simply no longer part
-    of the road being described. That is correct and deliberate. What was NOT correct was reading
-    the evidence off it: a week's prescription is what `_week_banked` judges actual runs against, it
-    lives only inside plan artifacts, and sourcing it from the current road made six weeks of banked
-    evidence evaporate the day the road moved (streak 5→0, regime assertive→caution, race-day CTL
-    60→26). Plan history is therefore the PERMANENT home of that lookup, not a workaround for a bug
-    to be fixed upstream — do not "repair" `_rebase_start` to keep the past; the past is not its job.
-    Newest plan carrying a week wins;
-    the prior plan wins outright. Scans back through saved plans only until every wanted start is
-    covered, so the normal case (the road still carries its own past) reads one plan and stops.
-    No cross-call state: a regen that has just saved a plan must not see a stale map."""
-    out, need = {}, set(wanted)
-    if db is not None and need:
-        try:
-            rows = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT ?",
-                              (BANK_PLAN_SCAN,)).fetchall()
-        except Exception:
-            rows = []
-        for r in rows:
-            try:
-                p = json.loads(r["plan"])
-            except (ValueError, TypeError):
-                continue
-            for w in _plan_all_weeks(p):
-                s = w.get("start")
-                if s in need:
-                    out[s] = w
-                    need.discard(s)
-            if not need:
-                break
-    for w in _plan_all_weeks(prior_plan or {}):       # the live road is the freshest word
-        if w.get("start"):
-            out[w["start"]] = w
-    return out
+BANK_PLAN_SCAN = 80        # §PRO12 — how many saved plans `_laid_sessions` may consult
 
 
 def _laid_sessions(db, since_iso, until_iso=None):
     """§PRO12 — {date → the session prescribed for it}, resolved across PLAN HISTORY, for dates in
-    [since_iso, until_iso). The sibling of `_prescription_history` at the session grain, and it
-    exists for the same reason: a saved plan is the ROAD AHEAD (see there), so it stops covering
+    [since_iso, until_iso). A saved plan is the ROAD AHEAD (his ruling 2026-07-28 — a re-anchor
+    dropping lived weeks is CORRECT, never "fix" `_rebase_start`), so it stops covering
     dates it has advanced past — by design — while a prescription lives only inside plan artifacts.
     Reading it off the current road therefore loses it exactly when the road moves. Live 2026-07-27:
     the re-base block expired, the road re-anchored to that Monday, and the effort monitor's 28-day
@@ -5713,101 +5554,18 @@ def _laid_sessions(db, since_iso, until_iso=None):
     return out
 
 
-def _banked_streak(db, today, prior_plan):
-    """The banked STREAK of fully-ELAPSED weeks walking BACK from today (same `_week_banked` test as
-    graduation; down weeks neutral; stops at the first miss) + whether the latest readiness is ok
-    (not red/heavy). The single shared evidence both §6e upward levers read — the volume lift
-    (`earned_state`) and the frequency advance (`freq_state`) judge a week identically.
-
-    §PRO12 — the walk is over the CALENDAR, and each week's prescription is looked up across plan
-    history (`_week_prescription`), not read off the current road. Sourcing it from the road alone
-    silently zeroed the ratchet whenever the road advanced past its own past: on 2026-07-27 the
-    re-base block expired, `_rebase_start` re-anchored to that Monday, and the saved plan went from
-    26 weeks (back to 06-15) to 20 weeks starting that day. The next regen therefore found NO elapsed
-    weeks at all — streak 5 → 0, regime assertive → caution, projected race-day CTL 60 → 26, finish
-    4:59 → 6:35 — and, since that regen also saved a past-less plan, the reset sustained itself. A
-    week we have no prescription for ends the walk: unknown is not evidence, in either direction.
-    Returns (streak, ready_ok)."""
-    from datetime import timedelta
-    drop = dropped_ids(db)
-    today_d = _date(today) if isinstance(today, str) else today
-    # the most recent week whose 7-day window has fully closed, then backwards a bounded distance
-    ws = _monday(today_d) - timedelta(weeks=1)
-    while ws + timedelta(days=6) >= today_d:
-        ws -= timedelta(weeks=1)
-    walk = [(ws - timedelta(weeks=i)).isoformat() for i in range(BANK_LOOKBACK_WEEKS)]
-    presc = _prescription_history(db, prior_plan, walk)
-    streak = 0
-    for start_iso in walk:
-        ws = _date(start_iso)
-        w = presc.get(start_iso)
-        if not w:
-            break                                  # no prescription ⇒ nothing to judge ⇒ stop
-        if not _is_down(w.get("intent")):          # down week is neutral (as in graduation)
-            # §CARD3 — the prescription bar comes from intent_runs/intent_km, never from the header
-            # fields: §CARD2 (and §CARD3's elapsed true-up) rewrite `runs`/`km` to what was actually
-            # run, so judging adherence on them compares actuals against actuals — every week
-            # self-banks and the regime gate goes vacuous. `runs` stays as the fallback for weeks
-            # saved before intent_runs existed (their header still holds the as-laid count).
-            banked, *_ = _week_banked(db, ws, ws + timedelta(days=6),
-                                      w.get("intent_km", w.get("km")),
-                                      w.get("intent_runs", w.get("runs")), drop)
-            if not banked:
-                break
-            streak += 1
-    rd = db.execute("SELECT energy, stop_symptom FROM readiness "
-                    "ORDER BY date DESC LIMIT 1").fetchone()
-    ready_ok = not (rd and (rd["stop_symptom"] or rd["energy"] == "heavy"))
-    return streak, ready_ok
-
-
-def earned_state(db, today, prior_plan):
-    """§6e/§6f — earned upward responsiveness (volume) gate. Reads the shared banked streak
-    (`_banked_streak`) and combines it with the owner opt-in toggle to decide a BOUNDED intent lift
-    for future Base/Build weeks. Pure read — the lift is applied (and governor-capped) in
-    generate_plan. Returns factor 1.0 (a pure no-op) unless ALL of: opted in · streak ≥
-    EARNED_BANK_AT · latest readiness not red/heavy."""
-    opted_in = str(get_meta(db, EARNED_KEY, "0")).lower() in ("1", "true", "on", "yes")
-    streak, ready_ok = _banked_streak(db, today, prior_plan)
-    tiers = min(EARNED_MAX_TIERS, streak - EARNED_BANK_AT + 1) if streak >= EARNED_BANK_AT else 0
-    unlocked = streak >= EARNED_BANK_AT and ready_ok
-    active = opted_in and unlocked and tiers > 0
-    return {"opted_in": opted_in, "banked_streak": streak, "ready_ok": ready_ok,
-            "unlocked": unlocked, "tiers": tiers, "active": active,
-            "factor": round(1.0 + EARNED_VOLUME_STEP * tiers, 4) if active else 1.0,
-            "bank_at": EARNED_BANK_AT, "step": EARNED_VOLUME_STEP, "max_tiers": EARNED_MAX_TIERS}
-
-
-def freq_state(db, today, prior_plan):
-    """§6e — earned FREQUENCY advance gate (the 6th weekly run on non-down Base/Build weeks). Sibling
-    of `earned_state`: same shared banked-streak evidence (`_banked_streak`), but its OWN opt-in
-    toggle and a STRICTER bank threshold (FREQ_BANK_AT) — added frequency means more loading cycles,
-    the connective-tissue stimulus ACWR can't see, so it's earned harder. Binary (no tiers): the week
-    advances to BASE_RUNS+1 or it doesn't. Pure read — the runs bump is applied (and ACWR-governed)
-    in generate_plan. No-op unless ALL of: opted in · streak ≥ FREQ_BANK_AT · readiness not red/heavy.
-    Emergent coupling (intended): once active, future weeks are PLANNED at 6 runs, so `_week_banked`'s
-    `act_runs ≥ planned_runs−1` bar rises to ≥5 actual runs — for BOTH levers (shared `_banked_streak`).
-    Defensible: opting into 6 makes 6-ish the new adherence expectation."""
-    opted_in = str(get_meta(db, FREQ_KEY, "0")).lower() in ("1", "true", "on", "yes")
-    streak, ready_ok = _banked_streak(db, today, prior_plan)
-    unlocked = streak >= FREQ_BANK_AT and ready_ok
-    active = opted_in and unlocked
-    return {"opted_in": opted_in, "banked_streak": streak, "ready_ok": ready_ok,
-            "unlocked": unlocked, "active": active, "bank_at": FREQ_BANK_AT,
-            "runs": (BASE_RUNS + 1) if active else BASE_RUNS}
-
-
-# §PRO3 — training-REGIME gate (data-gated caution). The engine no longer treats the conservative
-# re-base + min(intent,ceiling) posture as the unconditional default. It engages the ASSERTIVE build
-# (ride the safe headroom, §PRO2) only when the DATA shows the restart caution isn't needed — a
-# deliberately STRONG conjunction, because there is no explicit owner toggle to fall back on (the owner
-# chose "infer from data only"): the bar is high so the inference, not a setting, carries the safety.
-# Keyed on the SAFE signals (demonstrated tolerance + clear medical/symptom window + green readiness),
-# NEVER on raw CTL — that distinction is the whole reason §6r (CTL-scaling the re-base) was reverted
-# [[governor-lever-retune]]: CTL can't tell "detrained-but-healthy" from "returning-from-illness", but
-# a clean symptom window + weeks of well-absorbed running CAN. Everyone starts in caution and EARNS
-# assertive (a fresh DB has no banked weeks → caution → the re-base), so the post-illness restart is
-# never skipped on day one. Any single miss ⇒ caution.
+# §PRO3/§FORM1 — training-REGIME posture, entered on BODY EVIDENCE only. The conservative re-base +
+# min(intent,ceiling) posture exists for one athlete: the one returning from illness/injury. The app
+# KNOWS that athlete — he tells it (readiness stop-symptoms, medical holds via check-ins) — so the
+# posture keys on that evidence directly: a hold in force, a recent medical event, or a recent
+# stop-symptom ⇒ caution; otherwise the plan follows measured form toward the objective (assertive),
+# bounded by the physical governors (per-session/long-run eq caps, ACWR/ramp ceilings, §PRO5's
+# measured-response ride). The old third clause — a banked streak of plan-adherent weeks
+# ("demonstrated tolerance") — was removed 2026-08-18 (§FORM1): it inferred illness from
+# DISOBEDIENCE, and a travel week (30.1 km run, cleanly absorbed, one run short of the lay) zeroed
+# three banked weeks and collapsed the road into a 13 km/wk detraining re-base. Obedience is not a
+# body signal. A genuinely detrained return without medical evidence needs no gate either: the
+# governors ramp from his real trailing load, so the plan starts small BY MEASUREMENT.
 # §PRO5 — self-calibrating shape-RESPONSE. The assertive regime rides the full ACWR ceiling by default,
 # but the moderate fixed ramp can't tell whether HE, specifically, is absorbing it. This closes the loop:
 # compare his MEASURED CTL now to what the PRIOR plan PROJECTED for now (stored per-week as `proj_ctl`).
@@ -5816,20 +5574,16 @@ def freq_state(db, today, prior_plan):
 # ceiling (factor ≤ 1.0), surfaced. The literal "calculate my shape-increase rate and adapt".
 RESPONSE_MIN = 0.6          # floor on the ride factor ⇒ eased ride_cap never below 1.0 + 0.25·0.6 = 1.15
 RESPONSE_ONTRACK = 0.98     # realised ≥ 98% of projected ⇒ on-track ⇒ full ceiling (small dead-band)
-REGIME_BANK_AT = 2          # banked, well-absorbed weeks required (the demonstrated-tolerance bar).
-                            # Owner-chosen 3→2 (2026-06-30): more responsive to a runner already
-                            # out-running a flat plan — 2 well-absorbed weeks is enough demonstrated
-                            # tolerance to graduate, while still requiring a clean symptom/medical window
-                            # + green readiness (the conjunction below carries the safety, not this count).
 REGIME_CLEAR_DAYS = 56      # a clean window (no medical event / no stop-symptom) this long ⇒ cleared
 
 
 def training_regime(db, today, prior_plan):
-    """Decide the training regime → ("assertive" | "caution", reason). ASSERTIVE requires ALL of:
-      • no medical hold currently in force, AND no medical adjustment within REGIME_CLEAR_DAYS;
-      • no stop-symptom check-in within REGIME_CLEAR_DAYS (a RED — amber/heavy legs does NOT block);
-      • ≥ REGIME_BANK_AT banked, well-absorbed weeks (shared `_banked_streak` — demonstrated tolerance).
-    Any miss ⇒ caution, with a human reason for the surface. Pure read; never writes the plan."""
+    """Decide the training regime → ("assertive" | "caution", reason). §FORM1: ASSERTIVE unless the
+    BODY says otherwise — caution requires positive evidence:
+      • a medical hold currently in force, OR a medical adjustment within REGIME_CLEAR_DAYS;
+      • a stop-symptom check-in within REGIME_CLEAR_DAYS (a RED — amber/heavy legs does NOT block).
+    No adherence bookkeeping: how last week compared to its prescription is not a body signal
+    (§FORM1 2026-08-18 — the banked-streak clause is gone). Pure read; never writes the plan."""
     from datetime import timedelta
     td = _date(today) if isinstance(today, str) else today
     horizon = (td - timedelta(days=REGIME_CLEAR_DAYS)).isoformat()
@@ -5849,14 +5603,10 @@ def training_regime(db, today, prior_plan):
     if recent_symptom:
         return "caution", f"a stop-symptom check-in within the last {REGIME_CLEAR_DAYS} days"
     # §PRO3 — only a RED (stop-symptom, caught above by the 56-day window) or a medical hold blocks the
-    # regime. AMBER / heavy-legs does NOT: a single tired day shouldn't drop you to conservative, and
-    # sustained heaviness already prevents banking (`_week_banked` needs recovery intact), so the streak
-    # below is the real backstop. (Owner call 2026-06-30 — don't make him fight the tool on a tired day.)
-    streak, _ = _banked_streak(db, today, prior_plan)
-    if streak < REGIME_BANK_AT:
-        return "caution", f"building tolerance ({streak}/{REGIME_BANK_AT} well-absorbed weeks banked)"
-    return "assertive", (f"cleared: {streak} well-absorbed weeks banked, readiness green, "
-                         f"no symptom or medical event in {REGIME_CLEAR_DAYS} days")
+    # regime. AMBER / heavy-legs does NOT: a single tired day shouldn't drop you to conservative.
+    # (Owner call 2026-06-30 — don't make him fight the tool on a tired day.)
+    return "assertive", (f"no symptom or medical event in {REGIME_CLEAR_DAYS} days — "
+                         "the plan follows your measured form")
 
 
 def shape_response(db, today, prior_plan):
@@ -5886,44 +5636,6 @@ def shape_response(db, today, prior_plan):
              f"measured CTL {realized} is {round(ratio * 100)}% of the projected {projected} — easing the ride")
     return {"factor": round(factor, 3), "realized": realized, "projected": projected,
             "ratio": round(ratio, 3), "basis": basis}
-
-
-def _apply_earned_lift(shape, factor):
-    """Scale NON-DOWN weeks' volume intent by `factor` (≥1). Down weeks are left untouched so the 3:1
-    recovery trough survives the lift (a uniform lift would flatten it up to the ACWR ceiling — the
-    one masters/post-illness risk the cap alone doesn't catch); the governor still caps each week.
-    Returns a NEW shape, never mutating the caller's."""
-    if factor <= 1.0:
-        return shape
-    return [w if _is_down(w.get("intent"))
-            else {**w, "km": round(w["km"] * factor), "long": round(w["long"] * factor)}
-            for w in shape]
-
-
-def _freq_easy_km(w):
-    """The per-week non-long run distance the min-distance floor judges: at BASE_RUNS+1 runs, the
-    non-long runs (= BASE_RUNS of them) share (week km − long km). A shape-level proxy — quality
-    weeks' true easy runs run a touch shorter than this average, deliberately erring permissive."""
-    return ((w.get("km") or 0) - (w.get("long") or 0)) / BASE_RUNS
-
-
-def _apply_freq_advance(shape, active):
-    """§6e — advance a NON-DOWN week from BASE_RUNS to BASE_RUNS+1 runs (the earned 6th run) at
-    CONSTANT weekly volume: only `runs` changes, so `_distribute_week` splits the same governed
-    km/TRIMP across one more day — the runs get SHORTER, the week doesn't get heavier (the ACWR
-    governor still caps total load; intensity and the long run keep their slices). A week advances
-    only when ALL hold: it's non-down, currently at exactly BASE_RUNS, AND its non-long runs would
-    still clear FREQ_MIN_EASY_KM at the higher count (the owner-chosen floor — frequency is earned by
-    VOLUME too, so the 6th run is never junk; below it the week keeps BASE_RUNS, so the lever is
-    dormant at low volume). Down weeks keep their lower count (recovery trough stays fewer-not-more).
-    NEW shape, never mutates the caller's. No-op when inactive."""
-    if not active:
-        return shape
-    return [{**w, "runs": BASE_RUNS + 1}
-            if (not _is_down(w.get("intent")) and w.get("runs") == BASE_RUNS
-                and _freq_easy_km(w) >= FREQ_MIN_EASY_KM)
-            else w
-            for w in shape]
 
 
 def _mark_load_integrity(w, zones):
@@ -6243,8 +5955,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
             # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to
-            # done+ahead below: this is the bar §6e banking judges the lived week against, and the
-            # header rewrite must never be allowed to become that bar (see _banked_streak).
+            # done+ahead below: the honest record of what was PRESCRIBED, kept distinct from what
+            # was run (the header). Display/history provenance only since §FORM1 — no decision
+            # reads it any more.
             pweek["intent_runs"] = pweek["runs"]
             # §CARD2 — THE STRADDLING WEEK'S HEADER DESCRIBES THE WEEK, NOT THE PRESCRIPTION TRAIL.
             # The old header summed the PRESCRIBED elapsed days + the governed remainder ("display
@@ -6422,8 +6135,17 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                         and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
         if breach or eroded or bio_over:
             pre_total = sum(dt.values())
+            # §FORM1 — the re-govern search runs under the SAME governor contract as the primary call
+            # (soft CTL floor, shape-neutral soft test, bio caps, long cap): it used to omit them — a
+            # pre-§PRO8 fossil, unreachable while assertive required banked weeks (CTL was never low
+            # there) — so a cold-start week that stripped quality was re-governed against RAW CTL≈1
+            # and pinned at ~0 km. Caution passes every added kwarg as None/False ⇒ byte-identical.
             allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
-                                      ramp_max=ramp, days_override=av_days, av_blocked=av_off,
+                                      ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                                      shape_neutral=assertive,
+                                      session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
+                                      long_km_cap=long_km_cap,
+                                      days_override=av_days, av_blocked=av_off,
                                       actual_floor=act_floor, ladder=assertive)   # §PRO20b/§PRO24
             # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
             chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
@@ -7445,7 +7167,7 @@ def _rebase_start(db, today):
     A legacy non-Monday anchor (the old 'starts today' scheme) is migrated to its **containing**
     Monday — back-only, never forward. Back-only is the safe direction: it never pushes block_start
     past `today` (so the runner is never shown a pre-start tile) and never *un*-elapses a week (so a
-    banked graduation streak can't be reset). The cost of this one-time re-grid: the already-elapsed
+    frozen week is never re-opened). The cost of this one-time re-grid: the already-elapsed
     week(s) no longer start-date-match the prior saved plan, so they regenerate onto the calendar grid
     (flagged elapsed-but-not-frozen) rather than being carried verbatim — an accepted, deliberate
     trade for aligning the live block now; actual runs still match by their real date in the log, and
@@ -7840,10 +7562,10 @@ def _card_truth_elapsed(plan, db, today):
     so for the life of the block. Recomputing at the read-model seam self-heals every carried week
     on the next regen (and keeps healing if a late sync adds a run to a past week).
 
-    Evidence is preserved FIRST: intent_runs/intent_km keep the as-laid bar so §6e banking never
-    judges actuals against actuals (see _banked_streak — §CARD2's header rewrite had silently made
-    the frozen straddle's `runs` self-referential there). For pre-§CARD2 weeks the old header IS
-    the only surviving prescription count, so it is banked into intent_runs before being replaced."""
+    Evidence is preserved FIRST: intent_runs/intent_km keep the as-laid bar — the honest record of
+    what was PRESCRIBED, distinct from the actuals the header now states (display/history
+    provenance; since §FORM1 no decision reads it). For pre-§CARD2 weeks the old header IS
+    the only surviving prescription count, so it is preserved into intent_runs before being replaced."""
     from datetime import timedelta
     if db is None:
         return
@@ -7917,10 +7639,10 @@ def generate_plan(db, force_regime=None, today=None):
 
     prior = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     prior_plan = json.loads(prior["plan"]) if prior else None   # §6f E — source of frozen weeks
-    # §PRO3 — data-gated regime. Assertive rides the safe headroom AND skips the conservative re-base
-    # (the medical-confirmation block isn't needed once tolerance is demonstrated + the symptom/medical
-    # window is clean); caution keeps the full re-base + min(intent,ceiling). Decided BEFORE the re-base
-    # length so assertive can drop it. Everyone starts in caution and earns assertive.
+    # §PRO3/§FORM1 — body-evidence regime. Assertive rides the safe headroom AND skips the re-base
+    # (the medical-confirmation block exists for the post-illness return only); caution keeps the full
+    # re-base + min(intent,ceiling) and is entered on medical/symptom evidence alone. Decided BEFORE
+    # the re-base length so assertive can drop it.
     regime, regime_reason = training_regime(db, today, prior_plan)
     if force_regime in ("caution", "assertive"):   # §PRO10 — counterfactual regime for the drift overlay
         regime, regime_reason = force_regime, f"counterfactual ({force_regime})"   # pure: never persisted
@@ -7928,8 +7650,7 @@ def generate_plan(db, force_regime=None, today=None):
     resp = shape_response(db, today, prior_plan)
     ride_cap = round(1.0 + (ACWR_SOFT - 1.0) * resp["factor"], 3) if regime == "assertive" else ACWR_SOFT
 
-    bank = rebase_banking(db, block_start, today.isoformat())   # §6e — earned faster exit
-    natural_len = bank["effective_len"]
+    natural_len = len(REBASE_SHAPE)   # §FORM1 — fixed template; no adherence-earned graduation
     # §PER1 F1 — clamp the re-base to the runway so the phases can't overrun the first race (a taper
     # scheduled AFTER race day). When the first race is closer than re-base + taper, shrink the re-base
     # (the conservative phases collapse first) so re-base + taper ≤ runway and the taper bottom lands ON
@@ -7949,20 +7670,28 @@ def generate_plan(db, force_regime=None, today=None):
     shape = REBASE_SHAPE[:rebase_eff]
     rebase_weeks_n = len(shape)
 
-    earned = earned_state(db, today, prior_plan)   # §6e/§6f — earned volume lift (opt-in; no-op off)
-    freq = freq_state(db, today, prior_plan)       # §6e — earned 6th run (opt-in; no-op off)
-
     # §6f Step E — the live seed for the FIRST today-onward week is today's snapshot CTL/ATL (the
     # snapshot already embodies the frozen past); `started` flips once any future week is generated,
     # after which later phases chain off the previous phase's projected end.
+    # §FORM1 — the RESTART DOSE: with no runs at all in the trailing windows (a cold start, or a
+    # long healthy gap), every bio ladder is empty — no bio cap is in force, §PRO17's peak stand-down
+    # doesn't apply, and the hard per-day ACWR on a decayed raw CTL pins every week at ~zero (the
+    # old design escaped this only because everyone started in the gated caution re-base, whose
+    # FIXED templates need no trailing history). Form-driven needs a floor, not a gate: an empty
+    # window seeds at the conservative re-base's FIRST RUNG — the dose the post-illness block
+    # prescribes anyone on day one, so it is safe by construction — and the governed ladder ramps
+    # from there by measurement. A window with ANY real run keeps its honest measured seed.
+    _rb0 = REBASE_SHAPE[0]
     live = {"ctl": ctl0, "atl": atl0, "started": False,
             "consec_hard": 0, "last_nondown": None,   # §PRO6 — tissue streak + trough anchor across phases
             # §PRO9/§3.1 — trailing long-run + biomechanical eq_km windows, seeded from his real recent weeks
             # (assertive skips the re-base, so the plan's own weeks won't seed the first building weeks) and
             # carried across phases.
-            "recent_longs": _recent_long_runs(db, block_start),
-            "recent_session_eq": _recent_session_eq(db, block_start, zones),   # §PRO17
-            "recent_eq": _recent_eq_km(db, block_start, zones)}
+            "recent_longs": _recent_long_runs(db, block_start) or [float(_rb0["long"])],
+            # at re-base (easy) pace the eq factor is 1.0 ⇒ rung eq == rung km; largest bout = its long
+            "recent_session_eq": _recent_session_eq(db, block_start, zones)
+                                 or [float(_rb0["long"])],                     # §PRO17
+            "recent_eq": _recent_eq_km(db, block_start, zones) or [float(_rb0["km"])]}
 
     prior_all = _prior_weeks_all(prior_plan)   # §H6 — freeze elapsed weeks by start across ALL phases,
     # not just the same key, so a week that crossed a phase boundary (calendar drift) is still carried
@@ -8025,10 +7754,9 @@ def generate_plan(db, force_regime=None, today=None):
         "shape": {"effective_vo2max": vo2, "ctl": ctl0, "atl": atl0,
                   **({"seed": seed_meta} if seed_meta else {})},
         "pace_zones": {k: f"{fmt_pace(v)}/km" for k, v in zones.items()},
-        "rebase": {**rb, "banked_streak": bank["banked_streak"], "graduated": bank["graduate"],
-                   "grad_at": REBASE_GRAD_AT, "full_len": len(REBASE_SHAPE)},
+        "rebase": {**rb, "full_len": len(REBASE_SHAPE)},
         # §PRO3 — which regime drove this plan + why (auto-flips, so it's surfaced, never silent)
-        "regime": {"mode": regime, "reason": regime_reason, "bank_at": REGIME_BANK_AT},
+        "regime": {"mode": regime, "reason": regime_reason},
         # §PRO5 — self-calibrating shape-response: how his measured fitness tracks the projection + the
         # resulting assertive ride cap (full 1.25 when on track, eased when he's falling behind)
         "shape_response": {**resp, "ride_cap": ride_cap},
@@ -8041,8 +7769,6 @@ def generate_plan(db, force_regime=None, today=None):
                           "(soft-cap floor; hard caps still bind) — assumes continued clean "
                           "absorption, re-anchored on your actuals at every regen".format(PROG_RAMP)}
                  if regime == "assertive" else None),
-        "earned": earned,   # §6e/§6f earned volume lift — gate state + factor (1.0 = off / no-op)
-        "freq": freq,       # §6e earned frequency advance — gate state + target runs (5 = off / no-op)
         "tune_ups": [{"label": o["label"], "date": o["date"], "type": o["type"],
                       "priority": o["priority"]} for o in tune_ups],
         "note": ("Easy pace ~%s/km — if your easy runs are habitually faster than this they're "
@@ -8084,14 +7810,11 @@ def generate_plan(db, force_regime=None, today=None):
         # The taper trades a little chronic load for a lot of freshness; reading the trough treated the
         # taper as pure detraining and hid the build's payoff. This is what feasibility/finish-time use.
         peak_ctl = rb["end_ctl"]
-        earned_applied = False
-        freq_would = 0   # §6e2 — weeks the 6th-run opt-in would visibly move (the offer, measured)
         race_proj = {}   # §6q — projected end-CTL at each race (end of its taper), for the surfaces
         for ph in phases:
             kind, key, n_wk = ph["kind"], ph["key"], ph["weeks"]
             if kind == "rebase" or n_wk <= 0:
                 continue   # the re-base block is already generated above as `rb`
-            building = kind in ("base", "build", "bridge")   # the volume-building phases
             # §T2 — the Davis component periodization rides the ASSERTIVE regime only (earned, like
             # every other assertive lever); caution keeps the legacy shapes byte-identical. Taper is
             # regime-agnostic (freshening is freshening).
@@ -8108,35 +7831,10 @@ def generate_plan(db, force_regime=None, today=None):
             # (§6h CTL-responsive floor removed 2026-06-30 — it was a dormant follower: the re-base decay
             # kept it below its activation band in real plans, and the §PRO assertive ride is the proper
             # fitness-tracker now. Caution is a clean conservative ramp; assertive rides the ceiling.)
-            # §6e/§6f — earned volume lift: apply ONCE, to the FIRST Base/Build phase (the initial
-            # build), NOT to a post-race bridge — so a short first-race runway can't land the banked
-            # boost on a recovery re-build. Build/Peak inherit the lifted level through `cur_km`.
-            if kind in ("base", "build") and not earned_applied and earned["factor"] > 1.0:
-                sh = _apply_earned_lift(sh, earned["factor"])   # non-down weeks; governor still caps
-                earned_applied = True
-            # §6e — earned FREQUENCY advance: the 6th run on non-down building weeks (not Peak/Taper).
-            # Orthogonal to the volume lifts (changes `runs`, not km), applied per phase since `runs`
-            # isn't carried through `cur_km`. Constant volume; governor caps.
-            # §6e2 — MEASURE the offer, never assert it. The opt-in banner carried a hardcoded "it
-            # stays at 5 runs until your volume is high enough … so it's quiet for now": true at the
-            # ~20 km/wk he ran when that copy was written, false ever since, and contradicted ON THE
-            # SAME SCREEN by §PRO9's cap spread — which lays a 6th easy day of its own, so the week
-            # card reads "6 runs" while the note below it promises 5 (`runs` is the honest laid
-            # count, :5807). A static string cannot describe a volume-floored lever. So ask the
-            # lever: lay the phase, then count the weeks he would actually SEE change — the shape
-            # would advance AND the laid week is still at BASE_RUNS. A week §PRO9 has already spread
-            # to 6 days must NOT be counted: opting in would not move its day count, and claiming it
-            # would is the same species of lie in the other direction.
-            if building:
-                adv = _apply_freq_advance(sh, True)
-                would = [i for i, (a, b) in enumerate(zip(sh, adv)) if b["runs"] != a["runs"]]
-                sh = adv if freq["active"] else sh
+            # (§FORM1 2026-08-18 — the §6e earned volume lift and 6th-run advance are gone with the
+            # banked-streak machinery: volume responsiveness is §PRO5's ride, frequency spreads are
+            # §PRO9's. Nothing is unlocked by adherence bookkeeping.)
             block, end_ctl = _gen_phase(key, cur_start, sh, zones, regime, ride_cap, soft_floor)
-            if building and not freq["active"]:
-                wks = block.get("weeks") or []
-                freq_would += sum(1 for i in would
-                                  if i < len(wks) and (wks[i].get("runs") or 0) == BASE_RUNS
-                                  and not (wks[i].get("frozen") or wks[i].get("elapsed")))
             plan[key] = block
             cur_start = cur_start + timedelta(weeks=n_wk)
             # §PRO4 — chain the next phase off the volume this phase actually REACHED. In caution that's
@@ -8155,11 +7853,6 @@ def generate_plan(db, force_regime=None, today=None):
                 race_proj[key] = peak_ctl  # §PRO7b — the fitness carried INTO this taper (not its trough)
             else:
                 peak_ctl = end_ctl         # building/peak phases raise the carried race fitness
-
-        # §6e2 — the offer, measured on the plan just laid. 0 when the lever is already ON (the
-        # advance is applied; there is nothing left to offer) and 0 when the volume floor genuinely
-        # keeps it dormant — the surface tells those apart by `active`, not by this count alone.
-        freq["would_advance"] = freq_would
 
         # §6f Step E / §PRO7b — feasibility re-reads the engine's REAL projected race fitness — the PEAK
         # CTL carried into the final taper (chained through every segment under the ceiling), realized on
@@ -8782,10 +8475,6 @@ def _plan_summary_for_llm(plan, diff):
         "rebase_start": rb.get("start"),
         "rebase_end_ctl": rb.get("end_ctl"),
         "rebase_end_atl": rb.get("end_atl"),
-        "rebase_banked_streak": rb.get("banked_streak"),
-        "rebase_graduated_weeks_early": rb.get("graduated"),
-        "earned_progression": plan.get("earned"),   # §6e/§6f — earned volume lift (active + factor)
-        "freq_advance": plan.get("freq"),            # §6e — earned 6th run (active + target runs)
         "regime": plan.get("regime"),                # §PRO3 — caution vs assertive build posture + reason
         "weeks": weeks,
         "easy_pace": plan.get("pace_zones", {}).get("easy_top"),
@@ -8825,23 +8514,11 @@ def explain_plan(db, diff=None):
         "a CTL above projected_race_ctl. (You may mention a phase's end_ctl from phase_blocks when "
         "walking the path, but the race-day number is projected_race_ctl alone.) If any "
         "phase shows frozen_done_weeks, note those weeks are completed and carried verbatim — the past "
-        "isn't rewritten, only the road ahead. If "
-        "rebase_graduated_weeks_early > 0, note they EARNED a faster exit from Phase 0 by banking solid "
-        "weeks (adherence + recovery) — the block is shorter and base-build starts sooner; stress the "
-        "reward is time, not extra load, and the safe ACWR ceiling never moved. If "
-        "earned_progression.active is true, note they OPTED IN to an earned faster build and, by banking "
-        "weeks, have earned a small (~factor) volume bump on the HARD Base/Build weeks only — recovery "
-        "(down) weeks and the ACWR ≤1.25 ceiling are deliberately left untouched, and they can turn it "
-        "off anytime; do NOT imply the ceiling rose or that recovery weeks got harder. If regime.mode is "
-        "'assertive', note the plan has graduated from the conservative restart and is riding the safe "
-        "ACWR headroom to build fitness as fast as is safe (gated on demonstrated tolerance); if "
-        "'caution', it's the conservative posture and regime.reason says what's still being banked. "
-        "If freq_advance.active is true, "
-        "note they OPTED IN to an earned 6th weekly run on the HARD Base/Build weeks — it's added at the "
-        "SAME weekly volume (the runs get shorter, the week is not heavier), a frequency reward they "
-        "earned by banking weeks; recovery (down) weeks keep fewer runs and the ACWR ceiling is "
-        "unchanged. Be honest: it's more frequency for durability, not an easier or harder week; they "
-        "can turn it off anytime. If last_replan or "
+        "isn't rewritten, only the road ahead. If regime.mode is "
+        "'assertive', note the plan follows their measured form and rides the safe "
+        "ACWR headroom to build fitness as fast as is safe; if "
+        "'caution', it's the conservative post-illness posture and regime.reason names the medical/"
+        "symptom evidence that triggered it. If last_replan or "
         "active_adjustment is set, explain what changed and why in change_note (else empty string). "
         "Encouraging, specific, never medical advice. Keep bullets short."
     )
@@ -9073,8 +8750,9 @@ def _plan_all_weeks(plan):
             weeks += [{**w, "pk": key} for w in (plan.get(key) or {}).get("weeks", [])]
             keyed = True
     if not keyed:   # LEGACY saved plan (pre-§6q phases carry no keys): the classic single-A blocks.
-        # Matters because prior_plan rows feed DECISIONS (_banked_streak → regime/earned gates): a
-        # stale-format row must not silently zero the banked evidence right after an upgrade.
+        # Matters because prior_plan rows feed DECISIONS (§PRO5's measured-vs-projected ride reads
+        # proj_ctl off them): a stale-format row must not silently blind the response right after
+        # an upgrade.
         for key in ("base", "build", "peak", "taper"):
             weeks += [{**w, "pk": key} for w in (plan.get(key) or {}).get("weeks", [])]
     return weeks
@@ -10625,38 +10303,6 @@ def api_activity_delete(aid):
     if not delete_activity_local(db, aid):
         return jsonify(ok=False, error="no such activity"), 404
     return jsonify(ok=True, deleted=aid)
-
-
-@app.post("/api/earned")
-def api_earned_toggle():
-    """§6e/§6f — owner opt-in for earned upward responsiveness (the bounded volume lift on the
-    building phases). This toggle is the owner's CONSENT, not a switch that forces load: the lift
-    still only acts when the banked-week streak + readiness gates are met, and the ACWR governor
-    still caps every week. Writable only — the public container 403s every POST via the guard.
-    Returns the freshly-recomputed gate state so the UI reflects it without a full re-plan."""
-    db = get_db()
-    on = bool((request.get_json(silent=True) or {}).get("on"))
-    set_meta(db, EARNED_KEY, "1" if on else "0")
-    db.commit()
-    prior = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
-    prior_plan = json.loads(prior["plan"]) if prior else None
-    return jsonify(ok=True, earned=earned_state(db, datetime.now().date(), prior_plan))
-
-
-@app.post("/api/freq")
-def api_freq_toggle():
-    """§6e — owner opt-in for the earned FREQUENCY advance (the 6th weekly run on non-down Base/Build
-    weeks). Like `/api/earned`, this is CONSENT, not a forced change: the 6th run still only appears
-    when the (stricter) banked-week streak + readiness gates are met, at constant governed volume,
-    and the ACWR governor still caps every week. Writable only — the public container 403s every POST
-    via the guard. Returns the freshly-recomputed gate state so the UI reflects it without a re-plan."""
-    db = get_db()
-    on = bool((request.get_json(silent=True) or {}).get("on"))
-    set_meta(db, FREQ_KEY, "1" if on else "0")
-    db.commit()
-    prior = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
-    prior_plan = json.loads(prior["plan"]) if prior else None
-    return jsonify(ok=True, freq=freq_state(db, datetime.now().date(), prior_plan))
 
 
 def _profile_cached(db, aid):
@@ -13887,40 +13533,10 @@ function renderPlan(p){
     return weekDetail(inner,'rebase',w.wk,rbSel);}).join("")+`</div>`;
   const adh = (LOG&&LOG.adherence&&LOG.adherence.scheduled)
     ? `<span class="muted mono" style="font-size:11px"> · done ${LOG.adherence.done}/${LOG.adherence.scheduled} so far</span>` : "";
-  // §6e — earned faster exit: the block can graduate a week early when recent weeks are banked.
-  const grad = rb.graduated
-    ? `<div class="gradnote">▲ Earned a faster exit — you've banked ${rb.banked_streak} solid week${rb.banked_streak===1?'':'s'}, so Phase 0 graduates a week early (${rb.full_len-rb.graduated} of ${rb.full_len} weeks) and base-build starts sooner. Volumes and the ACWR ceiling are unchanged — the reward is time.</div>`
-    : (rb.banked_streak>0
-        ? `<div class="legend" style="margin-top:6px">▲ ${rb.banked_streak} week${rb.banked_streak===1?'':'s'} banked — ${rb.grad_at-rb.banked_streak>0?`${rb.grad_at-rb.banked_streak} more to graduate Phase 0 a week early`:'on track to graduate early'}.</div>`
-        : "");
-  // §6e/§6f — earned upward responsiveness (volume). The opt-in sibling of the graduation above:
-  // banked weeks earn a small, ACWR-capped volume bump on the HARD weeks (recovery weeks protected).
-  const E = p.earned || {};
-  const pct = Math.round((( E.factor||1)-1)*100);
-  const earnedNote = SH_READONLY ? "" : (
-    E.active
-      ? `<div class="gradnote">▲ Earned faster build is <b>on</b> — you've banked ${E.banked_streak} solid week${E.banked_streak===1?'':'s'}, so Base/Build volume is nudged up ~${pct}% on the hard weeks. Recovery (down) weeks and the ACWR ≤1.25 ceiling are untouched — the governor still caps every week. <a href="#" id="earnedToggle" data-on="0">turn off</a></div>`
-    : E.opted_in
-      ? `<div class="legend" style="margin-top:6px">▲ Earned faster build is on — ${E.banked_streak>=E.bank_at?(E.ready_ok?'applying now':'paused until readiness is green'):`${E.bank_at-E.banked_streak} more banked week${E.bank_at-E.banked_streak===1?'':'s'} to unlock`}. <a href="#" id="earnedToggle" data-on="0">turn off</a></div>`
-    : E.banked_streak>=E.bank_at
-      ? `<div class="gradnote">▲ You've banked ${E.banked_streak} solid weeks — you can opt into an <b>earned faster build</b>: a small (~${E.step?Math.round(E.step*100):8}–${E.step&&E.max_tiers?Math.round(E.step*E.max_tiers*100):16}%) volume bump on hard weeks as the build progresses, ACWR-capped, recovery weeks protected. <a href="#" id="earnedToggle" data-on="1">opt in</a></div>`
-    : "");
-  // (§6h CTL-floor note removed — the §PRO regime bar above now carries the fitness-tracking story.)
-  // §6e — earned FREQUENCY advance (the 6th run). Sibling of the volume lift above, its own opt-in:
-  // banked weeks earn a 6th weekly run on the hard Base/Build weeks at the SAME volume (shorter runs,
-  // more frequency for durability — honestly a tradeoff: more loading cycles, not "easier").
-  // §6e2 — the offer sentence is DATA, not copy: `would_advance` counts the weeks the opt-in would
-  // visibly move (engine-side, measured on the laid plan). A plan saved before §6e2 carries no such
-  // count ⇒ the sentence is OMITTED rather than guessed — an old plan cannot know, so it says nothing.
-  const Q = p.freq || {};
-  const freqNote = SH_READONLY ? "" : (
-    Q.active
-      ? `<div class="gradnote">▲ Earned 6th run is <b>on</b> — you've banked ${Q.banked_streak} solid week${Q.banked_streak===1?'':'s'}, so the hard Base/Build weeks run <b>6×</b> instead of 5× at the same weekly volume (shorter, more frequent runs — durability, not a heavier week). Recovery (down) weeks keep fewer runs and the ACWR ≤1.25 ceiling is untouched. <a href="#" id="freqToggle" data-on="0">turn off</a></div>`
-    : Q.opted_in
-      ? `<div class="legend" style="margin-top:6px">▲ Earned 6th run is on — ${Q.banked_streak>=Q.bank_at?(Q.ready_ok?'applying now':'paused until readiness is green'):`${Q.bank_at-Q.banked_streak} more banked week${Q.bank_at-Q.banked_streak===1?'':'s'} to unlock`}. <a href="#" id="freqToggle" data-on="0">turn off</a></div>`
-    : Q.banked_streak>=Q.bank_at
-      ? `<div class="gradnote">▲ You've banked ${Q.banked_streak} solid weeks — you can opt into an <b>earned 6th weekly run</b> on the hard Base/Build weeks: same weekly volume, spread over one more day (shorter, more frequent runs for durability), recovery weeks and the ACWR ceiling protected. ${Q.would_advance==null ? `` : Q.would_advance ? `It would add a 6th day to <b>${Q.would_advance}</b> Base/Build week${Q.would_advance===1?'':'s'} of this block, at the same weekly volume.` : `Your easy runs are still short enough that a 6th would be junk (the bar is ~4 km), so it would stay at 5 runs for now.`} <a href="#" id="freqToggle" data-on="1">opt in</a></div>`
-    : "");
+  // (§FORM1 2026-08-18 — the graduation, earned-build, and 6th-run banners are gone with the
+  // banked-week machinery: nothing is unlocked by adherence bookkeeping any more. The regime bar
+  // above carries the posture story; §PRO5's ride note carries the responsiveness story.)
+  const grad = "", earnedNote = "", freqNote = "";
   const tuneTxt = (p.tune_ups&&p.tune_ups.length)
     ? `<div class="legend" style="margin-top:8px">Tune-ups before the peak: ${p.tune_ups.map(t=>`${esc(t.label)} (${t.date}, ${t.priority})`).join(" · ")}</div>` : "";
   // §6q/#2 — multi-A chain strip: when the build chains ≥2 A-races, surface each race's projected
@@ -14101,28 +13717,6 @@ function renderPlan(p){
   }));
   wireObjActions();
   wireAdjust();
-  const et = document.getElementById("earnedToggle");
-  if(et) et.addEventListener("click", async ev=>{
-    ev.preventDefault(); et.style.pointerEvents="none";
-    try{
-      await fetch("/api/earned",{method:"POST",headers:{"Content-Type":"application/json"},
-                                 body:JSON.stringify({on: et.dataset.on==="1"})});
-      // regenerate so the lift takes effect and the change stays versioned/diff-able (§6b)
-      const r=await fetch("/api/plan/generate",{method:"POST"}); const p=await r.json();
-      if(p.ok){ LASTDIFF=p.diff; await refreshPlan(p); } else { await refreshPlan(); }
-    }catch(e){ alert("Could not update earned setting: "+e); }
-  });
-  const ft = document.getElementById("freqToggle");
-  if(ft) ft.addEventListener("click", async ev=>{
-    ev.preventDefault(); ft.style.pointerEvents="none";
-    try{
-      await fetch("/api/freq",{method:"POST",headers:{"Content-Type":"application/json"},
-                               body:JSON.stringify({on: ft.dataset.on==="1"})});
-      // regenerate so the 6th run takes effect and the change stays versioned/diff-able (§6b)
-      const r=await fetch("/api/plan/generate",{method:"POST"}); const p=await r.json();
-      if(p.ok){ LASTDIFF=p.diff; await refreshPlan(p); } else { await refreshPlan(); }
-    }catch(e){ alert("Could not update 6th-run setting: "+e); }
-  });
 }
 async function refreshPlan(p){
   OBJECTIVES = await getJSON("/api/objectives");
@@ -15520,8 +15114,8 @@ def _stc_day_spacing():
         detail.append({"runs": n, "days": d, "max_consecutive": s, "long_on_weekend": weekend})
         if not (s <= 2 and weekend):
             bad.append(n)
-    # n=6 (the §6e earned frequency advance): 6 runs / 1 rest CAN'T avoid a 3-run streak, so the
-    # ≤2-consecutive invariant is infeasible. The invariant that actually protects a masters/post-
+    # n=6 (§PRO9's cap spread can lay a 6th easy day): 6 runs / 1 rest CAN'T avoid a 3-run streak, so
+    # the ≤2-consecutive invariant is infeasible. The invariant that actually protects a masters/post-
     # illness body is weaker but the one that matters: NO TWO HARD sessions (quality / long-MP) on
     # consecutive days, and the long run on the weekend. Check it on a REAL generated 6-run Base
     # (one light tempo) and Build (interval + long-MP) week, not just the day grid.
@@ -15529,11 +15123,12 @@ def _stc_day_spacing():
     zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
     mon, HARD = date(2026, 8, 3), {"tempo", "interval", "long_mp"}     # 2026-08-03 is a Monday
     six = {}
-    # high start volume so the §6e min-distance floor opens (the 6th run only appears once non-long
-    # runs clear FREQ_MIN_EASY_KM) — here we're testing the LAYOUT of an advanced week, not the floor.
+    # (§FORM1 — the earned 6th-run lever is gone, but §PRO9's cap spread still lays 6-run weeks, so
+    # the 6-run LAYOUT invariant stays live: construct the 6-run week directly.)
     for ph, shp in (("base", base_shape(4, 55)), ("build", build_shape(4, 60))):
-        adv = _apply_freq_advance(shp, True)
-        wk = next(w for w in adv if w["runs"] == 6 and w.get("quality"))   # an advanced week WITH quality
+        adv = [{**w, "runs": 6} if (not _is_down(w.get("intent")) and w.get("runs") == BASE_RUNS)
+               else w for w in shp]
+        wk = next(w for w in adv if w["runs"] == 6 and w.get("quality"))   # a 6-run week WITH quality
         sess, _ = _distribute_week(wk, mon, 320.0, easy, zones=zones)
         dk = sorted((_date(s["date"]).weekday(), s["kind"]) for s in sess)
         hard = [dw for dw, k in dk if k in HARD]
@@ -17086,15 +16681,25 @@ def _stc_multi_a_plan():
     for c in chain:
         if "proj_ctl" in c and c.get("feasibility") not in ("finish", "earn it", "too soon", "maintain"):
             fails.append(f"chain race {c.get('label')} proj_ctl w/o verdict: {c.get('feasibility')}")
+    # §PRO23/§PRO8 — judge the governor's PUBLISHED decision variable (proj_acwr_soft, the floored
+    # soft reading), same contract as det/regime-plan: below the CTL floor the raw flat legitimately
+    # rides above ACWR_SOFT (the floor supplies the denominator), and a prog-ridden week may ride to
+    # ACWR_HARD. Fallback reconstruction covers caution plans saved without the field.
+    def _soft(w):
+        s = w.get("proj_acwr_soft")
+        if s is not None:
+            return s
+        a = w.get("proj_acwr_flat")
+        if a is None:
+            a = w.get("proj_acwr") or 0
+        c = w.get("proj_ctl")
+        return a * min(1.0, c / ACWR_SOFT_CTL_FLOOR) if c else a
     overs = []
     for ph in p.get("phases", []):
         for w in (p.get(ph.get("key")) or {}).get("weeks", []):
-            # §PRO17 — judge the reading the governor actually uses (shape-neutral under assertive)
-            a = w.get("proj_acwr_flat")
-            if a is None:
-                a = w.get("proj_acwr")
-            if a is not None and a > ACWR_SOFT + 1e-6:
-                overs.append((ph["key"], w.get("wk"), round(a, 3)))
+            cap = ACWR_HARD if w.get("prog_ridden") else ACWR_SOFT
+            if w.get("proj_acwr") is not None and _soft(w) > cap + 0.005:
+                overs.append((ph["key"], w.get("wk"), round(_soft(w), 3)))
     if overs:
         fails.append(f"ACWR ceiling breached: {overs[:5]}")
     mem.close()
@@ -19450,10 +19055,12 @@ def _stc_eq_km():
 
 
 def _stc_regime_gate():
-    """§PRO3 — the inferred regime gate is a STRONG conjunction keyed on SAFE signals (never raw CTL):
-    a fresh DB (no banked weeks) ⇒ caution (everyone earns assertive — the restart is never skipped on
-    day one); 3 well-absorbed weeks + green readiness + a clean medical/symptom window ⇒ assertive; and
-    ANY single miss (medical event, stop-symptom, low bank) ⇒ caution. Throwaway in-memory DB."""
+    """§PRO3/§FORM1 — the regime keys on BODY EVIDENCE only: medical event / stop-symptom within
+    REGIME_CLEAR_DAYS ⇒ caution; otherwise ASSERTIVE — including a fresh DB (a blank history is not
+    illness; the governors ramp from measured trailing load) and including a week lived DIFFERENTLY
+    from its prescription (the 2026-08-18 travel week: 30.1 km cleanly absorbed against a 5-run lay
+    must NOT demote — obedience is not a body signal; the pre-§FORM1 banked-streak clause fails this
+    tooth). Throwaway in-memory DB."""
     import sqlite3 as _sq
     from datetime import date, timedelta
     today = date(2026, 6, 29)             # a Monday
@@ -19463,77 +19070,63 @@ def _stc_regime_gate():
         m.executescript(SCHEMA)
         return m
 
-    def banked_plan(n):
-        wks = []
-        for i in range(n):                # n fully-elapsed, well-adhered base weeks ending before today
-            ws = today - timedelta(weeks=n - i)
-            wks.append({"start": ws.isoformat(), "intent_km": 20, "km": 20, "runs": 4,
-                        "intent": "Easy aerobic base"})
-        # real saved plans carry a phases list — _plan_all_weeks (the shared whole-road reader) needs it
+    def travel_plan():
+        # the lived week, one full week back, laid at 5 runs / 24 km — the as-laid bar
+        ws = today - timedelta(weeks=1)
+        wks = [{"start": ws.isoformat(), "intent_km": 24, "intent_runs": 5, "km": 24, "runs": 5,
+                "intent": "Easy aerobic base"}]
         return {"base": {"weeks": wks}, "phases": [{"key": "base"}]}
 
-    def log_adherence(m, n):
-        for i in range(n):                # 4 runs/wk totalling 20km ≥ 0.8×20
-            ws = today - timedelta(weeks=n - i)
-            for off in (0, 2, 4, 6):
-                d = (ws + timedelta(days=off)).isoformat()
-                m.execute("INSERT INTO activities(date,date_time,sport,distance,duration) "
-                          "VALUES(?,?,?,?,?)", (d, d + "T18:00", RUNNING_SPORT, 5.0, 1800))
+    def log_travel_week(m):
+        # he ran 3 runs / 30.1 km of it — MORE km than laid, fewer runs, cleanly absorbed
+        ws = today - timedelta(weeks=1)
+        for off, km in ((0, 10.0), (2, 10.0), (5, 10.1)):
+            d = (ws + timedelta(days=off)).isoformat()
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration) "
+                      "VALUES(?,?,?,?,?)", (d, d + "T18:00", RUNNING_SPORT, km, 3600))
 
-    at, below = REGIME_BANK_AT, REGIME_BANK_AT - 1
-    pp = banked_plan(at)
-    # 1 — exactly at the bar, fully cleared ⇒ assertive
-    m = fresh(); log_adherence(m, at)
-    r_clear = training_regime(m, today, pp)[0]
-    # 1b — one below the bar ⇒ caution (locks the exact threshold)
-    m = fresh(); log_adherence(m, below)
-    r_below = training_regime(m, today, banked_plan(below))[0]
+    # 1 — ⭐ the travel week: lived differently, no body evidence ⇒ ASSERTIVE (the §FORM1 tooth —
+    # the old banked-streak clause reads this as caution "0/2 banked")
+    m = fresh(); log_travel_week(m)
+    r_travel = training_regime(m, today, travel_plan())[0]
     # 2 — recent medical adjustment ⇒ caution
-    m = fresh(); log_adherence(m, at)
+    m = fresh(); log_travel_week(m)
     m.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,active,medical)"
               " VALUES('now','sym','{}',?,?,0,1)",
               ((today - timedelta(days=20)).isoformat(), (today - timedelta(days=10)).isoformat()))
-    r_med = training_regime(m, today, pp)[0]
+    r_med = training_regime(m, today, travel_plan())[0]
     # 3 — recent stop-symptom ⇒ caution
-    m = fresh(); log_adherence(m, at)
+    m = fresh(); log_travel_week(m)
     m.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,1)",
               ((today - timedelta(days=15)).isoformat(), "ok"))
-    r_sym = training_regime(m, today, pp)[0]
-    # 4 — no banked weeks (fresh) ⇒ caution
+    r_sym = training_regime(m, today, travel_plan())[0]
+    # 4 — fresh DB, no evidence of anything ⇒ ASSERTIVE (deliberate §FORM1 flip: a blank history is
+    # not illness — the plan starts small BY MEASUREMENT, not by gate)
     r_fresh = training_regime(fresh(), today, None)[0]
-    # 5 — banked + clean window but LATEST readiness AMBER/heavy ⇒ STILL ASSERTIVE (only red blocks; a
-    # tired day shouldn't drop you to conservative — §PRO3 owner call). stop_symptom stays 0 here.
-    m = fresh(); log_adherence(m, at)
+    # 5 — LATEST readiness AMBER/heavy ⇒ STILL ASSERTIVE (only red blocks; a tired day shouldn't
+    # drop you to conservative — §PRO3 owner call). stop_symptom stays 0 here.
+    m = fresh(); log_travel_week(m)
     m.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,0)", (today.isoformat(), "heavy"))
-    r_heavy = training_regime(m, today, pp)[0]
-    # 6 — a NO-OP check-in ("felt good" → ×1.0, not easy-only, nothing clamped) overlapping a banked
-    # week must NOT void it (live 2026-07 case: a positive note silently delayed a real graduation)
-    noop = ('{"situation":"feeling_good","volume_multiplier":1.0,"easy_only":false,'
-            '"medical_flag":false,"clamp":null}')
-    m = fresh(); log_adherence(m, at)
-    m.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,active,medical)"
-              " VALUES('now','felt good',?,?,?,0,0)",
-              (noop, (today - timedelta(days=4)).isoformat(), (today - timedelta(days=4)).isoformat()))
-    r_noop = training_regime(m, today, pp)[0]
-    # 6b — a MATERIAL ease (×0.6/easy-only) on the same day still voids the week ⇒ caution
-    m = fresh(); log_adherence(m, at)
+    r_heavy = training_regime(m, today, travel_plan())[0]
+    # 6 — a NON-medical routine ease (×0.6/easy-only) does NOT flip the regime: the adjustment
+    # machinery eases the laid plan itself; posture demotion needs MEDICAL evidence
+    m = fresh(); log_travel_week(m)
     m.execute("INSERT INTO adjustments(created_at,note,directive,applies_from,applies_until,active,medical)"
               " VALUES('now','tired',?,?,?,0,0)",
               ('{"volume_multiplier":0.6,"easy_only":true,"medical_flag":false,"clamp":null}',
                (today - timedelta(days=4)).isoformat(), (today - timedelta(days=4)).isoformat()))
-    r_ease = training_regime(m, today, pp)[0]
+    r_ease = training_regime(m, today, travel_plan())[0]
 
     fail = []
-    if r_noop != "assertive":
-        fail.append(f"a no-op feel-good check-in must not void banking: got {r_noop}")
-    if r_ease != "caution":
-        fail.append(f"a material ease must still void the week: got {r_ease}")
-    if r_clear != "assertive":
-        fail.append(f"{at}-banked+cleared should be assertive, got {r_clear}")
+    if r_travel != "assertive":
+        fail.append(f"a week lived differently (clean body) must NOT demote: got {r_travel}")
+    if r_fresh != "assertive":
+        fail.append(f"fresh DB (no body evidence) should be assertive, got {r_fresh}")
     if r_heavy != "assertive":
         fail.append(f"amber/heavy readiness should NOT block (only red does): got {r_heavy}")
-    for label, got in (("below-bar", r_below), ("medical", r_med), ("symptom", r_sym),
-                       ("fresh", r_fresh)):
+    if r_ease != "assertive":
+        fail.append(f"a non-medical routine ease must not demote the regime: got {r_ease}")
+    for label, got in (("medical", r_med), ("symptom", r_sym)):
         if got != "caution":
             fail.append(f"{label} should gate to caution, got {got}")
     # §PRO3 — a regime FLIP must surface in diff_plans (never silent); same regime ⇒ no phantom flip
@@ -19544,13 +19137,13 @@ def _stc_regime_gate():
     if any("Regime" in c for c in same.get("changes", [])):
         fail.append("phantom regime flip on unchanged regime")
     return _st("det", "regime-gate",
-               f"regime gate: {at} banked + clean window ⇒ assertive (amber/heavy still assertive — only "
-               "red blocks); one-below-bar / medical event / stop-symptom / no-bank ⇒ caution; a NO-OP "
-               "feel-good check-in doesn't void a banked week (a material ease still does); flip diffed",
-               passed=not fail, expect=f"assertive at ≥{at} banked & cleared; red/bank miss ⇒ caution; "
-               "no-op check-in banks, material ease voids; flip diffed",
-               got={"at_bar": r_clear, "below_bar": r_below, "medical": r_med, "symptom": r_sym,
-                    "heavy": r_heavy, "fresh": r_fresh, "noop_checkin": r_noop, "material_ease": r_ease,
+               "§FORM1 regime gate: body evidence only — travel week (lived differently, clean body) "
+               "stays assertive; fresh DB assertive; medical event / stop-symptom ⇒ caution; "
+               "amber/heavy + non-medical ease don't demote; flip diffed",
+               passed=not fail, expect="assertive unless medical/stop-symptom evidence; "
+               "obedience is not a body signal; flip diffed",
+               got={"travel_week": r_travel, "medical": r_med, "symptom": r_sym,
+                    "heavy": r_heavy, "fresh": r_fresh, "routine_ease": r_ease,
                     "failures": fail or "none"})
 
 
@@ -20098,6 +19691,57 @@ def _stc_ft_scale():
                     "c_marathon": c_m, "c_to_10k": round(c_10, 5), "failures": fail or "none"})
 
 
+def _stc_restart_dose():
+    """§FORM1 — the RESTART DOSE floor: a HEALTHY athlete whose last run is older than the trailing
+    windows (a long gap — travel, life, a lapsed season; no medical evidence) gets an ASSERTIVE plan
+    that ramps from the conservative re-base's first rung, not the degenerate ~0 km road. Pre-§FORM1
+    this case never existed (no banked weeks ⇒ the caution gate caught it); with the gate removed,
+    empty trailing windows meant no bio caps ⇒ §PRO17's peak stand-down inert ⇒ the hard per-day
+    ACWR on decayed raw CTL pinned every week at ~zero (measured: an 8-week base of 0.0–0.3 km).
+    The floor seeds empty windows at REBASE_SHAPE[0] (the dose the post-illness block prescribes
+    anyone on day one — safe by construction) and the governed ladder ramps from there. A revert of
+    the seed floor OR of the re-govern governor contract (§FORM1's second half) fails this."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta
+    today = date(2026, 8, 17)                     # a Monday
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    # a real running history that ENDED 10 weeks ago (beyond LONG_RUN_STEP_WINDOW/BIO_EQ_WINDOW)
+    for wk in range(8):
+        ws = today - timedelta(weeks=18 - wk)
+        for off in (0, 2, 4, 6):
+            d = (ws + timedelta(days=off)).isoformat()
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                        "VALUES(?,?,?,?,?,?)", (d, d + "T18:00", RUNNING_SPORT, 8.0, 2880, 60.0))
+    # today's snapshot: decayed load state, eVO2 remembered
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+                "VALUES(?,?,?,?)", (today.isoformat(), 35.0, 6.0, 1.0))
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                "VALUES(?,?,?,?,?,?,?)", ("marathon", "Gap Return", (today + timedelta(weeks=20)).isoformat(),
+                                          "finish", "A", "upcoming", _now_iso()))
+    mem.commit()
+    p = generate_plan(mem, today=today)
+    fails = []
+    if (p.get("regime") or {}).get("mode") != "assertive":
+        fails.append(f"a healthy gap is not illness: regime {(p.get('regime') or {}).get('mode')}")
+    bw = [w["km"] for k in ("base", "build") for w in (p.get(k) or {}).get("weeks", [])
+          if not _is_down(w.get("intent")) and not w.get("elapsed")]
+    first = next((x for x in bw if x), 0)
+    if not bw or max(bw) < REBASE_SHAPE[-1]["km"]:
+        fails.append(f"gap return never grows past the restart dose (peak building week "
+                     f"{max(bw or [0])} < rung {REBASE_SHAPE[-1]['km']}) — the degenerate road")
+    if first and first > 2 * REBASE_SHAPE[0]["km"]:
+        fails.append(f"gap return should START near the restart dose, not big: first week {first} "
+                     f"vs rung {REBASE_SHAPE[0]['km']}")
+    mem.close()
+    return _st("det", "restart-dose",
+               "§FORM1 a healthy long gap (no medical evidence) plans ASSERTIVE and ramps from the "
+               "re-base's first-rung dose — never the degenerate ~0 km road, never a big-bang start",
+               passed=not fails, expect="assertive; peak building ≥ terminal rung; first week ≤ 2× rung 1",
+               got={"first_building_km": first, "peak_building_km": max(bw or [0]),
+                    "failures": fails or "none"})
+
+
 def _stc_ft_coldstart():
     """§FT5 det — the "any runner" cold start: a bare db (one hard 10k + an objective, NO shape
     snapshot) generates a real CAUTION plan seeded by VDOT inversion (round-trip locked), the
@@ -20136,20 +19780,40 @@ def _stc_ft_coldstart():
         mem.commit()
         return mem
 
-    # (2) the bare intake generates a real caution plan with surfaced seeds + a cold-wide band
+    # (2) the bare intake generates a real plan with surfaced seeds + a cold-wide band. §FORM1: a
+    # blank history is not illness — the regime is ASSERTIVE, and the safe-learning path is carried
+    # by MEASUREMENT instead of a gate: near-zero trailing load ⇒ the governors ramp from small.
     mem = colddb()
     p = generate_plan(mem)
     cs = p.get("cold_start") or {}
     if not p.get("ok"):
         fail.append(f"cold start did not generate: {p.get('error')}")
     else:
-        if (p.get("regime") or {}).get("mode") != "caution":
-            fail.append("cold start must begin in caution (the safe-learning path)")
+        if (p.get("regime") or {}).get("mode") != "assertive":
+            fail.append("cold start (no body evidence) should be assertive — §FORM1: the gate is "
+                        f"medical/symptom only (got {(p.get('regime') or {}).get('mode')})")
+        bw = [w["km"] for k in ("base", "build") for w in (p.get(k) or {}).get("weeks", [])
+              if not _is_down(w.get("intent"))]
+        if bw and not (bw[0] <= 0.6 * max(bw)):
+            fail.append(f"cold start should RAMP from measured small, not start big: first building "
+                        f"week {bw[0]} vs peak {max(bw)}")
+        # §FORM1 — and the ramp must be REAL: with the restart-dose floor or the re-govern governor
+        # contract broken, the cold road degenerates to ~0 km weeks (the pre-fix fixed point at
+        # zero), which the share tooth above cannot see. The build must clear the re-base's own
+        # terminal rung — the least any restart road achieves.
+        if bw and max(bw) < REBASE_SHAPE[-1]["km"]:
+            fail.append(f"cold start never grows past the restart dose (peak building week "
+                        f"{max(bw)} km < rung {REBASE_SHAPE[-1]['km']}) — bootstrap floor or "
+                        f"re-govern contract broken")
         if not (cs.get("race_type") == "10k" and abs((cs.get("vo2_seed") or 0) - v10) < 0.5):
             fail.append(f"cold_start seeds wrong/absent: {cs}")
         f = p.get("feasibility") or {}
-        if f.get("verdict") != "earn it":
-            fail.append(f"low cold seed should verdict 'earn it' (got {f.get('verdict')})")
+        # §FORM1 — with the restart-dose bootstrap the bare intake lays a REAL 20-week build (not
+        # the old gated near-zero caution road), so the honest verdict may be 'finish'; 'earn it'
+        # stays legal on a shorter runway. What the tooth refuses: a crash verdict ('too soon' —
+        # the machinery mis-crashing a low seed) — the cold-wide band below carries the uncertainty.
+        if f.get("verdict") not in ("finish", "earn it"):
+            fail.append(f"low cold seed should verdict finish/'earn it' (got {f.get('verdict')})")
         band = (f.get("finish_time") or {}).get("band") or {}
         if not ((band.get("sigma_log") or 0) >= 0.08):
             fail.append(f"cold band should be wide by design: σ {band.get('sigma_log')}")
@@ -20212,12 +19876,14 @@ def _stc_ft_coldstart():
             fail.append(f"served curve carries no projected eVO₂ per point: {ftw.get('curve')}")
     young.close(); rebuilder.close()
     return _st("det", "ft-coldstart",
-               "§FT5 cold start: VDOT inversion round-trips, bare intake ⇒ caution plan + surfaced "
-               "seeds + 'earn it' + wide band, Tanaka prior only when data-less, generality fixtures "
+               "§FT5 cold start: VDOT inversion round-trips, bare intake ⇒ an assertive plan that "
+               "RAMPS from the restart dose (§FORM1) + surfaced seeds + honest verdict + wide band, "
+               "Tanaka prior only when data-less, generality fixtures "
                "(identical 10k ⇒ identical seed; divergence only via measured data), no ceiling "
                "pinned to v₀, and generate_plan actually serves the §FT wiring",
                passed=not fail,
-               expect="v(50:00 10k)≈37; caution+earn-it+σ≥0.08; measured 191 > prior 184; seeds "
+               expect="v(50:00 10k)≈37; assertive, ramps from small, finish/earn-it, σ≥0.08; "
+                      "measured 191 > prior 184; seeds "
                       "equal, ceilings apart + above v₀; served payload carries at_evo2/long_km/"
                       "correction/band + per-point curve eVO₂",
                got={"v10": round(v10 or 0, 1), "seed": cs.get("vo2_seed"),
@@ -20321,8 +19987,9 @@ def _stc_meso_rephase():
 
 
 def _stc_regime_plan():
-    """§PRO3/§PRO4 INTEGRATION — generate_plan in the ASSERTIVE regime (in-memory DB, banked into
-    assertive via the same fixture as det/regime-gate): it (a) SKIPS the conservative re-base; (b) holds
+    """§PRO3/§PRO4 INTEGRATION — generate_plan in the ASSERTIVE regime (in-memory DB; §FORM1:
+    assertive is the clean-body default — the history exists to seed the governors, not to earn the
+    regime): it (a) SKIPS the conservative re-base; (b) holds
     the ACWR ceiling on every week of every phase (the safety invariant survives ceiling-riding); and
     (c) the TAPER scales off the REALISED peak (§PRO4 chaining) — its top week is a real cut-back from
     the peak volume, not a collapse to the tiny fixed-ramp number. Self-contained; never touches the
@@ -20338,9 +20005,9 @@ def _stc_regime_plan():
                     (today.isoformat(), 52.0, 55.0, 52.0))             # a fit returner — headroom to ride
         mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
                     ("marathon", "Goal", (today + timedelta(weeks=24)).isoformat(), "finish", "A", "upcoming", _now_iso()))
-        wks = []   # REGIME_BANK_AT well-absorbed elapsed weeks ⇒ assertive; optional high proj_ctl ⇒ behind
-        for i in range(REGIME_BANK_AT):
-            ws = today - timedelta(weeks=REGIME_BANK_AT - i)
+        wks = []   # 2 elapsed weeks seed the governors (recent longs/eq, §PRO5); high proj_ctl ⇒ behind
+        for i in range(2):
+            ws = today - timedelta(weeks=2 - i)
             w = {"start": ws.isoformat(), "intent_km": 30, "km": 30, "runs": 5, "intent": "Easy aerobic base"}
             if prior_proj_ctl is not None:
                 w["proj_ctl"] = prior_proj_ctl
@@ -20438,13 +20105,10 @@ def _stc_regime_plan():
         fails.append(f"race fitness {race_fit} should anchor on the pre-taper CTL {pre_taper_ctl}")
     if taper_bottom is not None and not (race_fit > taper_bottom + 2):
         fails.append(f"race fitness {race_fit} should be well above the taper trough {taper_bottom}")
-    # §PRO12 — THE ROAD MAY ADVANCE PAST ITS OWN PAST; THE EVIDENCE MAY NOT VANISH WITH IT.
-    # Live 2026-07-27: the re-base block expired, `_rebase_start` re-anchored the road to that
-    # Monday, and the saved plan went 26 weeks (back to 06-15) → 20 weeks starting that day. The
-    # next regen read the banked streak off that road, found NO elapsed weeks, and dropped
-    # assertive → caution (race-day CTL 60 → 26, finish 4:59 → 6:35) — then saved another past-less
-    # plan, so the reset sustained itself. Re-save the SAME fixture with a road that starts today
-    # and assert the streak survives out of plan history.
+    # §PRO12/§FORM1 — THE ROAD MAY ADVANCE PAST ITS OWN PAST without moving the regime. Under the old
+    # banked-streak clause a re-anchored, past-less road zeroed the evidence and dropped assertive →
+    # caution (live 2026-07-27: race-day CTL 60 → 26). §FORM1 removed the history-dependence
+    # structurally; this tooth stays to catch any path re-introducing it.
     p2, mem2 = build()
     road_today = json.dumps({"base": {"weeks": [{"start": today.isoformat(), "intent_km": 30,
                                                  "km": 30, "runs": 5, "intent": "Easy aerobic base"}]},
@@ -20452,10 +20116,6 @@ def _stc_regime_plan():
     mem2.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
                  (_now_iso(), today.isoformat(), "{}", road_today))
     mem2.commit()
-    streak_after, _ = _banked_streak(mem2, today, json.loads(road_today))
-    if streak_after < REGIME_BANK_AT:
-        fails.append(f"§PRO12 regression: a road starting today zeroed the banked streak "
-                     f"({streak_after} < {REGIME_BANK_AT}) — evidence must survive in plan history")
     p3 = generate_plan(mem2, today=today)
     if (p3.get("regime") or {}).get("mode") != "assertive":
         fails.append(f"§PRO12 regression: regime fell to "
@@ -20463,12 +20123,11 @@ def _stc_regime_plan():
     return _st("det", "regime-plan",
                "assertive generate_plan (CLOCK-PINNED — the fixture's date is the engine's date): "
                "re-base skipped, ACWR held every week, taper scales from the realised peak (§PRO4 "
-               "chaining), and §PRO12 — a road that starts today keeps its banked evidence",
+               "chaining), and §PRO12/§FORM1 — a re-anchored road cannot move the regime",
                passed=not fails, expect="assertive, no re-base, acwr≤cap, build peak≫caution, taper "
-                                        "from peak, streak survives a re-anchored road",
+                                        "from peak, regime survives a re-anchored road",
                got={"build_peak": round(build_pk, 1),
                     "taper": [round(w["km"], 1) for w in taper_wks], "acwr_over": overs or "none",
-                    "streak_after_reanchor": streak_after,
                     "failures": fails or "none"})
 
 
@@ -21068,278 +20727,6 @@ def _stc_ctl_floor_removed():
                got={"lo_peak": round(lo_pk, 1), "hi_peak": round(hi_pk, 1), "failures": fail or "none"})
 
 
-def _stc_earned_lift():
-    """§6e/§6f earned upward responsiveness — the SAFETY assertion. When a banked streak unlocks the
-    bounded volume lift, it must raise non-down BUILDING weeks WITHOUT flattening the 3:1 recovery
-    trough: a uniform lift pushes the down week's realized ACWR up to its neighbours — the one
-    masters/post-illness risk the ≤1.25 cap alone does NOT catch (every week still passes ≤1.25 while
-    the recovery is gone). So this asserts the down-week trough SURVIVES, not just that the cap holds.
-    Also CO-FIRES with the re-base graduation: a graduated (shortened) re-base chains into the lifted
-    block, both mechanisms active at once. Pure/deterministic."""
-    from datetime import date, timedelta
-    easy = 425
-    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
-    factor = round(1.0 + EARNED_VOLUME_STEP * EARNED_MAX_TIERS, 4)      # full earned lift (~+16%)
-    grad = REBASE_SHAPE[:len(REBASE_SHAPE) - REBASE_MAX_GRADUATE]       # graduated (shortened) re-base
-    # Seed the re-base from a fit recreational CTL (50) so the lifted block lands with governor
-    # HEADROOM (end_ctl ~26): under the corrected EWMA factor a low seed pins every building week at
-    # the ACWR cap, which both makes the lift inert and ACWR-compresses the 3:1 trough so it can't be
-    # measured. The lift being governor-dominated at realistic low CTL is real + banked for the re-tune
-    # [[governor-lever-retune]]; here we test the lift/trough LOGIC where the lever can actually move.
-    rb, rbm = generate_block(grad, date(2026, 8, 1), 50.0, 48.0, easy)  # → seeds the lifted block
-    bstart = date(2026, 8, 1) + timedelta(weeks=len(grad))
-    shape = build_shape(8, rb[-1]["intent_km"])
-    base0, _ = generate_block(shape, bstart, rbm["end_ctl"], rbm["end_atl"], easy, zones=zones)
-    base1, _ = generate_block(_apply_earned_lift(shape, factor), bstart,
-                              rbm["end_ctl"], rbm["end_atl"], easy, zones=zones)
-    fail, troughs = [], []
-    for w0, w1 in zip(base0, base1):
-        if _is_down(w1.get("intent")) and w1["intent_km"] != w0["intent_km"]:
-            fail.append(f"down#{w1['wk']} intent moved")            # lift must skip down weeks
-        if (w1.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
-            fail.append(f"acwr#{w1['wk']}={w1['proj_acwr']}")       # governor still caps every week
-    for i, w in enumerate(base1):
-        if not _is_down(w.get("intent")):
-            continue
-        nb = [base1[j]["proj_acwr"] for j in (i - 1, i + 1) if 0 <= j < len(base1)]
-        nb_km = [base1[j].get("intent_km") or 0 for j in (i - 1, i + 1) if 0 <= j < len(base1)]
-        a = w.get("proj_acwr") or 0
-        km = w.get("intent_km") or 0
-        troughs.append({"wk": w["wk"], "down_acwr": a, "neighbours": nb})
-        # A genuine recovery trough = the down week sits BELOW its neighbours in BOTH load-ratio (ACWR
-        # not above) and volume. An ACWR margin alone compresses to ~0 once the governor pins building
-        # weeks at the cap (correct-EWMA regime), so volume carries the recovery signal there.
-        if nb and (a > min(nb) + 0.005 or km >= min(nb_km)):       # the recovery dip must stay a dip
-            fail.append(f"trough-collapsed#{w['wk']} acwr {a} vs {nb}, km {km} vs {nb_km}")
-    moved = sum(1 for w0, w1 in zip(base0, base1)
-                if not _is_down(w1.get("intent")) and w1["km"] > w0["km"] + 0.5)
-    if moved == 0:
-        fail.append("lift inert — no non-down week rose")          # the lever must actually move output
-    return _st("det", "earned-lift",
-               "earned lift raises non-down building weeks, PRESERVES the 3:1 trough (down-week ACWR "
-               "below neighbours), holds ≤1.25; co-fires with re-base graduation",
-               passed=not fail, expect="troughs survive · ceiling held · lift moves output",
-               got={"violations": fail or "none", "weeks_moved": moved,
-                    "graduated_rebase_weeks": len(grad)},
-               output={"troughs": troughs})
-
-
-def _fixture_plan_db():
-    """A CONSTRUCTED plan-generation fixture: fresh schema, a known-headroom snapshot (CTL 45,
-    caution regime — no banked evidence) and a marathon 24 weeks out. The deterministic seed the
-    earned/freq gate end-to-end checks run generate_plan on, instead of the ambient DB — whose
-    CTL and regime flip their verdicts (the [[governor-lever-retune]] fixture-hygiene item; the
-    07-03 assertive flip broke the freq e2e the same way). Caller closes."""
-    import sqlite3 as _sq
-    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
-    mem.executescript(SCHEMA)
-    today = datetime.now().date()
-    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
-                "VALUES(?,?,?,?)", (today.isoformat(), 50.0, 45.0, 42.0))
-    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                ("marathon", "Fixture Marathon", (today + timedelta(weeks=24)).isoformat(),
-                 "finish", "A", "upcoming", _now_iso()))
-    mem.commit()
-    return mem
-
-
-def _stc_earned_gate(db):
-    """§6e/§6f earned-progression GATE: it's opt-in and bounded. Default-off is a pure no-op
-    (factor 1.0 ⇒ shape untouched), the lift never scales a down week, the tier math is capped at
-    EARNED_MAX_TIERS, and the LIVE plan exposes the gate state OFF ⇒ factor 1.0 (never automatic).
-    The end-to-end off/on comparison runs on a CONSTRUCTED in-memory fixture at a known-headroom
-    seed, NOT the ambient DB — so the verdict can't flip with whatever DB happens to be loaded
-    (the [[governor-lever-retune]] fixture-hygiene item). Non-persisting (read-only on the DB)."""
-    fails = []
-    sh = build_shape(8, 24)
-    if _apply_earned_lift(sh, 1.0) != sh:
-        fails.append("factor-1.0 not a no-op")                     # the default-off guarantee
-    lifted = _apply_earned_lift(sh, 1.2)
-    for a, b in zip(sh, lifted):
-        if _is_down(a.get("intent")) and b["km"] != a["km"]:
-            fails.append(f"down scaled wk{a['wk']}")
-        elif not _is_down(a.get("intent")) and b["km"] <= a["km"]:
-            fails.append(f"non-down not scaled wk{a['wk']}")
-    tiers = lambda s: min(EARNED_MAX_TIERS, s - EARNED_BANK_AT + 1) if s >= EARNED_BANK_AT else 0
-    if (tiers(EARNED_BANK_AT - 1), tiers(EARNED_BANK_AT), tiers(EARNED_BANK_AT + 50)) \
-            != (0, 1, EARNED_MAX_TIERS):
-        fails.append("tier math not bounded as expected")
-    e = generate_plan(db).get("earned") or {}
-    if not e:
-        fails.append("plan missing earned state")
-    elif not e.get("opted_in") and e.get("factor") != 1.0:
-        fails.append(f"off-but-not-no-op: {e}")                    # off must always mean factor 1.0
-    # End-to-end through generate_plan (force the gate active): the lift must be a SINGLE level-lift
-    # (build ≈ ×F vs off, NOT ×F² compounded phase-over-phase), the down-week troughs must survive
-    # the real chained path, and the lever must actually move output — none of which the regression
-    # `det/earned-lift` (one generate_block) can see. Runs on the CONSTRUCTED fixture, not the
-    # ambient DB: an assertion that flips with ambient CTL/regime isn't a deterministic guardrail —
-    # the old ambient read passed at live CTL 36 and failed at a stale CTL-12 copy
-    # [[governor-lever-retune]].
-    mem = _fixture_plan_db()
-    _orig, F = earned_state, round(1 + EARNED_VOLUME_STEP * EARNED_MAX_TIERS, 4)
-    g = globals()
-    try:
-        off = generate_plan(mem)
-        g["earned_state"] = lambda d, t, pr: {**_orig(d, t, pr), "opted_in": True, "unlocked": True,
-            "ready_ok": True, "active": True, "tiers": EARNED_MAX_TIERS, "factor": F}
-        on = generate_plan(mem)
-    finally:
-        g["earned_state"] = _orig
-        mem.close()
-    nd = lambda pl, k: next((w["intent_km"] for w in (pl.get(k) or {}).get("weeks", [])
-                             if not _is_down(w.get("intent"))), None)
-    bo, bn = nd(off, "build"), nd(on, "build")
-    ratio = round(bn / bo, 3) if bo and bn else None
-    if ratio is not None and ratio > F + 0.06:                     # F²≈1.35 would land well above this
-        fails.append(f"build lift compounded: ×{ratio} (expected ~{F})")
-    moved_e2e, troughs_e2e = 0, []
-    for key in ("base", "build"):
-        ws = (on.get(key) or {}).get("weeks", [])
-        offw = {w["wk"]: w for w in (off.get(key) or {}).get("weeks", [])}
-        for i, w in enumerate(ws):
-            if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
-                fails.append(f"{key} acwr#{w['wk']}={w.get('proj_acwr')}")
-            if _is_down(w.get("intent")):
-                # Trough survival, asserted ONLY on a fully-unclipped triple (same volume-aware
-                # predicate as det/earned-lift): when a building neighbour is governor-clipped below
-                # its intent, the down week can legitimately ride above it — the banked low-CTL
-                # trough inversion, a cap artifact, not a lost recovery [[governor-lever-retune]].
-                # Through the real caution path (fixed small re-base ⇒ low CTL at base/build) a
-                # full-tier lift is governor-dominated, so today every triple clips and this stays a
-                # deterministic diagnostic; the binding dip-under-headroom lock is det/earned-lift.
-                # If a future engine change frees a triple here, the assertion arms itself.
-                nbi = [j for j in (i - 1, i + 1) if 0 <= j < len(ws)]
-                nb = [ws[j].get("proj_acwr") for j in nbi]
-                nb_km = [ws[j].get("km") or 0 for j in nbi]
-                a, km = w.get("proj_acwr") or 0, w.get("km") or 0
-                asserted = bool(nbi) and not w.get("clipped") \
-                    and not any(ws[j].get("clipped") for j in nbi)
-                troughs_e2e.append({"phase": key, "wk": w["wk"], "down_acwr": a, "neighbours": nb,
-                                    "km": km, "nb_km": nb_km, "asserted": asserted})
-                if asserted and (a > min(nb) + 0.005 or km >= min(nb_km)):
-                    fails.append(f"trough-collapsed {key}#{w['wk']} acwr {a} vs {nb}, "
-                                 f"km {km} vs {nb_km}")
-            elif offw.get(w["wk"]) and w["km"] > offw[w["wk"]]["km"] + 0.5:
-                moved_e2e += 1
-    if moved_e2e == 0:   # at the fixture the lever MUST move output (no ambient cap-pinning excuse)
-        fails.append("lift inert e2e — no non-down base/build week rose at the headroom fixture")
-    return _st("det", "earned-gate",
-               "earned lift is opt-in & bounded: factor-1.0 no-op, down weeks never scaled, tiers "
-               "capped; end-to-end on a CONSTRUCTED fixture (not the ambient DB) it's a single "
-               "level-lift (no phase compounding), ceiling held, lift moves output; troughs asserted "
-               "on unclipped triples (else the banked cap-artifact inversion — diagnostic only); "
-               "live plan off ⇒ no-op",
-               passed=not fails, expect="opt-in no-op · single lift · ceiling held · lift moves "
-               "(fixture) · unclipped troughs survive",
-               got={"violations": fails or "none", "build_lift_ratio": ratio,
-                    "weeks_moved_e2e": moved_e2e},
-               output={"earned_live": e, "troughs_e2e": troughs_e2e})
-
-
-def _stc_freq_advance(db):
-    """§6e earned FREQUENCY advance GATE: opt-in, bounded, AND volume-floored. Inactive is a pure
-    no-op; active advances a NON-DOWN Base/Build week to the 6th run ONLY when its non-long runs would
-    still clear FREQ_MIN_EASY_KM — so it's dormant at low volume (no ~2 km junk), wakes as volume
-    grows, never touches down weeks / Peak/Taper, and holds volume + the ACWR ceiling. Live off ⇒
-    inactive / 5 runs. Non-persisting (read-only)."""
-    fails = []
-    # the floor's two sides, at the shape level —
-    # §PRO18 — 24 km/wk no longer sits under the floor: with the long run at 25% instead of 42% the
-    # non-long runs get MORE km (4.25 vs 2.8), so the fixture's "low volume" case had to move down.
-    lo = _apply_freq_advance(build_shape(8, 18), True)             # ~18 km/wk: non-long ≈3.25 km < floor
-    if any(w["runs"] != BASE_RUNS for w in lo):
-        fails.append("low-volume week advanced (floor not enforced)")
-    if _apply_freq_advance(build_shape(8, 18), False) != build_shape(8, 18):
-        fails.append("inactive not a no-op")                       # the default-off guarantee
-    hi_in = build_shape(8, 60)                                     # ~60 km/wk: non-long ≫ floor → advance
-    hi = _apply_freq_advance(hi_in, True)
-    advanced_hi = 0
-    for a, b in zip(hi_in, hi):
-        if _is_down(a.get("intent")):
-            if b["runs"] != a["runs"]:
-                fails.append(f"down advanced wk{a['wk']}")         # recovery trough keeps fewer runs
-        elif b["runs"] != BASE_RUNS + 1:
-            fails.append(f"high-volume non-down not advanced wk{a['wk']}")
-        else:
-            advanced_hi += 1
-        if b["km"] != a["km"]:
-            fails.append(f"volume changed wk{a['wk']}")            # constant volume — only runs change
-    if advanced_hi == 0:
-        fails.append("floor never opens (no high-volume week advanced)")
-    f = generate_plan(db).get("freq") or {}
-    if not f:
-        fails.append("plan missing freq state")
-    elif not f.get("opted_in") and (f.get("active") or f.get("runs") != BASE_RUNS):
-        fails.append(f"off-but-not-no-op: {f}")                    # off must always mean 5 runs / inactive
-    # End-to-end through generate_plan (force the gate active): structural invariants hold whatever
-    # the volume is — down weeks + Peak/Taper stay 5, any non-down Base/Build week is 5-or-6, volume
-    # is unchanged vs off, ACWR held. When the floor keeps it DORMANT (0 advanced) that's correct,
-    # not a failure; advancement itself is covered by the high-volume case. Runs on the CONSTRUCTED
-    # fixture, not the ambient DB — these are caution-era invariants, and an assertive ambient plan
-    # legitimately breaks them (§PRO8 rides the floored cap to 1.30; frozen lived weeks carry his
-    # real 3–4 run counts): the same fixture hygiene as det/earned-gate.
-    mem = _fixture_plan_db()
-    _orig = freq_state
-    g = globals()
-    try:
-        off = generate_plan(mem)
-        g["freq_state"] = lambda d, t, pr: {**_orig(d, t, pr), "opted_in": True, "unlocked": True,
-            "ready_ok": True, "active": True, "runs": BASE_RUNS + 1}
-        on = generate_plan(mem)
-    finally:
-        g["freq_state"] = _orig
-        mem.close()
-    moved = 0
-    for key in ("base", "build", "peak", "taper"):
-        offw = {w["wk"]: w for w in (off.get(key) or {}).get("weeks", [])}
-        for w in (on.get(key) or {}).get("weeks", []):
-            if (w.get("proj_acwr") or 0) > ACWR_SOFT + 0.02:
-                fails.append(f"{key} acwr#{w['wk']}={w.get('proj_acwr')}")
-            # UPPER bound only: the freq contract is "never a 6th run where it shouldn't be";
-            # FEWER runs is legitimate (§JR junk floor sheds sub-2.5km stub days)
-            cap_runs = BASE_RUNS if (key in ("peak", "taper") or _is_down(w.get("intent"))) \
-                else BASE_RUNS + 1
-            if (w.get("runs") or 0) > cap_runs:
-                fails.append(f"{key} runs#{w['wk']}={w.get('runs')} > {cap_runs}")
-            ow = offw.get(w["wk"])
-            if ow and abs((w.get("intent_km") or 0) - (ow.get("intent_km") or 0)) > 0.6:
-                fails.append(f"{key} volume moved#{w['wk']}")      # frequency must not change km
-            if w.get("runs") == BASE_RUNS + 1:
-                moved += 1
-    # §6e2 — THE OFFER MUST BE THE TRUTH. The opt-in copy used to hardcode "it stays at 5 runs …
-    # quiet for now": unfalsifiable, and false for every week §PRO9's spread had already taken to 6.
-    # The replacement is a measured count, so it is now checkable — and this is the check: the number
-    # the banner shows must equal what flipping the lever ACTUALLY does to his visible day counts.
-    seen_move = 0
-    for key in ("base", "build", "bridge"):
-        offw = {w["wk"]: w for w in (off.get(key) or {}).get("weeks", [])}
-        for w in (on.get(key) or {}).get("weeks", []):
-            ow = offw.get(w["wk"])
-            if ow and (w.get("runs") or 0) != (ow.get("runs") or 0):
-                seen_move += 1
-    offer = (off.get("freq") or {}).get("would_advance")
-    if offer is None:
-        fails.append("plan carries no would_advance offer")
-    elif offer != seen_move:
-        fails.append(f"offer lies: promises {offer} weeks move, flipping it moves {seen_move}")
-    if (on.get("freq") or {}).get("would_advance"):
-        fails.append("offer non-zero while the lever is already ON (nothing left to offer)")
-    # ANTI-VACUITY (§43): an equality between two zeroes proves nothing. The fixture must actually
-    # move a week, or this det has quietly stopped testing the claim it is named for.
-    if seen_move == 0:
-        fails.append("fixture no longer moves any week — the offer check has gone vacuous")
-    return _st("det", "freq-advance",
-               "earned 6th run is opt-in, volume-floored & bounded: inactive no-op, floor suppresses "
-               "low-volume weeks + opens high-volume ones, down + Peak/Taper stay 5, volume constant, "
-               "ACWR held, live off ⇒ 5",
-               passed=not fails, expect="opt-in · floored · non-down Base/Build only · constant volume",
-               got={"violations": fails or "none", "advanced_hi_vol": advanced_hi,
-                    "advanced_e2e_fixture": moved, "offer_vs_reality": f"{offer} == {seen_move}"},
-               output={"freq_live": f})
-
-
 def _stc_effort_discipline(db):
     """§6m effort monitor — HR-LED, not TE-led (the load-bearing design choice). The DISCRIMINATING
     case: a long easy run with LOW HR but a duration-lifted high Training Effect must read ON, never
@@ -21543,17 +20930,31 @@ def _stc_card_truth(db):
     past all three fixed publishers verbatim, so the owner's original screenshot week (07-27,
     "48.6 km · 5 runs" over a week he ran as 42.4) survived the whole §CARD campaign. Lived weeks
     are now asserted against the LOG (header == Mon–Sun actuals, ahead settled, sessions verbatim),
-    and the as-laid bar must survive in intent_runs — §CARD2's header rewrite had silently made
-    §6e banking judge the straddle's frozen weeks against their own actuals (see _banked_streak).
+    and the as-laid bar must survive in intent_runs, distinct from the actuals (the prescription
+    record is history the header rewrite must never overwrite — §FORM1: provenance, not a decision).
     Tooth (e) constructs the fossil and drives it through generate_plan itself, because on a DB
     whose every frozen week post-dates the fix the live sweep can no longer distinguish a revert."""
     from datetime import timedelta
+    import sqlite3 as _sq
     fails, saw_partial, saw_trimmed, n_weeks = [], False, False, 0
     saw_frozen = False
     NONREST = lambda ss: [s for s in ss if (s.get("kind") or "") != "rest"]
     # a Thursday: generate_plan's own `today` seam (the §PRO12 lesson) — mid-week ⇒ straddle exists
     anchor = datetime.now().date()
     thursday = anchor + timedelta(days=(3 - anchor.weekday()) % 7)
+    # Frozen-week coverage must be STRUCTURAL, not a race against the wall clock: the sweep used to
+    # rely on the real DB's last saved plan still overlapping today's road, which silently expires
+    # as the DB ages (caught 2026-08-18: the road re-anchored past the June plan and saw_frozen went
+    # false with no code change). Sweep an in-memory COPY seeded with a plan generated one week
+    # earlier, so the new road always has a prior to freeze from.
+    mem_db = _sq.connect(":memory:"); mem_db.row_factory = _sq.Row
+    db.backup(mem_db)
+    _seed_p = generate_plan(mem_db, today=thursday - timedelta(days=7))
+    mem_db.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                   (_now_iso(), (thursday - timedelta(days=7)).isoformat(), "{}",
+                    json.dumps(_seed_p)))
+    mem_db.commit()
+    db = mem_db
     # §CARD2 — ground truth for the straddling week comes from the DB, not from the plan's own
     # fields: the header must equal (what was actually run) + (what is still prescribed), and
     # "actually run" is the same Mon–Sun actuals read the engine itself uses.
@@ -21669,11 +21070,10 @@ def _stc_card_truth(db):
     # live sweep above goes vacuous once every frozen week on the real DB post-dates the fix): a
     # prior plan carries a week frozen under a PRE-§CARD engine — lying header, no done/ahead split
     # — over a lived week whose log says (2 runs, 11.2 km). The regen must carry the SESSIONS
-    # verbatim (§6f) yet publish the header as the actuals, bank the old header's count into
-    # intent_runs, and §6e banking must judge adherence on THAT bar — 2 of 5 runs is a miss, so the
-    # streak is 0. A revert of the true-up fails the header teeth; a revert of the intent_runs
-    # evidence chain (either the preservation or _banked_streak's read) self-banks the week and
-    # fails the streak tooth.
+    # verbatim (§6f) yet publish the header as the actuals, and preserve the old header's count into
+    # intent_runs — the as-laid record must stay DISTINCT from the actuals (§FORM1: display/history
+    # provenance; no decision reads it). A revert of the true-up fails the header teeth; a revert of
+    # the intent_runs preservation fails the bar tooth.
     import sqlite3 as _sq
     _t = _dd(2026, 6, 1)                                   # a Monday; wk 05-25 is the last closed week
     _m = _sq.connect(":memory:"); _m.row_factory = _sq.Row
@@ -21711,11 +21111,6 @@ def _stc_card_truth(db):
         if _fw.get("intent_runs") != 5:
             fails.append(f"fossil prescription bar lost: intent_runs={_fw.get('intent_runs')} "
                          f"(want the pre-fix header's 5)")
-        _streak, _ = _banked_streak(_m, _t, _fp)
-        if _streak != 0:
-            fails.append(f"§6e banking self-banked the lived week (streak {_streak}, want 0): "
-                         f"2 actual runs must be judged against the 5 prescribed, not against "
-                         f"themselves")
     _m.close()
     return _st("det", "card-truth",
                "§CARD a week's header states what its own listing shows: runs == non-rest sessions "
@@ -21723,8 +21118,8 @@ def _stc_card_truth(db):
                "the straddle and race-trim paths provably exercised — the owner caught '5 runs' "
                "over a 4-run listing on his live card; §CARD3 a week fully LIVED states what "
                "actually happened (header == the log's Mon–Sun actuals, sessions verbatim, the "
-               "as-laid bar preserved in intent_runs so §6e banking never judges actuals against "
-               "actuals) — incl. a constructed pre-fix fossil carried through generate_plan",
+               "as-laid bar preserved in intent_runs, distinct from the actuals) — incl. a "
+               "constructed pre-fix fossil carried through generate_plan",
                passed=not fails,
                expect="0 header/listing mismatches over every week × both regimes; straddle + race "
                       "+ frozen weeks all present in the sweep; the fossil trues up and stays "
@@ -21796,6 +21191,10 @@ def _stc_rebase_runway_clamp():
         mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row; mem.executescript(SCHEMA)
         mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
                     "VALUES(?,?,?,?)", (today.isoformat(), 50.0, 30.0, 28.0))
+        # §FORM1 — the re-base lays only on body evidence now; a recent stop-symptom enters caution
+        # through the real gate (the clamp under test is a property of the caution road)
+        mem.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,1)",
+                    ((today - timedelta(days=7)).isoformat(), "ok"))
         for typ, lbl, wks in objs:
             mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
                         "VALUES(?,?,?,?,?,?,?)", (typ, lbl, (today + timedelta(weeks=wks)).isoformat(),
@@ -22856,7 +22255,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),
-                 lambda: _stc_ft_coldstart(), lambda: _stc_ft_scale(), lambda: _stc_polarized(),
+                 lambda: _stc_ft_coldstart(), lambda: _stc_restart_dose(),
+                 lambda: _stc_ft_scale(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),
                  lambda: _stc_taper(), lambda: _stc_taper_touch(db), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
@@ -22864,8 +22264,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_quality_forward(),
                  lambda: _stc_down_weeks(),
                  lambda: _stc_long_run(),
-                 lambda: _stc_earned_lift(), lambda: _stc_earned_gate(db),
-                 lambda: _stc_freq_advance(db), lambda: _stc_effort_discipline(db),
+                 lambda: _stc_effort_discipline(db),
                  lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),

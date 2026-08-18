@@ -45,14 +45,14 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
   (🔒) for as long as they are part of the current block — but when a block ends and the road
   re-anchors, the plan starts from the new block and those older weeks are no longer in it. Nothing
   is lost: every plan ever generated is kept, and the parts of the app that judge you against what
-  was prescribed (your banked-week evidence, the effort monitor) read from that whole history, not
+  was prescribed (the effort monitor) read from that whole history, not
   from the road currently on screen. The plan document answers "where am I going", not "where have
   I been" — the drift scorecard and the prediction ledger answer that.
 - **Safety is a hard ceiling, not a suggestion.** Every planned week is bounded by a hard ACWR cap
-  (acute:chronic workload ratio) of **1.30**, with **1.25** the conservative planning target the rebuild
-  sticks to. Once your data *earns* the assertive build (see §6) the week rides between the two, and further
-  injury brakes beyond ACWR engage (long-run-jump cap, a biomechanical load lens, a tissue limiter). Earned
-  levers raise *volume targets*, never the ceiling.
+  (acute:chronic workload ratio) of **1.30**, with **1.25** the conservative planning target the
+  post-illness rebuild sticks to. On the normal (assertive) build the week rides between the two, and
+  further injury brakes beyond ACWR engage (long-run-jump cap, a biomechanical load lens, a tissue
+  limiter). The plan follows your *measured* form — nothing is unlocked by adherence bookkeeping.
 
 You operate it by keeping your data synced and your objectives current. The engine does the rest; the AI
 layer (optional) only narrates and parses — it never overrides the deterministic safety logic.
@@ -238,27 +238,24 @@ plots the whole ledger, so the projection's own track record is visible rather t
 VO₂max, **CTL** (chronic load ≈ your fitness, a slow ~42-day average), **ATL** (acute load ≈ recent fatigue,
 a fast ~7-day average), and **ACWR** (ATL ÷ CTL — how hard recent load is relative to your base). ACWR near
 1.0 is balanced; the plan holds every week under a hard **1.30** ceiling — targeting **1.25** on the
-conservative rebuild, riding toward 1.30 on the earned assertive build.
+conservative rebuild, riding toward 1.30 on the assertive build.
 
 ### The plan
 A phase bar (Re-base → Base → Build → Peak → Taper, plus any chain bridges) over a "weeks to race day" count.
 Tap a phase to open its weeks; tap a week to open its sessions. Each week shows planned km, run count, the
 projected end-of-week ACWR badge, and — once lived — what you actually ran. Watch for:
 
-- **Regime badge (conservative → assertive)** — the plan tile shows which posture it's in, with the reason.
-  *Conservative* is the rebuild posture (a Re-base plus a gentle fixed ramp); *assertive* rides the safe
-  ACWR ceiling instead. Assertive is **earned automatically from your data** — a clean 56-day
-  medical/symptom window, at least **2 well-absorbed weeks banked**, and green readiness — and the badge
-  names whichever one is still missing ("building tolerance — 1 of 2 weeks banked"). There is no manual
-  override; the safety is in the inference. In the assertive regime the extra injury brakes engage and a
+- **Regime badge (conservative / assertive)** — the plan tile shows which posture it's in, with the reason.
+  *Assertive* is the normal posture: the plan follows your measured form toward the objective, riding
+  the safe ACWR ceiling under the full set of injury brakes. *Conservative* is the **post-illness**
+  posture (a Re-base plus a gentle fixed ramp), and it engages only on **body evidence** — a medical
+  hold, or a stop-symptom check-in within the last 56 days; it lifts by itself once that window is
+  clean. How last week compared to its prescription is *not* a body signal: a travel week, a skipped
+  run, a week lived differently never demotes the plan. In the assertive regime a
   week can be flagged **`long-run held (+10%)`** (the long-run-jump cap) or **`fast load eased`** (the
-  biomechanical brake trimming a fast-load spike to easy).
+  biomechanical brake trimming a fast-load spike to easy). After a long healthy *break*, the plan
+  restarts from a small conservative dose and ramps from there by measurement — no gate, just a floor.
 - **`clipped to fit ACWR`** — the safety ceiling trimmed that week's volume. Expected on aggressive weeks.
-- **Re-base graduation** — bank enough solid weeks and Phase 0 exits a week early (the reward is *time*;
-  volumes and the ceiling are unchanged).
-- **Earned levers** (opt-in, private): *faster build* (a small ACWR-capped volume bump on hard weeks),
-  *earned 6th run* (same volume spread over one more day), and the *CTL volume floor* (volume tracks
-  measured fitness once it outruns the default ramp). All protect recovery weeks and hold the ceiling.
 - **Component chips + the "builds" line** — every quality session carries a small chip naming which of the
   four fitness components it chiefly builds (**VO₂max**, **SSmax/LT2**, **economy**, **resilience** — hover
   a chip for the science), and each phase header sums what the phase is *for*, derived from the sessions
@@ -415,7 +412,7 @@ out of a red/halt. Blank key = every one of these is dormant and the determinist
   running tomorrow's tempo today (or skipping today's easy and doing it tomorrow) is read correctly, not
   flagged as a missed session + a rogue extra one.
 - **Weekly:** check the plan drift scorecard. "Ahead on fitness, behind on volume" tells you which lever to
-  pull. If you've banked solid weeks, the earned levers offer themselves — opt in if you want them.
+  pull.
 - **When you change a goal:** add/remove/re-prioritize in the Objectives panel and regenerate. The drift
   baseline re-anchors to the new goal and self-heals as plans for it accrue.
 
@@ -486,7 +483,7 @@ The canonical no-lab way to measure LTHR (Friel):
 3. Your **average HR over the final 20 minutes** is your LTHR. Enter it under **Settings → Manual LTHR**.
 
 ⚠️ **This is a near-maximal effort.** The app only *suggests* the test (a line on the effort panel) when
-every clearance holds: your plan is on the assertive regime (fitness established — never during a
+every clearance holds: your plan is on the assertive regime (never during a post-illness
 conservative rebuild), your latest check-in is green (no stop-symptom, not heavy-legged), there is no
 medical hold, and the current threshold estimate is actually improvable. If you have any cardiovascular
 history, clear max-effort testing with your doctor first — the derived estimate needs no test at all and
@@ -506,8 +503,8 @@ Anything you'd rather set via environment still works — see the env table in t
 Everything the app knows lives in one SQLite file — but only some of it can be rebuilt. Runalyze can
 re-backfill your activities and fitness history any time; what **cannot** be rebuilt is what you put
 in yourself: objectives and their race outcomes, readiness check-ins, session reflections,
-adjustments, manual lab markers, and the versioned plan history (which carries the engine's banked
-evidence). Back those up.
+adjustments, manual lab markers, and the versioned plan history (which carries every prescription
+ever laid — the effort monitor reads from it). Back those up.
 
 Two downloads, both in **Settings → Backup & export** (private console only):
 
@@ -547,9 +544,10 @@ API keys and tokens are **never** included in either file — they live in a sep
 - **VO₂max** — Aerobic ceiling, read from Runalyze; drives the prescribed pace zones (Daniels VDOT).
 - **LT1** — Aerobic-threshold *pace* (≈ 80 % of 5 k pace), derived from your current fitness so it *moves* as
   you get fitter or detrain. The effort monitor's easy-pace ceiling when a trustworthy LTHR isn't available.
-- **Regime (conservative / assertive)** — the plan's safety posture: *conservative* is the rebuild;
-  *assertive* rides the safe ACWR ceiling, earned automatically from your data (clean medical/symptom window +
-  banked well-absorbed weeks + green readiness). No manual override.
+- **Regime (conservative / assertive)** — the plan's safety posture: *assertive* is the normal,
+  form-following build; *conservative* is the post-illness rebuild, entered on body evidence only
+  (a medical hold or a recent stop-symptom) and lifted once the 56-day window is clean. No manual
+  override, and no adherence bookkeeping.
 - **LTHR** — Lactate-Threshold Heart Rate. The HR you can hold at the aerobic/anaerobic turnpoint; anchors the
   HR zones and the effort monitor (Friel's run zones are all %LTHR). Derived from your sustained hard efforts,
   with a confidence flag; a %HRmax estimate stands in (provisional) until there's enough data.
@@ -565,8 +563,6 @@ API keys and tokens are **never** included in either file — they live in a sep
   from your own history rather than assumed. The median under it is the trend signal, not a promise.
 - **Prediction ledger** — the running record of every finish prediction made for a goal, and how each one
   scored once the race was run.
-- **Earned levers** — opt-in, ACWR-capped progressions (faster build / 6th run / faster Phase-0 exit) unlocked by banked solid weeks.
-
 ---
 
 *For the change history see [CHANGELOG.md](CHANGELOG.md). For licensing and the honest AI-assisted provenance

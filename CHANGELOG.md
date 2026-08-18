@@ -10,7 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
-## [Unreleased]
+## [0.26.0] - 2026-08-18
+
+### Changed
+
+- **The plan follows your measured form — the obedience gate is gone.** Until now the engine
+  inferred your health from how closely each week matched its prescription: a "banked streak" of
+  plan-adherent weeks earned the normal (assertive) build, and any single miss — even a travel week
+  where you ran *more* kilometres than planned, in fewer runs, and absorbed them cleanly — zeroed
+  that streak and collapsed the whole road into the post-illness rebuild. That machinery is
+  removed: the streak, the regime's "well-absorbed weeks banked" requirement, the re-base's earned
+  early exit, the opt-in earned faster build, and the opt-in earned 6th run. The conservative
+  posture now engages on **body evidence only** — a medical hold, or a stop-symptom check-in within
+  the last 56 days — and lifts by itself once that window is clean. How you lived last week is
+  never a reason to shrink the next one; your measured fitness, and the safety ceilings, already
+  carry that. (The two opt-in toggles disappear from Settings; nothing you need to do.)
+- **Coming back after a long healthy break starts from a small dose, not from zero.** With the
+  gate gone, a runner whose recent weeks are empty (travel, a lapsed season) is planned from a
+  conservative restart dose — the same first week the post-illness block prescribes — and the plan
+  ramps from there by measurement. Previously this case could only produce the gated rebuild;
+  internally the ungated path would have degenerated to near-zero weeks, which is also fixed.
 
 ## [0.25.3] - 2026-08-15
 
