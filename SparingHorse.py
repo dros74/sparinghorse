@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.26.1"
+ENGINE_VERSION = "0.26.2"
 
 
 def activity_profile(activity_id, n=120):
@@ -4989,7 +4989,23 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                     break                       # every day is at the cap — the week genuinely cannot
                 for s in _free:                 # hold it, and §PRO9's ceiling outranks the shape
                     short_w[s] += _spill * short_w[s] / _room
-    first_easy = min(easy_slots) if easy_slots else None
+    # strides land on the freshest-legs day: the short easy slot furthest (max-min day distance)
+    # from every heavy session — this week's long run, each quality day, and last week's long one
+    # slot back. The old rule ("the first easy run, as in the re-base") predates base-week quality
+    # and put a neuromuscular sprint stimulus on the classic recovery day, sandwiching the week's
+    # three hardest stimuli back-to-back-to-back: Sun long → Mon strides → Tue intervals (his
+    # 2026-08-20 ask — "an increased strain on my legs… three in-a-row"; strain, not stimulus).
+    # It is the same principle §PRO24's ladder measured on his own corpus — the day after a long
+    # run runs LIGHT (0.929 ± 0.031 vs 1.086 two days out) — and §JR's pre-long freshness shed.
+    # Ties break to the LATER day (further from last week's long). On the standard 6-run base week
+    # this lands Thursday; every phase moves with the same rule (a shape rule, not a load lever —
+    # deliberately NOT caution-byte-identical, weekly km untouched).
+    strides_slot = None
+    _s_cand = [i for i in easy_slots if i != long_idx]
+    if _s_cand:
+        _heavy = [days[s] for s in q_by_slot] + [days[long_idx], days[long_idx] - 7]
+        strides_slot = max(_s_cand,
+                           key=lambda i: (min(abs(days[i] - h) for h in _heavy), days[i]))
     for i in easy_slots:
         is_long = (i == long_idx)
         if is_long:
@@ -5029,7 +5045,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                 km = round(mins * 60 / easy_pace_sec, 1)
                 tr = round(mins * EASY_TRIMP_PER_MIN, 1)
         note = "long easy run" if is_long else "easy run"
-        carries_strides = bool(wk["strides"]) and not is_long and i == first_easy
+        carries_strides = bool(wk["strides"]) and not is_long and i == strides_slot
         if carries_strides:
             note += f" + {wk['strides']}×4–6 strides"
         if is_long and long_step_capped:                # §PRO9
@@ -21813,6 +21829,54 @@ def _stc_junk_floor():
                        "zero": [(s["kind"], s["km"]) for s in zero]})
 
 
+def _stc_strides_day():
+    """Strides land on the freshest-legs day (his 2026-08-20 ask): the short easy slot with the
+    max-min day distance to every heavy session — this week's long, each quality day, and last
+    week's long one slot back. The old rule rode the FIRST easy run, stacking Sun long → Mon
+    strides → Tue intervals three-in-a-row. Locks: the 6-run quality week carries strides ≥2 days
+    clear of both quality and long (never Monday, never the long itself, exactly ONE carrier);
+    the plain 5-run week lands Thursday; a §JR-collapsed week simply drops them (no stub carrier)."""
+    from datetime import date
+    zones = {"easy_top": 430, "easy": 460, "marathon": 400, "threshold": 370, "interval": 340}
+    mon = date(2026, 8, 24)
+    fails = []
+
+    def carriers(ss):
+        return [(_date(s["date"]) - mon).days for s in ss if s.get("strides")]
+    qwk = {"wk": 2, "km": 50, "runs": 6, "long": 13, "strides": 2, "intent": "General",
+           "quality": [{"kind": "interval", "zone": "interval", "frac": 0.12,
+                        "structure": "intervals", "rep_min": 2, "rec_min": 2, "label": "x"}]}
+    qs, _ = _distribute_week(qwk, mon, 420, 430, zones)
+    qc = carriers(qs)
+    q_off = [(_date(s["date"]) - mon).days for s in qs if s.get("reps")]
+    l_off = [(_date(s["date"]) - mon).days for s in qs if s.get("kind") in ("long", "long_mp")]
+    if len(qc) != 1:
+        fails.append(f"quality week: expected exactly one strides carrier, got {qc}")
+    else:
+        heavy = q_off + l_off + [l_off[0] - 7 if l_off else -1]
+        gap = min(abs(qc[0] - h) for h in heavy)
+        if qc[0] == 0 or gap < 2:
+            fails.append(f"quality week: strides at offset {qc[0]} (gap {gap}) — the Mon sandwich "
+                         f"(long → strides → intervals) is back")
+        if qc[0] in l_off:
+            fails.append("strides landed on the long run")
+    pwk = {"wk": 2, "km": 34, "runs": 5, "long": 9, "strides": 2, "intent": "General"}
+    ps, _ = _distribute_week(pwk, mon, 290, 430)
+    pc = carriers(ps)
+    if pc != [3]:
+        fails.append(f"plain 5-run week: strides should land Thu (offset 3, max-min from both "
+                     f"longs), got {pc}")
+    cs, _ = _distribute_week(pwk, mon, 45, 430)          # §JR collapse — one honest long, no strides
+    if carriers(cs):
+        fails.append(f"collapsed week must drop strides, got carriers {carriers(cs)}")
+    return _st("det", "strides-day",
+               "strides ride the easy day furthest from every heavy session (quality, this long, "
+               "last week's long) — never the first-easy Monday sandwich, never the long, dropped "
+               "on a collapsed week",
+               passed=not fails, expect="one carrier · ≥2 days clear · plain week = Thu · collapse drops",
+               got={"quality_week": qc, "plain_week": pc, "violations": fails or "none"})
+
+
 def _stc_structure():
     """§RD — the workout-structure classifier reads a recorded pace profile back into the plan's
     vocabulary. Fixtures are synthesized 1Hz streams with deterministic jitter; the flagship case is
@@ -22385,6 +22449,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_long_run(),
                  lambda: _stc_effort_discipline(db),
                  lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
+                 lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),

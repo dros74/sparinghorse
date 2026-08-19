@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.26.2] - 2026-08-20
+
+### Fixed
+
+- **Strides no longer stack onto the heavy end of the week.** They used to ride the first easy run
+  — Monday, right between Sunday's long run and Tuesday's intervals, three harder days in a row.
+  Strides now land on the easy day furthest from every hard session (this week's long, any quality
+  day, and last Sunday's long), which on a typical week means Thursday. Same sessions, same weekly
+  volume — just spread so your legs get to be fresh for the part that needs them.
+
 ## [0.26.1] - 2026-08-19
 
 ### Fixed
