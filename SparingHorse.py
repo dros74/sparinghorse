@@ -4994,7 +4994,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # slot back. The old rule ("the first easy run, as in the re-base") predates base-week quality
     # and put a neuromuscular sprint stimulus on the classic recovery day, sandwiching the week's
     # three hardest stimuli back-to-back-to-back: Sun long → Mon strides → Tue intervals (his
-    # 2026-08-20 ask — "an increased strain on my legs… three in-a-row"; strain, not stimulus).
+    # 2026-08-19 ask — "an increased strain on my legs… three in-a-row"; strain, not stimulus).
     # It is the same principle §PRO24's ladder measured on his own corpus — the day after a long
     # run runs LIGHT (0.929 ± 0.031 vs 1.086 two days out) — and §JR's pre-long freshness shed.
     # Ties break to the LATER day (further from last week's long). On the standard 6-run base week
@@ -21830,7 +21830,7 @@ def _stc_junk_floor():
 
 
 def _stc_strides_day():
-    """Strides land on the freshest-legs day (his 2026-08-20 ask): the short easy slot with the
+    """Strides land on the freshest-legs day (his 2026-08-19 ask): the short easy slot with the
     max-min day distance to every heavy session — this week's long, each quality day, and last
     week's long one slot back. The old rule rode the FIRST easy run, stacking Sun long → Mon
     strides → Tue intervals three-in-a-row. Locks: the 6-run quality week carries strides ≥2 days

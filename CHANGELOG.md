@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
-## [0.26.2] - 2026-08-20
+## [0.26.2] - 2026-08-19
 
 ### Fixed
 
