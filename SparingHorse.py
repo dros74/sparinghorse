@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.26.0"
+ENGINE_VERSION = "0.26.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -4898,6 +4898,16 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         drop = max((i for i in easy_slots if i != long_idx), key=lambda i: days[i])
         easy_slots.remove(drop)
         n_short -= 1
+    # §JR (0.26.1) — not even ONE honest run fits. The collapse above needs a POSITIVE stub
+    # (`0 < …`), so a budget crushed to exactly zero sailed past it: the shorts shed, the long slot
+    # survived, and the plan published a "0.0 km · long easy run" (live 2026-08-18: ACWR 1.32 ≥ the
+    # hard ceiling governed the straddle remainder to nothing, and the card counted the stub as a
+    # run). A zero budget lays NOTHING — taper included, a 0-km "leg-loosener" is no prescription
+    # at all — and a positive budget below one honest run sheds the collapsed long slot too.
+    if easy_budget <= 1e-9:
+        easy_slots, n_short = [], 0
+    elif long_idx in easy_slots and n_short == 0 and easy_budget < min_tr:
+        easy_slots = []
     # §PRO9 (§PRO15 follow-on) — the cap is a PROMISE about the single longest run, so it has to
     # survive the §JR collapse too. The share-based clip above requires n_short > 0; once shedding
     # leaves the long slot alone it takes the WHOLE easy budget (`long_w if n_short else 1.0`) and
@@ -5661,6 +5671,19 @@ def _mark_load_integrity(w, zones):
     intent = w.get("intent")
     if _is_down(intent) or _is_taper(intent):
         return w
+    # §JR (0.26.1) — the governor crushed this week below even ONE honest run and the junk floor
+    # shed everything rather than publish 0.0-km stubs (the old path laid a "0.0 km · long easy
+    # run" here). An EMPTY building week must still say why — the same promise as the relabel
+    # below: deliver load, or say why it couldn't. Two exemptions, both false attributions:
+    # a met week's optional-rest card is the opposite story (the load is already run), and an
+    # §AV away-shed week is empty because of TRAVEL — pre-§JR it laid nothing too, and a week
+    # both away-shed and fatigue-crushed stays silent rather than guess which one to blame.
+    if (not [s for s in w.get("sessions", []) if (s.get("kind") or "") != "rest"]
+            and not (w.get("frequency_met") or w.get("volume_met") or w.get("av_shed"))):
+        w["long_capped"] = True
+        if zones is not None:                  # building phase (re-base is the pure-easy zones=None block)
+            w["fatigue_capped"] = True
+        return w
     longs = [s for s in w.get("sessions", []) if s.get("kind") == "long"]
     if longs and (longs[0].get("km") or 0) < LONG_RUN_MIN_KM:
         s = longs[0]
@@ -5991,6 +6014,24 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 pweek["av_dates"] = av_dates               # field; the public plan view strips it)
                 if av_shed:
                     pweek["av_shed"] = av_shed
+            # §PRO6 (0.26.1) — fold the straddling week into the near-ceiling streak + trough
+            # anchor, judged exactly as the frozen fold will judge this same week next Monday
+            # (down/taper intent resets; otherwise its proj_acwr counts against NEAR_CEILING_ACWR
+            # and trimp_total anchors the trough). This branch `continue`s past the full-week
+            # bookkeeping, so a down week UNDERWAY never reset the streak: on the 2026-08-19 live
+            # plan, three near-ceiling lived weeks + the straddling shape down week left
+            # consec_hard at 3, §PRO6 tripped on the very next week, and §PRO11 pulled the base's
+            # END down week forward — two consecutive absorption weeks, no recovery left in the
+            # block tail, and the miscount cascaded a second pull plus a forced pure-easy deload
+            # into the build phase. Which DAY of the week the plan is regenerated on must not
+            # re-phase the road — this is the fold's judgment applied at lay time.
+            if assertive:
+                if _is_down(wk.get("intent")) or _is_taper(wk.get("intent")):
+                    consec_hard = 0
+                else:
+                    consec_hard = consec_hard + 1 if (eow and eow >= NEAR_CEILING_ACWR) else 0
+                    if pweek["trimp_total"]:
+                        last_nondown = pweek["trimp_total"]
             weeks.append(pweek)
             blk_longs.append(max(week_actual_long or 0.0, _week_long_km(rem_s)))
             blk_eqs.append(round((week_actual_eq or 0.0) + _week_eq_km(rem_s), 2))
@@ -19986,6 +20027,67 @@ def _stc_meso_rephase():
                     "failures": fail or "none"})
 
 
+def _stc_straddle_streak():
+    """§PRO6 (0.26.1) — the STRADDLING week folds into the near-ceiling streak like any other week,
+    so the plan does not re-phase depending on which DAY it is regenerated. Two limbs, both from the
+    2026-08-19 live plan:
+    (a) THE TOOTH — a shape DOWN week underway must RESET the streak. Left unreset (the straddle
+        branch `continue`d past the bookkeeping), three near-ceiling lived weeks + the straddling
+        down week left consec_hard at the cap, §PRO6 tripped on the very next week, and §PRO11
+        pulled the block's END down week forward: TWO consecutive absorption weeks, no recovery
+        left in the block tail — the exact plan the owner flagged ("the absorption week moved to
+        next week").
+    (b) DAY-INVARIANCE — a near-ceiling BUILDING week underway must COUNT: the §PRO6 trip lands on
+        the same week a Monday regeneration (frozen fold, same judgment) would put it."""
+    from datetime import date, timedelta
+    easy, bs = 425, date(2026, 8, 3)                       # Monday
+    today = bs + timedelta(days=3)                          # Thursday — wk1 straddles it
+    fail = []
+    # (a) wk1 = the shape's own down week, underway; wk2/wk3 build; wk4 = the shape's next trough.
+    shape_a = [{"wk": 1, "km": 34, "runs": 4, "long": 10, "strides": 0,
+                "intent": "Down week — absorb the block"}] + \
+              [{"wk": i, "km": 50, "runs": 5, "long": 13, "strides": 0, "intent": "Build — general"}
+               for i in (2, 3)] + \
+              [{"wk": 4, "km": 38, "runs": 4, "long": 11, "strides": 0,
+                "intent": "Down week — absorb the block"}]
+    aw, _ = generate_block(shape_a, bs, 60.0, 60.0, easy, today=today,
+                           regime="assertive", consec_hard=MESO_MAX_HARD, last_nondown=400.0)
+    downs = [w["wk"] for w in aw if _is_down(w.get("intent"))]
+    if downs != [1, 4]:
+        fail.append(f"downs must be the shape's own [1, 4] (the straddling down RESETS the streak); got {downs}")
+    if any(w.get("deload_pulled") or w.get("deload_forced") for w in aw):
+        fail.append("no pull/force may fire — the recovery is already underway")
+    if any(_is_down(a.get("intent")) and _is_down(b.get("intent")) for a, b in zip(aw, aw[1:])):
+        fail.append("two consecutive absorption weeks (the 2026-08-19 live defect)")
+    # (b) wk1 = a building week underway, riding near the ceiling; the seeded streak is one short of
+    # the cap, so COUNTING wk1 trips §PRO6 at wk2 and §PRO11 pulls wk3's trough there — exactly
+    # where a Monday regeneration would land it. Skipping wk1 leaves the shape untouched.
+    shape_b = [{"wk": i, "km": 50, "runs": 5, "long": 13, "strides": 0, "intent": "Build — general"}
+               for i in (1, 2)] + \
+              [{"wk": 3, "km": 38, "runs": 4, "long": 11, "strides": 0,
+                "intent": "Down week — absorb the block"}]
+    bw, _ = generate_block(shape_b, bs, 60.0, 66.0, easy, today=today,
+                           regime="assertive", consec_hard=MESO_MAX_HARD - 1, last_nondown=400.0)
+    if (bw[0].get("proj_acwr") or 0) < NEAR_CEILING_ACWR:
+        fail.append(f"fixture rot: straddling build week must ride near-ceiling, proj_acwr={bw[0].get('proj_acwr')}")
+    if [w["wk"] for w in bw if w.get("deload_pulled")] != [2]:
+        fail.append(f"counting the straddle must pull the trough to wk 2 (Monday-regen parity); "
+                    f"pulled={[w['wk'] for w in bw if w.get('deload_pulled')]}")
+    # caution untouched — the fold is assertive-only, like every consumer of the streak
+    cw, _ = generate_block([dict(w) for w in shape_a], bs, 60.0, 60.0, easy, today=today,
+                           regime="caution", consec_hard=MESO_MAX_HARD, last_nondown=400.0)
+    if any(w.get("deload_pulled") or w.get("deload_forced") for w in cw):
+        fail.append("caution must never re-phase or force (assertive-only)")
+    return _st("det", "straddle-streak",
+               "§PRO6 straddle fold: a down week underway resets the near-ceiling streak (no second "
+               "absorption week stacked after it), a riding week underway counts toward it — the "
+               "regeneration DAY never re-phases the road; caution untouched",
+               passed=not fail,
+               expect="downs [1,4] · no pull/force after a straddling down · build-straddle pulls at wk 2",
+               got={"downs_a": downs, "pulled_b": [w["wk"] for w in bw if w.get("deload_pulled")],
+                    "straddle_acwr_b": bw[0].get("proj_acwr"), "failures": fail or "none"})
+
+
 def _stc_regime_plan():
     """§PRO3/§PRO4 INTEGRATION — generate_plan in the ASSERTIVE regime (in-memory DB; §FORM1:
     assertive is the clean-body default — the history exists to seed the governors, not to earn the
@@ -21685,14 +21787,30 @@ def _stc_junk_floor():
     tap, _ = _distribute_week(twk, date(2026, 7, 6), 130, 430)
     if len(tap) != 5:
         fails.append(f"taper not exempt (race-week leg-looseners are real): {len(tap)} runs")
+    # 0.26.1 — the zero-stub teeth (live 2026-08-18: the ACWR hard ceiling governed a straddle
+    # remainder to ZERO and the long slot survived as "0.0 km · long easy run", counted as a run
+    # on the card). A zero budget lays NOTHING (taper included — a 0-km run is no prescription);
+    # a positive budget below ONE honest run (min_tr ≈ 23.3 here) lays nothing either.
+    zero, zdt = _distribute_week(wk, date(2026, 7, 6), 0.0, 430)
+    if zero or zdt:
+        fails.append(f"zero budget laid stubs: {[(s['kind'], s['km']) for s in zero]}")
+    sub, _ = _distribute_week(wk, date(2026, 7, 6), 20, 430)
+    if sub:
+        fails.append(f"sub-floor budget laid stubs: {[(s['kind'], s['km']) for s in sub]}")
+    tapz, _ = _distribute_week(twk, date(2026, 7, 6), 0.0, 430)
+    if tapz:
+        fails.append(f"taper zero budget laid stubs: {[(s['kind'], s['km']) for s in tapz]}")
     return _st("det", "junk-floor",
                "no prescribed run under RUN_MIN_KM: a crushed budget sheds days (real runs only), "
-               "collapses to one run at the extreme, leaves normal weeks byte-identical, and keeps "
+               "collapses to one run at the extreme, lays NOTHING when even one honest run can't "
+               "be made (0.26.1 zero-stub), leaves normal weeks byte-identical, and keeps "
                "the structured session on a crushed building week",
-               passed=not fails, expect=f"stubs shed days · ≥{RUN_MIN_KM}km/run · normal untouched",
+               passed=not fails, expect=f"stubs shed days · ≥{RUN_MIN_KM}km/run · zero budget lays "
+                                        f"nothing · normal untouched",
                got={"violations": fails or "none"},
                output={"crushed": [(s["kind"], s["km"]) for s in crushed],
-                       "tiny": [(s["kind"], s["km"]) for s in tiny]})
+                       "tiny": [(s["kind"], s["km"]) for s in tiny],
+                       "zero": [(s["kind"], s["km"]) for s in zero]})
 
 
 def _stc_structure():
@@ -22252,6 +22370,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_clock_couple(), lambda: _stc_easy_ladder(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
+                 lambda: _stc_straddle_streak(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),

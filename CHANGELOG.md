@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.26.1] - 2026-08-19
+
+### Fixed
+
+- **No more 0.0 km runs.** When you front-load a week hard enough that the safety brake rests the
+  remaining days entirely, the plan used to keep an empty placeholder — a "0.0 km · long easy run"
+  that even counted as a run in the week's header. A rested remainder now simply lays nothing: the
+  card shows what you ran and nothing fake ahead. If the brake ever rests a whole *future* week, the
+  card now says the build was capped by recent fatigue instead of showing an unexplained blank.
+- **The absorption week no longer doubles up.** If the plan was regenerated *during* a down week,
+  the engine forgot that the recovery it was asking for was already happening — so it pulled the
+  next scheduled down week forward and you got two absorption weeks back to back, while the
+  recovery that belonged at the end of the block vanished (and the miscount rippled extra troughs
+  into the build). The week you are living now counts exactly as it will once it's over: one
+  recovery per cycle, and the road ahead no longer depends on which day of the week you hit
+  regenerate.
+
 ## [0.26.0] - 2026-08-18
 
 ### Changed
