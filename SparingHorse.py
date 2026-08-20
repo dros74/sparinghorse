@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.26.2"
+ENGINE_VERSION = "0.26.3"
 
 
 def activity_profile(activity_id, n=120):
@@ -8659,6 +8659,8 @@ def adjudicate_objectives(db, today=None):
 # readiness metric the personal REST API exposes; RHR/sleep trends are MCP-only) with a
 # subjective daily check-in. The check-in is the safety-critical input: a returning
 # "had-to-stop" exertional symptom RED-flags the day and halts the plan (his 2025 history).
+READINESS_ENERGY = ("good", "ok", "heavy")   # the check-in vocabulary — the UI's three legs options;
+READINESS_SLEEP = ("good", "ok", "poor")     # the engine tests "heavy" / "poor", the API rejects the rest
 def hrv_signal(db):
     """Objective HRV readiness from the latest shape snapshot: 'low' | 'ok' | 'high' | None."""
     row = latest_snapshot(db)
@@ -9216,13 +9218,40 @@ def body():
     return request.get_json(silent=True) or {}
 
 
+def _int_arg(name, default, lo=1, hi=None):
+    """A bounded integer query parameter, or a JSON 400 — never a bare int() that answers junk with an
+    HTML 500 (0.26.3; det/api-validation). Returns (value, None) or (None, (response, 400)): absent/blank
+    ⇒ default; non-integer or out of [lo, hi] ⇒ the 400."""
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default, None
+    v = request.args.get(name, type=int)
+    if v is None or v < lo or (hi is not None and v > hi):
+        bound = f"between {lo} and {hi}" if hi is not None else f"≥ {lo}"
+        return None, (jsonify(ok=False, error=f"{name} must be an integer {bound}"), 400)
+    return v, None
+
+
 def replan(db, mutate):
-    """Re-periodize around a write (§6b): snapshot the plan, apply `mutate`, commit, return the diff.
-    Centralises the invariant that every objective/adjustment change re-anchors the road ahead."""
-    base = plan_baseline(db)
-    mutate()
-    db.commit()
-    return jsonify(regenerate(db, baseline=base))
+    """Re-periodize around a write (§6b): snapshot the plan, apply `mutate`, regenerate, commit, return
+    the diff. Centralises the invariant that every objective/adjustment change re-anchors the road
+    ahead — and (0.26.3) that the write and its re-plan land TOGETHER. The mutation stays uncommitted
+    until `regenerate` has digested it: save_plan commits the write and the new plan at once; when no
+    plan can be built without raising (the last race removed ⇒ maintenance) the explicit commit keeps
+    the write; and a re-plan that RAISES rolls the write back and answers JSON 500 — never an HTML 500
+    over a half-applied change. Before this the write was committed FIRST: a malformed objective date
+    landed, then poisoned every later regeneration (the nightly included — /api/plan kept serving the
+    last saved plan while every generate raised) until the row was deleted by hand (Codex review,
+    2026-08-20; det/api-validation drives the raise for real)."""
+    try:
+        base = plan_baseline(db)
+        mutate()
+        out = regenerate(db, baseline=base)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return jsonify(ok=False, error=f"change not applied — re-planning failed: {e}"), 500
+    return jsonify(out)
 
 
 @app.get("/healthz")
@@ -9342,7 +9371,9 @@ def api_effort_discipline():
     """§6m — effort vs prescription over the recent window. PRIVATE console = the HR-led read (per-run
     HR + TE + feeling); PUBLIC read-only showcase = a SANITIZED pace-based easy-discipline score with no
     HR or personal critique (READONLY → public=True). `?days=N` (default 21)."""
-    days = int(request.args.get("days", str(EFFORT_WINDOW_DAYS)))
+    days, err = _int_arg("days", EFFORT_WINDOW_DAYS, hi=3650)
+    if err:
+        return err
     return jsonify(effort_discipline(get_db(), window_days=days, public=READONLY))
 
 
@@ -9371,7 +9402,9 @@ def api_projector():
     """The reconstructed fitness/fatigue curve + a validation of the model against
     Runalyze's reported values. `?days=N` trims the returned history (default 180)."""
     db = get_db()
-    days = int(request.args.get("days", "180"))
+    days, err = _int_arg("days", 180, hi=3650)
+    if err:
+        return err
     hist = reconstruct_history(db)
     modeled, snap = current_model(db)
     valid = None
@@ -9866,11 +9899,17 @@ def api_objectives_add():
     d = body()
     if not d.get("date"):
         return jsonify(ok=False, error="need a date"), 400
+    try:                                   # the engine reads this with _date() — reject junk HERE, not
+        _date(str(d["date"]))              # after it is in the table (0.26.3; det/api-validation)
+    except (ValueError, TypeError):
+        return jsonify(ok=False, error="date must be YYYY-MM-DD"), 400
+    if d.get("priority", "A") not in ("A", "B", "C"):
+        return jsonify(ok=False, error="priority must be A, B or C"), 400
     db = get_db()
     return replan(db, lambda: db.execute(
         "INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (d.get("type", "custom"), d.get("label", "Race"), d["date"],
+        (d.get("type", "custom"), d.get("label", "Race"), str(d["date"]),
          d.get("target", "finish"), d.get("priority", "A"), "upcoming", _now_iso()),
     ))
 
@@ -10191,15 +10230,22 @@ def api_readiness():
 
 @app.post("/api/readiness")
 def api_readiness_post():
-    """Submit today's check-in: {energy, sleep, stop_symptom, note}."""
+    """Submit today's check-in: {energy, sleep, stop_symptom, note}. energy/sleep must be in the
+    check-in vocabulary (READINESS_ENERGY / READINESS_SLEEP): the engine only ever tests for "heavy"
+    and "poor", so an unknown word used to be stored verbatim and read back as "all signals normal"
+    (0.26.3; det/api-validation)."""
     d = body()
+    energy, sleep = d.get("energy") or "ok", d.get("sleep") or "ok"
+    if energy not in READINESS_ENERGY or sleep not in READINESS_SLEEP:
+        return jsonify(ok=False, error=f"energy must be one of {'|'.join(READINESS_ENERGY)} and "
+                                       f"sleep one of {'|'.join(READINESS_SLEEP)}"), 400
     db = get_db()
     today = datetime.now().strftime("%Y-%m-%d")
     db.execute(
         "INSERT OR REPLACE INTO readiness (date,energy,sleep,stop_symptom,note,created_at) "
         "VALUES (?,?,?,?,?,?)",
-        (today, d.get("energy", "ok"), d.get("sleep", "ok"),
-         1 if d.get("stop_symptom") else 0, d.get("note", ""), _now_iso()),
+        (today, energy, sleep,
+         1 if d.get("stop_symptom") else 0, str(d.get("note") or ""), _now_iso()),
     )
     db.commit()
     # §H3 — if THIS check-in flags a stop-symptom (checkbox or the §H2 deterministic note catch),
@@ -10541,7 +10587,9 @@ def api_weekly():
     """Running km per ISO week. `weeks>0` trims to the most recent N; `weeks<=0` returns the
     FULL history so the volume chart can pan back/forth over everything we own (it's tiny —
     a few hundred {week,km} rows)."""
-    weeks = int(request.args.get("weeks", "26"))
+    weeks, err = _int_arg("weeks", 26, lo=0, hi=520)   # 0 = the full history (the chart's own call)
+    if err:
+        return err
     rows = db_weekly_running()
     return jsonify(rows[-weeks:] if weeks > 0 else rows)
 
@@ -10552,7 +10600,9 @@ def api_vo2max():
     background sparkline. shape_snapshots only holds today's value, so the trend comes from
     each run's own vo2max estimate (in the raw activity JSON), lightly smoothed."""
     db = get_db()
-    months = int(request.args.get("months", "6"))
+    months, err = _int_arg("months", 6, hi=120)
+    if err:
+        return err
     return jsonify(vo2max_trend(db, months))
 
 
@@ -21025,6 +21075,96 @@ def _stc_effort_discipline(db):
                        "public_score": pub.get("easy_score"), "public_ceiling": pub.get("easy_pace_ceiling")})
 
 
+def _stc_api_validation(db):
+    """0.26.3 — the write endpoints reject junk at the door, and a write whose re-plan fails is never
+    committed (Codex review 2026-08-20 — all three defects were reproduced through the real endpoints):
+      (a) POST /api/objectives with a non-ISO date → 400 and NO row. Before: the row was committed
+          FIRST and then poisoned every later regeneration (nightly included) — /api/plan kept serving
+          the last saved plan while /api/plan/generate raised — until the row was deleted by hand.
+      (b) replan() is ATOMIC: a mutation whose regenerate() RAISES is rolled back and answered as JSON
+          500, never an HTML 500 over a half-applied change. Driven for real: `regenerate` is swapped
+          for a raiser for ONE valid POST, and the objectives table must be unchanged afterwards.
+      (c) POST /api/readiness rejects energy/sleep outside the check-in vocabulary (before: stored
+          verbatim and read back as "all signals normal"); the bad check-in must not land.
+      (d) the integer query args (effort-discipline days, projector days, weekly weeks, vo2max months)
+          answer junk with JSON 400 — not a bare int() ValueError and an HTML 500 — and the happy path
+          still serves.
+    Runs against the HOST DB through app.test_client(); every probe is a REJECTED write, and the
+    row counts are asserted unchanged so the det leaves nothing behind."""
+    global READONLY, regenerate
+    from datetime import timedelta
+    fails = []
+    counts = lambda: tuple(db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                           for t in ("objectives", "plans", "readiness"))
+    before = counts()
+    saved_ro, saved_regen = READONLY, regenerate
+    c = app.test_client()
+
+    def is_json(r):
+        return (r.headers.get("Content-Type") or "").startswith("application/json")
+    try:
+        READONLY = False                 # the private write surface is what's under test
+        # (a) junk objective date → 400, JSON, nothing committed
+        r = c.post("/api/objectives", json={"type": "marathon", "label": "junk", "date": "not-a-date"})
+        if r.status_code != 400 or not is_json(r) or (r.get_json() or {}).get("ok") is not False:
+            fails.append(f"(a) junk objective date answered {r.status_code} "
+                         f"{'json' if is_json(r) else 'non-json'} — want JSON 400")
+        r = c.post("/api/objectives", json={"type": "marathon", "label": "junk",
+                                            "date": (datetime.now().date() + timedelta(days=100)).isoformat(),
+                                            "priority": "Z"})
+        if r.status_code != 400:
+            fails.append(f"(a) junk objective priority answered {r.status_code} — want 400")
+        if counts() != before:
+            fails.append(f"(a) a rejected objective write left rows behind: {before} → {counts()}")
+        b0 = counts()
+        # (b) atomic replan — a raising regenerate rolls the (valid) write back, JSON 500
+        def _boom(db_, baseline=None):
+            raise RuntimeError("selftest: simulated re-plan failure")
+        regenerate = _boom
+        r = c.post("/api/objectives", json={"type": "marathon", "label": "atomic-probe",
+                                            "date": (datetime.now().date() + timedelta(days=120)).isoformat()})
+        regenerate = saved_regen
+        if r.status_code != 500 or not is_json(r) or (r.get_json() or {}).get("ok") is not False:
+            fails.append(f"(b) a failing re-plan answered {r.status_code} "
+                         f"{'json' if is_json(r) else 'non-json'} — want JSON 500")
+        if counts() != b0:
+            fails.append(f"(b) replan is NOT atomic — the write survived its failed re-plan: "
+                         f"{b0} → {counts()}")
+            db.execute("DELETE FROM objectives WHERE label='atomic-probe'"); db.commit()   # leave nothing
+        c0 = counts()
+        # (c) readiness vocabulary
+        for bad in ({"energy": "fantastic"}, {"sleep": "unknown"}, {"energy": "heavy", "sleep": 7}):
+            r = c.post("/api/readiness", json=bad)
+            if r.status_code != 400 or not is_json(r):
+                fails.append(f"(c) readiness {bad} answered {r.status_code} — want JSON 400")
+        if counts() != c0:
+            fails.append(f"(c) a rejected check-in landed: {c0} → {counts()}")
+        # (d) integer query args
+        for path in ("/api/effort-discipline?days=abc", "/api/projector?days=x",
+                     "/api/weekly?weeks=x", "/api/vo2max?months=y", "/api/projector?days=0",
+                     "/api/vo2max?months=-3"):
+            try:
+                r = c.get(path)
+                if r.status_code != 400 or not is_json(r):
+                    fails.append(f"(d) {path} answered {r.status_code} "
+                                 f"{'json' if is_json(r) else 'non-json'} — want JSON 400")
+            except Exception as e:       # the pre-fix shape: a bare ValueError out of the view
+                fails.append(f"(d) {path} raised {type(e).__name__} out of the view")
+        for path in ("/api/weekly?weeks=4", "/api/weekly?weeks=0"):   # 0 = full history, the chart's call
+            r = c.get(path)
+            if r.status_code != 200 or not is_json(r):
+                fails.append(f"(d) the happy path {path} answered {r.status_code}")
+    finally:
+        READONLY, regenerate = saved_ro, saved_regen
+    return _st("det", "api-validation",
+               "write endpoints reject junk at the door and a write whose re-plan fails is never "
+               "committed: bad objective date/priority → 400 + no row; replan() atomic (a raising "
+               "regenerate rolls the write back, JSON 500); readiness vocabulary enforced; int query "
+               "args → JSON 400 not a ValueError 500",
+               passed=not fails, expect="400/500 are JSON; rejected writes leave no rows; happy path serves",
+               got={"violations": fails or "none", "rows_before": before, "rows_after": counts()})
+
+
 def _stc_card_truth(db):
     """§CARD — every number a week's card asserts is recomputed from the sessions listed under it.
     The owner read "35.8 km · 5 runs" above a FOUR-run week off his own live card (2026-08-07): the
@@ -21067,6 +21207,16 @@ def _stc_card_truth(db):
     # earlier, so the new road always has a prior to freeze from.
     mem_db = _sq.connect(":memory:"); mem_db.row_factory = _sq.Row
     db.backup(mem_db)
+    # ...and the copy must NOT inherit the host's road anchor or saved plans: `_rebase_start` returns
+    # a stored `rebase_start` while its block is in flight, which pins the backdated seed road to the
+    # CURRENT block start — on a young DB (the `seed` CLI's, any fresh self-host) no lived week then
+    # exists to freeze, and this tooth read "sweep never met a frozen week" while the dev DB passed
+    # on an old anchor + a stack of stale plans (Codex review 2026-08-20: 111/1 on `seed`). Reset
+    # both so the coverage is STRUCTURAL: the seed road starts on its own Monday, the new road
+    # freezes it — on any DB, every day of the week.
+    mem_db.execute("DELETE FROM plans")
+    mem_db.execute("DELETE FROM meta WHERE key='rebase_start'")
+    mem_db.commit()
     _seed_p = generate_plan(mem_db, today=thursday - timedelta(days=7))
     mem_db.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
                    (_now_iso(), (thursday - timedelta(days=7)).isoformat(), "{}",
@@ -22451,6 +22601,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
+                 lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),

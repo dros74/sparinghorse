@@ -188,14 +188,16 @@ async function runEmpty() {
 
 async function runCold() {
   // §FT5 — cold start: one 10k + an objective, NO snapshot. API-level (DOM-free) assertions:
-  // the seeded plan exists, carries the cold_start seeds, runs in caution, and the §FT3 band
-  // is present + wide by design. Page itself must load without errors (checked globally).
+  // the seeded plan exists, carries the cold_start seeds, runs ASSERTIVE (§FORM1, 2026-08-18: the
+  // regime is body evidence only — a blank history is not illness; the safe-learning path is
+  // MEASUREMENT, the governors ramp from near-zero trailing load), and the §FT3 band is present +
+  // wide by design. Page itself must load without errors (checked globally).
   const plan = await page.evaluate(() => fetch('/api/plan').then(r => r.json()));
   ok('cold-start plan generated + persisted', !!(plan && plan.ok));
   const cs = plan && plan.cold_start;
   ok('cold_start seeds surfaced (vo2 from the 10k)', !!(cs && cs.vo2_seed > 25 && cs.race_type === '10k'));
-  ok('regime starts caution (the safe-learning path)',
-     ((plan && plan.regime) || {}).mode === 'caution');
+  ok('regime starts assertive (§FORM1: no body evidence ⇒ no gate; measurement ramps the load)',
+     ((plan && plan.regime) || {}).mode === 'assertive');
   const band = (((plan || {}).feasibility || {}).finish_time || {}).band;
   ok('prediction is a band, wide by design (cold σ)', !!(band && band.sigma_log >= 0.08));
   await page.screenshot({ path: `${SHOTS}/05-coldstart.png`, fullPage: true });

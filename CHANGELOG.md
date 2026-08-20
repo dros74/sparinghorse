@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.26.3] - 2026-08-20
+
+### Fixed
+
+- **A bad objective can no longer jam the planner.** Adding a race with a malformed date used to be
+  saved first and re-planned second — the save stuck, the re-plan crashed, and from then on *every*
+  regeneration (the nightly one included) failed silently behind the last good plan until the row
+  was removed by hand. Dates and priorities are now checked at the door (a clear error, nothing
+  saved), and every change that triggers a re-plan — objectives, availability, adjustments — is
+  applied and re-planned as one unit: if the re-plan fails, the change is rolled back and you get
+  a readable error instead of a half-applied state.
+- **The daily check-in only accepts its own vocabulary.** An unexpected energy or sleep value used
+  to be stored as-is and then read as "all signals normal"; it is now rejected.
+- **Numeric query parameters answer junk with a clear error** (`days`, `weeks`, `months` on the
+  effort, projector, weekly-volume and VO₂max endpoints) instead of a server error page.
+- **Self-test honesty.** The card-truth check's frozen-week coverage no longer depends on what
+  happens to be in *your* database (it built its fixture on top of the live road anchor, so a fresh
+  or synthetic install reported a spurious failure); the browser test-drive's cold-start check was
+  updated to the 0.26.0 regime rule; and the release script now refuses to publish unless the whole
+  suite is green on the synthetic demo database — the one a new install actually runs.
+
 ## [0.26.2] - 2026-08-19
 
 ### Fixed
