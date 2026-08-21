@@ -273,7 +273,9 @@ a proper log score — and the record is kept where you can see it.
 
 ## Self-test
 `python SparingHorse.py selftest` runs the deterministic engine battery (and the key-gated LLM checks where a
-key is present). Also at `/selftest` (private only).
+key is present). Also at `/selftest` (private only). While a battery runs (~40 s) the private server answers
+other requests 503 + `Retry-After` — the battery swaps module globals for its duration, so nothing else is
+served off them; a second battery is refused (409).
 
 ## Changelog
 Notable features and fixes are tracked in [`CHANGELOG.md`](CHANGELOG.md)

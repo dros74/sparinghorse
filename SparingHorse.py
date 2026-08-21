@@ -155,27 +155,51 @@ def _mcp_parse(text):
 
 def _mcp_init():
     global _mcp_session
+    # A NEW InitializeRequest carries no Mcp-Session-Id (MCP spec) — and the stale id is exactly what a
+    # re-init exists to shed. Before 0.27.1 the old id rode along on the new initialize and was never
+    # cleared, so a session the server had expired stayed sticky until restart (Gemini review #7).
+    _mcp_session = None
     body = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                        "clientInfo": {"name": "sparinghorse", "version": "0.1"}}}
     r = _http().post(MCP_URL, json=body, headers=_mcp_headers(), timeout=30)
+    if r.status_code >= 400:
+        raise RunalyzeError(f"MCP initialize HTTP {r.status_code}: {r.text[:200]!r}")
     _mcp_session = r.headers.get("Mcp-Session-Id")
     _http().post(MCP_URL, json={"jsonrpc": "2.0", "method": "notifications/initialized"},
                  headers=_mcp_headers(), timeout=30)
 
 
+def _mcp_post(body, timeout):
+    """One JSON-RPC round trip → (parsed body, None) or (None, why). A non-2xx status or an unparseable
+    body (a 404 'Not Found' for a dead session) is a reason to re-initialize, not a crash — before
+    0.27.1 the parse raised ValueError BEFORE the re-init path, so one expired session failed every
+    later MCP read (hover profiles, LTHR derive, §RD, the health/sleep sync) until restart."""
+    r = _http().post(MCP_URL, json=body, headers=_mcp_headers(), timeout=timeout)
+    if r.status_code >= 400:
+        return None, f"HTTP {r.status_code}: {r.text[:120]!r}"
+    try:
+        return _mcp_parse(r.text), None
+    except ValueError as e:
+        return None, f"unparseable body: {e}"
+
+
 def mcp_call(tool, args):
-    """Call an MCP tool, returning its structuredContent. Re-inits the session on failure."""
+    """Call an MCP tool, returning its structuredContent. A dead session (non-2xx, non-JSON body, or a
+    JSON-RPC error) re-initializes ONCE and retries; a second failure raises RunalyzeError — every
+    caller catches it — rather than a KeyError/ValueError from inside the parse."""
     if not _mcp_session:
         _mcp_init()
     body = {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
             "params": {"name": tool, "arguments": args}}
-    r = _http().post(MCP_URL, json=body, headers=_mcp_headers(), timeout=45)
-    d = _mcp_parse(r.text)
-    if "error" in d:  # likely stale session → re-init once
+    d, err = _mcp_post(body, 45)
+    if err or "error" in d:                      # likely stale session → re-init once
         _mcp_init()
-        r = _http().post(MCP_URL, json=body, headers=_mcp_headers(), timeout=45)
-        d = _mcp_parse(r.text)
+        d, err = _mcp_post(body, 45)
+        if err:
+            raise RunalyzeError(f"MCP {tool}: {err}")
+        if "error" in d:
+            raise RunalyzeError(f"MCP {tool}: {d['error']}")
     res = d.get("result", {})
     return res.get("structuredContent") or json.loads(res["content"][0]["text"])
 
@@ -203,7 +227,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.27.0"
+ENGINE_VERSION = "0.27.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -8498,6 +8522,14 @@ EXPLAIN_SCHEMA = {
 }
 
 
+def _phase_keys(plan):
+    """The phase keys a plan actually carries, in road order, re-base excluded: the §6q keyed phases
+    (chain segments like bridge1/peak1 included), or the classic four for a LEGACY saved plan whose
+    phases carry no keys — the same fallback `_plan_all_weeks` applies."""
+    keys = [ph.get("key") for ph in plan.get("phases", []) if ph.get("key") and ph.get("key") != "rebase"]
+    return keys or ["base", "build", "peak", "taper"]
+
+
 def _phase_block_summary(block):
     """Compact per-phase view for the explainer (§6f Step F): volume range, the quality kinds the
     polarized model placed, projected end fitness, and how many weeks are already frozen/done."""
@@ -8520,6 +8552,11 @@ def _plan_summary_for_llm(plan, diff):
              + (" [eased]" if w.get("adjusted") else "") + (" [clipped-to-ACWR]" if w.get("clipped") else "")
              + (" [frozen/done]" if w.get("frozen") else "")
              for w in _plan_all_weeks(plan)]
+    # `bd7df91` (2026-07-04) moved the week list onto _plan_all_weeks and dropped this binding while the
+    # re-base fields below kept reading it: every /api/plan/explain answered 502 "name 'rb' is not
+    # defined" for seven weeks — invisible to the LLM-gated det on a keyless box (det/plan-summary now
+    # builds this summary without a key). An assertive plan has no re-base: the fields read None.
+    rb = plan.get("rebase") or {}
     return {
         "mode": plan.get("mode"),
         "objective": plan.get("objective"),
@@ -8529,8 +8566,8 @@ def _plan_summary_for_llm(plan, diff):
         "feasibility": {k: v for k, v in (plan.get("feasibility") or {}).items()
                         if k != "estimate_ctl"},
         "phases": plan.get("phases"),
-        "phase_blocks": {k: _phase_block_summary(plan.get(k))      # §6f Step F — Base→Taper detail
-                         for k in ("base", "build", "peak", "taper")},
+        "phase_blocks": {k: _phase_block_summary(plan.get(k))      # §6f Step F — the whole phase path,
+                         for k in _phase_keys(plan)},              # chain segments included (0.27.1)
         "projected_race_ctl": (plan.get("feasibility") or {}).get("projected_ctl"),
         "shape_now": plan.get("shape"),
         "rebase_start": rb.get("start"),
@@ -9173,6 +9210,50 @@ def _readonly_guard():
     # its POST (a write check-in) is already rejected above by the mutating-method guard.
 
 
+_selftest_lock = threading.Lock()
+_selftest_thread = None       # ident of the thread running the battery; None when idle
+
+
+class SelfTestBusy(RuntimeError):
+    """A self-test battery is already running (one at a time — it swaps module globals)."""
+
+
+def _selftest_running_elsewhere():
+    """True while a battery runs on a thread other than the caller's. The battery swaps module globals
+    for its duration (READONLY ×5, `regenerate`, the secrets store + tokens); a request served off
+    another thread meanwhile would read the swapped values (Gemini review 2026-08-21 #2 — real, rarely
+    reachable: single owner, ~40 s, but the nightly tick or a second tab could land in it)."""
+    t = _selftest_thread
+    return t is not None and t != threading.get_ident()
+
+
+def _wait_for_selftest(limit=180):
+    """Hold a background job while a battery runs (it has swapped `regenerate`/READONLY). Returns True
+    when clear; after `limit` seconds gives up and returns False (the caller proceeds and says so)."""
+    for _ in range(limit):
+        if _selftest_thread is None:
+            return True
+        time.sleep(1)
+    return False
+
+
+@app.before_request
+def _selftest_gate():
+    """Maintenance gate: while a battery runs, every OTHER request thread answers 503 + Retry-After.
+    The battery's own in-process probes (same thread) pass; /healthz and the self-test surfaces stay
+    reachable so the page can keep polling and the container's health stays true. Private box only in
+    practice — the public box 403s /api/selftest before a battery can start."""
+    if not _selftest_running_elsewhere():
+        return
+    p = request.path
+    if p in ("/healthz", "/selftest") or p.startswith("/api/selftest"):
+        return
+    resp = jsonify(ok=False, error="a self-test battery is running — retry in a minute")
+    resp.status_code = 503
+    resp.headers["Retry-After"] = "60"
+    return resp
+
+
 @app.before_request
 def _csrf_origin_guard():
     """CSRF defence: refuse a state-changing request whose Origin is a different host. A browser
@@ -9266,6 +9347,9 @@ def healthz():
                    llm=llm_available(), readonly=READONLY)
 
 
+_sync_lock = threading.Lock()   # one Runalyze pull at a time — page-load syncs, "Sync now", the nightly
+
+
 @app.post("/api/sync")
 def api_sync():
     backfill = request.args.get("backfill") in ("1", "true", "yes")
@@ -9276,12 +9360,21 @@ def api_sync():
         last = get_meta(get_db(), "last_sync")
         if last and _seconds_since(last) < AUTO_SYNC_THROTTLE:
             return jsonify(ok=True, skipped=True, last_sync=last)
+        # The throttle is check-then-act: N tabs opening together all passed it and fanned out into N
+        # incremental pulls (data-safe — INSERT OR REPLACE — but N× the Runalyze calls; Gemini review
+        # 2026-08-21 #4). The first to take the lock syncs; the rest report the in-flight one.
+        if not _sync_lock.acquire(blocking=False):
+            return jsonify(ok=True, skipped=True, in_flight=True, last_sync=last)
+    else:
+        _sync_lock.acquire()          # "Sync now" / backfill queue behind an in-flight pull, never race it
     try:
         return jsonify(run_sync(backfill=backfill))
     except RunalyzeError as e:
         return jsonify(ok=False, error=str(e)), 502
     except Exception as e:                       # never leak an HTML 500 to the JSON client
         return jsonify(ok=False, error=f"sync failed: {e}"), 500
+    finally:
+        _sync_lock.release()
 
 
 @app.get("/api/shape")
@@ -10060,6 +10153,7 @@ def api_log():
         for w in log["weeks"]:
             for s in w["sessions"]:
                 s.pop("reflection", None)
+        _strip_av_public(log)   # §AV — the log spreads the week dicts whole: the away dates ride in them
     return jsonify(log)
 
 
@@ -10178,15 +10272,24 @@ def _plan_for_view(plan, db=None):
     return plan
 
 
-def _strip_av_public(plan):
+def _strip_av_public(obj):
     """§AV/H7 — away dates on the public box are an empty-house broadcast: remove every
-    availability trace from the plan payload at the DATA layer (the week chip derives from these
-    fields, so stripping here silences the UI with no second render path — same posture as the
-    §RL outcome redaction). The re-laid session days themselves stay: they're just a plan."""
-    for key in ("base", "build", "peak", "taper"):
-        for w in ((plan.get(key) or {}).get("weeks") or []):
-            w.pop("av_dates", None)
-            w.pop("av_shed", None)
+    availability trace from a payload at the DATA layer (the week chip derives from these fields, so
+    stripping here silences the UI with no second render path — same posture as the §RL outcome
+    redaction). The re-laid session days themselves stay: they're just a plan. Walks EVERY dict at
+    any depth (0.27.1): the 0.27.0 strip enumerated base/build/peak/taper and so missed the re-base
+    and the chain segments (bridge1/peak1…), and it ran on /api/plan only while /api/log spreads the
+    same week dicts whole — on 2026-07-19..26 the public log served the owner's 07-21 flight date
+    (Gemini review #1, widened by verification). A key-agnostic walk cannot be outrun by a new phase
+    key or a new payload; det/av-public-strip drives both endpoints."""
+    if isinstance(obj, dict):
+        obj.pop("av_dates", None)
+        obj.pop("av_shed", None)
+        for v in obj.values():
+            _strip_av_public(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            _strip_av_public(v)
 
 
 @app.get("/api/plan")
@@ -10424,6 +10527,13 @@ def _profile_cached(db, aid):
     cached = json.loads(row["profile"]) if row else None
     if cached and cached.get("v") == PROFILE_VERSION:
         return cached, None
+    if READONLY:
+        # The public box is tokenless and its DB mount is query_only: never fetch, never write. Serve
+        # what is cached (a stale shape is still a pace curve) or say so — before 0.27.1 a miss here
+        # made a doomed MCP call and, with a token present, an INSERT on the query_only connection
+        # (an HTML 500 instead of the JSON 502; Gemini review #3, verified). The private side fills
+        # the cache the owner's views share.
+        return cached, RunalyzeError("profile not cached — the public view cannot fetch it")
     try:
         prof = activity_profile(aid)
     except (RunalyzeError, requests.RequestException, KeyError, ValueError) as e:
@@ -14859,8 +14969,11 @@ def _daily_replan():
 def _scheduler_loop(hhmm):
     while True:
         time.sleep(_seconds_until(hhmm))
+        if not _wait_for_selftest():   # a running battery has swapped READONLY/regenerate — never re-plan under it
+            print("[scheduler] a self-test battery is still running after 3 min — proceeding anyway")
         try:
-            res = run_sync()
+            with _sync_lock:           # never overlap a "Sync now" / page-load pull
+                res = run_sync()
             print(f"[scheduler] daily sync ok: {res.get('activities')}")
         except Exception as e:
             print(f"[scheduler] daily sync failed: {e}")
@@ -15450,29 +15563,316 @@ def _stc_quality_forward():
 
 
 def _stc_av_public_strip():
-    """§AV/H7 — the public plan payload carries NO availability trace (data-layer strip, same
-    posture as the §RL outcome redaction), and the /api/availability surface itself is on the
-    public box's private-only blocklist."""
-    plan = {"base": {"weeks": [{"km": 20, "av_dates": ["2026-08-04"], "av_shed": 1},
-                               {"km": 22}]},
-            "build": {"weeks": [{"km": 25, "av_dates": ["2026-09-01"]}]},
-            "peak": {}, "taper": {"weeks": []}}
-    _strip_av_public(plan)
-    leaks = [k for key in ("base", "build", "peak", "taper")
-             for w in ((plan.get(key) or {}).get("weeks") or [])
-             for k in ("av_dates", "av_shed") if k in w]
-    kept = plan["base"]["weeks"][0]["km"] == 20 and plan["build"]["weeks"][0]["km"] == 25
-    gated = all(_private_only_path(p) for p in
-                ("/api/availability", "/api/availability/3/remove"))
-    bad = ([] if not leaks else [f"leaks: {leaks}"]) \
-        + ([] if kept else ["stripped more than av fields"]) \
-        + ([] if gated else ["/api/availability not private-only"])
+    """§AV/H7 — NO availability trace reaches the public box, on ANY phase (re-base + chain segments
+    included — the 0.27.0 strip walked base/build/peak/taper only; Gemini review 2026-08-21 #1/#6) and on
+    EVERY payload that spreads week dicts: /api/plan AND /api/log (block_log → _plan_all_weeks →
+    {**w, "sessions"} carries av_dates for every phase and api_log popped only `reflection` — on
+    2026-07-19..26 the public log served the owner's 07-21 flight date). Drives the REAL endpoints under
+    READONLY through a throwaway DB (a fixture-only strip check is exactly what let the gap through);
+    the private view must KEEP the fields (the ✈ week chip reads them). /api/availability stays
+    private-only."""
+    import sqlite3 as _sq
+    global READONLY, get_db
+    wk = lambda start, **extra: {"wk": 1, "start": start, "km": 20, "runs": 3,
+                                 "sessions": [{"date": start, "kind": "easy", "km": 8}], **extra}
+    plan = {"phases": [{"key": "rebase", "kind": "rebase"}, {"key": "base", "kind": "base"},
+                       {"key": "bridge1", "kind": "bridge"}, {"key": "peak1", "kind": "peak"}],
+            "rebase": {"weeks": [wk("2026-08-03", av_dates=["2026-08-04"], av_shed=1)]},
+            "base": {"weeks": [wk("2026-08-10", av_dates=["2026-08-11"]), wk("2026-08-17")]},
+            "bridge1": {"weeks": [wk("2026-08-24", av_dates=["2026-08-25"], av_shed=2)]},
+            "peak1": {"weeks": [wk("2026-08-31", av_dates=["2026-09-02"])]},
+            "taper": {"weeks": []}, "pace_zones": {"easy_top": "6:30/km"}}
+    leaks_in = lambda obj: [m for m in ("av_dates", "av_shed") if m in json.dumps(obj)]
+    fails, detail = [], {}
+    # (a) the data-layer strip covers every weeks-bearing dict, whatever its key, and nothing else
+    p = json.loads(json.dumps(plan))
+    _strip_av_public(p)
+    detail["strip_leaks"] = leaks_in(p)
+    if detail["strip_leaks"]:
+        fails.append(f"strip leaks {detail['strip_leaks']}")
+    if not (p["base"]["weeks"][0]["km"] == 20 and p["bridge1"]["weeks"][0]["sessions"][0]["km"] == 8
+            and p["phases"][2]["key"] == "bridge1"):
+        fails.append("stripped more than the av fields")
+    # (b) the endpoints, driven for real: public = no trace anywhere; private = the chip's fields intact
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(SCHEMA)
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now','2026-08-03','{}',?)",
+              (json.dumps(plan),))
+    m.commit()
+    saved_ro, saved_get = READONLY, get_db
+    try:
+        get_db = lambda: m
+        c = app.test_client()
+        for ro in (True, False):
+            READONLY = ro
+            for path in ("/api/plan", "/api/log"):
+                r = c.get(path)
+                if r.status_code != 200:
+                    fails.append(f"{path} HTTP {r.status_code} (READONLY={ro})")
+                    continue
+                found = leaks_in(r.get_json())
+                detail[f"{'public' if ro else 'private'} {path}"] = found
+                if ro and found:
+                    fails.append(f"public {path} leaks {found}")
+                if not ro and not found:
+                    fails.append(f"private {path} lost the av fields")
+    finally:
+        READONLY, get_db = saved_ro, saved_get
+        m.close()
+    gated = all(_private_only_path(q) for q in ("/api/availability", "/api/availability/3/remove"))
+    if not gated:
+        fails.append("/api/availability not private-only")
     return _st("det", "av-public-strip",
-               "§AV/H7 — av_dates/av_shed stripped from every phase's weeks in the public plan "
-               "payload; other fields untouched; /api/availability blocked on the public box",
-               passed=not bad, expect="no av trace public · fields intact · endpoint gated",
-               got="ok" if not bad else f"fails: {bad}",
-               output={"leaks": leaks, "endpoint_gated": gated})
+               "§AV/H7 — av_dates/av_shed stripped from EVERY phase (re-base + chain keys) on the public "
+               "/api/plan AND /api/log, kept on the private view; /api/availability blocked on the public box",
+               passed=not fails, expect="no av trace on public plan+log · private keeps them · endpoint gated",
+               got="ok" if not fails else f"fails: {fails}", output=detail)
+
+
+def _stc_plan_summary():
+    """§6c — the explainer's grounding summary must BUILD: for an assertive chain plan (no re-base) and
+    for a caution plan with one. Since `bd7df91` (2026-07-04) `_plan_summary_for_llm` read `rb` without
+    binding it — every /api/plan/explain answered 502 "name 'rb' is not defined" for seven weeks, and the
+    LLM-gated plan-explain det could not see it on a keyless box (found verifying the Gemini review
+    2026-08-21; its #5 was adjacent). Also: phase_blocks must cover the chain segments, not just the
+    classic four, and estimate_ctl must stay out of the narrator's reach. Pure — no LLM, no DB."""
+    fails, detail = [], {}
+    wk = lambda start, **x: {"wk": 1, "start": start, "km": 30, "runs": 4, "proj_acwr": 1.1,
+                             "sessions": [{"date": start, "kind": "easy", "km": 8}], **x}
+    chain = {"phases": [{"key": "base", "kind": "base"}, {"key": "bridge1", "kind": "bridge"},
+                        {"key": "peak1", "kind": "peak"}],
+             "base": {"weeks": [wk("2026-08-10")], "end_ctl": 50},
+             "bridge1": {"weeks": [wk("2026-08-17", sessions=[{"date": "2026-08-18", "kind": "vo2",
+                                                                "km": 10, "reps": 5}])], "end_ctl": 55},
+             "peak1": {"weeks": [wk("2026-08-24")], "end_ctl": 60},
+             "feasibility": {"projected_ctl": 60, "estimate_ctl": 99}, "pace_zones": {"easy_top": "6:30/km"}}
+    caution = {"phases": [{"key": "rebase", "kind": "rebase"}, {"key": "base", "kind": "base"}],
+               "rebase": {"weeks": [wk("2026-08-03")], "start": "2026-08-03", "end_ctl": 40, "end_atl": 38},
+               "base": {"weeks": [wk("2026-08-10")]}, "pace_zones": {}}
+    try:
+        s = _plan_summary_for_llm(chain, None)
+        pb = {k: v for k, v in (s.get("phase_blocks") or {}).items() if v}
+        detail["chain"] = {"phase_blocks": sorted(pb), "weeks": s.get("weeks"), "rebase_start": s.get("rebase_start")}
+        if s.get("rebase_start") is not None:
+            fails.append("chain: phantom rebase_start")
+        if not (pb.get("bridge1") and pb.get("peak1") and pb["bridge1"].get("quality") == ["vo2"]):
+            fails.append(f"chain: phase_blocks miss the chain segments ({sorted(pb)})")
+        if len(s.get("weeks") or []) != 3 or not any(w.startswith("bridge1 ") for w in s["weeks"]):
+            fails.append(f"chain: weeks {s.get('weeks')}")
+        if "estimate_ctl" in (s.get("feasibility") or {}):
+            fails.append("chain: estimate_ctl reached the narrator")
+        s2 = _plan_summary_for_llm(caution, {"x": 1})
+        detail["caution"] = {"rebase_start": s2.get("rebase_start"), "rebase_end_ctl": s2.get("rebase_end_ctl")}
+        if s2.get("rebase_start") != "2026-08-03" or s2.get("rebase_end_ctl") != 40 or s2.get("rebase_end_atl") != 38:
+            fails.append(f"caution: rebase fields {detail['caution']}")
+        if s2.get("last_replan") != {"x": 1}:
+            fails.append("caution: the re-plan diff was not carried")
+    except Exception as e:
+        fails.append(f"raised {type(e).__name__}: {e}")
+    return _st("det", "plan-summary",
+               "§6c — the explainer's summary builds for chain + caution plans (no unbound `rb`); "
+               "phase_blocks cover the chain segments; re-base fields bound; estimate_ctl withheld",
+               passed=not fails, expect="builds · chain segments summarized · re-base bound",
+               got="ok" if not fails else f"fails: {fails}", output=detail)
+
+
+def _stc_mcp_session():
+    """MCP client — a dead session must not be sticky (Gemini review 2026-08-21 #7, verified): a
+    tools/call answered with 404 / a non-JSON body / a JSON-RPC error triggers ONE re-initialize, which
+    must NOT carry the stale Mcp-Session-Id (a new InitializeRequest carries none — MCP spec), and the
+    retried call rides the new id. Before 0.27.1 the stale id was never cleared and a non-JSON 404 raised
+    before the re-init path, so every MCP read (hover profiles, LTHR derive, §RD, the health/sleep sync —
+    the last swallowed silently) failed until restart. Fully stubbed transport — no network."""
+    global _session, _mcp_session
+    calls = []
+
+    class _R:
+        def __init__(self, status, text="", headers=None):
+            self.status_code, self.text, self.headers = status, text, headers or {}
+
+    class _Fake:
+        def post(self, url, json=None, headers=None, timeout=None):
+            calls.append((json.get("method"), (headers or {}).get("Mcp-Session-Id")))
+            if json.get("method") == "initialize":
+                return _R(200, '{"jsonrpc":"2.0","id":1,"result":{}}', {"Mcp-Session-Id": "NEW"})
+            if json.get("method") == "notifications/initialized":
+                return _R(202, "")
+            if (headers or {}).get("Mcp-Session-Id") == "NEW":     # the fresh session answers
+                return _R(200, '{"jsonrpc":"2.0","id":9,"result":{"structuredContent":{"ok":1}}}')
+            return _R(404, "Not Found")                           # the stale one is dead: non-JSON 404
+
+    saved_s, saved_m = _session, _mcp_session
+    fails, out = [], None
+    try:
+        _session, _mcp_session = _Fake(), "STALE"
+        try:
+            out = mcp_call("get_activity_details", {"activity_id": 1})
+        except Exception as e:
+            fails.append(f"raised {type(e).__name__}: {e}")
+        after = _mcp_session
+    finally:
+        _session, _mcp_session = saved_s, saved_m
+    if out != {"ok": 1}:
+        fails.append(f"result {out!r}")
+    inits = [sid for meth, sid in calls if meth == "initialize"]
+    if inits != [None]:
+        fails.append(f"initialize carried session ids {inits} (want exactly one, carrying none)")
+    seq = [sid for meth, sid in calls if meth == "tools/call"]
+    if seq != ["STALE", "NEW"]:
+        fails.append(f"tools/call session sequence {seq}")
+    if after != "NEW":
+        fails.append(f"session after re-init = {after!r}")
+    return _st("det", "mcp-session",
+               "MCP client — a dead session re-initializes ONCE without the stale id and the retried call "
+               "rides the new one; a non-JSON 404 no longer raises past the re-init",
+               passed=not fails, expect="result via NEW · init carries no id · call sequence STALE→NEW",
+               got="ok" if not fails else f"fails: {fails}", output={"calls": calls})
+
+
+def _stc_sync_lock():
+    """/api/sync — page-load (auto) syncs from N tabs must collapse into ONE Runalyze pull (Gemini review
+    2026-08-21 #4, verified): the throttle was check-then-act with no lock, so simultaneous tabs each ran a
+    full incremental sync (data-safe — INSERT OR REPLACE — but N× the calls). Three concurrent auto
+    requests against a stubbed `run_sync` that blocks until released: exactly ONE runs, the other two
+    answer skipped/in_flight while it is still running. Stubbed — no network, nothing written; the view is
+    driven under test_request_context so the self-test gate does not stand in front of it."""
+    import threading as _th
+    global run_sync, AUTO_SYNC_THROTTLE
+    started, release = _th.Event(), _th.Event()
+    n, results = {"runs": 0}, []
+
+    def fake_sync(backfill=False):
+        n["runs"] += 1
+        started.set()
+        release.wait(timeout=10)
+        return {"ok": True, "activities": 0, "stub": True}
+
+    def hit():
+        with app.test_request_context("/api/sync?auto=1", method="POST"):
+            rv = api_sync()
+            resp = rv[0] if isinstance(rv, tuple) else rv
+            results.append(resp.get_json())
+
+    saved = (run_sync, AUTO_SYNC_THROTTLE)
+    fails = []
+    try:
+        run_sync, AUTO_SYNC_THROTTLE = fake_sync, 0        # throttle off: the lock alone must hold
+        ts = [_th.Thread(target=hit, daemon=True) for _ in range(3)]
+        for t in ts:
+            t.start()
+        if not started.wait(5):
+            fails.append("no sync started")
+        for _ in range(100):                                # the losers come back WHILE the winner runs
+            if len(results) >= 2:
+                break
+            _time.sleep(0.05)
+        losers = list(results)
+        release.set()
+        for t in ts:
+            t.join(5)
+    finally:
+        run_sync, AUTO_SYNC_THROTTLE = saved
+    if n["runs"] != 1:
+        fails.append(f"run_sync ran {n['runs']}× (want 1)")
+    if not (len(losers) == 2 and all(r.get("skipped") and r.get("in_flight") for r in losers)):
+        fails.append(f"losers {losers}")
+    if sum(1 for r in results if r.get("stub")) != 1:
+        fails.append(f"results {results}")
+    return _st("det", "sync-lock",
+               "/api/sync — N simultaneous page-load syncs collapse into one pull; the others answer "
+               "skipped/in_flight while it runs",
+               passed=not fails, expect="1 run · 2 in_flight skips", got="ok" if not fails else f"fails: {fails}",
+               output={"runs": n["runs"], "results": results})
+
+
+def _stc_profile_readonly():
+    """_profile_cached on the public box (Gemini review 2026-08-21 #3, verified): the public container is
+    tokenless and its DB mount is query_only, so a hover-profile cache miss must neither call the MCP nor
+    INSERT (tokenless it made a doomed call and 502'd; with a token the INSERT on the query_only
+    connection raised sqlite3.OperationalError → HTML 500). Under READONLY: a current cached profile is
+    served clean, a stale one is served AS stale, a miss answers (None, err) — with activity_profile NEVER
+    called and the table untouched. Throwaway in-memory table."""
+    import sqlite3 as _sq
+    global READONLY, activity_profile
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript("CREATE TABLE trackcache (activity_id INTEGER PRIMARY KEY, profile TEXT, cached_at TEXT);")
+    m.execute("INSERT INTO trackcache VALUES (1, ?, 'x')", (json.dumps({"v": PROFILE_VERSION, "pace": [1]}),))
+    m.execute("INSERT INTO trackcache VALUES (2, ?, 'x')", (json.dumps({"v": PROFILE_VERSION - 1, "pace": [2]}),))
+    m.commit()
+    called = []
+
+    def boom(aid, n=120):
+        called.append(aid)
+        raise AssertionError("fetched on the public box")
+
+    saved = (READONLY, activity_profile)
+    fails = []
+    cur = stale = miss = e1 = e2 = e3 = None
+    try:
+        READONLY, activity_profile = True, boom
+        cur, e1 = _profile_cached(m, 1)
+        stale, e2 = _profile_cached(m, 2)
+        miss, e3 = _profile_cached(m, 3)
+    except Exception as e:
+        fails.append(f"raised {type(e).__name__}: {e}")
+    finally:
+        READONLY, activity_profile = saved
+    if not (cur and cur.get("pace") == [1] and e1 is None):
+        fails.append("current cache not served clean")
+    if not (stale and stale.get("pace") == [2] and e2):
+        fails.append("stale cache should be served WITH an error")
+    if not (miss is None and e3):
+        fails.append("miss should be (None, err)")
+    if called:
+        fails.append(f"activity_profile called for {called}")
+    if m.execute("SELECT COUNT(*) FROM trackcache").fetchone()[0] != 2:
+        fails.append("trackcache written on the read-only box")
+    m.close()
+    return _st("det", "profile-readonly",
+               "_profile_cached under READONLY — serves current/stale cache, a miss is (None, err); "
+               "never fetches, never writes",
+               passed=not fails, expect="no fetch · no write · stale served as stale",
+               got="ok" if not fails else f"fails: {fails}", output={"called": called})
+
+
+def _stc_selftest_gate():
+    """The battery flips module globals (READONLY ×5, `regenerate`, the secrets store) in its own
+    request thread (Gemini review 2026-08-21 #2, verified — Med-Low exposure, real defect), so while it
+    runs NO other thread may be served off those globals: every other request thread answers 503 +
+    Retry-After, the battery's own in-thread probes pass, /healthz + the self-test surfaces stay
+    reachable, a second battery is refused (409), and the nightly tick waits. Probed from a helper thread
+    while THIS battery runs."""
+    import threading as _th
+    got = {}
+
+    def probe():
+        c = app.test_client()
+        r = c.get("/api/plan")
+        got["other_plan"], got["retry_after"] = r.status_code, r.headers.get("Retry-After")
+        got["other_health"] = c.get("/healthz").status_code
+        got["other_page"] = c.get("/selftest").status_code
+        got["other_list"] = c.get("/api/selftest?list=1").status_code
+        if _selftest_lock.locked():                     # never start a NESTED battery on the old code
+            got["second_battery"] = c.post("/api/selftest/run").status_code
+
+    t = _th.Thread(target=probe, daemon=True)
+    t.start(); t.join(30)
+    got["self_plan"] = app.test_client().get("/api/plan").status_code
+    fails = []
+    if got.get("other_plan") != 503 or got.get("retry_after") != "60":
+        fails.append(f"another thread got {got.get('other_plan')} (Retry-After {got.get('retry_after')!r}) — want 503/60")
+    for k in ("other_health", "other_page", "other_list"):
+        if got.get(k) != 200:
+            fails.append(f"{k} {got.get(k)} — want 200 (exempt)")
+    if got.get("second_battery") not in (409, 403):
+        fails.append(f"second battery {got.get('second_battery')} — want 409 (403 on a read-only box)")
+    if got.get("self_plan") != 200:
+        fails.append(f"the battery's own probe got {got.get('self_plan')}")
+    return _st("det", "selftest-gate",
+               "self-test battery — other request threads are held off (503 + Retry-After) while it runs, "
+               "its own probes pass, /healthz + /selftest + /api/selftest stay reachable, a second battery is 409",
+               passed=not fails, expect="other=503 · self=200 · exempt=200 · second=409",
+               got="ok" if not fails else f"fails: {fails}", output=got)
 
 
 def _stc_log_phases():
@@ -22635,7 +23035,21 @@ def _stc_prog_floor():
 
 
 def run_server_selftest(db, categories=None):
-    """Run the in-process battery. Returns the full report dict (also persisted by the caller)."""
+    """Run the in-process battery. Returns the full report dict (also persisted by the caller). ONE
+    battery at a time (SelfTestBusy otherwise), and for its duration other request threads are held
+    off by `_selftest_gate` — the scenarios swap module globals (det/selftest-gate probes this)."""
+    global _selftest_thread
+    if not _selftest_lock.acquire(blocking=False):
+        raise SelfTestBusy("a self-test battery is already running")
+    _selftest_thread = threading.get_ident()
+    try:
+        return _run_server_selftest(db, categories)
+    finally:
+        _selftest_thread = None
+        _selftest_lock.release()
+
+
+def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
@@ -22683,6 +23097,8 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_ctl_floor_removed(),
                  lambda: _stc_taper(), lambda: _stc_taper_touch(db), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
                  lambda: _stc_availability(), lambda: _stc_av_public_strip(),
+                 lambda: _stc_plan_summary(), lambda: _stc_mcp_session(), lambda: _stc_sync_lock(),
+                 lambda: _stc_profile_readonly(), lambda: _stc_selftest_gate(),
                  lambda: _stc_quality_forward(),
                  lambda: _stc_down_weeks(),
                  lambda: _stc_long_run(),
@@ -22748,7 +23164,10 @@ def _selftest_text(report):
 def api_selftest_run():
     db = get_db()
     cats = request.args.get("only")
-    report = run_server_selftest(db, set(cats.split(",")) if cats else None)
+    try:
+        report = run_server_selftest(db, set(cats.split(",")) if cats else None)
+    except SelfTestBusy as e:
+        return jsonify(ok=False, error=str(e)), 409
     report["id"] = save_selftest_run(db, report)
     return jsonify(report)
 

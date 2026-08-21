@@ -530,7 +530,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 | AI buttons are disabled / "add a Claude API key" | No Anthropic key. Add one in **Settings → Connections & keys** (optional — the engine runs without it). |
 | A trail run didn't reach the plan | Running-family activities (trail/treadmill) are included; check the activity's sport actually matches. Pure non-runs are excluded by design. |
 | Public site won't sync | By design — the public container has no token and a query-only connection. Sync from the private instance. |
-| Want to verify the engine | Run `python SparingHorse.py selftest` (or `/selftest`, private only) — the deterministic battery, plus the key-gated LLM checks when a key is present. |
+| Want to verify the engine | Run `python SparingHorse.py selftest` (or `/selftest`, private only) — the deterministic battery, plus the key-gated LLM checks when a key is present. Other pages answer 503 for the ~40 s it runs. |
 
 ---
 

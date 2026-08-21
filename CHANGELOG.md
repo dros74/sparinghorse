@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.27.1] - 2026-08-21
+
+### Fixed
+
+- **Away days no longer reach the public view — on any phase, through any payload.** The public plan
+  strip covered the four classic phases only, so a re-base week or a multi-race chain segment kept its
+  away dates; and the public training log (`/api/log`) spread the same week records whole and was never
+  stripped at all — the owner's own 2026-07-21 travel date was served there the week of 07-19..26. The
+  strip now walks every record at any depth and runs on the plan *and* the log; the self-test drives
+  both endpoints for real instead of checking a fixture. Found by an external review (Gemini 3.1 Pro),
+  widened in verification.
+- **"Explain this plan" works again.** Since 2026-07-04 the explainer's grounding summary referenced a
+  variable that was no longer bound, so every explanation answered a 502 — invisible to the key-gated
+  check on a keyless box. A new key-free self-test builds that summary on chain and caution plans. The
+  per-phase summary handed to the explainer now covers multi-race chain segments, not just
+  Base/Build/Peak/Taper.
+- **A dead Runalyze MCP session is no longer sticky.** The client re-initialised with the stale session
+  id still attached, and a non-JSON "not found" answer crashed before the re-initialise could run — so
+  one expired session broke every MCP read (hover profiles, LTHR derivation, run read-back, the
+  health/sleep sync) until a restart. It now re-initialises cleanly, once, and retries.
+- **Several tabs opening at once run one sync, not several.** The page-load sync throttle was
+  check-then-act; simultaneous tabs each pulled from Runalyze (harmless to the data, wasteful to the
+  API). A lock lets the first one run and tells the others it is in flight; "Sync now" and the nightly
+  job queue behind it rather than overlap.
+- **The public view's hover profile never fetches or writes.** On a cache miss the tokenless public box
+  made a doomed call and — had a token been present — tried to write into its query-only database (a
+  server error instead of the intended "not cached" answer). It now serves what is cached or says so.
+- **The self-test battery holds other requests while it runs.** The battery swaps module globals for
+  its ~40 s (read-only mode, the planner, the key store); any other request served meanwhile could read
+  those values. During a battery the private server now answers other requests 503 + `Retry-After`
+  (health, `/selftest` and its API stay reachable), refuses a second battery (409), and the nightly
+  job waits for it to finish.
+
 ## [0.27.0] - 2026-08-21
 
 ### Changed
