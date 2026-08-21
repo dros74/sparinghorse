@@ -1,0 +1,65 @@
+{
+  "adjustment": null,
+  "feasibility": {
+    "note": "No objective set \u2014 the plan holds fitness with an easy aerobic base (ACWR centred, no taper). Add a race and the engine re-periodizes the road ahead toward it.",
+    "projected_ctl": null,
+    "verdict": "maintain"
+  },
+  "mode": "maintenance",
+  "note": "Easy pace ~5:03/km \u2014 if your easy runs are habitually faster than this they're really threshold effort; the re-base deliberately runs slower to build the aerobic base. (See the Effort-discipline panel for how your actual easy runs measure up.)",
+  "objective": null,
+  "ok": true,
+  "pace_zones": {
+    "easy": "5:11/km",
+    "easy_top": "5:03/km",
+    "interval": "3:45/km",
+    "lt1": "4:47/km",
+    "marathon": "4:29/km",
+    "p5k": "3:49/km",
+    "threshold": "4:08/km"
+  },
+  "phases": [
+    {
+      "phase": "Re-base (Phase 0)",
+      "weeks": 0
+    },
+    {
+      "phase": "Maintenance \u2014 hold",
+      "weeks": 0
+    }
+  ],
+  "prog": {
+    "note": "building weeks progress \u22656%/wk over the last realised non-down load (soft-cap floor; hard caps still bind) \u2014 assumes continued clean absorption, re-anchored on your actuals at every regen",
+    "ramp": 0.06
+  },
+  "rebase": {
+    "clipped_by_acwr": false,
+    "end_atl": 68.2,
+    "end_ctl": 71.0,
+    "full_len": 6,
+    "start": "2026-06-29",
+    "weeks": []
+  },
+  "regime": {
+    "mode": "assertive",
+    "reason": "no symptom or medical event in 56 days \u2014 the plan follows your measured form"
+  },
+  "shape": {
+    "atl": 68.25,
+    "ctl": 71.03488372093024,
+    "effective_vo2max": 53.5,
+    "seed": {
+      "bridged_days": 1,
+      "fallback": null,
+      "from": "2026-06-29"
+    }
+  },
+  "shape_response": {
+    "basis": "no prior projection yet \u2014 riding the full ceiling",
+    "factor": 1.0,
+    "projected": null,
+    "realized": 67.7,
+    "ride_cap": 1.25
+  },
+  "tune_ups": []
+}

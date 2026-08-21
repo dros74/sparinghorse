@@ -1,0 +1,96 @@
+# Sparing Horse — CI (revised-plan TECH-2).
+#
+# The gate that used to exist only on the owner's laptop and inside publish_mirror.sh. Two jobs, both
+# on synthetic seed data: a real athlete's database never leaves the private box, so everything here
+# runs against `SparingHorse.py seed`.
+#
+# The battery is deliberately run with the LLM scenarios OFF (they are opt-in behind SH_SELFTEST_LLM
+# since TECH-1), so CI is free, deterministic, and does not depend on a model's mood.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  suite:
+    name: Self-test battery (seed DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'          # matches the Dockerfile's base image
+          cache: pip
+      - run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Both modules compile
+        run: |
+          python -m py_compile SparingHorse.py sh_selftest.py
+
+      - name: Seed a synthetic database
+        run: SH_DB="$RUNNER_TEMP/ci.db" python SparingHorse.py seed
+
+      - name: Battery (LLM scenarios off by default)
+        run: SH_DB="$RUNNER_TEMP/ci.db" python SparingHorse.py selftest
+
+      - name: Battery, standalone entry point + JSON report
+        run: |
+          SH_DB="$RUNNER_TEMP/ci2.db" python SparingHorse.py seed
+          python sh_selftest.py --db "$RUNNER_TEMP/ci2.db" --json "$RUNNER_TEMP/report.json"
+          python -c "import json,sys; s=json.load(open('$RUNNER_TEMP/report.json'))['summary']; \
+                     print(s); sys.exit(1 if s['failed'] else 0)"
+
+      - name: Golden plans are the committed ones
+        run: |
+          SH_DB="$RUNNER_TEMP/g.db" python SparingHorse.py golden
+          git diff --exit-code -- test/golden || {
+            echo "::error::the engine's answers changed — update test/golden in the same commit and quote the diff"
+            exit 1; }
+
+      - name: Personal-data leak scan
+        run: |
+          # The pattern lives in publish_mirror.sh, which is PRIVATE-ONLY (the mirror excludes it) —
+          # it names the owner's domain, town and NAS, so it must never be published. On the public
+          # mirror the file is absent and this step is a no-op by design.
+          if [ -f publish_mirror.sh ]; then
+            LEAK_RE="$(sed -n "s/^LEAK_RE='\(.*\)'$/\1/p" publish_mirror.sh)"
+            if [ -z "$LEAK_RE" ]; then echo "::error::could not read LEAK_RE"; exit 1; fi
+            # Scan the tree that would actually be PUBLISHED. publish_mirror.sh strips these four
+            # before it scans, and PROJECT_LOG.md is full of the owner's real context by design — a
+            # scan that includes them fails every time and teaches everyone to ignore it.
+            if git grep -nIiE "$LEAK_RE" -- . \
+                 ':!PROJECT_LOG.md' ':!ENGINE_SCIENCE.md' ':!publish_mirror.sh' ':!.githooks'; then
+              echo "::error::personal-data pattern found in the tree that would be published"; exit 1
+            fi
+            echo "clean"
+          else
+            echo "publish_mirror.sh absent (public mirror) — leak scan is a private-repo step"
+          fi
+
+  browser:
+    name: Browser flows (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install --no-cache-dir -r requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install Playwright (chromium only)
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+      - name: Drive the real UI in 6 modes
+        env:
+          PY: python
+          NODE_PATH: ${{ github.workspace }}/node_modules
+        run: ./test/run_local_test.sh

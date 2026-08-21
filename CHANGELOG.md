@@ -10,6 +10,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.28.0] - 2026-08-21
+
+### Added
+
+- **The engine's answers are frozen as golden snapshots.** Nine synthetic training scenarios — a cold
+  start, a mid-block, a maintenance stretch, the week after a race, both regime postures, a short
+  rebuild, a taper, a week away — are rebuilt at a fixed clock and compared byte-for-byte against
+  files committed to the repository. A refactor now has to prove it changed nothing; a deliberate
+  change to what the engine prescribes has to update those files in the same commit, where the diff
+  is readable line by line. The fixtures are hermetic: they were checked under wall clocks years apart
+  and produce the same plan, so they cannot quietly rot as time passes.
+- **Continuous integration.** Every push runs the full battery on a freshly seeded synthetic database,
+  checks the goldens still match, and scans for personal data — plus the browser flows in six modes.
+  The gate used to exist only on one laptop.
+
+### Fixed
+
+- **A plan is computed for the day it is for, not the day the server happens to be running.** The
+  engine takes the date it should plan for, and three readings ignored it and asked the clock
+  instead: how fit you have actually become, and — on a first-ever plan — which past race still
+  describes you and what starting fitness to assume from it. In everyday use the two dates are the
+  same, so nothing about your plan changes here. It mattered for testing: a plan built for a fixed
+  date quietly answered differently tomorrow, which is exactly the kind of drift the golden snapshots
+  exist to catch, and it was hiding one layer below them. A new check rebuilds every scenario under
+  clocks eight months apart and requires the same plan.
+
+### Changed
+
+- **The self-test battery no longer runs inside the app.** It lives in its own file and runs as its
+  own process against a snapshot of the database. Two things follow. A mistake in a test can no longer
+  take the web app and the nightly sync down with it — it breaks the self-test and nothing else. And
+  the app no longer goes offline while testing itself: it used to answer "a self-test is running,
+  retry in a minute" to every request for about forty seconds, which was the only downtime it ever
+  had, and it inflicted it on itself. Starting a battery now answers immediately and the page follows
+  its progress; the site stays fully usable throughout.
+- **The scenarios that call the language model are opt-in.** The default battery is free and
+  deterministic — no key needed, no dependence on a model's mood. Set `SH_SELFTEST_LLM=1` on the
+  machine where the key lives to exercise those paths for real.
+
 ## [0.27.2] - 2026-08-21
 
 ### Fixed

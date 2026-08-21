@@ -272,10 +272,16 @@ Every prediction is also **scored against the result** once the race is run — 
 a proper log score — and the record is kept where you can see it.
 
 ## Self-test
-`python SparingHorse.py selftest` runs the deterministic engine battery (and the key-gated LLM checks where a
-key is present). Also at `/selftest` (private only). While a battery runs (~40 s) the private server answers
-other requests 503 + `Retry-After` — the battery swaps module globals for its duration, so nothing else is
-served off them; a second battery is refused (409).
+`python SparingHorse.py selftest` runs the deterministic engine battery. It lives in `sh_selftest.py` and can
+also be run directly — `python sh_selftest.py --db <path> [--json <out>]` — which is what CI does. Also at
+`/selftest` (private only), where the server runs it as a SEPARATE PROCESS against a snapshot of the database:
+the site stays fully usable while a battery runs, the page polls `/api/selftest/status` for progress, and a
+second battery is refused (409). The scenarios that call the language model are opt-in — set
+`SH_SELFTEST_LLM=1` (with a key) to include them; the default battery is free and deterministic.
+
+The engine's answers are pinned by golden snapshots in `test/golden/`: ten synthetic scenarios rebuilt at a
+fixed clock and compared byte-for-byte. A refactor must show no diff; a deliberate change re-writes them with
+`python SparingHorse.py golden` in the same commit.
 
 ## Changelog
 Notable features and fixes are tracked in [`CHANGELOG.md`](CHANGELOG.md)

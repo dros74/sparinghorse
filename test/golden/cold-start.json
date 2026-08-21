@@ -1,0 +1,3133 @@
+{
+  "adjustment": null,
+  "base": {
+    "builds": [
+      "economy"
+    ],
+    "clipped_by_acwr": false,
+    "end_atl": 37.4,
+    "end_ctl": 30.4,
+    "start": "2026-06-29",
+    "weeks": [
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "fatigue_capped": true,
+        "freq_actual": null,
+        "frequency_met": false,
+        "frozen": false,
+        "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
+        "intent_km": 19,
+        "intent_runs": 0,
+        "km": 10.1,
+        "km_ahead": 0,
+        "km_done": 10.1,
+        "long": 5,
+        "long_capped": true,
+        "partial": true,
+        "peak_acwr": 2.635,
+        "proj_acwr": 1.009,
+        "proj_acwr_flat": 1.764,
+        "proj_ctl": 3.1,
+        "quality": [],
+        "runs": 1,
+        "runs_ahead": 0,
+        "runs_done": 1,
+        "sessions": [],
+        "start": "2026-06-29",
+        "strides": 2,
+        "trimp_total": 0,
+        "volume_met": false,
+        "wk": 1
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 17.4,
+        "frozen": false,
+        "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
+        "intent_km": 20,
+        "intent_runs": 5,
+        "km": 17.4,
+        "long": 5,
+        "peak_acwr": 2.654,
+        "proj_acwr": 2.654,
+        "proj_acwr_flat": 2.202,
+        "proj_acwr_soft": 0.2837,
+        "proj_ctl": 8.2,
+        "quality": [],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-07-06",
+            "kind": "easy",
+            "km": 2.7,
+            "minutes": 17,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 21.5
+          },
+          {
+            "date": "2026-07-07",
+            "kind": "easy",
+            "km": 3.0,
+            "minutes": 19,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 24.6
+          },
+          {
+            "date": "2026-07-09",
+            "kind": "easy",
+            "km": 3.4,
+            "minutes": 21,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 27.6
+          },
+          {
+            "date": "2026-07-11",
+            "kind": "easy",
+            "km": 2.2,
+            "minutes": 14,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 18.5
+          },
+          {
+            "date": "2026-07-12",
+            "kind": "long",
+            "km": 6.1,
+            "minutes": 38,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 49.7
+          }
+        ],
+        "start": "2026-07-06",
+        "strides": 2,
+        "trimp_total": 141.9,
+        "wk": 2
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 21.7,
+        "frozen": false,
+        "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
+        "intent_km": 21,
+        "intent_runs": 5,
+        "km": 21.7,
+        "long": 5,
+        "peak_acwr": 2.542,
+        "proj_acwr": 2.22,
+        "proj_acwr_flat": 2.089,
+        "proj_acwr_soft": 0.5152,
+        "proj_ctl": 13.2,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "short VO\u2082 touch",
+            "rec_min": 2,
+            "rep_min": 2,
+            "structure": "intervals",
+            "zone": "interval"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-07-13",
+            "kind": "easy",
+            "km": 3.4,
+            "minutes": 21,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 26.7
+          },
+          {
+            "date": "2026-07-14",
+            "kind": "easy",
+            "km": 3.7,
+            "minutes": 23,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 30.5
+          },
+          {
+            "date": "2026-07-16",
+            "kind": "easy",
+            "km": 4.2,
+            "minutes": 26,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 34.3
+          },
+          {
+            "date": "2026-07-18",
+            "kind": "easy",
+            "km": 2.9,
+            "minutes": 18,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 22.9
+          },
+          {
+            "date": "2026-07-19",
+            "kind": "long",
+            "km": 7.5,
+            "minutes": 47,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 61.6
+          }
+        ],
+        "start": "2026-07-13",
+        "strides": 2,
+        "trimp_total": 176.0,
+        "wk": 3
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 15.8,
+        "frozen": false,
+        "intent": "Down week \u2014 absorb the block",
+        "intent_km": 16,
+        "intent_runs": 5,
+        "km": 15.8,
+        "long": 4,
+        "peak_acwr": 1.994,
+        "proj_acwr": 1.574,
+        "proj_acwr_flat": 1.543,
+        "proj_acwr_soft": 0.4751,
+        "proj_ctl": 14.8,
+        "quality": [],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-07-20",
+            "kind": "easy",
+            "km": 2.4,
+            "minutes": 15,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 19.7
+          },
+          {
+            "date": "2026-07-21",
+            "kind": "easy",
+            "km": 2.7,
+            "minutes": 17,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 22.5
+          },
+          {
+            "date": "2026-07-23",
+            "kind": "easy",
+            "km": 3.0,
+            "minutes": 19,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 25.3
+          },
+          {
+            "date": "2026-07-25",
+            "kind": "easy",
+            "km": 2.1,
+            "minutes": 13,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 17.0
+          },
+          {
+            "date": "2026-07-26",
+            "kind": "long",
+            "km": 5.6,
+            "minutes": 35,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 45.5
+          }
+        ],
+        "start": "2026-07-20",
+        "strides": 0,
+        "trimp_total": 130.0,
+        "wk": 4
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 27.4,
+        "frozen": false,
+        "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
+        "intent_km": 22,
+        "intent_runs": 5,
+        "km": 27.4,
+        "long": 6,
+        "peak_acwr": 1.827,
+        "proj_acwr": 1.827,
+        "proj_acwr_flat": 1.537,
+        "proj_acwr_soft": 0.6006,
+        "proj_ctl": 19.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "short VO\u2082 touch",
+            "rec_min": 2,
+            "rep_min": 2,
+            "structure": "intervals",
+            "zone": "interval"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-07-27",
+            "kind": "easy",
+            "km": 4.2,
+            "minutes": 26,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 33.6
+          },
+          {
+            "date": "2026-07-28",
+            "kind": "easy",
+            "km": 4.8,
+            "minutes": 30,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 38.4
+          },
+          {
+            "date": "2026-07-30",
+            "kind": "easy",
+            "km": 5.3,
+            "minutes": 33,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 43.1
+          },
+          {
+            "date": "2026-08-01",
+            "kind": "easy",
+            "km": 3.5,
+            "minutes": 22,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 28.9
+          },
+          {
+            "date": "2026-08-02",
+            "kind": "long",
+            "km": 9.6,
+            "minutes": 60,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 77.5
+          }
+        ],
+        "start": "2026-07-27",
+        "strides": 2,
+        "trimp_total": 221.5,
+        "wk": 5
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 31.6,
+        "frozen": false,
+        "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
+        "intent_km": 23,
+        "intent_runs": 5,
+        "km": 31.6,
+        "long": 6,
+        "peak_acwr": 1.789,
+        "proj_acwr": 1.715,
+        "proj_acwr_flat": 1.543,
+        "proj_acwr_soft": 0.7691,
+        "proj_ctl": 24.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "short VO\u2082 touch",
+            "rec_min": 2,
+            "rep_min": 2,
+            "structure": "intervals",
+            "zone": "interval"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-08-03",
+            "kind": "easy",
+            "km": 5.0,
+            "minutes": 31,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 39.7
+          },
+          {
+            "date": "2026-08-04",
+            "kind": "easy",
+            "km": 5.6,
+            "minutes": 35,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 45.4
+          },
+          {
+            "date": "2026-08-06",
+            "kind": "easy",
+            "km": 6.2,
+            "minutes": 39,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 51.0
+          },
+          {
+            "date": "2026-08-08",
+            "kind": "easy",
+            "km": 4.2,
+            "minutes": 26,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 34.1
+          },
+          {
+            "date": "2026-08-09",
+            "kind": "long",
+            "km": 10.6,
+            "minutes": 66,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 86.1
+          }
+        ],
+        "start": "2026-08-03",
+        "strides": 2,
+        "trimp_total": 256.3,
+        "wk": 6
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 35.7,
+        "frozen": false,
+        "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
+        "intent_km": 24,
+        "intent_runs": 5,
+        "km": 35.7,
+        "long": 6,
+        "peak_acwr": 1.686,
+        "proj_acwr": 1.614,
+        "proj_acwr_flat": 1.456,
+        "proj_acwr_soft": 0.8828,
+        "proj_ctl": 29.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "short VO\u2082 touch",
+            "rec_min": 2,
+            "rep_min": 2,
+            "structure": "intervals",
+            "zone": "interval"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-08-10",
+            "kind": "easy",
+            "km": 5.6,
+            "minutes": 35,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 45.7
+          },
+          {
+            "date": "2026-08-11",
+            "kind": "easy",
+            "km": 6.4,
+            "minutes": 40,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 52.2
+          },
+          {
+            "date": "2026-08-13",
+            "kind": "easy",
+            "km": 7.2,
+            "minutes": 45,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 58.7
+          },
+          {
+            "date": "2026-08-15",
+            "kind": "easy",
+            "km": 4.8,
+            "minutes": 30,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 39.3
+          },
+          {
+            "date": "2026-08-16",
+            "kind": "long",
+            "km": 11.7,
+            "minutes": 73,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 95.1
+          }
+        ],
+        "start": "2026-08-10",
+        "strides": 2,
+        "trimp_total": 291.0,
+        "wk": 7
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 26.7,
+        "frozen": false,
+        "intent": "Down week \u2014 absorb the block",
+        "intent_km": 19,
+        "intent_runs": 5,
+        "km": 26.7,
+        "long": 5,
+        "peak_acwr": 1.496,
+        "proj_acwr": 1.231,
+        "proj_acwr_flat": 1.208,
+        "proj_acwr_soft": 0.7952,
+        "proj_ctl": 30.4,
+        "quality": [],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-08-17",
+            "kind": "easy",
+            "km": 4.3,
+            "minutes": 27,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 35.7
+          },
+          {
+            "date": "2026-08-18",
+            "kind": "easy",
+            "km": 5.0,
+            "minutes": 31,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 40.7
+          },
+          {
+            "date": "2026-08-20",
+            "kind": "easy",
+            "km": 5.6,
+            "minutes": 35,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 45.7
+          },
+          {
+            "date": "2026-08-22",
+            "kind": "easy",
+            "km": 3.8,
+            "minutes": 24,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 30.6
+          },
+          {
+            "component": "economy",
+            "date": "2026-08-23",
+            "kind": "long",
+            "km": 8.0,
+            "minutes": 50,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 65.5
+          }
+        ],
+        "start": "2026-08-17",
+        "strides": 0,
+        "trimp_total": 218.2,
+        "wk": 8
+      }
+    ]
+  },
+  "build": {
+    "builds": [
+      "vo2max",
+      "resilience",
+      "economy"
+    ],
+    "clipped_by_acwr": false,
+    "end_atl": 81.5,
+    "end_ctl": 59.8,
+    "start": "2026-08-24",
+    "weeks": [
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 44.62,
+        "frozen": false,
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent_km": 36,
+        "intent_runs": 5,
+        "km": 37.7,
+        "long": 10,
+        "peak_acwr": 1.478,
+        "proj_acwr": 1.435,
+        "proj_acwr_flat": 1.267,
+        "proj_acwr_soft": 0.924,
+        "proj_ctl": 35.3,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.07,
+            "kind": "long_mp",
+            "label": "marathon-pace long run (progressive)",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-08-24",
+            "kind": "easy",
+            "km": 6.7,
+            "minutes": 42,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 55.1
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-08-25",
+            "kind": "interval",
+            "km": 6.5,
+            "minutes": 38,
+            "note": "VO\u2082 intervals \u2014 10min easy wu + 4\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 72.2,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-08-27",
+            "kind": "easy",
+            "km": 7.7,
+            "minutes": 48,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 61.9
+          },
+          {
+            "date": "2026-08-29",
+            "kind": "easy",
+            "km": 5.9,
+            "minutes": 37,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 48.3
+          },
+          {
+            "component": "resilience",
+            "date": "2026-08-30",
+            "kind": "long_mp",
+            "km": 10.9,
+            "minutes": 67,
+            "note": "marathon-pace long run (progressive) \u2014 54min easy base + 13min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 8.6,
+                "minutes": 54,
+                "pace_zone": "6:15/km easy",
+                "trimp": 70.2,
+                "zone": "easy"
+              },
+              {
+                "detail": "13min @ marathon pace finish",
+                "effort": "work",
+                "km": 2.3,
+                "minutes": 13,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 23.4,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 93.6,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-08-24",
+        "strides": 0,
+        "trimp_total": 331.1,
+        "wk": 1
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 44.9,
+        "frozen": false,
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent_km": 37,
+        "intent_runs": 5,
+        "km": 44.9,
+        "long": 10,
+        "peak_acwr": 1.508,
+        "prog_ridden": true,
+        "proj_acwr": 1.431,
+        "proj_acwr_flat": 1.31,
+        "proj_acwr_soft": 1.0994,
+        "proj_ctl": 40.3,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.076,
+            "kind": "long_mp",
+            "label": "marathon-pace long run (progressive)",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-08-31",
+            "kind": "easy",
+            "km": 7.5,
+            "minutes": 47,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 61.2
+          },
+          {
+            "date": "2026-09-01",
+            "kind": "easy",
+            "km": 8.6,
+            "minutes": 54,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 69.8
+          },
+          {
+            "date": "2026-09-03",
+            "kind": "easy",
+            "km": 9.6,
+            "minutes": 60,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 78.4
+          },
+          {
+            "date": "2026-09-05",
+            "kind": "easy",
+            "km": 6.4,
+            "minutes": 40,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 52.5
+          },
+          {
+            "date": "2026-09-06",
+            "kind": "long",
+            "km": 12.8,
+            "minutes": 80,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 104.0
+          }
+        ],
+        "start": "2026-08-31",
+        "strides": 0,
+        "trimp_total": 365.9,
+        "wk": 2
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 49.3,
+        "frozen": false,
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent_km": 39,
+        "intent_runs": 5,
+        "km": 49.3,
+        "long": 11,
+        "peak_acwr": 1.483,
+        "prog_ridden": true,
+        "proj_acwr": 1.403,
+        "proj_acwr_flat": 1.286,
+        "proj_acwr_soft": 1.2159,
+        "proj_ctl": 45.3,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.082,
+            "kind": "long_mp",
+            "label": "marathon-pace long run (progressive)",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-09-07",
+            "kind": "easy",
+            "km": 8.2,
+            "minutes": 51,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 66.7
+          },
+          {
+            "date": "2026-09-08",
+            "kind": "easy",
+            "km": 9.4,
+            "minutes": 59,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 76.1
+          },
+          {
+            "date": "2026-09-10",
+            "kind": "easy",
+            "km": 10.6,
+            "minutes": 66,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 85.5
+          },
+          {
+            "date": "2026-09-12",
+            "kind": "easy",
+            "km": 7.0,
+            "minutes": 44,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 57.3
+          },
+          {
+            "date": "2026-09-13",
+            "kind": "long",
+            "km": 14.1,
+            "minutes": 88,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 114.6
+          }
+        ],
+        "start": "2026-09-07",
+        "strides": 0,
+        "trimp_total": 400.2,
+        "wk": 3
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 36.8,
+        "frozen": false,
+        "intent": "Down week \u2014 absorb the block",
+        "intent_km": 31,
+        "intent_runs": 5,
+        "km": 36.8,
+        "long": 9,
+        "peak_acwr": 1.318,
+        "proj_acwr": 1.138,
+        "proj_acwr_flat": 1.089,
+        "proj_acwr_soft": 1.0726,
+        "proj_ctl": 44.8,
+        "quality": [],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-09-14",
+            "kind": "easy",
+            "km": 6.1,
+            "minutes": 38,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 49.1
+          },
+          {
+            "date": "2026-09-15",
+            "kind": "easy",
+            "km": 6.9,
+            "minutes": 43,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 56.0
+          },
+          {
+            "date": "2026-09-17",
+            "kind": "easy",
+            "km": 7.7,
+            "minutes": 48,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 62.9
+          },
+          {
+            "date": "2026-09-19",
+            "kind": "easy",
+            "km": 5.1,
+            "minutes": 32,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 42.1
+          },
+          {
+            "component": "economy",
+            "date": "2026-09-20",
+            "kind": "long",
+            "km": 11.0,
+            "minutes": 69,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 90.0
+          }
+        ],
+        "start": "2026-09-14",
+        "strides": 0,
+        "trimp_total": 300.1,
+        "wk": 4
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 58.12,
+        "frozen": false,
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent_km": 41,
+        "intent_runs": 5,
+        "km": 49.1,
+        "long": 11,
+        "peak_acwr": 1.362,
+        "prog_ridden": true,
+        "proj_acwr": 1.362,
+        "proj_acwr_flat": 1.159,
+        "proj_acwr_soft": 1.159,
+        "proj_ctl": 49.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.088,
+            "kind": "long_mp",
+            "label": "marathon-pace long run (progressive)",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-09-21",
+            "kind": "easy",
+            "km": 8.8,
+            "minutes": 55,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 72.0
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-09-22",
+            "kind": "interval",
+            "km": 7.4,
+            "minutes": 43,
+            "note": "VO\u2082 intervals \u2014 10min easy wu + 5\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 84.4,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-09-24",
+            "kind": "easy",
+            "km": 9.9,
+            "minutes": 62,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 80.8
+          },
+          {
+            "date": "2026-09-26",
+            "kind": "easy",
+            "km": 7.8,
+            "minutes": 49,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 63.1
+          },
+          {
+            "component": "resilience",
+            "date": "2026-09-27",
+            "kind": "long_mp",
+            "km": 15.2,
+            "minutes": 92,
+            "note": "marathon-pace long run (progressive) \u2014 71min easy base + 21min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 11.4,
+                "minutes": 71,
+                "pace_zone": "6:15/km easy",
+                "trimp": 92.3,
+                "zone": "easy"
+              },
+              {
+                "detail": "21min @ marathon pace finish",
+                "effort": "work",
+                "km": 3.8,
+                "minutes": 21,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 37.8,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 130.1,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-09-21",
+        "strides": 0,
+        "trimp_total": 430.4,
+        "wk": 5
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 63.42,
+        "frozen": false,
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent_km": 43,
+        "intent_runs": 5,
+        "km": 52.7,
+        "long": 12,
+        "peak_acwr": 1.44,
+        "prog_ridden": true,
+        "proj_acwr": 1.365,
+        "proj_acwr_flat": 1.226,
+        "proj_acwr_soft": 1.226,
+        "proj_ctl": 54.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.094,
+            "kind": "long_mp",
+            "label": "marathon-pace long run (progressive)",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-09-28",
+            "kind": "easy",
+            "km": 9.3,
+            "minutes": 58,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 76.0
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-09-29",
+            "kind": "interval",
+            "km": 8.3,
+            "minutes": 48,
+            "note": "VO\u2082 intervals \u2014 10min easy wu + 6\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 96.6,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-10-01",
+            "kind": "easy",
+            "km": 10.6,
+            "minutes": 66,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 85.3
+          },
+          {
+            "date": "2026-10-03",
+            "kind": "easy",
+            "km": 8.2,
+            "minutes": 51,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 66.6
+          },
+          {
+            "component": "resilience",
+            "date": "2026-10-04",
+            "kind": "long_mp",
+            "km": 16.3,
+            "minutes": 99,
+            "note": "marathon-pace long run (progressive) \u2014 75min easy base + 24min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 12.0,
+                "minutes": 75,
+                "pace_zone": "6:15/km easy",
+                "trimp": 97.5,
+                "zone": "easy"
+              },
+              {
+                "detail": "24min @ marathon pace finish",
+                "effort": "work",
+                "km": 4.3,
+                "minutes": 24,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 43.2,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 140.7,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-09-28",
+        "strides": 0,
+        "trimp_total": 465.2,
+        "wk": 6
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 67.6,
+        "frozen": false,
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent_km": 44,
+        "intent_runs": 5,
+        "km": 56.6,
+        "long": 12,
+        "peak_acwr": 1.408,
+        "prog_ridden": true,
+        "proj_acwr": 1.362,
+        "proj_acwr_flat": 1.209,
+        "proj_acwr_soft": 1.209,
+        "proj_ctl": 59.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.1,
+            "kind": "long_mp",
+            "label": "marathon-pace long run (progressive)",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-10-05",
+            "kind": "easy",
+            "km": 10.1,
+            "minutes": 63,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 82.0
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-10-06",
+            "kind": "interval",
+            "km": 8.3,
+            "minutes": 48,
+            "note": "VO\u2082 intervals \u2014 10min easy wu + 6\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 96.6,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-10-08",
+            "kind": "easy",
+            "km": 11.4,
+            "minutes": 71,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 92.1
+          },
+          {
+            "date": "2026-10-10",
+            "kind": "easy",
+            "km": 8.8,
+            "minutes": 55,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 71.9
+          },
+          {
+            "component": "resilience",
+            "date": "2026-10-11",
+            "kind": "long_mp",
+            "km": 18.0,
+            "minutes": 109,
+            "note": "marathon-pace long run (progressive) \u2014 81min easy base + 28min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 13.0,
+                "minutes": 81,
+                "pace_zone": "6:15/km easy",
+                "trimp": 105.3,
+                "zone": "easy"
+              },
+              {
+                "detail": "28min @ marathon pace finish",
+                "effort": "work",
+                "km": 5.0,
+                "minutes": 28,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 50.4,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 155.7,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-10-05",
+        "strides": 0,
+        "trimp_total": 498.3,
+        "wk": 7
+      }
+    ]
+  },
+  "chain": [
+    {
+      "date": "2026-11-17",
+      "feasibility": "finish",
+      "label": "Cold-Start Marathon",
+      "proj_ctl": 74.8,
+      "role": "goal",
+      "type": "marathon"
+    }
+  ],
+  "cold_start": {
+    "activity_id": 1,
+    "atl0": 13.4,
+    "ctl0": 4.0,
+    "date": "2026-06-29",
+    "distance_km": 10.05,
+    "race_type": "10k",
+    "seconds": 3010,
+    "vo2_seed": 41.1
+  },
+  "feasibility": {
+    "estimate_ctl": 8.0,
+    "finish_time": {
+      "anchor_stale": null,
+      "at_ctl": 75,
+      "at_evo2": null,
+      "band": {
+        "components": {
+          "calibration": 0.0566,
+          "disp_a": 1.12,
+          "horizon": 0.0455,
+          "race": 0.08
+        },
+        "hi_hms": "4:00:24",
+        "hi_seconds": 14424,
+        "level": 80,
+        "lo_hms": "3:02:15",
+        "lo_seconds": 10935,
+        "sigma_log": 0.108
+      },
+      "correction": 1.0,
+      "curve": [
+        {
+          "ctl": 75,
+          "evo2": null,
+          "hms": "3:29:19",
+          "plus_weeks": 0
+        },
+        {
+          "ctl": 86,
+          "evo2": null,
+          "hms": "3:25:42",
+          "plus_weeks": 4
+        },
+        {
+          "ctl": 98,
+          "evo2": null,
+          "hms": "3:23:29",
+          "plus_weeks": 8
+        }
+      ],
+      "distance": "marathon",
+      "hms": "3:29:19",
+      "long_km": 22.9,
+      "note": "a range, not a promise: it assumes the laid build completes, and race day rides fuelling, pacing, weather and the day's legs. The median is the trend signal \u2014 more runway \u2192 higher fitness \u2192 faster \u2014 and the band narrows as runs land and raced results calibrate it.",
+      "seconds": 12559,
+      "today": {
+        "at_ctl": 4,
+        "at_evo2": 41.1,
+        "gain_seconds": 7857,
+        "hms": "5:40:16",
+        "long_km": 10.1,
+        "seconds": 20416
+      }
+    },
+    "note": "Projected fitness by race day \u2248 CTL 75 (from 4 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 45 a healthy marathon finish needs. That supports **finishing Cold-Start Marathon healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **3:02:15\u20134:00:24** (median 3:29:19) \u2014 the range narrows as runs land.",
+    "projected_ctl": 75,
+    "verdict": "finish"
+  },
+  "mode": "race",
+  "note": "Easy pace ~6:15/km \u2014 if your easy runs are habitually faster than this they're really threshold effort; the re-base deliberately runs slower to build the aerobic base. (See the Effort-discipline panel for how your actual easy runs measure up.)",
+  "objective": {
+    "date": "2026-11-17",
+    "label": "Cold-Start Marathon",
+    "priority": "A",
+    "target": "finish",
+    "type": "marathon",
+    "weeks_away": 19
+  },
+  "ok": true,
+  "pace_zones": {
+    "easy": "6:25/km",
+    "easy_top": "6:15/km",
+    "interval": "4:38/km",
+    "lt1": "5:55/km",
+    "marathon": "5:33/km",
+    "p5k": "4:44/km",
+    "threshold": "5:06/km"
+  },
+  "peak": {
+    "builds": [
+      "vo2max",
+      "resilience"
+    ],
+    "clipped_by_acwr": false,
+    "end_atl": 100.6,
+    "end_ctl": 74.8,
+    "start": "2026-10-12",
+    "weeks": [
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 72.76,
+        "frozen": false,
+        "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance",
+        "intent_km": 57,
+        "intent_runs": 5,
+        "km": 60.1,
+        "long": 17,
+        "peak_acwr": 1.411,
+        "proj_acwr": 1.339,
+        "proj_acwr_flat": 1.201,
+        "proj_acwr_soft": 1.201,
+        "proj_ctl": 64.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals \u2014 maintenance",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.1,
+            "kind": "long_mp",
+            "label": "long-fast resilience run",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-10-12",
+            "kind": "easy",
+            "km": 10.6,
+            "minutes": 66,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 86.4
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-10-13",
+            "kind": "interval",
+            "km": 9.2,
+            "minutes": 53,
+            "note": "VO\u2082 intervals \u2014 maintenance \u2014 10min easy wu + 7\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 108.8,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-10-15",
+            "kind": "easy",
+            "km": 12.0,
+            "minutes": 75,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 97.1
+          },
+          {
+            "date": "2026-10-17",
+            "kind": "easy",
+            "km": 9.3,
+            "minutes": 58,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 75.8
+          },
+          {
+            "component": "resilience",
+            "date": "2026-10-18",
+            "kind": "long_mp",
+            "km": 19.0,
+            "minutes": 115,
+            "note": "long-fast resilience run \u2014 85min easy base + 30min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 13.6,
+                "minutes": 85,
+                "pace_zone": "6:15/km easy",
+                "trimp": 110.5,
+                "zone": "easy"
+              },
+              {
+                "detail": "30min @ marathon pace finish",
+                "effort": "work",
+                "km": 5.4,
+                "minutes": 30,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 54.0,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 164.5,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-10-12",
+        "strides": 0,
+        "trimp_total": 532.6,
+        "wk": 1
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 77.1,
+        "frozen": false,
+        "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance",
+        "intent_km": 54,
+        "intent_runs": 5,
+        "km": 64.0,
+        "long": 16,
+        "peak_acwr": 1.37,
+        "proj_acwr": 1.34,
+        "proj_acwr_flat": 1.178,
+        "proj_acwr_soft": 1.178,
+        "proj_ctl": 69.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals \u2014 maintenance",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.115,
+            "kind": "long_mp",
+            "label": "long-fast resilience run",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-10-19",
+            "kind": "easy",
+            "km": 11.4,
+            "minutes": 71,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 91.7
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-10-20",
+            "kind": "interval",
+            "km": 9.2,
+            "minutes": 53,
+            "note": "VO\u2082 intervals \u2014 maintenance \u2014 10min easy wu + 7\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 108.8,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-10-22",
+            "kind": "easy",
+            "km": 12.6,
+            "minutes": 79,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 103.0
+          },
+          {
+            "date": "2026-10-24",
+            "kind": "easy",
+            "km": 9.9,
+            "minutes": 62,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 80.4
+          },
+          {
+            "component": "resilience",
+            "date": "2026-10-25",
+            "kind": "long_mp",
+            "km": 20.9,
+            "minutes": 126,
+            "note": "long-fast resilience run \u2014 90min easy base + 36min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 14.4,
+                "minutes": 90,
+                "pace_zone": "6:15/km easy",
+                "trimp": 117.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "36min @ marathon pace finish",
+                "effort": "work",
+                "km": 6.5,
+                "minutes": 36,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 64.8,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 181.8,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-10-19",
+        "strides": 0,
+        "trimp_total": 565.7,
+        "wk": 2
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 81.18,
+        "frozen": false,
+        "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance",
+        "intent_km": 52,
+        "intent_runs": 5,
+        "km": 67.6,
+        "long": 16,
+        "peak_acwr": 1.346,
+        "proj_acwr": 1.346,
+        "proj_acwr_flat": 1.164,
+        "proj_acwr_soft": 1.164,
+        "proj_ctl": 74.8,
+        "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.12,
+            "kind": "interval",
+            "label": "VO\u2082 intervals \u2014 maintenance",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "attach": "long",
+            "component": "resilience",
+            "frac": 0.13,
+            "kind": "long_mp",
+            "label": "long-fast resilience run",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-10-26",
+            "kind": "easy",
+            "km": 11.8,
+            "minutes": 74,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 96.2
+          },
+          {
+            "component": "vo2max",
+            "date": "2026-10-27",
+            "kind": "interval",
+            "km": 9.2,
+            "minutes": 53,
+            "note": "VO\u2082 intervals \u2014 maintenance \u2014 10min easy wu + 7\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "4:38/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.6,
+                "minutes": 3,
+                "pace_zone": "4:38/km interval",
+                "trimp": 9.6,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 108.8,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-10-29",
+            "kind": "easy",
+            "km": 13.3,
+            "minutes": 83,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 108.0
+          },
+          {
+            "date": "2026-10-31",
+            "kind": "easy",
+            "km": 10.4,
+            "minutes": 65,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 84.3
+          },
+          {
+            "component": "resilience",
+            "date": "2026-11-01",
+            "kind": "long_mp",
+            "km": 22.9,
+            "minutes": 138,
+            "note": "long-fast resilience run \u2014 95min easy base + 43min @ MP finish",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy aerobic base",
+                "effort": "easy_base",
+                "km": 15.2,
+                "minutes": 95,
+                "pace_zone": "6:15/km easy",
+                "trimp": 123.5,
+                "zone": "easy"
+              },
+              {
+                "detail": "43min @ marathon pace finish",
+                "effort": "work",
+                "km": 7.7,
+                "minutes": 43,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 77.4,
+                "zone": "marathon"
+              }
+            ],
+            "trimp": 200.9,
+            "zone": "marathon"
+          }
+        ],
+        "start": "2026-10-26",
+        "strides": 0,
+        "trimp_total": 598.2,
+        "wk": 3
+      }
+    ]
+  },
+  "phases": [
+    {
+      "key": "base",
+      "kind": "base",
+      "phase": "Base \u2014 aerobic",
+      "race": "Cold-Start Marathon",
+      "role": "goal",
+      "weeks": 8
+    },
+    {
+      "key": "build",
+      "kind": "build",
+      "phase": "Build \u2014 specific",
+      "race": "Cold-Start Marathon",
+      "role": "goal",
+      "weeks": 7
+    },
+    {
+      "key": "peak",
+      "kind": "peak",
+      "phase": "Peak \u2192 Cold-Start Marathon",
+      "race": "Cold-Start Marathon",
+      "role": "goal",
+      "weeks": 3
+    },
+    {
+      "key": "taper",
+      "kind": "taper",
+      "phase": "Taper \u2192 Cold-Start Marathon",
+      "race": "Cold-Start Marathon",
+      "role": "goal",
+      "type": "marathon",
+      "weeks": 3
+    }
+  ],
+  "prog": {
+    "note": "building weeks progress \u22656%/wk over the last realised non-down load (soft-cap floor; hard caps still bind) \u2014 assumes continued clean absorption, re-anchored on your actuals at every regen",
+    "ramp": 0.06
+  },
+  "rebase": {
+    "clipped_by_acwr": false,
+    "end_atl": 13.4,
+    "end_ctl": 4.0,
+    "full_len": 6,
+    "start": "2026-06-29",
+    "weeks": []
+  },
+  "regime": {
+    "mode": "assertive",
+    "reason": "no symptom or medical event in 56 days \u2014 the plan follows your measured form"
+  },
+  "shape": {
+    "atl": 13.4,
+    "ctl": 4.0,
+    "effective_vo2max": 41.1
+  },
+  "shape_response": {
+    "basis": "no prior projection yet \u2014 riding the full ceiling",
+    "factor": 1.0,
+    "projected": null,
+    "realized": 4.0,
+    "ride_cap": 1.25
+  },
+  "taper": {
+    "builds": [
+      "ssmax",
+      "economy"
+    ],
+    "clipped_by_acwr": false,
+    "end_atl": 38.0,
+    "end_ctl": 54.5,
+    "start": "2026-11-02",
+    "weeks": [
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 51.72,
+        "frozen": false,
+        "intent": "Taper \u2014 drop volume, keep sharpness",
+        "intent_km": 51,
+        "intent_runs": 5,
+        "km": 50.6,
+        "long": 15,
+        "peak_acwr": 1.278,
+        "proj_acwr": 0.992,
+        "proj_acwr_flat": 1.009,
+        "proj_acwr_soft": 1.009,
+        "proj_ctl": 70.5,
+        "quality": [
+          {
+            "component": "ssmax",
+            "frac": 0.06,
+            "kind": "tempo",
+            "label": "short race-pace touch",
+            "rec_min": 2,
+            "rep_min": 2,
+            "structure": "intervals",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-11-02",
+            "kind": "easy",
+            "km": 10.1,
+            "minutes": 63,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 82.4
+          },
+          {
+            "component": "ssmax",
+            "date": "2026-11-03",
+            "kind": "tempo",
+            "km": 7.8,
+            "minutes": 46,
+            "note": "short race-pace touch \u2014 10min easy wu + 7\u00d72min @ marathon w/ 2min jog + 10min easy cd",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 66.8,
+            "zone": "marathon"
+          },
+          {
+            "date": "2026-11-05",
+            "kind": "easy",
+            "km": 10.9,
+            "minutes": 68,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 88.6
+          },
+          {
+            "date": "2026-11-07",
+            "kind": "easy",
+            "km": 9.0,
+            "minutes": 56,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 72.2
+          },
+          {
+            "component": "economy",
+            "date": "2026-11-08",
+            "kind": "long",
+            "km": 12.8,
+            "minutes": 80,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 104.3
+          }
+        ],
+        "start": "2026-11-02",
+        "strides": 2,
+        "trimp_total": 414.3,
+        "wk": 1
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 39.56,
+        "frozen": false,
+        "intent": "Taper \u2014 drop volume, keep sharpness",
+        "intent_km": 39,
+        "intent_runs": 5,
+        "km": 38.6,
+        "long": 12,
+        "peak_acwr": 0.966,
+        "proj_acwr": 0.816,
+        "proj_acwr_flat": 0.804,
+        "proj_acwr_soft": 0.804,
+        "proj_ctl": 63.5,
+        "quality": [
+          {
+            "component": "ssmax",
+            "frac": 0.06,
+            "kind": "tempo",
+            "label": "short race-pace touch",
+            "rec_min": 2,
+            "rep_min": 2,
+            "structure": "intervals",
+            "zone": "marathon"
+          }
+        ],
+        "runs": 5,
+        "sessions": [
+          {
+            "date": "2026-11-09",
+            "kind": "easy",
+            "km": 7.5,
+            "minutes": 47,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 60.8
+          },
+          {
+            "component": "ssmax",
+            "date": "2026-11-10",
+            "kind": "tempo",
+            "km": 7.1,
+            "minutes": 42,
+            "note": "short race-pace touch \u2014 10min easy wu + 6\u00d72min @ marathon w/ 2min jog + 10min easy cd",
+            "pace_zone": "5:33/km marathon",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.3,
+                "minutes": 2,
+                "pace_zone": "6:15/km easy",
+                "trimp": 2.6,
+                "zone": "easy"
+              },
+              {
+                "detail": "2min @ marathon",
+                "effort": "work",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:33/km marathon",
+                "trimp": 3.6,
+                "zone": "marathon"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 1.6,
+                "minutes": 10,
+                "pace_zone": "6:15/km easy",
+                "trimp": 13.0,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 60.6,
+            "zone": "marathon"
+          },
+          {
+            "date": "2026-11-12",
+            "kind": "easy",
+            "km": 8.0,
+            "minutes": 50,
+            "note": "easy run + 2\u00d74\u20136 strides",
+            "pace_zone": "6:15/km easy",
+            "strides": 2,
+            "trimp": 65.4
+          },
+          {
+            "date": "2026-11-14",
+            "kind": "easy",
+            "km": 6.6,
+            "minutes": 41,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 53.3
+          },
+          {
+            "component": "economy",
+            "date": "2026-11-15",
+            "kind": "long",
+            "km": 9.4,
+            "minutes": 59,
+            "note": "long easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 76.9
+          }
+        ],
+        "start": "2026-11-09",
+        "strides": 2,
+        "trimp_total": 317.0,
+        "wk": 2
+      },
+      {
+        "adjusted": false,
+        "clipped": false,
+        "elapsed": false,
+        "eq_km": 27.1,
+        "frozen": false,
+        "intent": "Race week \u2014 freshen up, stay loose",
+        "intent_km": 27,
+        "intent_runs": 2,
+        "km": 9.5,
+        "long": 8,
+        "peak_acwr": 0.769,
+        "proj_acwr": 0.697,
+        "proj_acwr_flat": 0.647,
+        "proj_acwr_soft": 0.647,
+        "proj_ctl": 54.5,
+        "quality": [],
+        "runs": 2,
+        "sessions": [
+          {
+            "date": "2026-11-16",
+            "kind": "easy",
+            "km": 4.5,
+            "minutes": 28,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 35.9
+          },
+          {
+            "date": "2026-11-17",
+            "kind": "easy",
+            "km": 5.0,
+            "minutes": 31,
+            "note": "easy run",
+            "pace_zone": "6:15/km easy",
+            "trimp": 40.9
+          }
+        ],
+        "start": "2026-11-16",
+        "strides": 0,
+        "trimp_total": 76.8,
+        "wk": 3
+      }
+    ]
+  },
+  "tune_ups": []
+}
