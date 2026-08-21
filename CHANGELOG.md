@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Away days no longer reach the public view — on any phase, through any payload.** The public plan
   strip covered the four classic phases only, so a re-base week or a multi-race chain segment kept its
   away dates; and the public training log (`/api/log`) spread the same week records whole and was never
-  stripped at all — the owner's own 2026-07-21 travel date was served there the week of 07-19..26. The
+  stripped at all — a real away date of the owner's was served there for the week it mattered. The
   strip now walks every record at any depth and runs on the plan *and* the log; the self-test drives
   both endpoints for real instead of checking a fixture. Found by an external review (Gemini 3.1 Pro),
   widened in verification.

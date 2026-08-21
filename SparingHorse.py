@@ -10279,7 +10279,7 @@ def _strip_av_public(obj):
     redaction). The re-laid session days themselves stay: they're just a plan. Walks EVERY dict at
     any depth (0.27.1): the 0.27.0 strip enumerated base/build/peak/taper and so missed the re-base
     and the chain segments (bridge1/peak1…), and it ran on /api/plan only while /api/log spreads the
-    same week dicts whole — on 2026-07-19..26 the public log served the owner's 07-21 flight date
+    same week dicts whole — in July 2026 the public log served one of the owner's away dates for a week
     (Gemini review #1, widened by verification). A key-agnostic walk cannot be outrun by a new phase
     key or a new payload; det/av-public-strip drives both endpoints."""
     if isinstance(obj, dict):
@@ -15399,7 +15399,7 @@ def _stc_day_spacing():
 
 def _stc_availability():
     """§AV — availability-aware layout. Golden byte-identity with no blocks; the Tue relocation
-    (his 2026-07-21 flight — the feature's founding case); the weekend block moving the long to the
+    (his July 2026 flight — the feature's founding case); the weekend block moving the long to the
     last available day; the heavy block shedding runs WITH their load (prorate, never cram); the
     straddling week's remainder avoiding a blocked day; and the hard-gap invariant on re-laid sets."""
     from datetime import date, timedelta
@@ -15567,7 +15567,7 @@ def _stc_av_public_strip():
     included — the 0.27.0 strip walked base/build/peak/taper only; Gemini review 2026-08-21 #1/#6) and on
     EVERY payload that spreads week dicts: /api/plan AND /api/log (block_log → _plan_all_weeks →
     {**w, "sessions"} carries av_dates for every phase and api_log popped only `reflection` — on
-    2026-07-19..26 the public log served the owner's 07-21 flight date). Drives the REAL endpoints under
+    in July 2026 the public log served one of the owner's away dates for a week). Drives the REAL endpoints under
     READONLY through a throwaway DB (a fixture-only strip check is exactly what let the gap through);
     the private view must KEEP the fields (the ✈ week chip reads them). /api/availability stays
     private-only."""
