@@ -232,7 +232,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.28.0"
+ENGINE_VERSION = "0.28.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -15447,7 +15447,13 @@ async function explainProbe(){
 async function readyProbe(){
   const t0=t();
   const res=await fetch("/api/readiness"); const j=await res.json(); const ms=Math.round(t()-t0);
-  const verdict=j.verdict||(j.readiness&&j.readiness.verdict);
+  // The verdict lives at j.assessment.verdict and always has (today_readiness returns
+  // {date, assessment, session}). This probe read j.verdict / j.readiness.verdict — neither of which
+  // the endpoint has ever returned — so it reported FAIL with an empty output from the day it was
+  // written (2026-06-19) until an owner ran the browser check and read the report. A manual harness
+  // nobody re-runs is a test that rots in silence; det/client-probe now pins both ends of this.
+  const a=j.assessment||{};
+  const verdict=a.verdict||j.verdict||(j.readiness&&j.readiness.verdict);
   const ok=["green","amber","red"].includes(verdict);
   const node=sandbox(`<span class="tag ${ok?'PASS':'FAIL'}">${verdict||"?"}</span>`);
   return {category:"client",id:"readiness-render",desc:"readiness verdict renders (green/amber/red)",

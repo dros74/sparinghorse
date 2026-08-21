@@ -8571,6 +8571,47 @@ def _golden_week_diff(want, got):
     return lines[:14] + ([f"… {len(lines) - 14} more diff lines"] if len(lines) > 14 else [])
 
 
+def _stc_client_probe():
+    """§SELFTEST — the browser self-check reads the payload the server actually sends.
+
+    The /selftest page's probes run only when a human opens the page, so a wrong accessor in one of
+    them fails silently for as long as nobody looks. `readyProbe` read `j.verdict` / `j.readiness
+    .verdict`; `/api/readiness` has always answered `{date, assessment, session}` with the verdict at
+    `assessment.verdict`. It therefore reported FAIL with an empty output from 2026-06-19 until the
+    owner ran the check on the 0.28.0 box and pasted the report. Both ends are pinned here:
+
+      (a) the CONTRACT — /api/readiness carries assessment.verdict in the traffic-light vocabulary, on
+          the private payload AND the public projection (the public box redacts the inputs, never the
+          verdict);
+      (b) the PROBE — the page's readiness probe actually reads `assessment`. A det that only checked
+          (a) would have watched this bug for two months without blinking."""
+    fails, out = [], {}
+    c = S.app.test_client()
+    saved_ro = S.READONLY
+    try:
+        for ro, label in ((False, "private"), (True, "public")):
+            S.READONLY = ro
+            j = c.get("/api/readiness").get_json() or {}
+            v = ((j.get("assessment") or {}).get("verdict"))
+            out[label] = {"keys": sorted(j), "assessment.verdict": v}
+            if v not in ("green", "amber", "red"):
+                fails.append(f"(a) {label} /api/readiness: assessment.verdict is {v!r}, "
+                             f"not one of green/amber/red")
+    finally:
+        S.READONLY = saved_ro
+    probe = S.SELFTEST_HTML[S.SELFTEST_HTML.find("async function readyProbe"):]
+    probe = probe[:probe.find("async function runClient")]
+    out["probe_reads_assessment"] = "assessment" in probe
+    if not out["probe_reads_assessment"]:
+        fails.append("(b) the page's readiness probe never reads `assessment` — it is looking for a "
+                     "verdict where the endpoint does not put one")
+    return _st("det", "client-probe",
+               "the browser self-check reads what the server sends: /api/readiness carries "
+               "assessment.verdict (private AND public) and the page's probe reads that path",
+               passed=not fails, expect="verdict at assessment.verdict on both projections; probe reads it",
+               got={"violations": fails or "none", **out})
+
+
 def _stc_clock_purity():
     """§GOLD (0.28.0) — the engine answers to the `today` it is GIVEN, and to nothing else.
 
@@ -8659,7 +8700,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),

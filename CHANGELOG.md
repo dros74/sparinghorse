@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.28.1] - 2026-08-22
+
+### Fixed
+
+- **The browser self-check's readiness probe was looking in the wrong place.** It asked the server for
+  today's readiness and then read the verdict from a field the answer has never contained, so it
+  reported a failure with an empty result — and had done since the day it was written in June. Nothing
+  was ever wrong with the readiness verdict itself; only the check was broken. It reads the right
+  field now, and a new test pins both halves — that the server puts the verdict where it says it does
+  (on the private view and the public one), and that the page's probe reads it from there. A check
+  that only runs when someone opens a page can rot for months without a sound.
+
 ## [0.28.0] - 2026-08-21
 
 ### Added
