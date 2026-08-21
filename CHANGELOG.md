@@ -10,6 +10,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.27.2] - 2026-08-21
+
+### Fixed
+
+- **The readiness card is readable in every theme and state.** White text on the amber and red
+  gradients measured as low as 1.8:1 at the big verdict — washed out somewhere in all three themes.
+  Daylight is back on the design spec's deeper greens and maps amber/red to the theme's own
+  warn/danger colours; Charcoal darkens its neon stops; Aurora keeps the neon and switches to dark
+  ink. A new self-test computes the WCAG contrast ratios straight from the stylesheet, so a future
+  recolour can't silently regress (verdict ≥3:1, card footer ≥4.5:1, every theme × every state).
+- **The stop-symptom halt has an explicit control.** The check-in accepted a stop-the-run symptom
+  flag all along, but the only way to raise it was a matching phrase in the free-text note. A quiet
+  "I had to stop / chest symptom" checkbox now posts the flag directly — the card flips to red +
+  halted and the plan rests — while the note's phrase catch stays on as a backstop. It is quiet on
+  purpose: it sits in the same grey as the energy and sleep labels beside it, and only turns the
+  warning colour once it is actually ticked, so it isn't raising an alarm on every ordinary day.
+- **Tiles fail honestly instead of spinning forever.** A dashboard tile whose fetch failed used to
+  sit on "Loading…" for the life of the page. Every loader now ends somewhere: data, an honest empty
+  state, or a failure notice that names a dropped connection ("offline — data as of your last sync")
+  versus a server error ("unavailable") and offers a working retry. That now includes the zones and
+  effort-discipline panels: the effort section used to hide itself outright when its read failed, so a
+  server problem looked exactly like a feature you didn't have. The check-in button shows busy and
+  couldn't-save states instead of silently doing nothing. The plan-drift view is also no longer loaded
+  twice on every page open — the heaviest read on the page was being fetched two times over.
+- **A missed nightly sync can't hide.** A container restart across the nightly minute used to skip
+  the night without a trace. The scheduler now records each run's outcome, runs a catch-up pass at
+  boot when the last success is more than 26 hours old, and reports through `/healthz` — timestamps
+  on the private console, booleans only on the public box so a probe can't learn the household's
+  routine. Each successful nightly also leaves a dated database snapshot beside the data volume,
+  keeping a week.
+- **API errors answer as JSON, without internals.** An unhandled route error now returns
+  `{ok:false,error}` with status 500 for API paths (and a quiet HTML page for the app itself) —
+  never a traceback; the details go to the server log. The run-metrics endpoint's numeric filters
+  are bounded and validated like every other route (junk values used to be silently ignored).
+- **The drift view's accent no longer depends on the trial palette.** Several drift styles used the
+  second accent colour bare, which only the removable polychrome trial block defines in two of the
+  three themes — removing that block would have stripped those tints and strokes. They now fall
+  back to the main accent, as the design doc promises.
+
 ## [0.27.1] - 2026-08-21
 
 ### Fixed

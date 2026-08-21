@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, g, jsonify, redirect, request, send_file
+from werkzeug.exceptions import HTTPException
 from requests.adapters import HTTPAdapter, Retry
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -227,7 +228,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.27.1"
+ENGINE_VERSION = "0.27.2"
 
 
 def activity_profile(activity_id, n=120):
@@ -8798,7 +8799,7 @@ def assess_readiness(db, checkin):
     llm = llm_readiness(hrv, energy, sleep, note) if llm_available() else None
     if not (llm and llm.get("ok")):
         return base
-    if llm.get("stop_symptom_detected"):  # free-text safety catch → same halt as the checkbox
+    if llm.get("stop_symptom_detected"):  # free-text safety catch — the §H2 backstop to the check-in stop control
         return {"verdict": "red", "halt": True, "hrv": hrv,
                 "action": "Stop — your note reads like a stop-the-run exertional symptom. Rest and "
                           "contact your doctor before resuming.",
@@ -9229,9 +9230,10 @@ def _selftest_running_elsewhere():
 
 def _wait_for_selftest(limit=180):
     """Hold a background job while a battery runs (it has swapped `regenerate`/READONLY). Returns True
-    when clear; after `limit` seconds gives up and returns False (the caller proceeds and says so)."""
+    when clear; after `limit` seconds gives up and returns False (the caller proceeds and says so).
+    The battery's OWN thread never waits on itself (dets drive the nightly job in-process)."""
     for _ in range(limit):
-        if _selftest_thread is None:
+        if not _selftest_running_elsewhere():
             return True
         time.sleep(1)
     return False
@@ -9252,6 +9254,24 @@ def _selftest_gate():
     resp.status_code = 503
     resp.headers["Retry-After"] = "60"
     return resp
+
+
+@app.errorhandler(Exception)
+def _unhandled_json_500(e):
+    """Blanket last resort (TECH-9): /api/* and /healthz answer JSON {ok:false,error} 500, pages get a
+    quiet HTML 500 — and NEITHER leaks the exception (the public box serves strangers; the traceback
+    always lands in the server log instead). Flask's own HTTPException (404/405/…) keeps its answer."""
+    if isinstance(e, HTTPException):
+        return e
+    app.logger.exception("unhandled %s %s", request.method, request.path)
+    if request.path.startswith("/api/") or request.path == "/healthz":
+        return jsonify(ok=False, error="internal error — the server log has the details"), 500
+    return ("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<title>Sparing Horse — something broke</title></head>"
+            "<body style=\"font-family:system-ui,sans-serif;max-width:38em;margin:4em auto;line-height:1.5\">"
+            "<h1 style=\"font-size:1.4em\">Something broke.</h1>"
+            "<p>Reload the page. If it keeps happening, the server log has the full traceback.</p>"
+            "</body></html>"), 500
 
 
 @app.before_request
@@ -9343,8 +9363,21 @@ def replan(db, mutate):
 
 @app.get("/healthz")
 def healthz():
-    return jsonify(ok=True, token_configured=bool(RUNALYZE_TOKEN), db=DB_PATH.exists(),
-                   llm=llm_available(), readonly=READONLY)
+    """Liveness + scheduler telemetry (TECH-8). The private box gets the raw timestamps; the PUBLIC box
+    gets booleans only — an unauthenticated probe must not learn when the owner's nightly runs (their
+    routine is private), but an uptime check can still see that syncing works and is fresh."""
+    db = get_db()
+    last_sync = get_meta(db, "last_sync")
+    last_ok = get_meta(db, "sched:last_ok")
+    fails = int(get_meta(db, "sched:fail_count", "0") or 0)
+    out = dict(ok=True, token_configured=bool(RUNALYZE_TOKEN), db=DB_PATH.exists(),
+               llm=llm_available(), readonly=READONLY, consecutive_failures=fails)
+    if READONLY:
+        out.update(sync_ok=bool(last_ok),
+                   sync_stale=(not last_ok) or _seconds_since(last_ok) > 36 * 3600)
+    else:
+        out.update(last_sync=last_sync, last_ok=last_ok)
+    return jsonify(out)
 
 
 _sync_lock = threading.Lock()   # one Runalyze pull at a time — page-load syncs, "Sync now", the nightly
@@ -9485,14 +9518,23 @@ def api_run_metrics():
     if READONLY:
         return jsonify(ok=False, error="per-run metrics are private"), 403
     db = get_db()
-    route = request.args.get("route", type=int)
-    days = request.args.get("days", type=int)
-    limit = request.args.get("limit", type=int)
+    route, err = _int_arg("route", None)
+    if err:
+        return err
+    days, err = _int_arg("days", None, hi=3650)
+    if err:
+        return err
+    limit, err = _int_arg("limit", None, hi=10000)
+    if err:
+        return err
+    example, err = _int_arg("example", None)
+    if err:
+        return err
     out = {"ok": True, "rows": run_metrics(db, route_id=route, days=days, limit=limit)}
     if request.args.get("analysis", "1") != "0":
         out["analysis"] = run_metrics_analysis(db)
         # the worked example anchors on the latest run (or ?example=<id>), independent of the row filters
-        out["worked_example"] = worked_example(db, activity_id=request.args.get("example", type=int))
+        out["worked_example"] = worked_example(db, activity_id=example)
     return jsonify(out)
 
 
@@ -11219,7 +11261,11 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     --bg:#f4f1ea; --surface:#fbf9f4; --surface2:#ece7db; --line:#ddd6c7;
     --text:#2a2620; --muted:#6f6857; --accent:#b9542c;
     --ok:#4f8c5f; --warn:#a9781f; --danger:#b5563f;
-    --readybg:#2f9760; --readybg2:#1d6240; --readyamber:#f7b32b; --readyred:#fc6a55; --onacc:#fff;   /* readiness status-card palette borrowed from the dark theme (richer signals) */
+    --readybg:#4d8a5c; --readybg2:#3c6a48;   /* spec greens (DESIGN.md §2.3) — deep enough for white */
+    --readyamber:var(--warn); --readyamber2:color-mix(in oklab,var(--warn),#000 30%);   /* amber/red ride the theme signals (mockup mapping) */
+    --readyred:var(--danger); --readyred2:color-mix(in oklab,var(--danger),#000 32%);
+    --onready:#fff;   /* ink on the readiness gradient (det/readiness-contrast pins ≥3:1 verdict, ≥4.5:1 footer) */
+    --onacc:#fff;
     --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);   /* legacy aliases */
     --serif:'Fraunces',Georgia,serif; --sans:'Inter',system-ui,sans-serif;
     --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
@@ -11228,14 +11274,22 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     --bg:#191a1d; --surface:#222327; --surface2:#2a2b30; --line:#3a3c43;
     --text:#edeef1; --muted:#9b9da5; --accent:#fa7d42;
     --ok:#33d98a; --warn:#f7b32b; --danger:#fc6a55;
-    --readybg:#2f9760; --readybg2:#1d6240; --readyamber:#f7b32b; --readyred:#fc6a55; --onacc:#fff;
+    --readybg:#2f9760; --readybg2:#1d6240;   /* green already passes vs white — unchanged */
+    --readyamber:color-mix(in oklab,var(--warn),#000 22%); --readyamber2:color-mix(in oklab,var(--warn),#000 46%);   /* neon amber darkened to white-legible */
+    --readyred:color-mix(in oklab,var(--danger),#000 10%); --readyred2:color-mix(in oklab,var(--danger),#000 40%);
+    --onready:#fff;
+    --onacc:#fff;
     --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
   [data-theme="aurora"]{   /* Electric — deep indigo, violet→cyan accents, neon signals */
     --bg:#121226; --surface:#1c1d3e; --surface2:#262752; --line:#3a3c74;
     --text:#eef0ff; --muted:#a2a6dc; --accent:#7b61ff; --accent2:#28d6ee;
     --ok:#22e3a6; --warn:#ffc24d; --danger:#ff5d8a;
-    --readybg:#12b39a; --readybg2:#0a7d6e; --readyamber:var(--warn); --readyred:var(--danger); --onacc:#fff;
+    --readybg:#12b39a; --readybg2:#6bc6b2;   /* neon stays bright: dark ink + a LIFTED bottom stop */
+    --readyamber:var(--warn); --readyamber2:#ffd07d;   /* white-mix 22% */
+    --readyred:var(--danger); --readyred2:#ff7f9e;   /* white-mix 18% */
+    --onready:#121226;   /* dark indigo ink on the neon gradient */
+    --onacc:#fff;
     --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
   *{box-sizing:border-box}
@@ -11508,27 +11562,27 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .ready .rhrv{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px}
   .ready .raisrc{font-family:var(--mono);font-size:10px;color:var(--accent);margin-top:5px;letter-spacing:.04em}
   /* §3 status card — "lead with the verdict" (DESIGN.md Almanac). The bg swaps with the state. */
-  .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:var(--onacc);
+  .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:var(--onready);
     background:linear-gradient(155deg,var(--readybg),var(--readybg2));
     box-shadow:0 8px 22px color-mix(in oklab,var(--readybg),transparent 60%)}
-  .statuscard.amber{background:linear-gradient(155deg,var(--readyamber),color-mix(in oklab,var(--readyamber),#000 30%));
+  .statuscard.amber{background:linear-gradient(155deg,var(--readyamber),var(--readyamber2));
     box-shadow:0 8px 22px color-mix(in oklab,var(--readyamber),transparent 60%)}
-  .statuscard.red{background:linear-gradient(155deg,var(--readyred),color-mix(in oklab,var(--readyred),#000 32%));
+  .statuscard.red{background:linear-gradient(155deg,var(--readyred),var(--readyred2));
     box-shadow:0 8px 22px color-mix(in oklab,var(--readyred),transparent 55%)}
-  .statuscard .sc-orb{position:absolute;border-radius:50%;background:rgba(255,255,255,.09);pointer-events:none}
+  .statuscard .sc-orb{position:absolute;border-radius:50%;background:color-mix(in oklab,var(--onready),transparent 91%);pointer-events:none}
   .statuscard .sc-top{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative}
-  .statuscard .sc-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:rgba(255,255,255,.78)}
-  .statuscard .sc-pill{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.16);
-    border:1px solid rgba(255,255,255,.28);border-radius:999px;padding:4px 11px;
-    font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--onacc)}
-  .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--onacc);box-shadow:0 0 8px rgba(255,255,255,.9)}
+  .statuscard .sc-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:color-mix(in oklab,var(--onready),transparent 22%)}
+  .statuscard .sc-pill{display:inline-flex;align-items:center;gap:7px;background:color-mix(in oklab,var(--onready),transparent 84%);
+    border:1px solid color-mix(in oklab,var(--onready),transparent 72%);border-radius:999px;padding:4px 11px;
+    font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--onready)}
+  .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--onready);box-shadow:0 0 8px color-mix(in oklab,var(--onready),transparent 10%)}
   .statuscard .sc-verdict{font-family:var(--serif);font-weight:600;font-size:23px;margin-top:14px;line-height:1.18;position:relative}
   .statuscard .halt{font-weight:600;margin-top:10px;position:relative}
-  .statuscard .sc-foot{font-family:var(--mono);font-size:10.5px;color:rgba(255,255,255,.82);
-    margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.2);position:relative;line-height:1.6;
+  .statuscard .sc-foot{font-family:var(--mono);font-size:10.5px;color:color-mix(in oklab,var(--onready),transparent 18%);
+    margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in oklab,var(--onready),transparent 80%);position:relative;line-height:1.6;
     display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
   .statuscard .sc-wx{display:inline-flex;gap:12px;margin-left:auto}
-  .statuscard .sc-wx .wxc{display:inline-flex;align-items:center;gap:4px;color:rgba(255,255,255,.92)}
+  .statuscard .sc-wx .wxc{display:inline-flex;align-items:center;gap:4px;color:color-mix(in oklab,var(--onready),transparent 8%)}
   .statuscard .sc-wx .wxk{opacity:.6;font-size:9px;letter-spacing:.06em}
   /* readiness ⨉ chronic-load, side by side (mockup Almanac) */
   .rgrid{display:grid;grid-template-columns:1.45fr 1fr;gap:16px;align-items:stretch}
@@ -11573,7 +11627,12 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     letter-spacing:.1em;color:var(--muted)}
   .checkin select{font-family:var(--sans);font-size:13px;color:var(--text);
     background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
-  .checkin .stop{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--danger)}
+  /* Quiet at rest, loud only when it is actually saying something: an inactive medical control that
+     renders in the danger colour shouts every day nothing is wrong. Muted matches its ENERGY/SLEEP
+     siblings; the box itself still paints danger when ticked (accent-color inherits). */
+  .checkin .stop{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);
+    accent-color:var(--danger)}
+  .checkin .stop:has(:checked){color:var(--danger)}
 
   /* training plan */
   .objline{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 16px;margin-bottom:14px}
@@ -11938,9 +11997,9 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .driftseg{display:inline-flex;gap:2px;margin:0 0 14px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
   .driftseg button{font:inherit;font-size:12px;padding:5px 12px;background:transparent;color:var(--muted);border:0;cursor:pointer}
   .driftseg button.on{background:var(--accent);color:#fff}
-  .driftcaveat{background:color-mix(in oklab,var(--accent2),transparent 90%);border-left:3px solid var(--accent2);padding:8px 12px;border-radius:6px;margin-bottom:18px}
+  .driftcaveat{background:color-mix(in oklab,var(--accent2, var(--accent)),transparent 90%);border-left:3px solid var(--accent2, var(--accent));padding:8px 12px;border-radius:6px;margin-bottom:18px}
   .cfout{font-size:13px;line-height:1.9}.cfout .k{font-weight:600}
-  .drift .dl.cf{stroke:var(--accent2)}
+  .drift .dl.cf{stroke:var(--accent2, var(--accent))}
   .drift .dl{fill:none;stroke-width:2}
   .drift .dl.init{stroke:var(--muted);stroke-width:1.5}
   .drift .dl.actual{stroke:var(--accent)}
@@ -12051,6 +12110,9 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .wxresults .sub{color:var(--muted);font-size:11px}
   .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
+  .tilefail{font-style:normal}
+  .tilefail .tf-retry{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);font-style:normal}
+  button.primary.err{background:var(--danger);border-color:var(--danger)}
   footer{margin-top:48px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
     text-transform:uppercase;color:var(--muted);text-align:center;
     display:flex;flex-direction:column;align-items:center;gap:13px}
@@ -12347,7 +12409,24 @@ const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
 // Per-workout calendar date, e.g. "Jun 23 - Tue" — so the runner can schedule life around the plan.
 const sessDate = iso => { if(!iso) return ""; const d=new Date(iso+"T00:00:00");
   return d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+" - "+d.toLocaleDateString("en-US",{weekday:"short"}); };
-const getJSON = (url, opts) => fetch(url, opts).then(r => r.json());   // fetch + parse; callers keep their own try/catch
+const getJSON = (url, opts) => fetch(url, opts).then(r => r.json().then(d => {
+  if(!r.ok) throw new Error((d && d.error) || ("http " + r.status));   // an error body is a failure, not renderable data
+  return d;
+}));   // fetch + parse; callers keep their own try/catch
+// UX-3 — every loader ends somewhere: data, an honest empty state, or a FAILURE TERMINUS with a retry
+// hook. A transport failure (TypeError / !navigator.onLine) is named as offline and stamped with the
+// last sync we saw; an answered-with-error read gets the plain "unavailable". Never a parked "Loading…".
+let LAST_SYNC = null;
+function tileFail(host, name, retry, err){
+  if(!host) return;
+  const off = (err instanceof TypeError) || (typeof navigator !== "undefined" && navigator.onLine === false);
+  const when = LAST_SYNC ? ` · data as of your last sync, ${new Date(LAST_SYNC).toLocaleString()}` : "";
+  host.innerHTML = `<div class="empty tilefail">${off
+      ? `Offline — ${esc(name)} loads when you're back${when}.`
+      : `${esc(name)} unavailable — the server didn't answer.`} <a href="#" class="tf-retry">Retry</a></div>`;
+  host.querySelector(".tf-retry").addEventListener("click", ev => { ev.preventDefault();
+    host.innerHTML = `<div class="empty">Loading…</div>`; retry(); });
+}
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));  // HTML-escape before innerHTML
 
 // theme switcher
@@ -12416,7 +12495,10 @@ async function drawShapeTrends(){   // Fitness/Fatigue/Form from the reconstruct
 }
 
 async function loadShape(){
-  const r = await fetch("/api/shape"); const d = await r.json();
+  let d;
+  try{ const r = await fetch("/api/shape"); if(!r.ok) throw new Error("http "+r.status); d = await r.json(); }
+  catch(e){ tileFail($("#tiles"), "Current shape", loadShape, e); return; }
+  if(d.last_sync) LAST_SYNC = d.last_sync;
   const s = d.latest;
   HAS_SHAPE = !!s; _frSeen.shape=true; refreshFirstRun();   // first-run: history present?
   const tiles = $("#tiles");
@@ -12569,7 +12651,10 @@ function wireWeeklyDrag(){
   }, {passive:false});
 }
 async function loadWeekly(){
-  WEEKLY_ALL = await getJSON("/api/weekly?weeks=0");   // full history (tiny)
+  let all;
+  try{ all = await getJSON("/api/weekly?weeks=0"); }   // full history (tiny)
+  catch(e){ tileFail($("#chart"), "Weekly volume", loadWeekly, e); return; }
+  WEEKLY_ALL = all;
   WEEKLY_END = WEEKLY_ALL.length;
   WEEKLY_MAX = Math.max(...WEEKLY_ALL.map(x=>x.km), 1);
   renderWeekly();
@@ -12749,8 +12834,10 @@ let CURACT=null;   // the activity currently shown in the tile (null = the lates
 function loadRecent(){ return loadActivity(); }   // default tile = latest activity
 async function loadActivity(aid){
   CURACT = aid || null;
-  const a = await getJSON(aid?`/api/activity/${aid}`:"/api/activity/latest");
   const host=$("#recent");
+  let a;
+  try{ a = await getJSON(aid?`/api/activity/${aid}`:"/api/activity/latest"); }
+  catch(e){ tileFail(host, aid ? "That activity" : "Latest activity", ()=>loadActivity(aid), e); return; }
   // a non-run is the most-recent activity → note it (private view only). Its load still counts toward
   // the plan via Runalyze's all-sport fitness/fatigue, so this just explains why an older run shows.
   const cx = (!SH_READONLY && a && a.cross_training) ? a.cross_training : null;
@@ -13061,7 +13148,7 @@ function wxFootHtml(){
 function statusCard(a, foot, wx){
   const v=a.verdict||"green";
   const orbs=`<span class="sc-orb" style="top:-50px;right:-40px;width:180px;height:180px"></span>`+
-             `<span class="sc-orb" style="bottom:-60px;left:-30px;width:150px;height:150px;background:rgba(255,255,255,.05)"></span>`;
+             `<span class="sc-orb" style="bottom:-60px;left:-30px;width:150px;height:150px;background:color-mix(in oklab,var(--onready),transparent 95%)"></span>`;
   return `<div class="statuscard ${v}">${orbs}
       <div class="sc-top">
         <span class="sc-eyebrow">Today's readiness</span>
@@ -13101,16 +13188,28 @@ function renderReadiness(d){
       ${sel("energy", c.energy||"ok", [["good","Legs: fresh"],["ok","Legs: ok"],["heavy","Legs: heavy"]])}
       ${sel("sleep", c.sleep||"ok", [["good","Slept: well"],["ok","Slept: ok"],["poor","Slept: poorly"]])}
       <input id="ci_note" class="cinote" placeholder="${notePh}" value="${esc(c.note)}">
+      <label class="stop" title="Stop-the-run exertional symptom (chest pain, breathlessness, dizziness, fainting) — halts the plan"><input type="checkbox" id="ci_stop" ${c.stop_symptom?"checked":""}> I had to stop / chest symptom</label>
       <button class="primary" id="ciBtn" style="font-size:13px;padding:7px 12px">Save check-in</button>
     </div>`;
   $("#ciBtn").addEventListener("click", async ()=>{
+    const btn=$("#ciBtn");
     const body={energy:$("#ci_energy").value, sleep:$("#ci_sleep").value,
-      note:$("#ci_note").value};
-    const r=await fetch("/api/readiness",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    renderReadiness(await r.json());
+      note:$("#ci_note").value, stop_symptom:$("#ci_stop").checked};
+    btn.disabled=true; btn.classList.remove("err"); btn.textContent="Saving…";
+    try{
+      const r=await fetch("/api/readiness",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const d=await r.json().catch(()=>null);
+      if(!r.ok || !d || !d.assessment) throw new Error((d&&d.error)||("http "+r.status));
+      renderReadiness(d);
+    }catch(e){
+      btn.disabled=false; btn.textContent="Couldn't save — retry"; btn.classList.add("err");
+    }
   });
 }
-async function loadReadiness(){ renderReadiness(await getJSON("/api/readiness")); }
+async function loadReadiness(){
+  try{ renderReadiness(await getJSON("/api/readiness")); }
+  catch(e){ tileFail($("#readiness"), "Readiness", loadReadiness, e); }
+}
 // Opportunistic page-load sync (private only): pull any activities synced to Runalyze since the
 // last sync — throttled server-side — so a run finished earlier today lands without the manual
 // button, and the readiness tile flips to "done ✓". Silent + non-blocking. A real (non-skipped)
@@ -13953,7 +14052,11 @@ async function refreshPlan(p){
   renderPlan(p || await getJSON("/api/plan"));
   loadDrift();   // the plan (or its history) may have moved — refresh the drift view
 }
-async function loadPlan(){ await refreshPlan(); }
+async function loadPlan(){ try{ await refreshPlan(); }catch(e){ tileFail($("#plan"), "Training plan", loadPlan, e);
+  // refreshPlan() is what normally fires loadDrift(), so a failed plan load would leave #drift parked on
+  // "Loading…" for the life of the page. Terminate it HERE rather than also calling loadDrift() at boot:
+  // that fired a second /api/plandrift on every healthy load (the plan's heaviest read, twice per page).
+  tileFail($("#drift"), "Plan drift", loadDrift, e); } }
 $("#planBtn").addEventListener("click", async ()=>{
   const b=$("#planBtn"); b.disabled=true; const t=b.textContent; b.textContent="Generating…";
   try{
@@ -13965,7 +14068,9 @@ $("#planBtn").addEventListener("click", async ()=>{
 
 // ── Fitness & fatigue trend (projector) ─────────────────────────────────────
 async function loadProjector(){
-  const d = await getJSON("/api/projector?days=180");
+  let d;
+  try{ d = await getJSON("/api/projector?days=180"); }
+  catch(e){ tileFail($("#ffchart"), "Fitness & fatigue", loadProjector, e); return; }
   const h = d.history||[];
   const host = $("#ffchart");
   if(!h.length){ host.innerHTML = `<div class="empty">No activities synced yet.</div>`; return; }
@@ -14165,7 +14270,7 @@ const EFFV = {on:["var(--ok)","on target"], hot:["var(--warn)","hot"],
               unknown:["var(--muted)","—"]};
 async function loadEffort(){
   const host=$("#effort"); if(!host) return;
-  let d; try{ d=await getJSON("/api/effort-discipline"); }catch(e){ const s=$("#sec-effort"); if(s) s.style.display="none"; return; }
+  let d; try{ d=await getJSON("/api/effort-discipline"); }catch(e){ tileFail(host, "Effort discipline", loadEffort, e); return; }
   if(!d || d.easy_score==null){
     host.innerHTML=`<div class="empty">Not enough runs in the last ${d&&d.window_days||21} days yet${d&&d.public?" to score easy-pace discipline.":" — this reads your synced runs' HR."}</div>`; return; }
   const c=d.easy_counts, score=d.easy_score;
@@ -14261,7 +14366,7 @@ async function loadEffort(){
 }
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
-  let d; try{ d=await getJSON("/api/plandrift"); }catch(e){ return; }
+  let d; try{ d=await getJSON("/api/plandrift"); }catch(e){ tileFail(host, "Plan drift", loadDrift, e); return; }
   if(!d || !d.ok){ host.innerHTML=`<div class="empty">${(d&&d.error)||"No plan history yet."}</div>`; return; }
   const MUTED="var(--muted)", ACC="var(--accent)";
   // 1 — cumulative distance
@@ -14344,7 +14449,7 @@ async function loadDrift(){
     if(!cfTried){ cfTried=true; try{ cfData=(await getJSON("/api/plandrift?compare=1")).counterfactual; }catch(e){} }
     const cf=cfData, cav=$("#drift-caveat");
     if(!cf){ if(cav){ cav.textContent="Comparison needs an objective set."; cav.style.display=""; } return; }
-    const ACC2="var(--accent2)", ACC="var(--accent)";
+    const ACC2="var(--accent2, var(--accent))", ACC="var(--accent)";
     const lbl=rn(cf.regime), nlbl=rn(cf.vs);
     // direction matters (Duarte's 2026-07-04 catch): from a CONSERVATIVE plan the assertive road is
     // the upper envelope you can EARN; from an ASSERTIVE plan the conservative road is the FLOOR the
@@ -14378,7 +14483,7 @@ async function loadDrift(){
     const ob=$("#drift-out");
     if(ob) ob.innerHTML=`<div class="cfout">`+
       `<div><span class="k">${nlbl} now</span> — peak CTL <b>${o.now_peak_ctl==null?"–":o.now_peak_ctl}</b>, finish <b>${o.now_finish||"–"}</b></div>`+
-      `<div><span class="k" style="color:var(--accent2)">${lbl}</span> — peak CTL <b>${o.peak_ctl==null?"–":o.peak_ctl}</b>, finish <b>${o.finish||"–"}</b></div>`+
+      `<div><span class="k" style="color:var(--accent2, var(--accent))">${lbl}</span> — peak CTL <b>${o.peak_ctl==null?"–":o.peak_ctl}</b>, finish <b>${o.finish||"–"}</b></div>`+
       (o.curve&&o.curve.length?`<div class="note">With more runway: ${o.curve.map(c=>"+"+c.plus_weeks+"w → "+c.hms).join(" · ")}</div>`:"")+
       `</div>`;
     if(cav){ cav.innerHTML=upside
@@ -14504,7 +14609,9 @@ function wireHCard(card){
 }
 
 async function loadHealth(){
-  const d = await getJSON("/api/health");
+  let d;
+  try{ d = await getJSON("/api/health"); }
+  catch(e){ tileFail($("#health"), "Health markers", loadHealth, e); return; }
   MARKERS = d.markers;
   HSERIES = d.series||{};
   // populate the add-form marker dropdown once
@@ -14819,7 +14926,7 @@ loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEff
 // removed on the public view; the endpoint 403s there too).
 async function loadZones(){
   const host=$("#zones"); if(!host || SH_READONLY) return;
-  let d; try{ d=await getJSON("/api/zones"); }catch(e){ host.innerHTML=`<div class="empty">Zones unavailable.</div>`; return; }
+  let d; try{ d=await getJSON("/api/zones"); }catch(e){ tileFail(host, "Current zones", loadZones, e); return; }
   if(!d || !d.ok){ host.innerHTML=`<div class="empty">Not enough data yet — zones appear once a fitness (VO₂max) snapshot or heart-rate history is in.</div>`; return; }
   ZONESD=d;   // §W1 — same payload shape as the readiness rider; workout cards read it
   const paceHint=qhint("Pace targets are fixed fractions of vVO₂max — the velocity at VO₂max, solved from the Daniels–Gilbert oxygen-cost curve VO₂(v) = −4.60 + 0.182258·v + 0.000104·v² — using your CURRENT effective VO₂max: marathon 0.81, threshold 0.88, interval 0.97 of vVO₂max. The easy bar is LT1 (aerobic threshold), operationalized as 80% of 5k pace with v5k ≈ 0.95·vVO₂max (a pace-first anchor informed by John Davis). Every value moves as your VO₂max moves — zones are never stale.");
@@ -14966,37 +15073,87 @@ def _daily_replan():
         db.close()
 
 
+def _backup_rotate():
+    """After a successful nightly: a consistent snapshot beside the DB (VACUUM INTO — WAL-safe,
+    page-consistent, compacted), dated, newest 7 kept — the NAS volume then holds a week of nightlies
+    with zero cron. Best-effort: a failed snapshot must never fail the nightly (caller catches)."""
+    day = datetime.now().strftime("%Y-%m-%d")
+    target = DB_PATH.parent / f"{DB_PATH.stem}-backup-{day}.db"
+    if target.exists():
+        target.unlink()          # VACUUM INTO wants a fresh path; a same-day re-run replaces it
+    db = connect_db()
+    try:
+        db.execute("VACUUM INTO ?", (str(target),))
+    finally:
+        db.close()
+    for f in sorted(DB_PATH.parent.glob(f"{DB_PATH.stem}-backup-*.db"))[:-7]:
+        f.unlink()
+
+
+def _nightly_job(kind="nightly"):
+    """One full nightly pass — the scheduled run AND the boot catch-up share this: sync → daily
+    re-plan → Suunto guides → rotated DB snapshot, with the outcome recorded in meta
+    (sched:last_run / sched:last_ok / sched:fail_count) so /healthz and the catch-up can see it."""
+    if not _wait_for_selftest():   # a running battery has swapped READONLY/regenerate — never re-plan under it
+        print("[scheduler] a self-test battery is still running after 3 min — proceeding anyway")
+    ok = False
+    try:
+        with _sync_lock:           # never overlap a "Sync now" / page-load pull
+            res = run_sync()
+        print(f"[scheduler] {kind} sync ok: {res.get('activities')}")
+        ok = True
+    except Exception as e:
+        print(f"[scheduler] {kind} sync failed: {e}")
+    db = connect_db()
+    try:
+        set_meta(db, "sched:last_run", _now_iso())
+        if ok:
+            set_meta(db, "sched:last_ok", _now_iso())
+            set_meta(db, "sched:fail_count", "0")
+        else:
+            set_meta(db, "sched:fail_count", str(int(get_meta(db, "sched:fail_count", "0") or 0) + 1))
+        db.commit()
+    finally:
+        db.close()
+    # §6b — recompute against today even if the sync failed: advancing the plan's date and
+    # §6e banking needs no fresh pull, so a flaky Runalyze night must not also freeze the plan.
+    try:
+        _daily_replan()
+    except Exception as e:
+        print(f"[scheduler] daily re-plan failed: {e}")
+    # §SG — after the re-plan, keep the watch current: push the refreshed next-days sessions
+    # as SuuntoPlus Guides. No-ops (skipped=True) when Suunto isn't connected; push_guides
+    # never raises, but the belt-and-braces try keeps a converter surprise from killing the loop.
+    try:
+        db = connect_db()
+        try:
+            res = push_guides(db)
+        finally:
+            db.close()
+        if not res.get("skipped"):
+            print(f"[scheduler] suunto guides push: {res.get('pushed', 0)} pushed"
+                  + (f" — {res['error']}" if res.get("error") else ""))
+    except Exception as e:
+        print(f"[scheduler] suunto guides push failed: {e}")
+    if ok:
+        try:
+            _backup_rotate()
+        except Exception as e:
+            print(f"[scheduler] backup rotation failed: {e}")
+
+
+def _sched_catchup_needed(db):
+    """Boot check: is a nightly owed? True when no successful run is recorded, or the last success is
+    older than 26 h. 26, not 24: the nightly's own wall-clock jitter (a slow night, a restart inside
+    the trigger minute) must not fire a duplicate pass on every boot."""
+    last_ok = get_meta(db, "sched:last_ok")
+    return (not last_ok) or _seconds_since(last_ok) > 26 * 3600
+
+
 def _scheduler_loop(hhmm):
     while True:
         time.sleep(_seconds_until(hhmm))
-        if not _wait_for_selftest():   # a running battery has swapped READONLY/regenerate — never re-plan under it
-            print("[scheduler] a self-test battery is still running after 3 min — proceeding anyway")
-        try:
-            with _sync_lock:           # never overlap a "Sync now" / page-load pull
-                res = run_sync()
-            print(f"[scheduler] daily sync ok: {res.get('activities')}")
-        except Exception as e:
-            print(f"[scheduler] daily sync failed: {e}")
-        # §6b — recompute against today even if the sync failed: advancing the plan's date and
-        # §6e banking needs no fresh pull, so a flaky Runalyze night must not also freeze the plan.
-        try:
-            _daily_replan()
-        except Exception as e:
-            print(f"[scheduler] daily re-plan failed: {e}")
-        # §SG — after the re-plan, keep the watch current: push the refreshed next-days sessions
-        # as SuuntoPlus Guides. No-ops (skipped=True) when Suunto isn't connected; push_guides
-        # never raises, but the belt-and-braces try keeps a converter surprise from killing the loop.
-        try:
-            db = connect_db()
-            try:
-                res = push_guides(db)
-            finally:
-                db.close()
-            if not res.get("skipped"):
-                print(f"[scheduler] suunto guides push: {res.get('pushed', 0)} pushed"
-                      + (f" — {res['error']}" if res.get("error") else ""))
-        except Exception as e:
-            print(f"[scheduler] suunto guides push failed: {e}")
+        _nightly_job()
         time.sleep(61)  # step past the trigger minute before recomputing the next wait
 
 
@@ -15022,6 +15179,20 @@ def start_scheduler():
     threading.Thread(target=_scheduler_loop, args=(hhmm,), daemon=True).start()
     _scheduler_started = True
     print(f"Sparing Horse → scheduled daily sync at {hhmm} {SYNC_TZ.key}")
+    # Boot catch-up (TECH-8): a container restart across the nightly minute used to skip the night
+    # silently. If no successful run is recorded in the last 26 h, run one pass now — in its own
+    # thread, so boot never blocks on a Runalyze pull.
+    try:
+        db = connect_db()
+        try:
+            owed = _sched_catchup_needed(db)
+        finally:
+            db.close()
+        if owed:
+            print("[scheduler] no successful nightly in the last 26 h — running a catch-up pass now")
+            threading.Thread(target=_nightly_job, args=("catch-up",), daemon=True).start()
+    except Exception as e:
+        print(f"[scheduler] boot catch-up check failed: {e}")
 
 
 # ── Self-test harness (§ diagnostics) ───────────────────────────────────────
@@ -15177,6 +15348,194 @@ def _stc_mobile_nav():
                "mobile bottom-tab shell: <body> default tab + a button per tab, every tab owns content, deep-links; public drops the (empty) Body tab",
                passed=not fail, expect="both modes: nav + seed + deep-link present, every button owns content; public has no Body tab",
                got={"violations": fail or "none"})
+
+
+# — readiness status-card contrast (UX-1, 0.27.2) —
+# Tiny CSS evaluator for exactly the features the status card uses: #hex (3/6), var() with fallback,
+# and color-mix(in oklab, …) against #hex / var() / transparent. It parses the three theme token
+# blocks + the .statuscard rules out of INDEX_HTML and checks WCAG relative-luminance ratios:
+# the 23px verdict (large text) needs ≥ 3:1 against the gradient's TOP stop; the 10.5px footer
+# needs ≥ 4.5:1 against the BOTTOM stop (its translucent ink composited over it). 0.27.1 shipped
+# white-on-#f7b32b at 1.84:1 — this det is the regression lock on the fix.
+def _stcss_lin(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _stcss_lum(rgb):
+    r, g, b = (_stcss_lin(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _stcss_contrast(a, b):
+    la, lb = _stcss_lum(a), _stcss_lum(b)
+    if la < lb:
+        la, lb = lb, la
+    return (la + 0.05) / (lb + 0.05)
+
+
+def _stcss_srgb2oklab(rgb):
+    r, g, b = (_stcss_lin(c) for c in rgb)
+    l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b
+    m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b
+    s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b
+    l_, m_, s_ = l ** (1 / 3), m ** (1 / 3), s ** (1 / 3)
+    return (0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_)
+
+
+def _stcss_oklab2srgb(lab):
+    L, a, b = lab
+    l_ = L + 0.3963377774 * a + 0.2158037573 * b
+    m_ = L - 0.1055613458 * a - 0.0638541728 * b
+    s_ = L - 0.0894841775 * a - 1.2914855480 * b
+    l, m, s = l_ ** 3, m_ ** 3, s_ ** 3
+    def enc(c):
+        c = min(1, max(0, c))
+        return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+    return (enc(+4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+            enc(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+            enc(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s))
+
+
+def _stcss_split_top(s, sep=","):
+    """Split at separators only at paren depth 0 (var(--a, var(--b)) / color-mix args)."""
+    parts, depth, cur = [], 0, ""
+    for ch in s:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return [p.strip() for p in parts]
+
+
+def _stcss_color(expr, props, depth=0):
+    """Resolve a CSS color expression to ((r,g,b) 0..1, alpha). Supports #rgb/#rrggbb, var() with
+    fallback, transparent, and color-mix(in oklab, A w%, B w%) (alpha-premultiplied, per spec)."""
+    if depth > 8:
+        raise ValueError(f"color resolution too deep: {expr!r}")
+    expr = expr.strip()
+    if expr == "transparent":
+        return (0.0, 0.0, 0.0), 0.0
+    if expr.startswith("#"):
+        h = expr[1:]
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        return tuple(int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)), 1.0
+    if expr.startswith("var(") and expr.endswith(")"):
+        inner = _stcss_split_top(expr[4:-1])
+        name = inner[0].strip()
+        if name in props:
+            return _stcss_color(props[name], props, depth + 1)
+        if len(inner) > 1:
+            return _stcss_color(inner[1], props, depth + 1)
+        raise ValueError(f"unresolved var({name})")
+    m = re.match(r"^rgba?\((.*)\)$", expr, re.S)
+    if m:
+        ch = [c.strip() for c in m.group(1).split(",")]
+        alpha = float(ch[3]) if len(ch) > 3 else 1.0
+        return tuple(int(c) / 255 for c in ch[:3]), alpha
+    if expr.startswith("color-mix("):
+        inner = expr[len("color-mix("):-1].strip()
+        m = re.match(r"^in\s+oklab\s*,(.*)$", inner, re.S)
+        if not m:
+            raise ValueError(f"unsupported color-mix space: {expr!r}")
+        args = _stcss_split_top(m.group(1))
+        cols, wts = [], []
+        for a in args:
+            toks = a.rsplit(None, 1)
+            if len(toks) == 2 and toks[1].endswith("%"):
+                cols.append(toks[0])
+                wts.append(float(toks[1][:-1]) / 100)
+            else:
+                cols.append(a)
+                wts.append(None)
+        if wts[0] is None and wts[1] is not None:
+            wts[0] = 1 - wts[1]
+        elif wts[1] is None and wts[0] is not None:
+            wts[1] = 1 - wts[0]
+        elif wts[0] is None:
+            wts = [0.5, 0.5]
+        (ca, aa), (cb, ab) = (_stcss_color(c, props, depth + 1) for c in cols)
+        wa, wb = wts   # premultiplied oklab interpolation (CSS Color 4)
+        la, lb_ = _stcss_srgb2oklab(ca), _stcss_srgb2oklab(cb)
+        alpha = wa * aa + wb * ab
+        if alpha <= 0:
+            return (0.0, 0.0, 0.0), 0.0
+        mixed = tuple((wa * aa * la[i] + wb * ab * lb_[i]) / alpha for i in range(3))
+        return _stcss_oklab2srgb(mixed), alpha
+    raise ValueError(f"unsupported color expression: {expr!r}")
+
+
+def _stcss_rule(doc, selector):
+    """First rule body whose selector is exactly `selector` (rules start at line beginnings)."""
+    m = re.search(r"(?:^|\n)\s*" + re.escape(selector) + r"\s*\{([^{}]*)\}", doc)
+    return m.group(1) if m else ""
+
+
+def _stcss_decls(body):
+    out = {}
+    for d in re.sub(r"/\*.*?\*/", "", body, flags=re.S).split(";"):
+        if ":" in d:
+            k, v = d.split(":", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def _stcss_gradient_stops(rule_body):
+    """(top, bottom) color expressions of the linear-gradient background."""
+    m = re.search(r"linear-gradient\((.*)\)", rule_body, re.S)
+    if not m:
+        return None, None
+    args = _stcss_split_top(m.group(1))
+    stops = [a for a in args if not re.match(r"^\d+deg$", a)]
+    return (stops[0], stops[-1]) if len(stops) >= 2 else (None, None)
+
+
+def _stc_readiness_contrast():
+    fail, report = [], {}
+    root = _stcss_decls(_stcss_rule(INDEX_HTML, ":root"))
+    base = _stcss_decls(_stcss_rule(INDEX_HTML, ".statuscard"))
+    foot = _stcss_decls(_stcss_rule(INDEX_HTML, ".statuscard .sc-foot"))
+    states = {"green": base, "amber": _stcss_decls(_stcss_rule(INDEX_HTML, ".statuscard.amber")),
+              "red": _stcss_decls(_stcss_rule(INDEX_HTML, ".statuscard.red"))}
+    if not base.get("color"):
+        fail.append(".statuscard base rule missing a text color")
+    for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]'), ("aurora", '[data-theme="aurora"]')):
+        props = {**root, **_stcss_decls(_stcss_rule(INDEX_HTML, sel))}
+        try:
+            ink, ink_a = _stcss_color(base["color"], props)
+            foot_c, foot_a = _stcss_color(foot["color"], props)
+        except (ValueError, KeyError) as e:
+            fail.append(f"{theme}: statuscard text colors unresolvable ({e})")
+            continue
+        report.setdefault(theme, {})
+        for state, decls in states.items():
+            top_e, bot_e = _stcss_gradient_stops(decls.get("background", ""))
+            try:
+                top, _ = _stcss_color(top_e, props)
+                bot, _ = _stcss_color(bot_e, props)
+            except (ValueError, TypeError) as e:
+                fail.append(f"{theme}/{state}: gradient stops unresolvable ({e})")
+                continue
+            verdict = _stcss_contrast(ink, top)                       # 23px serif ≈ large text ⇒ ≥ 3:1
+            foot_rgb = tuple(foot_a * f + (1 - foot_a) * b for f, b in zip(foot_c, bot))
+            footer = _stcss_contrast(foot_rgb, bot)                   # 10.5px mono ⇒ ≥ 4.5:1
+            report[theme][state] = {"verdict": round(verdict, 2), "footer": round(footer, 2)}
+            if verdict < 3.0:
+                fail.append(f"{theme}/{state}: verdict {verdict:.2f} < 3.0 (top stop)")
+            if footer < 4.5:
+                fail.append(f"{theme}/{state}: footer {footer:.2f} < 4.5 (bottom stop)")
+    return _st("det", "readiness-contrast",
+               "readiness status card: verdict text ≥3:1 on the gradient top, footer ≥4.5:1 on the bottom stop, all 3 themes × states (WCAG relative luminance)",
+               passed=not fail, expect="every theme×state ≥3.0 verdict / ≥4.5 footer",
+               got={"violations": fail or "none", "ratios": report})
 
 
 def _stc_runs_browser():
@@ -15783,6 +16142,107 @@ def _stc_sync_lock():
                "skipped/in_flight while it runs",
                passed=not fails, expect="1 run · 2 in_flight skips", got="ok" if not fails else f"fails: {fails}",
                output={"runs": n["runs"], "results": results})
+
+
+def _stc_scheduler_health():
+    """TECH-8 (0.27.2) — the nightly can't skip silently anymore. (a) /healthz carries the scheduler
+    telemetry: timestamps + fail count on the private box, BOOLEANS ONLY on the public one (a probe
+    must not learn when the owner's nightly runs). (b) the boot catch-up decision: owed when
+    sched:last_ok is missing or >26 h stale. (c) the nightly job itself, on a temp-dir DB with a
+    stubbed sync: success records last_run/last_ok and zeroes fail_count + drops a rotated VACUUM
+    snapshot beside the DB (newest 7 kept); a failed sync increments fail_count, leaves last_ok
+    standing, and writes no snapshot."""
+    import sqlite3 as _sq
+    import tempfile as _tf
+    from datetime import timezone as _tz, timedelta as _td
+    out, ok = [], True
+    # (a) healthz shape, both deploy modes
+    global READONLY, DB_PATH, run_sync, push_guides
+    saved_ro = READONLY
+    try:
+        for ro in (False, True):
+            READONLY = ro
+            h = app.test_client().get("/healthz").get_json()
+            if ro:
+                p = ("last_ok" not in h and "last_sync" not in h
+                     and isinstance(h.get("sync_ok"), bool) and isinstance(h.get("sync_stale"), bool)
+                     and isinstance(h.get("consecutive_failures"), int))
+                out.append({"case": "public /healthz: booleans only, no routine-revealing timestamps",
+                            "keys": sorted(h), "passed": p})
+            else:
+                p = ("last_sync" in h and "last_ok" in h and isinstance(h.get("consecutive_failures"), int))
+                out.append({"case": "private /healthz carries last_sync / last_ok / consecutive_failures",
+                            "keys": sorted(h), "passed": p})
+            ok = ok and p
+    finally:
+        READONLY = saved_ro
+    # (b) the catch-up decision on an in-memory fixture
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    try:
+        now = datetime.now(_tz.utc)
+        for stamp, want, label in ((None, True, "never recorded ⇒ owed"),
+                                   ((now - _td(hours=27)).isoformat(timespec="seconds"), True, "27 h stale ⇒ owed"),
+                                   ((now - _td(hours=2)).isoformat(timespec="seconds"), False, "2 h fresh ⇒ not owed")):
+            mem.execute("DELETE FROM meta WHERE key='sched:last_ok'")
+            if stamp:
+                set_meta(mem, "sched:last_ok", stamp)
+                mem.commit()
+            got = _sched_catchup_needed(mem)
+            p = got == want
+            out.append({"case": f"catch-up decision: {label}", "last_ok": stamp or "(none)",
+                        "want": want, "got": got, "passed": p}); ok = ok and p
+    finally:
+        mem.close()
+    # (c) the nightly job on a temp-dir DB (sync + guides stubbed; re-plan no-ops with no plans)
+    saved = (DB_PATH, run_sync, push_guides)
+    tmp = Path(_tf.mkdtemp())
+    DB_PATH = tmp / "sparinghorse.db"
+    seeddb = connect_db(); seeddb.executescript(SCHEMA); seeddb.close()
+
+    def fake_sync(backfill=False):
+        db = connect_db(); set_meta(db, "last_sync", _now_iso()); db.commit(); db.close()
+        return {"ok": True, "activities": {"added": 0}, "stub": True}
+    run_sync = fake_sync
+    push_guides = lambda db: {"skipped": True}
+    try:
+        _nightly_job()
+        db = connect_db()
+        m = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM meta")}
+        db.close()
+        p = bool(m.get("sched:last_run")) and bool(m.get("sched:last_ok")) and m.get("sched:fail_count") == "0"
+        out.append({"case": "successful nightly records last_run/last_ok, zeroes fail_count",
+                    "meta": m, "passed": p}); ok = ok and p
+        baks = sorted(tmp.glob("sparinghorse-backup-*.db"))
+        p = len(baks) == 1 and baks[0].stat().st_size > 0
+        out.append({"case": "a rotated snapshot lands beside the DB",
+                    "backups": [b.name for b in baks], "passed": p}); ok = ok and p
+        for i in range(1, 9):   # 8 fossils + today's = 9 → prune to the newest 7
+            (tmp / f"sparinghorse-backup-2020-01-0{i}.db").write_bytes(b"x")
+        _backup_rotate()
+        names = sorted(b.name for b in tmp.glob("sparinghorse-backup-*.db"))
+        p = (len(names) == 7 and "sparinghorse-backup-2020-01-01.db" not in names
+             and "sparinghorse-backup-2020-01-02.db" not in names and baks[0].name in names)
+        out.append({"case": "rotation keeps the newest 7 (oldest dropped)", "kept": names, "passed": p})
+        ok = ok and p
+        def boom(backfill=False):
+            raise RuntimeError("runalyze down")
+        run_sync = boom
+        n_baks = len(list(tmp.glob("sparinghorse-backup-*.db")))
+        _nightly_job(); _nightly_job()
+        db = connect_db()
+        m2 = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM meta")}
+        db.close()
+        p = (m2.get("sched:fail_count") == "2" and m2.get("sched:last_ok") == m.get("sched:last_ok")
+             and len(list(tmp.glob("sparinghorse-backup-*.db"))) == n_baks)
+        out.append({"case": "failed nightly: fail_count increments, last_ok stands, no new snapshot",
+                    "meta": m2, "passed": p}); ok = ok and p
+    finally:
+        DB_PATH, run_sync, push_guides = saved
+    return _st("det", "scheduler-health",
+               "nightly telemetry + boot catch-up + rotated backups: healthz carries it (public: booleans "
+               "only); stale last_ok ⇒ catch-up owed; success records/rotates, failure counts and skips the snapshot",
+               passed=ok, output=out)
 
 
 def _stc_profile_readonly():
@@ -21486,6 +21946,83 @@ def _stc_effort_discipline(db):
                        "public_score": pub.get("easy_score"), "public_ceiling": pub.get("easy_pace_ceiling")})
 
 
+def _stc_error_shape():
+    """TECH-9 (0.27.2) — junk in, JSON out; a raising view never serves an API caller an HTML page and
+    never leaks a traceback to anyone. (a) /api/run_metrics' numeric args join the bounded _int_arg
+    treatment (they were raw type=int: garbage silently became None and the filter silently vanished).
+    (b) the blanket errorhandler, driven for real by swapping registered views for a raiser (and back):
+    /api/* and /healthz answer JSON {ok:false} 500, a page answers a quiet HTML 500, and neither body
+    carries the traceback (the public box serves strangers)."""
+    fails = []
+    c = app.test_client()
+    is_json = lambda r: (r.headers.get("Content-Type") or "").startswith("application/json")
+    # (a) bounded numeric args on run_metrics (a private surface; the det env is private)
+    for path in ("/api/run-metrics?days=abc", "/api/run-metrics?days=0", "/api/run-metrics?limit=-1",
+                 "/api/run-metrics?limit=99999999", "/api/run-metrics?route=x", "/api/run-metrics?example=y"):
+        r = c.get(path)
+        if r.status_code != 400 or not is_json(r):
+            fails.append(f"(a) {path} answered {r.status_code} "
+                         f"{'json' if is_json(r) else 'non-json'} — want JSON 400")
+    r = c.get("/api/run-metrics?days=30&limit=5")
+    if r.status_code != 200:
+        fails.append(f"(a) valid run_metrics args answered {r.status_code} — want 200")
+    # (b) the blanket handler, driven by raising views
+    def boom():
+        raise RuntimeError("selftest: simulated unhandled view failure")
+    saved = {ep: app.view_functions[ep] for ep in ("healthz", "index")}
+    app.view_functions["healthz"] = boom
+    app.view_functions["index"] = boom
+    app.logger.disabled = True   # the handler's own log line is proven by the probes; keep the report clean
+    try:
+        r = c.get("/healthz")
+        body = r.get_data()
+        if r.status_code != 500 or not is_json(r) or (r.get_json() or {}).get("ok") is not False:
+            fails.append(f"(b) a raising /healthz answered {r.status_code} "
+                         f"{'json' if is_json(r) else 'non-json'} — want JSON {{ok:false}} 500")
+        if b"Traceback" in body or b"simulated unhandled" in body:
+            fails.append("(b) the JSON 500 leaks the exception")
+        r = c.get("/")
+        body = r.get_data()
+        ct = r.headers.get("Content-Type") or ""
+        if r.status_code != 500 or "text/html" not in ct:
+            fails.append(f"(b) a raising page answered {r.status_code} {ct} — want HTML 500")
+        if b"Traceback" in body or b"simulated unhandled" in body:
+            fails.append("(b) the HTML 500 leaks the exception")
+    finally:
+        app.view_functions.update(saved)
+        app.logger.disabled = False
+    return _st("det", "error-shape",
+               "blanket error handler: JSON {ok:false} 500 for /api/* + /healthz, quiet HTML 500 for "
+               "pages, no traceback either way; run_metrics numeric args bounded (garbage ⇒ JSON 400)",
+               passed=not fails, expect="JSON 400 on junk args · JSON 500 for API · HTML 500 for pages · no leaks",
+               got={"violations": fails or "none"})
+
+
+def _stc_accent2_fallback():
+    """UX-5a (0.27.2) — no bare var(--accent2) outside the polychrome trial overlay. The overlay is
+    marked 'remove this whole block to revert'; Daylight/Charcoal define --accent2 ONLY inside it, so a
+    bare reference outside would go invalid-at-computed-value the day the block is pulled (the drift
+    caveat loses its tint, the chain-fit line its stroke, the drift JS its series colour). Every
+    outside use must carry the `var(--accent2, var(--accent))` fallback DESIGN.md promises."""
+    fails = []
+    banner = INDEX_HTML.index("SQUARE POLYCHROME PALETTE")
+    overlay_end = INDEX_HTML.index("</style>", banner)
+    for m in re.finditer(r"var\(\s*--accent2\s*\)", INDEX_HTML):
+        if not (banner <= m.start() < overlay_end):
+            line = INDEX_HTML.count("\n", 0, m.start()) + 1
+            fails.append(f"bare var(--accent2) outside the overlay (line {line})")
+    for needle, label in ((".driftcaveat", "drift caveat rule"),
+                          (".drift .dl.cf", "chain-fit line rule")):
+        body = _stcss_rule(INDEX_HTML, needle)
+        if "var(--accent2, var(--accent))" not in body:
+            fails.append(f"{label} lacks the var(--accent2, var(--accent)) fallback")
+    return _st("det", "accent2-fallback",
+               "no bare var(--accent2) outside the removable polychrome overlay — every outside use "
+               "carries var(--accent2, var(--accent)) (Daylight/Charcoal define --accent2 only in the overlay)",
+               passed=not fails, expect="0 bare uses outside the overlay; drift rules carry the fallback",
+               got={"violations": fails or "none"})
+
+
 def _stc_api_validation(db):
     """0.26.3 — the write endpoints reject junk at the door, and a write whose re-plan fails is never
     committed (Codex review 2026-08-20 — all three defects were reproduced through the real endpoints):
@@ -22240,6 +22777,66 @@ def _stc_readiness_deterministic_halt(db):
     return _st("det", "readiness-deterministic-halt",
                "free-text stop-symptom caught with NO LLM (non-softenable, no negation misses); "
                "medical hold persists red+halt past its window until explicitly cleared",
+               passed=ok, output=out)
+
+
+def _stc_checkin_stop():
+    """UX-2 (0.27.2) — the explicit stop-symptom control. (a) UI wiring: the check-in row carries the
+    quiet stop checkbox (the .checkin .stop rule was orphaned before), its label speaks the halt voice,
+    and the save handler POSTs stop_symptom with the flag — the note's keyword catch stays a backstop,
+    no longer the only door. (b) Production-path probe on an in-memory fixture: POSTing ONLY the flag
+    (no note) stores the row, answers red+HALT, and leaves exactly one active medical hold at
+    volume_multiplier 0 — the regime evidence that the plan actually rests (det/medical-track owns the
+    open-ended part). Runs with no LLM, like the live box."""
+    import sqlite3 as _sq
+    out, ok = [], True
+    # (a) UI wiring (INDEX_HTML text — the same source the browser parses)
+    ui_checks = [('id="ci_stop"', "stop checkbox rendered in the check-in row"),
+                 ('class="stop"', "the orphaned .checkin .stop rule is now used"),
+                 ("I had to stop", "label in the halt voice"),
+                 ("stop_symptom:", "save handler includes the flag in the POST body"),
+                 ('$("#ci_stop")', "handler reads the control")]
+    for needle, label in ui_checks:
+        p = needle in INDEX_HTML
+        out.append({"case": f"UI: {label}", "needle": needle, "passed": p}); ok = ok and p
+    # (a2) posture — the control is QUIET at rest and loud only once it is checked. An inactive medical
+    # control that renders in the danger colour shouts every day nothing is wrong; the plan asked for a
+    # "quiet checkbox" and the rule it reuses predates that wording (validation review F3, 0.27.2).
+    rest_c = _stcss_decls(_stcss_rule(INDEX_HTML, ".checkin .stop")).get("color")
+    chk_c = _stcss_decls(_stcss_rule(INDEX_HTML, ".checkin .stop:has(:checked)")).get("color")
+    for got, want, label in ((rest_c, "var(--muted)", "at rest the stop label is muted, like its ENERGY/SLEEP siblings"),
+                             (chk_c, "var(--danger)", "checked, it turns danger — the alarm is earned, not idle")):
+        p = got == want
+        out.append({"case": f"posture: {label}", "want": want, "got": got, "passed": p}); ok = ok and p
+    # (b) POST only the flag (no note) → stored + red/halt + active full-rest medical hold
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(SCHEMA)
+    global get_db
+    saved = get_db
+    get_db = lambda: mem
+    try:
+        with app.test_request_context("/api/readiness", method="POST", json={"stop_symptom": True}):
+            payload = api_readiness_post().get_json()
+    finally:
+        get_db = saved
+    a = payload.get("assessment", {})
+    p1 = a.get("verdict") == "red" and a.get("halt") is True
+    out.append({"case": "flag-only POST ⇒ red+HALT in the response", "verdict": a.get("verdict"),
+                    "halt": a.get("halt"), "passed": p1}); ok = ok and p1
+    row = mem.execute("SELECT energy, sleep, stop_symptom, note FROM readiness").fetchone()
+    p2 = bool(row) and row["stop_symptom"] == 1 and row["note"] == ""
+    out.append({"case": "check-in row stored with stop_symptom=1 and an empty note",
+                "got": dict(row) if row else None, "passed": p2}); ok = ok and p2
+    meds = mem.execute("SELECT directive FROM adjustments WHERE active=1 AND medical=1").fetchall()
+    p3 = (len(meds) == 1 and json.loads(meds[0]["directive"]).get("volume_multiplier") == 0.0
+          and active_medical_halt(mem))
+    out.append({"case": "regime evidence: exactly one active medical hold at mult 0 (the plan rests)",
+                "active_medical_rows": len(meds), "halt_gate": active_medical_halt(mem),
+                "passed": p3}); ok = ok and p3
+    mem.close()
+    return _st("det", "checkin-stop",
+               "explicit stop-symptom control: the check-in row posts stop_symptom; a flag-only POST "
+               "(no note) stores the row, answers red+HALT, and leaves one active full-rest medical hold",
                passed=ok, output=out)
 
 
@@ -23050,7 +23647,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
@@ -23098,6 +23695,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_taper(), lambda: _stc_taper_touch(db), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
                  lambda: _stc_availability(), lambda: _stc_av_public_strip(),
                  lambda: _stc_plan_summary(), lambda: _stc_mcp_session(), lambda: _stc_sync_lock(),
+                 lambda: _stc_scheduler_health(),
                  lambda: _stc_profile_readonly(), lambda: _stc_selftest_gate(),
                  lambda: _stc_quality_forward(),
                  lambda: _stc_down_weeks(),
@@ -23106,9 +23704,10 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
+                 lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
-                 lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_medical_track(db),
+                 lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_checkin_stop(), lambda: _stc_medical_track(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),
                  lambda: _stc_readiness_note_catch(db), lambda: _stc_plan_explain(db)]

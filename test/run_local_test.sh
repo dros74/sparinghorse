@@ -3,6 +3,8 @@
 # with Playwright, then tear down. No Runalyze token or network needed. Two phases:
 #   1. full  — a synthetic-seeded instance (dashboard, #67 dialog cycle, first-run hidden + step ③)
 #   2. empty — a fresh dataless instance (first-run card step ①)
+#   (+ noplan / settled / cold / blocked — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
+#    and asserts every tile reaches a failure terminus with a working retry, UX-3)
 #
 #   ./test/run_local_test.sh
 #
@@ -80,6 +82,9 @@ COLD_DB="$WORK/cold.db"
 echo "▸ seeding $COLD_DB (--cold)"
 SH_DB="$COLD_DB" "$PY" SparingHorse.py seed --cold >/dev/null
 launch_and_drive "$COLD_DB" "$((PORT + 4))" cold "cold" || RC=$?
+
+# Phase 6 — blocked (UX-3): /api/* + /healthz unreachable ⇒ every loader reaches a failure terminus
+launch_and_drive "$FULL_DB" "$((PORT + 5))" blocked "blocked" || RC=$?
 
 echo "▸ artifacts: $WORK (server logs + screenshots)"
 exit $RC

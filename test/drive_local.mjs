@@ -92,6 +92,40 @@ async function runFull() {
   // innerText reflects CSS text-transform (the .dh banner is uppercased) → match case-insensitively
   ok('Generate plan re-plans (diff banner)', /re-planned/i.test(await page.locator('#plan .diff').innerText()));
 
+  // ── UX-2 — the stop-symptom control halts the plan from the check-in row ──
+  await page.waitForSelector('#ci_stop', { timeout: 15000 });   // readiness check-in row rendered
+  const stop = page.locator('#ci_stop');
+  ok('stop-symptom control rendered in the check-in row', await stop.count() === 1);
+  ok('stop control speaks the halt voice',
+     /I had to stop/i.test(await page.locator('.checkin .stop').innerText()));   // innerText is CSS-uppercased
+  // Posture (validation-review F3): an inactive medical control must not shout danger every day nothing
+  // is wrong — muted at rest, danger only once it is checked. Computed colours, not the stylesheet text,
+  // so this also proves the :has(:checked) selector actually resolves in a real browser.
+  const stopColours = await page.evaluate(() => {
+    const el = document.querySelector('.checkin .stop'), box = document.querySelector('#ci_stop');
+    const cs = document.documentElement;
+    const tok = n => getComputedStyle(cs).getPropertyValue(n).trim();
+    const read = () => getComputedStyle(el).color;
+    const norm = hex => { const d = document.createElement('span'); d.style.color = hex;
+      document.body.appendChild(d); const c = getComputedStyle(d).color; d.remove(); return c; };
+    const rest = read();
+    box.checked = true;
+    const checked = read();
+    box.checked = false;
+    return { rest, checked, muted: norm(tok('--muted')), danger: norm(tok('--danger')) };
+  });
+  ok(`stop control is muted at rest, not an alarm (got ${stopColours.rest}, muted ${stopColours.muted})`,
+     stopColours.rest === stopColours.muted);
+  ok(`stop control turns danger once checked (got ${stopColours.checked}, danger ${stopColours.danger})`,
+     stopColours.checked === stopColours.danger);
+  await stop.check();
+  await page.locator('#ciBtn').click();
+  await page.waitForSelector('#readiness .statuscard.red', { timeout: 15000 });
+  const haltCard = await page.locator('#readiness .statuscard').innerText();
+  ok('card flips red + halted on a stop-symptom check-in',
+     /contact your doctor/i.test(haltCard) && /halted/i.test(haltCard));
+  ok('stop control reads back checked (state truth)', await page.locator('#ci_stop').isChecked());
+
   // ── §PRO14 — BOTH plan endpoints must stamp the running engine ────────────
   // The UI renders the generate RESPONSE directly (refreshPlan(p) skips the GET), so a stamp
   // present only on /api/plan leaves the staleness banner unable to evaluate for the entire
@@ -186,6 +220,43 @@ async function runEmpty() {
   await page.screenshot({ path: `${SHOTS}/04-firstrun-empty.png`, fullPage: true });
 }
 
+async function runBlocked() {
+  // UX-3 — with /api/* + /healthz unreachable, every dashboard tile must reach a FAILURE TERMINUS
+  // (no parked "Loading…", no uncaught page error), and a retry hook must reload the tile once the
+  // API answers again. The page first loads normally (prologue), then the routes are cut and it reloads.
+  await page.route('**/api/**', r => r.abort());
+  await page.route('**/healthz', r => r.abort());
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(3000);   // let every loader settle into its terminus
+  ok('no "Loading…" stranded with the API down', !/Loading…/.test(await page.evaluate(() => document.body.innerText)));
+  const termini = await page.locator('.tilefail').count();
+  ok('failure termini shown on the data tiles (≥5)', termini >= 5);
+  // The dashboard hosts that start life on "Loading…" or render a data tile. Naming them is the point:
+  // counting .tf-retry against .tilefail can never fail (tileFail writes the pair as one unit), and an
+  // innerText sweep can't see a tile whose section was hidden on the way down — both read green while a
+  // tile quietly offers the runner no way back. These two assertions are what actually hold UX-3 up.
+  const HOSTS = ['#tiles', '#recent', '#chart', '#ffchart', '#readiness', '#drift', '#effort', '#zones', '#health'];
+  const stranded = await page.evaluate(hs => hs.filter(h => {
+    const el = document.querySelector(h); return el && /Loading…/.test(el.innerHTML);
+  }), HOSTS);
+  ok(`no dashboard tile is left on "Loading…" in the DOM${stranded.length ? ' — stranded: ' + stranded.join(' ') : ''}`,
+     stranded.length === 0);
+  const noRetry = await page.evaluate(hs => hs.filter(h => {
+    const el = document.querySelector(h); return !el || !el.querySelector('.tf-retry');
+  }), HOSTS);
+  ok(`every dashboard tile offers a retry with the API down${noRetry.length ? ' — no retry in: ' + noRetry.join(' ') : ''}`,
+     noRetry.length === 0);
+  await page.screenshot({ path: `${SHOTS}/08-blocked.png`, fullPage: true });
+  // back online — retry reloads the tile
+  await page.unroute('**/api/**'); await page.unroute('**/healthz');
+  await page.locator('#tiles .tf-retry').click();
+  await page.waitForSelector('#tiles .tile', { timeout: 15000 });
+  ok('retry reloads the shape tiles once the API is back', true);
+  await page.locator('#readiness .tf-retry').click();
+  await page.waitForSelector('#readiness .statuscard', { timeout: 15000 });
+  ok('retry reloads the readiness card once the API is back', true);
+}
+
 async function runCold() {
   // §FT5 — cold start: one 10k + an objective, NO snapshot. API-level (DOM-free) assertions:
   // the seeded plan exists, carries the cold_start seeds, runs ASSERTIVE (§FORM1, 2026-08-18: the
@@ -210,6 +281,7 @@ try {
   else if (MODE === 'noplan') await runNoplan();
   else if (MODE === 'settled') await runSettled();
   else if (MODE === 'cold') await runCold();
+  else if (MODE === 'blocked') await runBlocked();
   else await runFull();
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));
