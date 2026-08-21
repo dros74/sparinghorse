@@ -32,17 +32,19 @@ showcase deliberately shows a slice; the real console has the full set.
 **The engine (deterministic, no AI required)**
 - **Current shape** — VO₂max, CTL/ATL (fitness/fatigue) and ACWR, read from your Runalyze data.
 - **Objective-driven plan** — reverse-periodized Re-base → Base → Build → Peak → Taper toward a goal
-  race, safety-governed every week: a hard ACWR ceiling always, plus further injury brakes once you've
-  earned the assertive build (see *How the plan is governed*).
+  race, safety-governed every week: a hard ACWR ceiling, a long-run-jump cap and a biomechanical-load
+  brake (see *How the plan is governed*).
 - **Two-direction replanning** — the road moves as results come in: eases toward an honest goal after a
   rough patch, expands to exploit fitness you've earned. Diff-able week to week.
 - **Combined multi-A periodization** — chain several A-races into one continuous build (intermediate
   peaks/tapers + re-build bridges), each race's role set by how far apart they are.
-- **CTL-responsive volume + earned levers** — volume tracks measured fitness; opt-in "earned" faster
-  build / 6th weekly run / faster Phase-0 exit, all ACWR-capped, recovery weeks protected.
-- **Earned progression (conservative → assertive)** — a conservative rebuild by default; the engine only
-  graduates you to a ceiling-riding **assertive** build when your data shows it's safe (see *How the plan
-  is governed*). No "train harder" button — the safety is in the inference.
+- **Volume follows measured fitness** — the build rides the load ceiling and self-calibrates the ride to
+  how your measured fitness tracks the projection; down weeks and the taper are protected. No opt-in
+  levers — nothing to flip.
+- **Two regimes, decided by body evidence** — the normal posture is the ceiling-riding **assertive**
+  build; the **conservative** post-illness rebuild engages only on a medical hold or a stop-symptom
+  check-in within the last 56 days, and lifts by itself once that window is clean (see *How the plan
+  is governed*). No "train harder" button — the safety is in the governors.
 - **Injury brakes beyond ACWR** — long-run-jump cap, a biomechanical damage-equivalent lens, a tissue
   limiter and a chronic-growth cap, so the ACWR ceiling isn't the only guardrail.
 - **Plan drift** — distance / effort / CTL / race-outcome charts comparing your founding road to where
@@ -139,8 +141,8 @@ caches only the shell and never the API.
 The engine **self-calibrates** most things from your synced data (pace zones from VO₂max, CTL/ATL from TRIMP,
 HR zones from a derived lactate-threshold HR). A few constants near the top of the engine —
 `EASY_TRIMP_PER_MIN`, `K_CTL_VOLUME`, and the `REBASE_SHAPE` starter block — are sensible defaults derived
-from one masters-runner dataset; they're conservative on purpose and tunable. The CTL floor and earned levers
-adapt the plan upward as your fitness proves itself.
+from one masters-runner dataset; they're conservative on purpose and tunable. The assertive ride adapts the
+plan upward as your measured fitness proves itself.
 
 ### Two intensity models (and the check that keeps them honest)
 Effort lives in two places, on two different physiological anchors:
@@ -179,22 +181,22 @@ conservative (lower) Friel boundary.
 The plan isn't a fixed template with a ceiling bolted on; it's the output of a few interacting governors.
 This is what decides how much you run and how fast that grows.
 
-### Two regimes, *earned* from your data
-Everyone starts **conservative** — a Re-base plus a gentle fixed ramp, the right posture after a
-layoff, illness, or a fresh start. The engine graduates you to an **assertive** build — one that *rides* the
-safe load ceiling instead of a timid fixed ramp — only when your own data says the conservative posture is no longer
-needed. Assertive requires **all** of:
+### Two regimes, decided by body evidence
+The normal posture is the **assertive** build — one that *rides* the load ceiling instead of a timid fixed
+ramp, under the full set of brakes below. The **conservative** regime — a Re-base plus a gentle fixed ramp,
+the right posture after illness — engages only on **body evidence**:
 
-- a **clean window** — no medical flag and no stop-the-run symptom in the last **56 days**;
-- **demonstrated tolerance** — at least **2 well-absorbed training weeks banked** (you actually did the
-  volume and recovered from it, not just planned it);
-- **green readiness** now.
+- a **medical hold** in force, or one cleared within the last **56 days**; or
+- a **stop-the-run symptom** check-in within the last **56 days**.
 
-Miss any one and it stays cautious — and it says *which* one in plain language ("building tolerance — 1 of 2
-weeks banked"). There is deliberately **no manual override**: the safety comes from the inference, not a
-setting you can flip. In assertive it further self-calibrates the ride to how you're actually absorbing load
-— riding the full ceiling while your measured fitness tracks the projection, easing automatically when you
-fall behind.
+It lifts by itself once that window is clean, and the plan says *which* evidence holds it ("a medical hold is
+in force"). How last week compared to its prescription is deliberately *not* evidence — a travel week, a
+skipped run, a week lived differently never demotes the plan; your measured fitness and the ceilings already
+carry that. After a long healthy *break* the plan restarts from a small conservative dose and ramps from
+there by measurement — no gate, just a floor. There is deliberately **no manual override**: the safety comes
+from the governors, not a setting you can flip. In assertive the engine further self-calibrates the ride to
+how you're actually absorbing load — riding the full ceiling while your measured fitness tracks the
+projection, easing automatically when you fall behind.
 
 ### The ACWR ceiling — useful, and *not trusted alone*
 Every week is bounded so projected **ACWR** (acute:chronic workload ratio — this week's load vs. your rolling

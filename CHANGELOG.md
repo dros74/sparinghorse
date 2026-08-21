@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.27.0] - 2026-08-21
+
+### Changed
+
+- **The dashboard says what the load ratio is, not what it predicts.** The acute:chronic tile used to
+  call its band a "sweet spot" with "injury risk" above it and "detraining" below it. It now reads
+  descriptively: ATL ÷ CTL, the band where a steady training week usually sits, taper and down weeks
+  below it *by design*, the 1.30 ceiling and 1.25 planning target the engine actually holds — and
+  the plain statement that a load ratio is not an injury predictor (the long-run-jump and fast-load
+  brakes are the governors aimed at that). The "you:" marker no longer turns red below the band,
+  only above it. The week badges' hint says the same thing.
+- **The regime badge names the ceiling it quotes.** "riding the full safe ceiling (ACWR ≤ 1.25)"
+  is now "riding the full load ceiling (ACWR planning cap 1.25, hard cap 1.30)": 1.25 is the
+  settled-week planning target, 1.30 the in-week hard cap; neither is called "safe". On a phone the
+  badge wraps instead of overflowing. The manual's regime paragraph matches.
+- **The product narrates nobody's history.** The three halt messages ("the exertional symptom that
+  preceded 2025…") now describe the symptom, not a person's year; the AI reply is addressed to "the
+  runner". Same red light, same halt, same doctor referral.
+- **README caught up with 0.26.0.** The front page still described the removed gate — "earned
+  progression", "2 well-absorbed weeks banked", the opt-in earned levers, the CTL floor. It now
+  describes the regime rule the engine actually runs: body evidence only.
+- **Hygiene** (from an external review; none reachable as an attack, all belt-and-braces): the
+  private self-test page escapes every scenario field before rendering; the adjustment dialog
+  escapes its error text; the secrets store is created owner-only (`0600`) on disk.
+
 ## [0.26.3] - 2026-08-20
 
 ### Fixed

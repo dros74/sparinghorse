@@ -203,7 +203,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.26.3"
+ENGINE_VERSION = "0.27.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -1619,6 +1619,10 @@ SECRET_BY_KEY = {s["key"]: s for s in SECRET_SPEC}
 def _secrets_conn():
     """Open (creating if needed) the private-only secrets store. Callers guarantee not-READONLY."""
     conn = sqlite3.connect(SECRETS_DB, timeout=15)
+    try:                          # 0.27.0 — live credentials: owner-only on disk. Best-effort: an odd
+        os.chmod(SECRETS_DB, 0o600)   # volume/Windows may refuse, and the store still works.
+    except Exception:
+        pass
     conn.execute("CREATE TABLE IF NOT EXISTS secret (key TEXT PRIMARY KEY, value TEXT)")
     return conn
 
@@ -8241,7 +8245,7 @@ ADJUSTMENT_SCHEMA = {
         "volume_multiplier": {"type": "number",
                               "description": "Fraction of planned load to keep over the window, "
                               "0..1 (0=full rest, 0.5=half, 1=no change). You may only REDUCE or "
-                              "hold — never above 1; the plan already ramps to the safe ACWR ceiling."},
+                              "hold — never above 1; the plan already ramps to the ACWR ceiling."},
         "scope_days": {"type": "integer",
                        "description": "How many days forward, including today, this applies (1..28)."},
         "easy_only": {"type": "boolean",
@@ -8253,8 +8257,8 @@ ADJUSTMENT_SCHEMA = {
                          "err toward true."},
         "summary": {"type": "string", "description": "One plain sentence: what you changed and why."},
         "reply": {"type": "string",
-                  "description": "A warm, specific one-or-two-sentence reply spoken TO him. For a "
-                  "pure reflection (no load change) this is the whole response — acknowledge what he "
+                  "description": "A warm, specific one-or-two-sentence reply spoken to the runner. For "
+                  "a pure reflection (no load change) this is the whole response — acknowledge what they "
                   "felt and, where it fits, affirm it with the plan's own logic. For a real "
                   "adjustment, say plainly what you're proposing and why."},
     },
@@ -8336,7 +8340,7 @@ def propose_adjustment(text, today=None, easy_pace=None):
         "(no change needed); sometimes it's a real signal to ease back. "
         f"Today is {today}. " + ctx_line + pace_line +
         "You can ONLY ease or hold load (volume_multiplier 0..1) and force easy effort; you CANNOT "
-        "add load — the deterministic engine already ramps to the safe ACWR ceiling, so a positive "
+        "add load — the deterministic engine already ramps to the ACWR ceiling, so a positive "
         "reflection ('feeling great') keeps them on plan (multiplier 1, easy_only false): it does NOT "
         "unlock more, and it is NOT an adjustment. Only set multiplier<1 or easy_only=true for a "
         "genuine reason to back off. Map a real situation to a sensible multiplier and forward window: "
@@ -8658,7 +8662,8 @@ def adjudicate_objectives(db, today=None):
 # objective HRV signal (hrvBaseline vs its normal band, from statistics/current — the only
 # readiness metric the personal REST API exposes; RHR/sleep trends are MCP-only) with a
 # subjective daily check-in. The check-in is the safety-critical input: a returning
-# "had-to-stop" exertional symptom RED-flags the day and halts the plan (his 2025 history).
+# "had-to-stop" exertional symptom RED-flags the day and halts the plan (calibrated on the owner's 2025
+# history; the halt WORDING is generic since 0.27.0 — the product ships to other runners, log §70).
 READINESS_ENERGY = ("good", "ok", "heavy")   # the check-in vocabulary — the UI's three legs options;
 READINESS_SLEEP = ("good", "ok", "poor")     # the engine tests "heavy" / "poor", the API rejects the rest
 def hrv_signal(db):
@@ -8719,14 +8724,15 @@ def assess_readiness(db, checkin):
 
     if stop:
         return {"verdict": "red", "halt": True, "hrv": hrv,
-                "action": "Stop — do not train. The exertional symptom that preceded 2025 is "
-                          "back. Rest and contact your doctor before resuming.",
-                "reasons": ["Returning 'had-to-stop' exertional symptom"]}
+                "action": "Stop — do not train. A stop-the-run exertional symptom was flagged: rest "
+                          "and contact your doctor before resuming.",
+                "reasons": ["A 'had-to-stop' exertional symptom was flagged"]}
 
     if _deterministic_stop_symptom(note):  # §H2 — non-softenable floor, runs with or without the LLM
         return {"verdict": "red", "halt": True, "hrv": hrv,
-                "action": "Stop — your note describes the kind of exertional symptom that preceded "
-                          "2025. Rest and contact your doctor before resuming.",
+                "action": "Stop — your note describes a stop-the-run exertional symptom (chest pain, "
+                          "breathlessness, dizziness, fainting, having to stop). Rest and contact your "
+                          "doctor before resuming.",
                 "reasons": ["A stop-the-run exertional symptom was detected in your note"],
                 "source": "engine"}
 
@@ -8757,8 +8763,8 @@ def assess_readiness(db, checkin):
         return base
     if llm.get("stop_symptom_detected"):  # free-text safety catch → same halt as the checkbox
         return {"verdict": "red", "halt": True, "hrv": hrv,
-                "action": "Stop — your note reads like the exertional symptom that preceded 2025. "
-                          "Rest and contact your doctor before resuming.",
+                "action": "Stop — your note reads like a stop-the-run exertional symptom. Rest and "
+                          "contact your doctor before resuming.",
                 "reasons": ["AI flagged a possible 'had-to-stop' symptom in your note"],
                 "source": "llm", "engine_floor": floor}
     sev = {"green": 0, "amber": 1, "red": 2}
@@ -11360,6 +11366,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .gyou span{font-family:var(--mono);font-size:11px;font-weight:500;padding:2px 7px;border-radius:6px}
   .gyou .inb{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 55%)}
   .gyou .out{color:var(--danger);border:1px solid color-mix(in oklab,var(--danger),transparent 50%)}
+  .gyou .low{color:var(--muted);border:1px solid color-mix(in oklab,var(--muted),transparent 50%)}
   .gauge-scale{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;
     color:var(--muted);margin-top:6px}
   .gauge-scale b{color:var(--ok)}
@@ -11488,7 +11495,7 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
     text-transform:uppercase;color:var(--muted);white-space:nowrap}
   .regimebar.assertive .rgbadge{color:var(--accent)}
   .rgreason{color:var(--muted)}
-  .rgride{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted);white-space:nowrap}
+  .rgride{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted);text-align:right}
   .phases{display:flex;gap:3px;margin:6px 0 4px;height:34px;border-radius:8px;overflow:hidden}
   .phaseseg{display:flex;flex-direction:column;justify-content:center;align-items:center;
     color:var(--text);font-family:var(--mono);font-size:9px;text-align:center;padding:0 4px;
@@ -12103,10 +12110,10 @@ INDEX_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
       <div class="rgrid">
         <div id="readiness"><div class="empty">Loading…</div></div>
         <div class="panel acwrcard">
-          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:10px;font-weight:400">— stay in the green band</span></div>
+          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:10px;font-weight:400">— this week's load against your base</span></div>
           <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
           <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
-          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Fatigue ÷ fitness. The shaded band (0.8–1.3) is the sweet spot — below it you're detraining, above it injury risk rises.</p>
+          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine keeps every planned week under a 1.30 ceiling (1.25 is its planning target). It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
           <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
         </div>
       </div>
@@ -12322,9 +12329,11 @@ async function loadShape(){
   if(acwr!=null){
     const L = pct(acwr);
     $("#gmark").style.left = L+"%";
-    const inb = acwr>=0.8 && acwr<=1.3;
+    // Above the band = the acute spike the engine brakes (danger); below it = tapering/resting/returning —
+    // deliberate more often than not, so neutral, not red (0.27.0, log §70).
+    const cls = acwr>1.3 ? 'out' : acwr<0.8 ? 'low' : 'inb';
     $("#gyou").style.left = L+"%";
-    $("#gyou").innerHTML = `<span class="${inb?'inb':'out'}">you: ${acwr.toFixed(2)}</span>`;
+    $("#gyou").innerHTML = `<span class="${cls}">you: ${acwr.toFixed(2)}</span>`;
   }
   if(d.last_sync){ const dt=new Date(d.last_sync);
     $("#foot").textContent = `Spares the horse by being the horse · synced ${dt.toLocaleString()}`; }
@@ -13015,7 +13024,7 @@ function acBadge(a){
   if(a==null) return "";
   const cls = a<=1.18 ? "lo" : "mid";
   return `<span class="acbadge ${cls}">ACWR →${a.toFixed(2)}</span>`+
-    qhint("Projected acute:chronic load at this week's end — rolled forward from today's fitness if you run the plan. Stay in the green band (≤ ~1.3); the engine trims volume to keep it there.");
+    qhint("Projected acute:chronic load at this week's end — rolled forward from today's fitness if you run the plan. The engine plans every week under the 1.30 ceiling and trims volume when a week would breach it; a taper or down week reads low on purpose.");
 }
 // House-styled confirmation for destructive actions — spells out the consequences before anything is
 // removed. opts: {title, intro, lines:[…consequences], alt, confirmLabel}. Returns a Promise<bool>
@@ -13220,7 +13229,7 @@ function wireObjActions(){
     const t=adj.textContent; adj.disabled=true; adj.textContent="Weighing…";
     const host=$("#objAdjudicate"); if(host) host.innerHTML=`<div class="adjclamp">thinking…</div>`;
     try{ renderAdjudicate(await getJSON("/api/objectives/adjudicate",{method:"POST"})); }
-    catch(e){ if(host) host.innerHTML=`<div class="adjclamp err">⚠ ${e}</div>`; }
+    catch(e){ if(host) host.innerHTML=`<div class="adjclamp err">⚠ ${esc(String(e))}</div>`; }
     finally{ adj.disabled=false; adj.textContent=t; }
   });
   const parse=$("#ao_parse");
@@ -13343,7 +13352,7 @@ function wireAdjust(){
       const r=await fetch("/api/plan/explain",{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify({diff:LASTDIFF})});
       renderExplain(await r.json());
-    }catch(e){ if(host) host.innerHTML=`<div class="adjclamp err">⚠ ${e}</div>`; }
+    }catch(e){ if(host) host.innerHTML=`<div class="adjclamp err">⚠ ${esc(String(e))}</div>`; }
     finally{ exp.disabled=false; exp.textContent=t; }
   });
   const clr=$("#adj_clear");
@@ -13359,7 +13368,7 @@ function wireAdjust(){
       const r=await fetch("/api/adjustment/propose",{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
       renderAdjPreview(await r.json());
-    }catch(e){ const h=$("#adj_preview"); if(h) h.innerHTML=`<div class="adjclamp err">⚠ ${e}</div>`; }
+    }catch(e){ const h=$("#adj_preview"); if(h) h.innerHTML=`<div class="adjclamp err">⚠ ${esc(String(e))}</div>`; }
     finally{ prop.disabled=false; prop.textContent=t; }
   });
 }
@@ -13735,12 +13744,14 @@ function renderPlan(p){
       ${qhint(fcHint)}
     </div>` : "";
   // §PRO3/§PRO5 — training-regime posture: which regime drove the plan + why, and (assertive) how hard
-  // it's riding the safe ceiling given his measured-vs-projected response. Surfaced so the auto-gate is
-  // never silent; in caution the reason tells him what he's banking toward.
+  // it's riding the load ceiling given the measured-vs-projected response. Surfaced so the auto-gate is
+  // never silent. The ceiling is named for what binds (0.27.0, log §70): `ride_cap` is the PLANNING cap —
+  // the settled end-of-week target (≤ ACWR_SOFT, judged on the §PRO8-floored denominator) — while the
+  // in-week raw peak rides to the HARD cap; "hard cap 1.30" = ACWR_HARD (det/copy-posture pins the literal).
   const RG = p.regime || {}, SR = p.shape_response || {};
   const rideTxt = (RG.mode==='assertive' && SR.ride_cap)
-    ? (SR.factor>=1 ? `riding the full safe ceiling (ACWR ≤ ${SR.ride_cap})`
-                    : `easing the push — measured fitness ${Math.round((SR.ratio||0)*100)}% of projection (ACWR ≤ ${SR.ride_cap})`)
+    ? (SR.factor>=1 ? `riding the full load ceiling (ACWR planning cap ${SR.ride_cap}, hard cap 1.30)`
+                    : `easing the push — measured fitness ${Math.round((SR.ratio||0)*100)}% of projection (ACWR planning cap ${SR.ride_cap})`)
     : "";
   const regimeNote = RG.mode ? `<div class="regimebar ${RG.mode}">
       <span class="rgbadge">${RG.mode==='assertive'?'⟢ Assertive build':'◇ Conservative'}</span>
@@ -21165,6 +21176,84 @@ def _stc_api_validation(db):
                got={"violations": fails or "none", "rows_before": before, "rows_after": counts()})
 
 
+def _stc_copy_posture(db):
+    """0.27.0 — the product's WORDS say what the engine does, and narrate nobody's history (plan B of the
+    Codex/Luna reviews, log §70). Words, not governors: every tooth here is a string or a file mode; the
+    ACWR brakes themselves are owned by det/acwr-ceiling, det/peak-acwr-floor and det/soft-ctl-floor.
+      (a) the readiness HALTS are generic — the stop-symptom flag path and the §H2 deterministic note
+          path BOTH still answer red+halt (semantics locked), and neither action narrates a year or a
+          person (the owner's clinical history ships to every self-hoster otherwise);
+      (b) the LLM reply schema addresses "the runner", never a gendered owner ("TO him");
+      (c) the dashboard's ACWR copy makes no sweet-spot / injury-risk / "safe ceiling" claim (our own
+          ENGINE_SCIENCE §1: injury lives on the biomechanical axis, a load ratio cannot see it — Davis,
+          Aarhus, Impellizzeri), and the regime badge names the cap it quotes: the hard-cap literal it
+          prints must equal ACWR_HARD, so the number on screen cannot drift from the governor;
+      (d) hygiene (Luna review): the self-test page's row() interpolates no raw scenario field, the three
+          adjustment catch→innerHTML sinks escape the error text, and the secrets store is created 0600.
+    ANTI-VACUITY (§43): the forbidden phrases are assembled by concatenation so this function's own
+    source can never satisfy a source-text check; the positive teeth (red+halt, "runner", the ACWR_HARD
+    literal, esc() at the sinks, 0600) were seen to FAIL on the 0.26.3 text before the wording changed."""
+    import os as _os, re as _re, stat as _stat, tempfile
+    global SECRETS_DB
+    fails = []
+    year = "20" + "25"
+    personal = ("preceded " + year, " him", " his ", " he ", " he'")
+    # (a) — both reachable halt paths, no LLM involved (each returns before the judgment layer).
+    for cin, tag in (({"stop_symptom": True}, "flag"),
+                     ({"note": "had to stop — chest pain at easy effort"}, "note")):
+        a = assess_readiness(db, cin)
+        if a.get("verdict") != "red" or not a.get("halt"):
+            fails.append(f"(a) {tag} path no longer halts: {a.get('verdict')}/{a.get('halt')}")
+        act = " " + str(a.get("action", "")) + " "
+        hit = [w for w in personal if w in act]
+        if hit or year in act:
+            fails.append(f"(a) {tag} halt action narrates a person/year {hit or year}: {act.strip()!r}")
+        if "doctor" not in act:
+            fails.append(f"(a) {tag} halt action dropped the doctor referral: {act.strip()!r}")
+    # (b) — the reply schema.
+    desc = ADJUSTMENT_SCHEMA["properties"]["reply"]["description"]
+    if "runner" not in desc or _re.search(r"\b(him|his|he)\b", desc):
+        fails.append(f"(b) reply schema is owner-addressed: {desc!r}")
+    # (c) — the SPA's ACWR copy and the regime badge.
+    low = INDEX_HTML.lower()
+    for phrase in ("sweet spot", "injury risk", "safe ceiling", "stay in the green band",
+                   "you're detraining"):
+        if phrase in low:
+            fails.append(f"(c) SPA still says {phrase!r}")
+    if f"hard cap {ACWR_HARD:.2f}" not in INDEX_HTML:
+        fails.append(f"(c) regime badge does not print the hard cap as ACWR_HARD={ACWR_HARD:.2f}")
+    if f"under a {ACWR_HARD:.2f} ceiling ({ACWR_SOFT:.2f} is its planning target)" not in INDEX_HTML:
+        fails.append("(c) the ACWR tile's ceiling/target literals drifted from ACWR_HARD/ACWR_SOFT")
+    # (d) — raw sinks + secrets-store mode.
+    if "${e}" in INDEX_HTML:
+        fails.append("(d) a catch→innerHTML sink still interpolates the raw error (${e})")
+    if INDEX_HTML.count("esc(String(e))") < 3:
+        fails.append(f"(d) expected ≥3 escaped adjustment catch sinks, found {INDEX_HTML.count('esc(String(e))')}")
+    for raw in ("${r.category}", "${r.id}", "${r.desc"):
+        if raw in SELFTEST_HTML:
+            fails.append(f"(d) self-test page row() interpolates {raw} raw")
+    if "esc(r.category)" not in SELFTEST_HTML:
+        fails.append("(d) self-test page has no esc() around the scenario fields")
+    if _os.name == "posix":
+        saved = SECRETS_DB
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                SECRETS_DB = Path(td) / "secrets.db"
+                _secrets_conn().close()
+                mode = _stat.S_IMODE(_os.stat(SECRETS_DB).st_mode)
+                if mode != 0o600:
+                    fails.append(f"(d) secrets store created with mode {oct(mode)}, want 0o600")
+            finally:
+                SECRETS_DB = saved
+    return _st("det", "copy-posture",
+               "product words match the engine and narrate nobody's history: readiness halts generic "
+               "(red+halt kept), reply schema says 'the runner', SPA makes no sweet-spot/injury-risk/"
+               "safe-ceiling claim and prints the hard cap = ACWR_HARD, catch sinks + self-test row "
+               "escaped, secrets store 0600",
+               passed=not fails, expect="no personal/overclaiming product strings; hygiene in place",
+               got={"violations": fails or "none"})
+
+
 def _stc_card_truth(db):
     """§CARD — every number a week's card asserts is recomputed from the sessions listed under it.
     The owner read "35.8 km · 5 runs" above a FOUR-run week off his own live card (2026-08-07): the
@@ -22556,7 +22645,7 @@ def run_server_selftest(db, categories=None):
                  lambda: _stc_seed_stale(),
                  lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
-                 lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(),
+                 lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(), lambda: _stc_copy_posture(db),
                  lambda: _stc_multi_a_chain(),
                  lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
                  lambda: _stc_race_lifecycle(), lambda: _stc_backup_export(),
@@ -22737,14 +22826,17 @@ SELFTEST_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <script>
 const $=s=>document.querySelector(s), tb=$("#tbl tbody");
 const TAG={true:"PASS",false:"FAIL",null:"INFO"};
+// Every scenario field goes through esc() before innerHTML — the page only ever renders its own
+// constants and the fresh server report, but a raw sink is a raw sink (0.27.0 hygiene, log §70).
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 function row(r){
   const tag = r.skipped?"SKIP":TAG[r.passed];
   const detail = r.error ? ("error: "+r.error)
     : (r.output!=null ? JSON.stringify(r.output,null,1) : (r.note||r.got!=null?JSON.stringify(r.got):""));
   const tr=document.createElement("tr");
   tr.innerHTML=`<td><span class="tag ${tag}">${tag}</span>${r.needs_human?' <span class="flag" title="captured for human/AI judgment">⚑</span>':''}</td>
-    <td><b>${r.category}/${r.id}</b><div class="sub">${r.desc||""}</div></td>
-    <td><pre>${(detail||"").replace(/</g,"&lt;")}</pre></td>`;
+    <td><b>${esc(r.category)}/${esc(r.id)}</b><div class="sub">${esc(r.desc||"")}</div></td>
+    <td><pre>${esc(detail||"")}</pre></td>`;
   tb.appendChild(tr);
 }
 function summarise(s){

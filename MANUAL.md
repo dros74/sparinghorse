@@ -247,7 +247,7 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
 
 - **Regime badge (conservative / assertive)** — the plan tile shows which posture it's in, with the reason.
   *Assertive* is the normal posture: the plan follows your measured form toward the objective, riding
-  the safe ACWR ceiling under the full set of injury brakes. *Conservative* is the **post-illness**
+  the ACWR load ceiling under the full set of injury brakes. *Conservative* is the **post-illness**
   posture (a Re-base plus a gentle fixed ramp), and it engages only on **body evidence** — a medical
   hold, or a stop-symptom check-in within the last 56 days; it lifts by itself once that window is
   clean. How last week compared to its prescription is *not* a body signal: a travel week, a skipped
