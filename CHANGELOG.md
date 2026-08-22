@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.30.0] - 2026-08-22
+
+### Changed
+
+- **The category colours are back.** The square-polychrome palette — the shape tiles tinted by
+  metric, the plan phases in their colour families, the green volume bars, the blue fatigue trace —
+  came out in 0.29.0 as an undocumented trial, and one day of the flat single-hue dashboard settled
+  the question: too dull. It is back, and this time it is written into the design document instead
+  of diverging from it. One improvement over the trial: the shape tiles take their hue from what
+  they measure (a metric identity) rather than where they sit, so adding or reordering a tile can
+  no longer repaint the row.
+
+### Fixed
+
+- **The two acute:chronic numbers on the dashboard agree.** The readiness card divided the synced
+  snapshot's fatigue by its fitness, while the Acute:chronic gauge painted the ratio field the sync
+  provides — which is computed on a different basis and can sit visibly apart on the same row
+  (0.87 against 1.09). The gauge now divides the same row the same way: one number, as the gauge's
+  own caption always claimed.
+
 ## [0.29.0] - 2026-08-22
 
 ### Changed

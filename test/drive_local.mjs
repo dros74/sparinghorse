@@ -363,6 +363,15 @@ async function runFull() {
   ok(`theme chrome follows the switch (${chrome1.meta} · ${chrome1.man})`,
      chrome1.meta === '#191a1d' && (chrome1.man || '').includes('theme=dark'));
 
+  // the ratified category palette (0.30.0): each shape tile takes its hue from its data-m metric
+  // identity — measured in the live cascade, since a source check can't see a rule that matches nothing
+  const hues = await page.evaluate(() =>
+    [...document.querySelectorAll('#tiles .tile')].map(t =>
+      [t.dataset.m || 'none', getComputedStyle(t).getPropertyValue('--accent').trim()]));
+  const distinct = new Set(hues.map(h => h[1]));
+  ok(`shape tiles carry metric-identity hues (${hues.map(h => h.join(':')).join(' · ')})`,
+     hues.length >= 4 && hues.every(h => h[0] !== 'none') && distinct.size >= 4);
+
   // the gauge "you:" pill is clamped inside the gauge even at the scale's very ends
   const pill = await page.evaluate(() => {
     const g = document.getElementById('gauge'), you = document.getElementById('gyou');
@@ -376,6 +385,19 @@ async function runFull() {
   });
   ok(`gauge pill never overhangs the gauge (end margins ${pill && Math.round(pill.hi)}/${pill && Math.round(pill.lo)}px)`,
      !!pill && pill.hi >= -1 && pill.lo >= -1);
+
+  // the gauge and the readiness card read ONE ratio: ATL ÷ CTL of the same snapshot row. Runalyze's
+  // own ACWR field is computed on another basis and can disagree with the ratio on the same row —
+  // so drive the REAL loadShape with a doctored snapshot where they differ (field 1.09, ratio 0.87)
+  // and watch which one gets painted. (The readiness side's half of the contract is det/acwr-agreement.)
+  await page.route('**/api/shape', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify({
+    ok: true, last_sync: null, duplicate_count: 0, duplicates: [], ignored: [], history: [],
+    latest: { fitness: 50, fatigue: 43.5, acwr: 1.09 } }) }));
+  const pillTxt = await page.evaluate(async () => { await loadShape();
+    return document.getElementById('gyou').textContent; });
+  await page.unroute('**/api/shape');
+  ok(`a snapshot whose field ≠ its ratio paints the RATIO (${pillTxt.trim()})`, /you: 0\.87/.test(pillTxt));
+  await page.evaluate(() => loadShape());   // put the real snapshot back for the rest of the run
 
   // the health form's date is prefilled to today (local, not UTC)
   const hd = await page.evaluate(() => {

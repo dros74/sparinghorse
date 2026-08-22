@@ -54,8 +54,10 @@ themes.addEventListener("click", e=>{ const b=e.target.closest("button"); if(!b)
   try{localStorage.setItem("sh-theme",b.dataset.theme)}catch(e){} paintTheme(); });
 paintTheme();
 
-function tile(k, v, unit, sub, cls, desc, bg){
-  return `<div class="tile${bg?' hascap':''}" ${desc?`title="${desc}"`:""}>
+// `m` is the tile's metric identity ("vo2max"/"fitness"/"fatigue"/"form") — the category palette
+// keys its hue off it (0.30.0; never position, which re-hues everything when a tile moves)
+function tile(k, v, unit, sub, cls, desc, bg, m){
+  return `<div class="tile${bg?' hascap':''}"${m?` data-m="${m}"`:""} ${desc?`title="${desc}"`:""}>
     ${bg?`<div class="tilebg" id="${bg}"></div>`:""}
     <div class="k">${k}${desc?' <span class="info">ⓘ</span>':''}</div>
     <div class="v">${v}${unit?`<small> ${unit}</small>`:""}</div>
@@ -123,15 +125,18 @@ async function loadShape(){
   const progTxt = prog==null ? "" : `${prog>=0?"▲":"▼"} ${fmt(Math.abs(prog),2)} trend`;
   tiles.innerHTML =
     tile("Effective VO₂max", fmt(s.effective_vo2max,1), "ml/kg/min", progTxt, prog>=0?"up":"down",
-      "Maximal oxygen uptake Runalyze estimates from your HR–pace relationship. The single best correlate of endurance performance. Higher is fitter.", "vo2bg") +
+      "Maximal oxygen uptake Runalyze estimates from your HR–pace relationship. The single best correlate of endurance performance. Higher is fitter.", "vo2bg", "vo2max") +
     tile("Fitness", fmt(s.fitness,0), "CTL", s.fitness_pct!=null?`${fmt(s.fitness_pct,0)}% of your all-time max`:"",null,
-      "CTL (Chronic Training Load): a 42-day weighted average of daily training load (TRIMP). Your built-up aerobic fitness — slow to gain, slow to lose.", "ctlbg") +
+      "CTL (Chronic Training Load): a 42-day weighted average of daily training load (TRIMP). Your built-up aerobic fitness — slow to gain, slow to lose.", "ctlbg", "fitness") +
     tile("Fatigue", fmt(s.fatigue,0), "ATL", "acute load",null,
-      "ATL (Acute Training Load): a 7-day weighted average of training load. Your recent fatigue — rises and falls fast.", "atlbg") +
+      "ATL (Acute Training Load): a 7-day weighted average of training load. Your recent fatigue — rises and falls fast.", "atlbg", "fatigue") +
     tile("Form", fmt(s.performance,0), "TSB", "fitness − fatigue",null,
-      "TSB (Training Stress Balance) = Fitness − Fatigue. Positive = fresh/tapered; negative = loaded/building. Near a race you want it positive.", "tsbbg");
-  // ACWR gauge: value is a RATIO; band 0.8–1.3 on a 0–2 scale
-  const acwr = s.acwr==null ? null : Number(s.acwr);
+      "TSB (Training Stress Balance) = Fitness − Fatigue. Positive = fresh/tapered; negative = loaded/building. Near a race you want it positive.", "tsbbg", "form");
+  // ACWR gauge: value is a RATIO; band 0.8–1.3 on a 0–2 scale. One definition page-wide: ATL ÷ CTL
+  // of this same snapshot row — the readiness card's rest-day line divides it the same way, and
+  // Runalyze's own ACWR field (computed on another basis; the schema warns "API mixes units!") can
+  // sit visibly off the ratio on the same row. The field only remains as the no-fitness fallback.
+  const acwr = s.fitness ? s.fatigue/s.fitness : (s.acwr==null ? null : Number(s.acwr));
   const pct = x => Math.max(0,Math.min(100, x/2*100));
   $("#gband").style.left = pct(0.8)+"%"; $("#gband").style.width = (pct(1.3)-pct(0.8))+"%";
   if(acwr!=null){

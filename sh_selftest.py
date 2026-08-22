@@ -6799,37 +6799,68 @@ def _stc_error_shape():
 
 
 def _stc_accent2_fallback():
-    """UX-5a → UX-5b — every `var(--accent2)` carries a fallback, everywhere, because only ONE theme
-    defines it.
+    """UX-5a → UX-5b → ratified (0.30.0) — the square-polychrome palette IS the house palette again.
 
-    The polychrome trial overlay was REMOVED on the owner's word (UX-5b, PROJECT_LOG §75). It was the
-    only place Daylight and Charcoal ever defined --accent2/3/4, so what used to be "no bare reference
-    OUTSIDE the overlay" is now simply "no bare reference": Aurora still declares --accent2 as part of
-    its own palette (violet → cyan is that theme's identity), and in the other two the fallback to
-    --accent is what paints. A bare use would go invalid-at-computed-value in two themes out of three —
-    the drift caveat losing its tint, the chain-fit line its stroke, the tile top-rule its gradient.
+    The overlay came out in 0.29.0 on the owner's word and came BACK in 0.30.0 on it: the flat
+    single-hue dashboard read too dull. The ratify path (REVISED_PLAN Phase 2) is what shipped:
+    the block is restored, DESIGN.md §2.3 carries the spec, and the shape tiles key their hue off
+    the tile's data-m METRIC IDENTITY rather than :nth-child — which silently re-hued every tile
+    the day one was added, dropped or reordered.
 
-    --accent3 and --accent4 left with the overlay and must not come back without a definition: a
-    reference to a token no theme declares paints nothing, silently."""
+      (a) no BARE var(--accent2/3/4) OUTSIDE the overlay block — inside it, bare uses are the
+          palette assigning its own hues; outside, the fallback is what keeps a use resolving if
+          the block is ever pulled again (UX-5a's lesson: a bare reference paints nothing, silently);
+      (b) the overlay is present and every theme defines all four category hues;
+      (c) the tiles' hues key off data-m, no #tiles :nth-child keying remains, and app.js actually
+          EMITS data-m on the shape tiles — a CSS rule keyed on an attribute nothing emits is
+          vacuous decoration;
+      (d) the plan phases keep their data-pk keying (hue stable across segment count/order)."""
     fails = []
-    for m in S.re.finditer(r"var\(\s*--accent2\s*\)", S.APP_CSS):
-        fails.append(f"bare var(--accent2) at app.css line {S.APP_CSS.count(chr(10), 0, m.start()) + 1}")
-    for m in S.re.finditer(r"var\(\s*--accent2\s*\)", S.APP_JS):
-        fails.append(f"bare var(--accent2) at app.js line {S.APP_JS.count(chr(10), 0, m.start()) + 1}")
+    # the overlay is the stylesheet's last block; when it is absent, EVERYTHING counts as outside
+    banner = (S.APP_CSS.index("SQUARE POLYCHROME PALETTE") if "SQUARE POLYCHROME PALETTE" in S.APP_CSS
+              else len(S.APP_CSS) + 1)
+    for m in S.re.finditer(r"var\(\s*--accent[234]\s*\)", S.APP_CSS):
+        if m.start() >= banner:
+            continue                                        # inside the overlay: the palette's own assigns
+        fails.append(f"(a) bare var(--accentN) outside the palette block at app.css line "
+                     f"{S.APP_CSS.count(chr(10), 0, m.start()) + 1} — carry the var(--accent) fallback")
+    for m in S.re.finditer(r"var\(\s*--accent[234]\s*\)", S.APP_JS):
+        fails.append(f"(a) bare var(--accentN) at app.js line "
+                     f"{S.APP_JS.count(chr(10), 0, m.start()) + 1} — carry the var(--accent) fallback")
     for needle, label in ((".driftcaveat", "drift caveat rule"),
                           (".drift .dl.cf", "chain-fit line rule")):
         body = _stcss_rule(S.APP_CSS, needle)
         if "var(--accent2, var(--accent))" not in body:
-            fails.append(f"{label} lacks the var(--accent2, var(--accent)) fallback")
-    for tok in ("--accent3", "--accent4"):
-        if tok in S.APP_CSS or tok in S.APP_JS:
-            fails.append(f"{tok} is referenced again but no theme defines it — it paints nothing")
-    if "SQUARE POLYCHROME PALETTE" in S.APP_CSS:
-        fails.append("the polychrome overlay is back in the stylesheet (UX-5b removed it deliberately)")
+            fails.append(f"(a) {label} lacks the var(--accent2, var(--accent)) fallback")
+    if "SQUARE POLYCHROME PALETTE" not in S.APP_CSS:
+        fails.append("(b) the polychrome block is gone — it is the ratified house palette (0.30.0), "
+                     "not an experiment to tidy away")
+    for theme in (":root", '[data-theme="dark"]', '[data-theme="aurora"]'):
+        # the overlay re-asserts all four per theme — read the LAST block for the selector, since
+        # the overlay's re-assertion is (deliberately) the later, winning rule
+        blocks = [m.group(1) for m in S.re.finditer(
+            r"(?:^|\n)\s*" + S.re.escape(theme) + r"\s*\{([^{}]*)\}", S.APP_CSS)]
+        decls = _stcss_decls(blocks[-1]) if blocks else {}
+        for tok in ("--accent1", "--accent2", "--accent3", "--accent4"):
+            if tok not in decls:
+                fails.append(f"(b) {theme} (final block) defines no {tok} — a category hue would "
+                             f"paint nothing")
+    for metric in ("vo2max", "fitness", "fatigue", "form"):
+        if not _stcss_rule(S.APP_CSS, f'#tiles .tile[data-m="{metric}"]'):
+            fails.append(f"(c) no hue rule keyed on data-m=\"{metric}\"")
+    if 'data-m="' not in S.APP_JS:
+        fails.append("(c) app.js emits no data-m on the tiles — the identity keying would key on nothing")
+    if S.re.search(r"#tiles \.tile:nth-child", S.APP_CSS):
+        fails.append("(c) the shape tiles are still hue-keyed by position (:nth-child) — a reorder "
+                     "silently repaints every tile")
+    if '.phaseseg[data-pk="build"]' not in S.APP_CSS:   # grouped selector — substring, not rule match
+        fails.append("(d) the plan phases lost their data-pk hue keying")
     return _st("det", "accent2-fallback",
-               "every var(--accent2) carries var(--accent2, var(--accent)) — only Aurora defines the "
-               "token, so a bare use paints nothing in the other two themes; --accent3/4 stay retired",
-               passed=not fails, expect="0 bare uses; drift rules carry the fallback; no accent3/4",
+               "the ratified square-polychrome palette: no bare var(--accentN) anywhere, all four "
+               "category hues defined per theme, shape tiles keyed by metric identity (data-m), "
+               "phases by data-pk",
+               passed=not fails,
+               expect="0 bare uses; 4 hues × 3 themes; data-m on tiles; data-pk on phases",
                got={"violations": fails or "none"})
 
 def _stc_api_validation(db):
@@ -9006,6 +9037,67 @@ def _stc_pwa_polish():
                got={"violations": fails or "none"})
 
 
+def _stc_acwr_agreement():
+    """0.30.0 — the dashboard shows ONE acute:chronic ratio, computed one way.
+
+    The readiness card's rest-day line ("your load is light (ACWR 0.87)…") divides the snapshot's
+    fatigue by its fitness; the Acute:chronic gauge painted Runalyze's own acuteChronicWorkloadRatio
+    field — computed on another basis entirely (the schema itself warns "API mixes units!") and able
+    to sit a quarter-point away from ATL÷CTL on the SAME row (seen on the owner's NAS after the
+    0.29.0 deploy: 0.87 vs 1.09). The gauge's own caption claims ATL ÷ CTL, so the gauge now
+    divides, and the field is only the fallback for a row with no fitness to divide by.
+
+      (a) THE SERVER'S SIDE, driven for real: a snapshot row whose stored field disagrees with its
+          own ratio, on a green rest day — the readiness action must quote the RATIO (the number
+          the gauge paints), never the field.
+      (b) THE CLIENT'S SIDE: the gauge's value divides fatigue by fitness from the same row. The
+          live half (a doctored /api/shape where field ≠ ratio, painted by the real loadShape) is
+          the Playwright check; this tooth pins the source."""
+    fails = []
+    mem = S.sqlite3.connect(":memory:"); mem.row_factory = S.sqlite3.Row
+    mem.executescript(S.SCHEMA)
+    now = S.datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    monday = (now - S.timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    tomorrow = (now + S.timedelta(days=1)).strftime("%Y-%m-%d")
+    plan = {"phases": [{"key": "base"}],
+            "base": {"weeks": [{"wk": 1, "start": monday,
+                                "sessions": [{"date": tomorrow, "kind": "easy", "km": 8}]}]},
+            "pace_zones": {"easy_top": "6:00"}}
+    mem.execute("INSERT INTO plans (created_at, for_date, inputs, plan) VALUES (?,?,?,?)",
+                (today, today, "{}", S.json.dumps(plan)))
+    mem.execute("INSERT INTO shape_snapshots (snapshot_date, captured_at, fitness, fatigue, acwr, raw) "
+                "VALUES (?,?,?,?,?,?)", (today, today, 50.0, 43.5, 1.09, "{}"))   # field 1.09 ≠ ratio 0.87
+    real_getdb, real_llm = S.get_db, S.llm_available
+    try:
+        S.get_db = lambda: mem
+        S.llm_available = lambda: False      # a det probes the engine floor, never a model's mood
+        r = S.today_readiness(mem)
+    finally:
+        S.get_db, S.llm_available = real_getdb, real_llm
+        mem.close()
+    act = (r.get("assessment") or {}).get("action", "")
+    kind = (r.get("session") or {}).get("kind")
+    if kind != "rest":
+        fails.append(f"(a) the fixture did not produce a rest day (kind={kind!r}) — the probe is vacuous")
+    if "ACWR 0.87" not in act:
+        fails.append(f"(a) green rest day, ratio 0.87 vs field 1.09: the readiness action reads "
+                     f"{act!r} — it must quote the ratio the gauge paints")
+    if "1.09" in act:
+        fails.append("(a) the readiness action quoted Runalyze's ACWR field — the mismatch itself")
+    aline = next((ln for ln in S.APP_JS.splitlines() if "const acwr" in ln), "")
+    if "s.fitness ? s.fatigue/s.fitness" not in aline:
+        fails.append("(b) the gauge does not divide fatigue by fitness from the snapshot row — it "
+                     "still paints Runalyze's field, which the readiness card cannot match")
+    return _st("det", "acwr-agreement",
+               "one acute:chronic ratio on the dashboard: the gauge divides the snapshot's fatigue "
+               "by its fitness — the same row, the same division the readiness card's rest-day line "
+               "uses; Runalyze's own ACWR field (a different basis) is only the no-fitness fallback",
+               passed=not fails,
+               expect="rest-day action quotes the ratio; the gauge divides",
+               got={"violations": fails or "none", "session_kind": kind, "action": act})
+
+
 def _stc_client_probe():
     """§SELFTEST — the browser self-check reads the payload the server actually sends.
 
@@ -9135,7 +9227,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),

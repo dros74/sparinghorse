@@ -988,3 +988,71 @@
   }
 
   /* ====================================================================== */
+  /* SQUARE POLYCHROME PALETTE — the house category palette. Tried as an overlay from _appMockups
+     (2026-06-27), removed in 0.29.0 (UX-5b), and RATIFIED back in 0.30.0 on the owner's word: the
+     flat single-hue dashboard read too dull without it. DESIGN.md §2.3 carries the spec.
+     Square (tetradic) palette: four hues 90 deg apart on the oklch wheel, anchored at the theme's
+     brand hue, deployed BY CATEGORY. */
+  /* --accent1 is a REAL token (the terracotta we started with) — never `--accent: var(--accent)`,
+     which is a self-reference cycle that resolves to guaranteed-invalid and leaves anything reading
+     var(--accent) (tile chart shade, re-base segment) uncoloured. --accent stays aliased to it so the
+     brand default is unchanged. */
+  :root{
+    --accent1: oklch(0.575 0.185 45);    /* terracotta — brand */
+    --accent:  var(--accent1);
+    --accent2: oklch(0.575 0.185 135);   /* green */
+    --accent3: oklch(0.575 0.185 225);   /* blue */
+    --accent4: oklch(0.575 0.185 315);   /* magenta */
+  }
+  [data-theme="dark"]{
+    --accent1: oklch(0.72 0.17 45);
+    --accent:  var(--accent1);
+    --accent2: oklch(0.72 0.17 135);
+    --accent3: oklch(0.72 0.17 225);
+    --accent4: oklch(0.72 0.17 315);
+  }
+  /* Aurora keeps its OWN identity. The palette :root above (equal specificity, later in source) would
+     otherwise win over the original [data-theme="aurora"] block and repaint Aurora terracotta — so we
+     re-assert the four category hues HERE. TRUE SQUARE: anchored at Aurora's brand violet (~292) and
+     stepped exactly 90deg (292/112/202/22). Lifted to L0.78/C0.21 (brighter than the other themes'
+     0.72/0.185) so the hues read neon on the deep-indigo ground rather than muddy. */
+  [data-theme="aurora"]{
+    --accent1: oklch(0.78 0.21 292);     /* violet — brand */
+    --accent:  var(--accent1);
+    --accent2: oklch(0.78 0.21 112);     /* green */
+    --accent3: oklch(0.78 0.21 202);     /* cyan/blue */
+    --accent4: oklch(0.78 0.21 22);      /* coral */
+  }
+  /* Current shape tiles: VO2max(terracotta) / Fitness(green) / Fatigue(blue) / Form(magenta).
+     Keyed by the tile's data-m METRIC IDENTITY (ratified 0.30.0) — not :nth-child, which silently
+     re-hued every tile the day a tile was added, dropped or reordered. */
+  #tiles .tile[data-m="vo2max"]{ --accent: var(--accent1); }
+  #tiles .tile[data-m="fitness"]{ --accent: var(--accent2); }
+  #tiles .tile[data-m="fatigue"]{ --accent: var(--accent3); }
+  #tiles .tile[data-m="form"]{ --accent: var(--accent4); }
+  #tiles .tile::before{ background: var(--accent); }
+  /* Plan phases — keyed by data-pk so the hue is stable regardless of segment count/order, and set on
+     BOTH the bar segment AND its panel so the week strip + week cards inherit the phase's hue (was
+     always terracotta). Chain segments (peak2/taper2/bridge2…) match by prefix. rebase = the terracotta
+     we started with; taper cycles back to terracotta (4 hues, 5 phases — the two low-volume bookends). */
+  .phaseseg[data-pk="rebase"],  .phasepanel[data-pk="rebase"] { --accent: var(--accent1); }
+  .phaseseg[data-pk="base"],    .phasepanel[data-pk="base"]   { --accent: var(--accent2); }
+  .phaseseg[data-pk="build"],   .phasepanel[data-pk="build"],
+  .phaseseg[data-pk^="bridge"], .phasepanel[data-pk^="bridge"]{ --accent: var(--accent3); }
+  .phaseseg[data-pk^="peak"],   .phasepanel[data-pk^="peak"]  { --accent: var(--accent4); }
+  .phaseseg[data-pk^="taper"],  .phasepanel[data-pk^="taper"] { --accent: var(--accent1); }
+  .phaseseg{ opacity: .72; }
+  .phaseseg.active{ opacity: 1; }
+  /* Health markers: cycle four hues */
+  .hgrid .hcard:nth-child(4n+1){ --accent: var(--accent1); }
+  .hgrid .hcard:nth-child(4n+2){ --accent: var(--accent2); }
+  .hgrid .hcard:nth-child(4n+3){ --accent: var(--accent3); }
+  .hgrid .hcard:nth-child(4n+4){ --accent: var(--accent4); }
+  /* Weekly volume bars: green (fitness/volume) hue */
+  .chart .col .barb{ background: var(--accent2); }
+  /* Fitness/fatigue chart: CTL=terracotta (default), ATL=blue */
+  .ff .atl{ stroke: var(--accent3); }
+  .ffdot.atl{ fill: var(--accent3); }
+  .legend .atl{ color: var(--accent3); }
+  .fftip .t-atl{ color: var(--accent3); }
+  /* ====================================================================== */
