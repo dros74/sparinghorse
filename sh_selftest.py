@@ -761,6 +761,188 @@ def _stc_quality_forward():
                got="ok" if not bad else f"fails: {bad}", output=detail)
 
 
+def _stc_public_allowlist():
+    """§PV/TECH-3 — the public projection is an ALLOWLIST. The old posture served the private payload
+    and popped what someone remembered was personal, which had already failed in the field (the §AV
+    away dates rode into /api/log inside week dicts nobody enumerated, 0.27.1) and was failing twice
+    more when this det was written — LIVE, on the public site: `/api/shape` served `latest.raw`, the
+    whole upstream snapshot payload (HRV baseline + normal range, easy-TRIMP bands, rest-day counts),
+    and the same endpoint handed out `last_sync`, the household's nightly time that /healthz reduces
+    to booleans (TECH-8) and the freshness chip keeps private (UX-4) — the public footer printed it.
+
+    Four teeth, all driven through the REAL endpoints under READONLY on a throwaway DB, because a
+    spec-only check is exactly what let the last one through:
+      (a) THE INVERSION — a payload seeded with a field NO allowlist names (an invented
+          `secret_diary`, planted at every level of every resource) must not reach the public box.
+          This is the tooth that fails on the old code: a blocklist passes an unnamed field by
+          definition, so the pre-§PV server serves every one of them.
+      (b) THE TWO LIVE LEAKS, pinned by name: no `raw`, no `hrv_baseline`, no `last_sync` on the
+          public /api/shape; no `outcome`/`resolved_at` on public objectives; no `reflection` and no
+          av trace on the public log; no `adjustment`/`cold_start` on the public plan; no HR on the
+          public activity.
+      (c) THE PRIVATE VIEW IS UNTOUCHED — every one of those fields still reaches the private box.
+          An allowlist that silently starved the owner's own console would be the worse bug.
+      (d) FAIL CLOSED — a resource with no spec RAISES rather than serving the payload, and every
+          registered spec is reachable (a spec nobody calls is a spec nobody maintains)."""
+    import sqlite3 as _sq
+    fails, detail = [], {}
+    MARK = "secret_diary"          # a field no allowlist names — the shape of every future leak
+
+    def _plant(o, depth=0):
+        """Plant the marker in every dict at every level, and return the object."""
+        if depth > 6:
+            return o
+        if isinstance(o, dict):
+            o[MARK] = "PRIVATE"
+            for v in list(o.values()):
+                _plant(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o:
+                _plant(v, depth + 1)
+        return o
+
+    wk = lambda start, **extra: {"wk": 1, "start": start, "km": 20, "runs": 3,
+                                 "sessions": [{"date": start, "kind": "easy", "km": 8,
+                                               "reflection": "felt awful, chest tight"}], **extra}
+    plan = {"phases": [{"key": "base", "kind": "base"}, {"key": "bridge1", "kind": "bridge"}],
+            "base": {"weeks": [wk("2026-08-10", av_dates=["2026-08-11"], av_shed=1)]},
+            "bridge1": {"weeks": [wk("2026-08-17", av_dates=["2026-08-18"])]},
+            "adjustment": {"situation": "medical", "note": "his doctor said"},
+            "cold_start": {"age": 52, "hrmax_prior": 178},
+            "regime": {"mode": "caution", "reason": "because of your history"},
+            "pace_zones": {"easy_top": "6:30/km"}}
+
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now','2026-08-10','{}',?)",
+              (S.json.dumps(plan),))
+    m.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at,outcome,"
+              "resolved_at) VALUES('marathon','Race','2026-06-01','3:45','A','done','now',"
+              "'3:52:00 — landed short','2026-06-02')")
+    m.execute("INSERT INTO shape_snapshots(snapshot_date,fitness,fatigue,performance,acwr,"
+              "effective_vo2max,hrv_baseline,monotony,training_strain,raw) VALUES"
+              "('2026-08-10',45.0,42.0,3.0,0.93,50.0,38.5,1.2,300.0,?)",
+              (S.json.dumps({"hrvBaseline": 38.5, "hrvNormalRange": [34.2, 43.4],
+                             "easyTrimpRangeFrom": 6.4, "restDays": 2}),))
+    m.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,hr_avg,hr_max,"
+              "trimp,raw) VALUES(9001,'2026-08-10','2026-08-10T18:00',?,10.0,3600,148,171,60.0,?)",
+              (S.RUNNING_SPORT, S.json.dumps({"id": 9001, "date_time": "2026-08-10T18:00",
+                                              "sport": {"name": S.RUNNING_SPORT}, "distance": 10.0,
+                                              "duration": 3600, "hr_avg": 148, "hr_max": 171,
+                                              "title": "evening run"})))
+    S.set_meta(m, "last_sync", "2026-08-10T22:31:00+00:00")
+    m.commit()
+
+    PATHS = {"/api/plan": "plan", "/api/log": "log", "/api/shape": "shape",
+             "/api/readiness": "readiness", "/api/objectives": "objectives",
+             "/api/activity/latest": "activity", "/api/weekly": "weekly", "/healthz": "healthz"}
+
+    def _violations(spec, value, where, out):
+        """Every key in a PUBLIC payload that its spec does not name. This is the tooth that catches
+        an endpoint which never called the projection at all — planting a marker inside
+        `_pv_project` can only ever test the call sites that already exist."""
+        if spec is True:
+            return out
+        if isinstance(value, list):
+            for i, v in enumerate(value[:8]):
+                _violations(spec, v, f"{where}[{i}]", out)
+            return out
+        if not isinstance(value, dict):
+            return out
+        for k, v in value.items():
+            sub = spec.get(k)
+            if sub is None:
+                # the plan's phase blocks are keyed dynamically — allowlisted structurally
+                if isinstance(v, dict) and "weeks" in v and where == "plan":
+                    _violations(S._PV_PHASE, v, f"{where}.{k}", out)
+                    continue
+                out.append(f"{where}.{k}")
+                continue
+            _violations(sub, v, f"{where}.{k}", out)
+        return out
+    # every field that must never appear on a public payload, by name
+    BANNED = {"/api/plan": ["adjustment", "cold_start", "av_dates", "av_shed", "reflection"],
+              "/api/log": ["reflection", "av_dates", "av_shed"],
+              "/api/shape": ["raw", "hrv_baseline", "last_sync", "monotony", "training_strain"],
+              "/api/objectives": ["outcome", "resolved_at"],
+              "/api/activity/latest": ["hr_avg", "hr_max"],
+              "/healthz": ["last_sync", "last_ok"]}
+    saved_ro, saved_get, saved_pv = S.READONLY, S.get_db, S._pv_project
+
+    def _marked(payload):
+        return MARK in S.json.dumps(payload)
+
+    try:
+        S.get_db = lambda: m
+        # (a) plant the marker on the way OUT, at every level of every resource: the allowlist must
+        # drop it wherever it sits, and a blocklist cannot.
+        S._pv_project = lambda spec, value: saved_pv(spec, _plant(value))
+        c = S.app.test_client()
+        S.READONLY = True
+        for path, resource in PATHS.items():
+            r = c.get(path)
+            if r.status_code != 200:
+                fails.append(f"public {path} HTTP {r.status_code}")
+                continue
+            body = r.get_json()
+            if _marked(body):
+                fails.append(f"public {path} served an unnamed field ({MARK}) — the projection is "
+                             f"not an allowlist")
+            for b in BANNED.get(path, []):
+                if f'"{b}"' in S.json.dumps(body):
+                    fails.append(f"public {path} leaks {b}")
+            # conformance: nothing outside the spec, at any depth — this is what fails when an
+            # endpoint skips the projection, which no planted marker can see
+            outside = _violations(S.PUBLIC_VIEWS[resource], body, resource, [])
+            if outside:
+                fails.append(f"public {path} served {len(outside)} field(s) no spec names: "
+                             f"{outside[:6]}")
+        detail["public_checked"] = sorted(PATHS)
+        # (c) the private box keeps everything
+        S._pv_project = saved_pv
+        S.READONLY = False
+        kept = {"/api/plan": ["adjustment", "cold_start", "av_dates"],
+                "/api/shape": ["raw", "hrv_baseline", "last_sync"],
+                "/api/objectives": ["outcome"], "/api/activity/latest": ["hr_avg"],
+                "/healthz": ["last_sync"]}
+        for path, names in kept.items():
+            body = c.get(path).get_json()
+            missing = [n for n in names if f'"{n}"' not in S.json.dumps(body)]
+            if missing:
+                fails.append(f"PRIVATE {path} lost {missing} — the allowlist ran on the owner's own "
+                             f"console")
+        detail["private_kept"] = sorted(kept)
+    finally:
+        S.READONLY, S.get_db, S._pv_project = saved_ro, saved_get, saved_pv
+        m.close()
+
+    # (d) fail closed, and no spec left unused
+    try:
+        S.public_view("no_such_resource", {"anything": 1})
+        fails.append("an unknown resource served its payload instead of raising — fail-closed is off")
+    except KeyError:
+        pass
+    if S.public_view("plan", None) is not None:
+        fails.append("public_view(None) invented a payload")
+    src = S.Path(S.__file__).read_text(encoding="utf-8")
+    unused = [r for r in S.PUBLIC_VIEWS
+              if f'public_view("{r}"' not in src and not (r == "plan" and "plan_public_view" in src)]
+    if unused:
+        fails.append(f"registered but never applied: {unused} — a spec nobody calls is a spec "
+                     f"nobody maintains")
+    detail["specs"] = sorted(S.PUBLIC_VIEWS)
+    return _st("det", "public-allowlist",
+               "§PV/TECH-3 the public projection is an ALLOWLIST: a field planted at every level of "
+               "every public payload never reaches the public box, the named leaks (shape's `raw` + "
+               "`last_sync`, the plan's adjustment/cold-start, the log's reflections, the §AV away "
+               "dates, race outcomes, per-run HR) are all absent, the PRIVATE view keeps every one "
+               "of them, and an unspec'd resource raises instead of serving",
+               passed=not fails,
+               expect="no unnamed field on any public payload · every named leak absent · private "
+                      "intact · fail-closed",
+               got={"failures": fails or "none", **detail})
+
+
 def _stc_av_public_strip():
     """§AV/H7 — NO availability trace reaches the public box, on ANY phase (re-base + chain segments
     included — the 0.27.0 strip walked base/build/peak/taper only; Gemini review 2026-08-21 #1/#6) and on
@@ -783,15 +965,17 @@ def _stc_av_public_strip():
             "taper": {"weeks": []}, "pace_zones": {"easy_top": "6:30/km"}}
     leaks_in = lambda obj: [m for m in ("av_dates", "av_shed") if m in S.json.dumps(obj)]
     fails, detail = [], {}
-    # (a) the data-layer strip covers every weeks-bearing dict, whatever its key, and nothing else
-    p = S.json.loads(S.json.dumps(plan))
-    S._strip_av_public(p)
+    # (a) the projection covers every weeks-bearing dict, whatever its key, and keeps the rest.
+    # §PV (TECH-3) retired the recursive `_strip_av_public` walker: the away fields are absent from
+    # the public plan because no allowlist NAMES them, so this tooth drives the live path — asserting
+    # the retired helper would have been a det testing code nothing calls.
+    p = S.plan_public_view(S.json.loads(S.json.dumps(plan)))
     detail["strip_leaks"] = leaks_in(p)
     if detail["strip_leaks"]:
-        fails.append(f"strip leaks {detail['strip_leaks']}")
+        fails.append(f"projection leaks {detail['strip_leaks']}")
     if not (p["base"]["weeks"][0]["km"] == 20 and p["bridge1"]["weeks"][0]["sessions"][0]["km"] == 8
             and p["phases"][2]["key"] == "bridge1"):
-        fails.append("stripped more than the av fields")
+        fails.append("the projection dropped more than the av fields")
     # (b) the endpoints, driven for real: public = no trace anywhere; private = the chip's fields intact
     m = _sq.connect(":memory:"); m.row_factory = _sq.Row
     m.executescript(S.SCHEMA)
@@ -900,17 +1084,21 @@ def _stc_mcp_session():
                 return _R(200, '{"jsonrpc":"2.0","id":9,"result":{"structuredContent":{"ok":1}}}')
             return _R(404, "Not Found")                           # the stale one is dead: non-JSON 404
 
-    saved_s, saved_m = S._session, S._mcp_session
+    saved_s, saved_m, saved_g = S._session, S._mcp_session, S._session_gen
     fails, out = [], None
     try:
+        # TECH-4 — `_http()` rebuilds the session whenever `_session_gen` is behind the config
+        # generation, so a fake must claim the current one or it is replaced by a real session
+        # (and the det then talks to Runalyze for real).
         S._session, S._mcp_session = _Fake(), "STALE"
+        S._session_gen = S.config().generation
         try:
             out = S.mcp_call("get_activity_details", {"activity_id": 1})
         except Exception as e:
             fails.append(f"raised {type(e).__name__}: {e}")
         after = S._mcp_session
     finally:
-        S._session, S._mcp_session = saved_s, saved_m
+        S._session, S._mcp_session, S._session_gen = saved_s, saved_m, saved_g
     if out != {"ok": 1}:
         fails.append(f"result {out!r}")
     inits = [sid for meth, sid in calls if meth == "initialize"]
@@ -2046,6 +2234,145 @@ def _stc_settings():
                got={"violations": fails or "none"})
 
 
+def _stc_runtime_config():
+    """TECH-4 — the runtime config is ONE IMMUTABLE SNAPSHOT, published by a single assignment.
+
+    What it replaced: nine module globals rebound one at a time by `apply_settings_overrides` /
+    `apply_secret_overrides`, with no lock and no barrier — a request thread could read the new
+    house URL beside the old house name. Narrow, unobserved, and exactly the kind of thing that
+    stays theoretical until it isn't. Four teeth:
+      (a) THE THREADING PROBE the plan asks for: readers hammer the config while savers swap it, and
+          every snapshot a reader takes must be INTERNALLY CONSISTENT — all fields from the same
+          generation. Each save writes a matched set (`gen-N` in every string field), so a torn read
+          is detectable rather than merely improbable.
+      (b) IMMUTABILITY — a snapshot cannot be written through, so a caller that holds one cannot
+          change what another thread is reading.
+      (c) THE CACHES FOLLOW THE GENERATION — this is a live bug fix, not just tidying: `_http()`
+          baked the Runalyze token into its session headers at first build and never rebuilt, so a
+          token changed in the Settings window kept authenticating REST calls with the OLD token
+          until a restart (MCP read the global per call, so it rotated and REST did not).
+      (d) `_mcp_init` IS SERIALIZED — two threads finding a dead session must not race to assign
+          `_mcp_session`, leaving the loser's id (a session the server has been told to forget)."""
+    import threading as _th, sys as _sys
+    fails, detail = [], {}
+    saved = S.config()
+    _switch = _sys.getswitchinterval()
+    try:
+        # (a0) ONE SAVE IS ONE PUBLICATION — the deterministic half of the torn-read tooth. A
+        # multi-field save must advance the generation by exactly ONE: publishing field by field
+        # (the pre-TECH-4 posture) advances it once per field, which is the tear, stated as a
+        # number instead of raced for. The stress probe below is real but PROBABILISTIC — it
+        # missed this exact mutation on its first run, so it cannot be the only tooth.
+        _g0 = S.config().generation
+        S._config_swap(house_url="one", house_name="one", private_url="one", athlete_context="one")
+        _steps = S.config().generation - _g0
+        detail["generations_per_save"] = _steps
+        if _steps != 1:
+            fails.append(f"a four-field save advanced the generation by {_steps} — it published "
+                         f"{_steps} times, so a reader can see a partial set")
+        # (a) concurrent savers + readers, every save a matched set
+        _sys.setswitchinterval(1e-6)     # switch threads as often as CPython will, so the probe
+        stop = _th.Event()               # actually visits the window it is looking for
+        torn, reads = [], [0]
+
+        def _saver(n):
+            for i in range(60):
+                if stop.is_set():
+                    return
+                tag = f"gen-{n}-{i}"
+                S._config_swap(house_url=tag, house_name=tag, private_url=tag,
+                               athlete_context=tag)
+
+        def _reader():
+            while not stop.is_set():
+                c = S.config()
+                reads[0] += 1
+                if len({c.house_url, c.house_name, c.private_url, c.athlete_context}) != 1:
+                    torn.append({"house_url": c.house_url, "house_name": c.house_name,
+                                 "private_url": c.private_url, "context": c.athlete_context})
+                    return
+
+        threads = [_th.Thread(target=_saver, args=(n,)) for n in range(4)] + \
+                  [_th.Thread(target=_reader) for _ in range(4)]
+        for t in threads[:4]:
+            t.start()
+        for t in threads[4:]:
+            t.start()
+        for t in threads[:4]:
+            t.join(timeout=20)
+        stop.set()
+        for t in threads[4:]:
+            t.join(timeout=20)
+        detail["reads"] = reads[0]
+        detail["generation_after"] = S.config().generation
+        if torn:
+            fails.append(f"TORN read: {torn[0]} — a snapshot mixed two generations")
+        if reads[0] < 100:
+            fails.append(f"the probe only managed {reads[0]} reads — it proves nothing at that rate")
+        if S.config().generation <= saved.generation:
+            fails.append("240 saves published no new generation")
+
+        # (b) a snapshot is immutable
+        try:
+            S.config().house_url = "written through"
+            fails.append("a config snapshot accepted a write — holders can mutate what others read")
+        except AttributeError:
+            pass
+
+        # (c) the caches follow the generation
+        S._config_swap(runalyze_token="TOKEN-ONE")
+        first = S._http()
+        if first.headers.get("token") != "TOKEN-ONE":
+            fails.append(f"session built with {first.headers.get('token')!r}, want TOKEN-ONE")
+        S._config_swap(runalyze_token="TOKEN-TWO")
+        second = S._http()
+        detail["token_after_rotation"] = second.headers.get("token")
+        if second.headers.get("token") != "TOKEN-TWO":
+            fails.append("the REST session kept the OLD token after a rotation — the pre-TECH-4 bug")
+        if S._http() is not second:
+            fails.append("the session is rebuilt on every call — the generation check isn't holding it")
+
+        # (d) _mcp_init is serialized
+        seen, order = [], []
+        real_init = S._mcp_init_locked
+
+        def _slow_init():
+            order.append("in")
+            _time.sleep(0.05)
+            seen.append(len([o for o in order if o == "in"]) - len([o for o in order if o == "out"]))
+            order.append("out")
+
+        S._mcp_init_locked = _slow_init
+        try:
+            ts = [_th.Thread(target=S._mcp_init) for _ in range(4)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(timeout=20)
+        finally:
+            S._mcp_init_locked = real_init
+        detail["mcp_concurrency"] = seen
+        if any(n > 1 for n in seen):
+            fails.append(f"_mcp_init ran concurrently ({seen}) — two handshakes race to assign the "
+                         f"session id and the loser's sticks")
+    finally:
+        _sys.setswitchinterval(_switch)
+        S._config_swap(house_url=saved.house_url, house_name=saved.house_name,
+                       private_url=saved.private_url, athlete_context=saved.athlete_context,
+                       runalyze_token=saved.runalyze_token,
+                       anthropic_api_key=saved.anthropic_api_key)
+    return _st("det", "runtime-config",
+               "TECH-4 the runtime config is one immutable snapshot swapped by a single assignment: "
+               "under 4 savers × 4 readers no snapshot ever mixes two generations, a snapshot can't "
+               "be written through, the cached REST session follows the generation (a rotated "
+               "Runalyze token reaches it — it used to keep the old one until restart), and "
+               "_mcp_init is serialized",
+               passed=not fails,
+               expect="no torn read · immutable · session rotates with the token · one _mcp_init "
+                      "at a time",
+               got={"failures": fails or "none", **detail})
+
+
 def _stc_secrets():
     """The private-only key store (Runalyze token / Claude key). Locks the SECURITY invariants the
     feature exists for: (a) status NEVER returns the value — only configured+source; (b) a window-set
@@ -2055,8 +2382,8 @@ def _stc_secrets():
     synthetic env; restores ALL module/env globals in a finally (incl. SH_SCHEDULE so no thread spawns)."""
     import sqlite3 as _sq, os as _os, tempfile, json as _json
     pass   # the rebinds below land on the app module (S.<name> = …), TECH-1
-    snap = dict(db=S.SECRETS_DB, ro=S.READONLY, rt=S.RUNALYZE_TOKEN, ak=S.ANTHROPIC_API_KEY,
-                cli=S._anthropic_client, e_rt=_os.environ.get("RUNALYZE_TOKEN"),
+    snap = dict(db=S.SECRETS_DB, ro=S.READONLY, cfg=S.config(),   # TECH-4: one snapshot, restored whole
+                e_rt=_os.environ.get("RUNALYZE_TOKEN"),
                 e_ak=_os.environ.get("ANTHROPIC_API_KEY"), e_sch=_os.environ.get("SH_SCHEDULE"))
     fails = []
     leaked = lambda needle: any(needle in _json.dumps(s) for s in S.secret_status())
@@ -2079,15 +2406,21 @@ def _stc_secrets():
             fails.append("a window-set value should win over env")
         if leaked("WINDOWTOKEN"):
             fails.append("status LEAKED the saved secret value")
-        if S.RUNALYZE_TOKEN != "WINDOWTOKEN":
-            fails.append("save didn't apply to the live global")
+        if S.config().runalyze_token != "WINDOWTOKEN":
+            fails.append("save didn't apply to the live config snapshot")
+        if S._http().headers.get("token") != "WINDOWTOKEN":
+            fails.append("the REST session still carries the OLD token — a rotated key would keep "
+                         "authenticating with the key it replaced (TECH-4)")
         S.save_secret("runalyze_token", "")                 # clear → revert to env
         if src("runalyze_token") != "env":
             fails.append("cleared secret should revert to env")
-        S._anthropic_client = "STALE"
+        _gen_before = S.config().generation
         S.save_secret("anthropic_api_key", "sk-test")
-        if S._anthropic_client is not None:
-            fails.append("setting the Claude key didn't reset the cached LLM client")
+        if S.config().generation <= _gen_before:
+            fails.append("setting the Claude key published no new config generation — the cached "
+                         "LLM client and HTTP session would both keep the old key (TECH-4)")
+        if S.config().anthropic_api_key != "sk-test":
+            fails.append("the Claude key didn't reach the live config snapshot")
         S.READONLY = True                                   # the public-box invariant
         if S._stored_secret("runalyze_token") is not None:
             fails.append("READONLY read the secrets store")
@@ -2110,7 +2443,8 @@ def _stc_secrets():
         try: _os.remove(S.SECRETS_DB)
         except Exception: pass
         S.SECRETS_DB, S.READONLY = snap["db"], snap["ro"]
-        S.RUNALYZE_TOKEN, S.ANTHROPIC_API_KEY, S._anthropic_client = snap["rt"], snap["ak"], snap["cli"]
+        S._config_swap(runalyze_token=snap["cfg"].runalyze_token,
+                       anthropic_api_key=snap["cfg"].anthropic_api_key)
         for var, val in (("RUNALYZE_TOKEN", snap["e_rt"]), ("ANTHROPIC_API_KEY", snap["e_ak"]),
                          ("SH_SCHEDULE", snap["e_sch"])):
             if val is None: _os.environ.pop(var, None)
@@ -9438,6 +9772,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
+                 lambda: _stc_public_allowlist(), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),

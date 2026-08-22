@@ -32,6 +32,7 @@ import threading
 import time
 import zipfile
 import zlib
+from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -46,8 +47,9 @@ from requests.adapters import HTTPAdapter, Retry
 PORT = int(os.environ.get("SH_PORT", "8770"))
 DB_PATH = Path(os.environ.get("SH_DB", "sparinghorse.db"))
 RUNALYZE_BASE = os.environ.get("RUNALYZE_BASE", "https://runalyze.com/api/v1")
-RUNALYZE_TOKEN = os.environ.get("RUNALYZE_TOKEN", "")  # personal API token (token: header)
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")  # LLM adjustment layer (§6c)
+# The window-settable values (the Runalyze token, the Claude key, the athlete context, the house
+# link, the private URL, the weather cities, the timezone) live in the TECH-4 config snapshot below,
+# not in module globals — `config().runalyze_token`, `config().athlete_context`, and so on.
 # Default to the latest capable model; adaptive thinking + low effort for the light parsing/
 # judgment tasks the engine hands off. Overridable for cost/latency experiments.
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
@@ -56,15 +58,12 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 # blocks every mutating endpoint, hides all inputs, and withholds the medical sections (blood
 # markers + readiness). The private container (behind Cloudflare Access) runs without the flag.
 READONLY = os.environ.get("SH_READONLY", "").lower() in ("1", "true", "yes")
-# On the public page, an optional "Log in" link to the private (Access-protected) console.
-PRIVATE_URL = os.environ.get("SH_PRIVATE_URL", "")
-# Optional house/personal branding — a small back-link in the header (e.g. your homepage). Empty = off.
-HOUSE_URL = os.environ.get("SH_HOUSE_URL", "")
-HOUSE_NAME = os.environ.get("SH_HOUSE_NAME", "")
-# Optional per-user athlete context, injected into the LLM prompts (e.g. "post-illness rebuild,
-# cleared by my doctor" / "masters runner returning from injury"). Empty = a neutral generic runner.
-# The medical SAFETY net (cardiac/exertional symptom → halt + see a doctor) is always on regardless.
-ATHLETE_CONTEXT = os.environ.get("SH_ATHLETE_CONTEXT", "").strip()
+# On the public page, an optional "Log in" link to the private (Access-protected) console
+# (`config().private_url`); optional house branding — a back-link in the header — in
+# `config().house_url` / `.house_name`; and an optional per-user athlete context injected into the
+# LLM prompts (`config().athlete_context`, e.g. "post-illness rebuild, cleared by my doctor").
+# Empty context = a neutral generic runner. The medical SAFETY net (cardiac/exertional symptom →
+# halt + see a doctor) is always on regardless of what the context says.
 # Optional weather widget cities: "Name,lat,lon;Name,lat,lon". Empty = the widget is hidden.
 RUNNING_SPORT = "Running"  # the canonical run sport name (used for seed/synthetic inserts)
 # The engine counts the whole RUNNING FAMILY — Running, Trail Running, Treadmill Running, … — as runs.
@@ -89,24 +88,81 @@ USER_AGENT = (
 PAGE_DELAY = 0.6  # seconds between paginated activity requests (WAF politeness)
 AUTO_SYNC_THROTTLE = 600  # seconds — opportunistic page-load sync no-ops if synced this recently
 
+# ── TECH-4 — the runtime config is ONE IMMUTABLE SNAPSHOT ───────────────────────────────────
+# The window-settable values used to live in nine module globals that `apply_settings_overrides` and
+# `apply_secret_overrides` REBOUND one at a time. Two problems with that, one live and one waiting:
+#  · A save rebinds six names in sequence while request threads read them. There is no lock and no
+#    barrier, so a thread can read the new house URL beside the old house name — a torn config. It
+#    is a narrow window and nobody has seen it bite, which is exactly how it would stay until it did.
+#  · The moment any of this moves into a package (the code-split's `config.py`), a reader that did
+#    `from SparingHorse import RUNALYZE_TOKEN` holds a COPY of the binding, and every later save
+#    updates a name that reader will never look at again. Rebinding module globals is a design that
+#    only works while everything shares one module object.
+# So: one immutable snapshot, swapped by a single assignment. A reader takes the snapshot ONCE and
+# reads fields off it — whatever it does next, those fields are all from the same generation. The
+# generation counter is what lets the cached HTTP session and LLM client notice they are stale;
+# before this, `_http()` baked the token into its session headers at first build and never rebuilt
+# it, so a Runalyze token changed in the Settings window kept authenticating REST calls with the OLD
+# token until someone restarted the process. (`_mcp_headers` read the global per call, so MCP picked
+# it up and REST did not — the inconsistency that gives that bug away.)
+RuntimeConfig = namedtuple("RuntimeConfig",
+                           "athlete_context house_url house_name private_url weather_cities "
+                           "sync_tz runalyze_token anthropic_api_key generation")
+
+_config_lock = threading.Lock()   # serializes the read-modify-write of a swap, not the reads
+
+_CONFIG = RuntimeConfig(
+    athlete_context=os.environ.get("SH_ATHLETE_CONTEXT", "").strip(),
+    house_url=os.environ.get("SH_HOUSE_URL", ""),
+    house_name=os.environ.get("SH_HOUSE_NAME", ""),
+    private_url=os.environ.get("SH_PRIVATE_URL", ""),
+    weather_cities=(),
+    sync_tz=None,                 # set just below, once ZoneInfo + the parser are defined
+    runalyze_token=os.environ.get("RUNALYZE_TOKEN", ""),
+    anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
+    generation=0,
+)
+
+
+def config():
+    """The current runtime config. Take it ONCE at the top of a request, a job or a helper and read
+    every field off that one snapshot: a save swaps the whole object in a single assignment, so one
+    snapshot is never half-old — while two separate `config().x` reads can still straddle a save."""
+    return _CONFIG
+
+
+def _config_swap(**changes):
+    """Publish a NEW config: build it off the current one, bump the generation, assign once. The lock
+    covers the read-modify-write (two concurrent saves must not each build off the same base); the
+    assignment itself is what readers rely on, and that is atomic without them taking any lock."""
+    global _CONFIG
+    with _config_lock:
+        _CONFIG = _CONFIG._replace(generation=_CONFIG.generation + 1, **changes)
+    return _CONFIG
+
+
 _session = None
+_session_gen = -1        # the config generation `_session` was built for (TECH-4)
 
 
 def _http():
-    global _session
-    if _session is None:
+    global _session, _session_gen
+    cfg = config()
+    # TECH-4 — the token rides in the session HEADERS, so the session belongs to the generation that
+    # supplied it: a key changed in the Settings window must not keep authenticating with the old one.
+    if _session is None or _session_gen != cfg.generation:
         s = requests.Session()
         retries = Retry(total=2, backoff_factor=0.8,
                         status_forcelist=(429, 500, 502, 503, 504),
                         allowed_methods=frozenset(["GET"]))
         s.mount("https://", HTTPAdapter(max_retries=retries))
         s.headers.update({
-            "token": RUNALYZE_TOKEN,
+            "token": cfg.runalyze_token,
             "Accept": "application/json",
             "Accept-Encoding": "identity",
             "User-Agent": USER_AGENT,
         })
-        _session = s
+        _session, _session_gen = s, cfg.generation
     return _session
 
 # ── Runalyze REST client ────────────────────────────────────────────────────
@@ -116,7 +172,7 @@ class RunalyzeError(RuntimeError):
 
 def _get(path, params=None, timeout=25):
     """GET a Runalyze Personal API endpoint as JSON. Auth via the `token` header."""
-    if not RUNALYZE_TOKEN:
+    if not config().runalyze_token:
         raise RunalyzeError("RUNALYZE_TOKEN is not set")
     url = f"{RUNALYZE_BASE}/{path.lstrip('/')}"
     try:
@@ -142,7 +198,7 @@ _mcp_session = None
 
 
 def _mcp_headers():
-    h = {"Authorization": f"Bearer pt#{RUNALYZE_TOKEN}", "Content-Type": "application/json",
+    h = {"Authorization": f"Bearer pt#{config().runalyze_token}", "Content-Type": "application/json",
          "Accept": "application/json, text/event-stream", "User-Agent": USER_AGENT}
     if _mcp_session:
         h["Mcp-Session-Id"] = _mcp_session
@@ -158,7 +214,21 @@ def _mcp_parse(text):
     return json.loads(data)
 
 
+_mcp_lock = threading.Lock()    # TECH-4 — one initialize at a time (see _mcp_init)
+
+
 def _mcp_init():
+    """(Re)establish the MCP session. TECH-4 — SERIALIZED: a page-load profile fetch and the nightly
+    sync can both find a dead session and re-initialize at once, and the two handshakes then race to
+    assign `_mcp_session` — the loser's id is what sticks, pointing at a session the server has
+    already been told to forget. Under the lock the second caller waits and then uses the first
+    caller's fresh session, which is also one fewer handshake against Runalyze."""
+    global _mcp_session
+    with _mcp_lock:
+        return _mcp_init_locked()
+
+
+def _mcp_init_locked():
     global _mcp_session
     # A NEW InitializeRequest carries no Mcp-Session-Id (MCP spec) — and the stale id is exactly what a
     # re-init exists to shed. Before 0.27.1 the old id rode along on the new initialize and was never
@@ -232,7 +302,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.30.1"
+ENGINE_VERSION = "0.31.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -1551,25 +1621,35 @@ def validate_setting(key, value):
 
 
 def apply_settings_overrides(db):
-    """Overlay the effective (meta → env → default) values onto the module globals the read-sites use.
+    """Resolve the effective (meta → env → default) values and publish them as ONE new config
+    snapshot (TECH-4) — the read-sites take `config()`.
     Called once at startup and after every save. Single-process deployment (one waitress process, many
     threads sharing these globals), so a save is visible to every request thread at once. The scheduler
-    thread reads SYNC_TZ live, but only re-arms its sleep on the NEXT cycle — so a tz change lands on
-    the next scheduled sync (as the help text says), not the one already counting down."""
-    global ATHLETE_CONTEXT, HOUSE_URL, HOUSE_NAME, WEATHER_CITIES, SYNC_TZ, PRIVATE_URL
-    ATHLETE_CONTEXT = _resolve_setting(db, SETTINGS_BY_KEY["athlete_context"])[0].strip()
-    HOUSE_URL = _resolve_setting(db, SETTINGS_BY_KEY["house_url"])[0].strip()
-    HOUSE_NAME = _resolve_setting(db, SETTINGS_BY_KEY["house_name"])[0].strip()
-    PRIVATE_URL = _resolve_setting(db, SETTINGS_BY_KEY["private_url"])[0].strip()
-    WEATHER_CITIES = _parse_weather_cities(_resolve_setting(db, SETTINGS_BY_KEY["weather_cities"])[0])
-    with _weather_lock:            # cities may have changed → drop the cached bundle so the next
-        _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
+    thread reads the zone off the config live, but only re-arms its sleep on the NEXT cycle — so a tz
+    change lands on the next scheduled sync (as the help text says), not the one already counting
+    down. TECH-4: the values are resolved first and published in ONE swap, so no request thread can
+    catch this half-applied."""
     tzval, tzsrc = _resolve_setting(db, SETTINGS_BY_KEY["tz"])
     tzname = tzval.strip() or "UTC"
     try:
-        SYNC_TZ = ZoneInfo(tzname)
+        tz = ZoneInfo(tzname)
     except Exception:   # validated on save; a stored zone can still be absent from this host's tzdata
-        print(f"[settings] ignoring unresolvable tz {tzname!r}; keeping {SYNC_TZ.key}")
+        tz = config().sync_tz
+        print(f"[settings] ignoring unresolvable tz {tzname!r}; keeping {tz.key}")
+    # TECH-4 — every value is resolved FIRST, then published in ONE swap: a request thread reading
+    # the config while a save runs sees the whole old snapshot or the whole new one, never the new
+    # house URL beside the old house name.
+    _config_swap(
+        athlete_context=_resolve_setting(db, SETTINGS_BY_KEY["athlete_context"])[0].strip(),
+        house_url=_resolve_setting(db, SETTINGS_BY_KEY["house_url"])[0].strip(),
+        house_name=_resolve_setting(db, SETTINGS_BY_KEY["house_name"])[0].strip(),
+        private_url=_resolve_setting(db, SETTINGS_BY_KEY["private_url"])[0].strip(),
+        weather_cities=_parse_weather_cities(
+            _resolve_setting(db, SETTINGS_BY_KEY["weather_cities"])[0]),
+        sync_tz=tz,
+    )
+    with _weather_lock:            # cities may have changed → drop the cached bundle so the next
+        _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
     # §TZ — the SAME zone owns the engine's calendar day, not just the nightly job's wall clock. This
     # is the authoritative apply: the import-time bootstrap only sees the env var, and the stored
     # setting overrides it. Applying it here also means a tz changed in the Settings window moves
@@ -1693,17 +1773,18 @@ def secret_status():
 
 
 def apply_secret_overrides():
-    """Overlay the effective (stored → env) secrets onto the module globals the read-sites use, and
-    reset the cached LLM client so a key change takes effect live. Called at startup and after each
-    save. No-op in READONLY — the public container keeps its empty env and never holds a secret."""
-    global RUNALYZE_TOKEN, ANTHROPIC_API_KEY, _anthropic_client
+    """Resolve the effective (stored → env) secrets and publish them as ONE new config snapshot
+    (TECH-4). The generation it bumps is what makes the cached LLM client AND the cached REST session
+    rebuild, so a key change takes effect live on both. Called at startup and after each save. No-op
+    in READONLY — the public container keeps its empty env and never holds a secret."""
     if READONLY:
         return
-    RUNALYZE_TOKEN = _resolve_secret(SECRET_BY_KEY["runalyze_token"])[0]
-    new_key = _resolve_secret(SECRET_BY_KEY["anthropic_api_key"])[0]
-    if new_key != ANTHROPIC_API_KEY:
-        ANTHROPIC_API_KEY = new_key
-        _anthropic_client = None   # rebuilt lazily by _anthropic() with the new key (or stays None)
+    # TECH-4 — one swap for both secrets, and the generation it bumps is what makes the cached HTTP
+    # session and LLM client rebuild themselves: no explicit cache-busting to forget. (The old code
+    # reset `_anthropic_client` by hand and never reset `_session`, so a new Runalyze token reached
+    # MCP — which reads it per call — but not REST, which had baked it into the session headers.)
+    _config_swap(runalyze_token=_resolve_secret(SECRET_BY_KEY["runalyze_token"])[0],
+                 anthropic_api_key=_resolve_secret(SECRET_BY_KEY["anthropic_api_key"])[0])
 
 
 def save_secret(key, value):
@@ -8194,18 +8275,23 @@ def seed_objectives(db):
 # on this same client + JSON-schema helper.
 
 _anthropic_client = None
+_anthropic_gen = -1      # the config generation `_anthropic_client` was built for (TECH-4)
 
 
 def _anthropic():
     """Lazy Anthropic client. Returns None (never raises) when the SDK isn't installed or no
     key is set, so the rest of the app is unaffected."""
-    global _anthropic_client
-    if not ANTHROPIC_API_KEY:
+    global _anthropic_client, _anthropic_gen
+    cfg = config()
+    if not cfg.anthropic_api_key:
         return None
-    if _anthropic_client is None:
+    # TECH-4 — the client belongs to the generation whose key built it, so a key changed in the
+    # Settings window takes effect on the next call rather than at the next restart.
+    if _anthropic_client is None or _anthropic_gen != cfg.generation:
         try:
             import anthropic
-            _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            _anthropic_client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+            _anthropic_gen = cfg.generation
         except Exception:
             return None
     return _anthropic_client
@@ -8391,7 +8477,8 @@ def propose_adjustment(text, today=None, easy_pace=None):
         "easier/slower run felt better or more sustainable, AFFIRM it: that's exactly what the plan is "
         "for. "
     ) if easy_pace else ""
-    ctx_line = f"Athlete context: {ATHLETE_CONTEXT}. " if ATHLETE_CONTEXT else ""
+    _ctx = config().athlete_context
+    ctx_line = f"Athlete context: {_ctx}. " if _ctx else ""
     system = (
         "You read a runner's free-text status. Most days it's a REFLECTION on how a run felt "
         "(no change needed); sometimes it's a real signal to ease back. "
@@ -8524,7 +8611,8 @@ def llm_readiness(hrv, energy, sleep, note):
             f"Their note: {note.strip() if note else '(none)'}")
     system = (
         "You make a daily training-readiness call (green/amber/red) for a runner rebuilding aerobic "
-        "fitness. " + (f"Athlete context: {ATHLETE_CONTEXT}. " if ATHLETE_CONTEXT else "") +
+        "fitness. " + (f"Athlete context: {config().athlete_context}. "
+                       if config().athlete_context else "") +
         "green=run as planned, amber=hold (easy, no progression), red=easy walk or rest. Weigh HRV, "
         "legs, sleep, and especially their free-text note — that's where nuance the numbers miss shows "
         "up. You may only ESCALATE caution beyond the obvious; a separate deterministic floor already "
@@ -8627,7 +8715,7 @@ def explain_plan(db, diff=None):
     system = (
         "You explain an already-computed running plan to its owner — a runner rebuilding toward a goal "
         "race — in plain, warm, concrete language. " +
-        (f"Athlete context: {ATHLETE_CONTEXT}. " if ATHLETE_CONTEXT else "") +
+        (f"Athlete context: {config().athlete_context}. " if config().athlete_context else "") +
         "The numbers are FIXED by a deterministic "
         "sports-science engine: never change, recompute, or invent any; your only job is the 'why'. "
         "Cover where their current shape sits, why the re-base is easy-dominant (an easy day run faster "
@@ -8706,7 +8794,7 @@ def adjudicate_objectives(db, today=None):
                                              "priority", "weeks_away")} for o in future]}
     system = (
         "You adjudicate competing race goals for a runner rebuilding toward a goal race. " +
-        (f"Athlete context: {ATHLETE_CONTEXT}. " if ATHLETE_CONTEXT else "") +
+        (f"Athlete context: {config().athlete_context}. " if config().athlete_context else "") +
         "A true A-race earns a full taper and peak — you CANNOT "
         "peak for two races within ~4 weeks of each other, so the nearer/secondary one should drop to "
         "a B/C tune-up subordinated to the main goal. Well-separated A-races (months apart) can stand "
@@ -9380,6 +9468,222 @@ def replan(db, mutate):
     return jsonify(out)
 
 
+# ── §PV — the public projection: an ALLOWLIST, one serializer per resource ───────────────────
+# TECH-3. Until now every public endpoint redacted by SUBTRACTION: serve the private payload, then
+# `pop()` the fields someone remembered were personal. A blocklist is only ever as good as the last
+# person to think about it, and this one had already failed twice in the field — the §AV away dates
+# rode into /api/log inside week dicts nobody enumerated (0.27.1), and building this allowlist found
+# two more the pops never named: `/api/shape` was serving `latest.raw`, the WHOLE Runalyze snapshot
+# payload (HRV baseline + normal range, the easy-TRIMP bands, rest-day counts), and the same endpoint
+# handed out `last_sync` — the household routine timestamp /healthz deliberately reduces to booleans
+# (TECH-8) and the freshness chip keeps private (UX-4). The public page footer printed it.
+#
+# So the posture inverts: a field reaches the public box because it is NAMED here, never because
+# nobody remembered to remove it. A new column, a new engine field, a new nested dict is PRIVATE
+# until someone adds it to a spec — the failure mode becomes "the public page is missing something",
+# which is visible, instead of "the public page is showing something", which is not.
+#
+# A spec is data: `True` publishes the value verbatim (a scalar, or a leaf whose whole subtree is
+# public); a dict is an allowlist applied to a dict — or to every dict in a list. Nothing else
+# survives. The specs are deliberately FLAT and boring to read: this is a file a reviewer must be
+# able to audit in one pass, which is the property `pop()` calls scattered over 30 endpoints lacked.
+_PV_REPS = {"detail": True, "effort": True, "km": True, "minutes": True, "pace_zone": True,
+            "trimp": True, "zone": True}
+_PV_QUALITY = {"attach": True, "component": True, "frac": True, "kind": True, "label": True,
+               "rec_min": True, "rep_min": True, "structure": True, "zone": True}
+# NOT `reflection`: the free-text "how it felt" is the readiness-note posture — private (§H7).
+_PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "component": True,
+               "date": True, "done": True, "kind": True, "km": True, "minutes": True,
+               "missed": True, "note": True, "pace_zone": True, "reps": _PV_REPS, "runs": True,
+               "strides": True, "trimp": True, "zone": True}
+# NOT `av_dates` / `av_shed`: away days are an empty-house broadcast (§AV). The 0.27.1 recursive
+# strip stays in place for anything outside these views; here the allowlist makes them unreachable
+# by construction — a new phase key or a new payload cannot outrun it.
+_PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pulled": True,
+            "elapsed": True, "eq_km": True, "freq_actual": True, "frequency_met": True,
+            "frozen": True, "intent": True, "intent_km": True, "intent_runs": True, "km": True,
+            "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
+            "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
+            "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,
+            "runs_ahead": True, "runs_done": True, "sessions": _PV_SESSION, "start": True,
+            "strides": True, "trimp_total": True, "volume_met": True, "wk": True}
+_PV_PHASE = {"builds": True, "clipped_by_acwr": True, "end_atl": True, "end_ctl": True,
+             "full_len": True, "start": True, "weeks": _PV_WEEK}
+_PV_FINISH = {"anchor_stale": True, "at_ctl": True, "at_evo2": True,
+              "band": {"components": {"calibration": True, "disp_a": True, "horizon": True,
+                                      "race": True},
+                       "hi_hms": True, "hi_seconds": True, "level": True, "lo_hms": True,
+                       "lo_seconds": True, "sigma_log": True},
+              "correction": True, "curve": {"ctl": True, "evo2": True, "hms": True,
+                                            "plus_weeks": True},
+              "distance": True, "hms": True, "long_km": True, "note": True, "seconds": True,
+              "today": {"at_ctl": True, "at_evo2": True, "gain_seconds": True, "hms": True,
+                        "long_km": True, "seconds": True}}
+_PV_FEASIBILITY = {"estimate_ctl": True, "finish_time": _PV_FINISH, "note": True,
+                   "projected_ctl": True, "verdict": True}
+
+# NOT `adjustment` (free-text/medical context) and NOT `cold_start` (§33f-5 — the seeds carry AGE
+# and an HRmax prior in bpm, H7-class). The phase blocks are matched STRUCTURALLY below, so a chain
+# segment (bridge1 / peak1 / taper2 …) is allowlisted like any other phase without being named.
+_PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ctl": True,
+                      "role": True, "type": True},
+            "engine_running": True, "engine_version": True, "feasibility": _PV_FEASIBILITY,
+            "generated_at": True, "mode": True, "note": True,
+            "objective": {"date": True, "label": True, "priority": True, "target": True,
+                          "type": True, "weeks_away": True},
+            "ok": True,
+            "pace_zones": {"easy": True, "easy_top": True, "interval": True, "lt1": True,
+                           "marathon": True, "p5k": True, "threshold": True},
+            "phases": {"key": True, "kind": True, "phase": True, "race": True, "role": True,
+                       "type": True, "weeks": True},
+            "prog": {"note": True, "ramp": True},
+            "regime": {"mode": True, "reason": True},
+            "seed_now": {"atl": True, "bridged_days": True, "ctl": True, "effective_vo2max": True,
+                         "fallback": True, "from": True, "moved": True,
+                         "was": {"atl": True, "ctl": True, "effective_vo2max": True},
+                         "was_from": True},
+            "shape": {"atl": True, "ctl": True, "effective_vo2max": True,
+                      "seed": {"bridged_days": True, "fallback": True, "from": True}},
+            "shape_response": {"basis": True, "factor": True, "projected": True, "realized": True,
+                               "ride_cap": True},
+            "tune_ups": {"date": True, "label": True, "priority": True, "type": True}}
+
+# NOT `last_sync` (the household's routine — /healthz gives booleans, so must this) and NOT
+# `latest.raw` (the entire upstream snapshot payload, HRV band included), nor the snapshot's own
+# `hrv_baseline` / `monotony` / `training_strain`: physiological, H7-class, and the front end reads
+# none of them on either box.
+_PV_SHAPE = {"duplicate_count": True, "duplicates": True, "ignored": True,
+             "history": {"acwr": True, "effective_vo2max": True, "fatigue": True, "fitness": True,
+                         "performance": True, "snapshot_date": True},
+             "latest": {"acwr": True, "captured_at": True, "effective_vo2max": True,
+                        "effective_vo2max_progress": True, "fatigue": True, "fitness": True,
+                        "fitness_pct": True, "marathon_shape": True, "performance": True,
+                        "snapshot_date": True}}
+
+_PV_LOG = {"adherence": {"done": True, "scheduled": True}, "end": True,
+           "ran": {"km": True, "min": True, "runs": True}, "start": True, "today": True,
+           "weeks": _PV_WEEK}
+
+# The readiness projection the public box already built by hand (verdict + today's session only):
+# same shape, now stated as a spec. The check-in inputs, the free-text note, the HRV signal, the
+# reasons and any halt/medical guidance stay private — see api_readiness for how `assessment` is
+# rebuilt into generic copy BEFORE this runs (the words are a projection too, not just the fields).
+_PV_READINESS = {"date": True,
+                 "assessment": {"verdict": True, "action": True, "public": True, "done": True},
+                 "session": dict(_PV_SESSION, easy_pace=True, pk=True, week=True)}
+
+# NOT `hr_avg` / `hr_max` (per-run HR is private, the same posture that drops HR from the public
+# effort-discipline read) and NOT `cross_training` (which sport, and when — personal).
+_PV_ACTIVITY = {"cadence": True, "date": True, "date_time": True, "distance": True,
+                "duration": True, "elapsed": True, "elevation_up": True, "empty_run": True,
+                "id": True, "ignored": True, "pace_min_km": True, "sport": True,
+                "sj": {"ids": True, "index": True, "km": True, "min": True, "parts": True},
+                "title": True, "trimp": True}
+
+# NOT `counterfactual.reason` (the regime rationale names the athlete's own history) and NOT
+# `scorecard.reckoning` — the settled race result. The public box does not COMPUTE the reckoning
+# (api_plandrift gates it on `not READONLY`), which is stronger than redacting it; leaving it out of
+# the spec too means dropping that gate one day cannot quietly publish a finish time. The card reads
+# `if(sc.reckoning)`, so absent renders exactly as the null it already received.
+_PV_DRIFT = {"anchor": {"created_at": True, "for_date": True, "is_current": True, "versions": True},
+             "counterfactual": {"ctl": {"ctl": True, "date": True},
+                                "distance": {"cum": True, "date": True, "kind": True},
+                                "effort": {"date": True, "trimp": True}, "envelope": True,
+                                "outcome": {"curve": {"ctl": True, "evo2": True, "hms": True,
+                                                      "plus_weeks": True},
+                                            "finish": True, "now_finish": True,
+                                            "now_peak_ctl": True, "peak_ctl": True},
+                                "regime": True, "vs": True},
+             "ctl": {"actual": {"ctl": True, "date": True}, "current": {"ctl": True, "date": True},
+                     "initial": {"ctl": True, "date": True}},
+             "distance": {"current": {"cum": True, "date": True, "kind": True},
+                          "initial": {"cum": True, "date": True, "kind": True}},
+             "duplicate_count": True,
+             "effort": {"actual": {"date": True, "trimp": True},
+                        "current": {"date": True, "trimp": True},
+                        "initial": {"date": True, "trimp": True}},
+             "error": True,
+             "finish_drift": {"at_ctl": True, "at_evo2": True, "date": True, "hi": True,
+                              "hms": True, "lo": True, "p50": True},
+             "ok": True, "outcome": {"ctl": True, "date": True, "verdict": True},
+             "race": {"date": True, "label": True, "weeks_away": True},
+             "scorecard": {"chain": True, "fitness": {"founding": True, "gap": True, "now": True,
+                                                      "state": True},
+                           "headline": True, "open": True,
+                           "race": {"caveat": True, "founding": True, "gap": True, "now": True,
+                                    "trend": True, "verdict": True},
+                           "settled": True,
+                           "volume": {"founding": True, "gap": True, "now": True, "state": True},
+                           "weeks_to_go": True},
+             "today": True}
+
+# NOT `outcome` / `resolved_at` — a race RESULT is personal (§RL/H7). `SELECT *` feeds this, so the
+# allowlist is also what keeps a NEW objectives column off the public box.
+_PV_OBJECTIVES = {"date": True, "id": True, "label": True, "priority": True, "status": True,
+                  "target": True, "type": True}
+
+_PV_WEEKLY = {"km": True, "week": True}
+
+# NOT `hr` (the per-second HR stream), `hr_avg`, `hrmax` or `hrzones` (bpm cutoffs are HR-derived),
+# and NOT `path` — route geo leaves only by the private /map (`_strip_geo` runs before this on both
+# boxes). `has_hr` stays: the chart needs to know the band is unavailable, not why.
+_PV_PROFILE = {"cadence": True, "dist": True, "elevation": True, "error": True, "has_cadence": True,
+               "has_elevation": True, "has_gps": True, "has_hr": True, "has_pace": True,
+               "pace": True, "v": True}
+
+# NOT `last_sync` / `last_ok` — an unauthenticated probe must not learn when the nightly runs
+# (TECH-8). api_healthz builds the public booleans itself; this is the gate that keeps them so.
+_PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True, "readonly": True,
+               "sync_ok": True, "sync_stale": True, "token_configured": True}
+
+PUBLIC_VIEWS = {"activity": _PV_ACTIVITY, "drift": _PV_DRIFT, "healthz": _PV_HEALTHZ,
+                "log": _PV_LOG, "objectives": _PV_OBJECTIVES, "plan": _PV_PLAN,
+                "profile": _PV_PROFILE, "readiness": _PV_READINESS, "shape": _PV_SHAPE,
+                "weekly": _PV_WEEKLY}
+
+
+def _pv_project(spec, value):
+    """Apply one allowlist to one value. `True` publishes verbatim; a dict allowlists a dict — or
+    every dict in a list, so a spec never has to know whether a field holds one week or twenty."""
+    if spec is True:
+        return value
+    if isinstance(value, list):
+        return [_pv_project(spec, v) for v in value]
+    if not isinstance(value, dict):
+        return value            # a spec'd key holding a scalar (or None) — nothing to project
+    return {k: _pv_project(sub, value[k]) for k, sub in spec.items() if k in value}
+
+
+def public_view(resource, payload):
+    """§PV — project a payload down to what the PUBLIC box may serve. Pure: it takes no view of
+    READONLY, so the call sites stay greppable and the specs stay unit-testable.
+
+    An unknown resource RAISES rather than passing the payload through: a new public endpoint that
+    forgets its allowlist must fail loudly on the public box (the blanket handler turns it into a
+    clean JSON 500 — §error-shape), never serve a private payload quietly. Fail closed, and loud."""
+    if payload is None:
+        return None
+    try:
+        spec = PUBLIC_VIEWS[resource]
+    except KeyError:
+        raise KeyError(f"no public view defined for {resource!r} — refusing to serve it publicly")
+    return _pv_project(spec, payload)
+
+
+def plan_public_view(plan):
+    """§PV — the plan, whose phase blocks are keyed dynamically: base/build/peak/taper/rebase, plus
+    a §PER1 chain's own segments (bridge1, peak1, taper2 …). Matching them STRUCTURALLY — any value
+    that is a dict carrying `weeks` — means a new segment key is allowlisted like every other phase
+    the day it appears, instead of leaking whole until someone enumerates it. That enumeration is
+    exactly what the 0.27.0 away-date strip got wrong."""
+    out = public_view("plan", plan)
+    if isinstance(plan, dict):
+        for k, v in plan.items():
+            if k not in out and isinstance(v, dict) and "weeks" in v:
+                out[k] = _pv_project(_PV_PHASE, v)
+    return out
+
+
 @app.get("/healthz")
 def healthz():
     """Liveness + scheduler telemetry (TECH-8). The private box gets the raw timestamps; the PUBLIC box
@@ -9389,13 +9693,13 @@ def healthz():
     last_sync = get_meta(db, "last_sync")
     last_ok = get_meta(db, "sched:last_ok")
     fails = int(get_meta(db, "sched:fail_count", "0") or 0)
-    out = dict(ok=True, token_configured=bool(RUNALYZE_TOKEN), db=DB_PATH.exists(),
+    out = dict(ok=True, token_configured=bool(config().runalyze_token), db=DB_PATH.exists(),
                llm=llm_available(), readonly=READONLY, consecutive_failures=fails)
     if READONLY:
         out.update(sync_ok=bool(last_ok),
                    sync_stale=(not last_ok) or _seconds_since(last_ok) > 36 * 3600)
-    else:
-        out.update(last_sync=last_sync, last_ok=last_ok)
+        return jsonify(public_view("healthz", out))    # §PV — the booleans are the whole allowlist
+    out.update(last_sync=last_sync, last_ok=last_ok)
     return jsonify(out)
 
 
@@ -9449,7 +9753,7 @@ def api_shape():
     ignored = db.execute(
         "SELECT i.id, a.date, a.distance, i.reason FROM ignored_activities i "
         "LEFT JOIN activities a ON a.id = i.id ORDER BY a.date DESC").fetchall()
-    return jsonify(
+    out = dict(
         latest=dict(latest) if latest else None,
         history=[dict(r) for r in history],
         last_sync=get_meta(db, "last_sync"),
@@ -9457,6 +9761,11 @@ def api_shape():
         duplicates=dup_rows,
         ignored=[dict(r) for r in ignored],
     )
+    # §PV — `latest` is a whole snapshot ROW: it carried `raw`, the entire upstream payload (HRV
+    # baseline + normal range, easy-TRIMP bands, rest-day counts), out to the public box, and
+    # `last_sync` handed a stranger the household's nightly time that /healthz reduces to booleans.
+    # Neither was ever named by a pop; both are absent now because neither is named by the allowlist.
+    return jsonify(public_view("shape", out) if READONLY else out)
 
 
 @app.get("/api/hr-zones/derive")
@@ -10017,7 +10326,7 @@ def api_plandrift():
             # envelope: only the assertive counterfactual is an UPPER envelope ("what earning it
             # unlocks"); from an assertive plan the caution road is a FLOOR, not an envelope.
             "regime": other, "vs": regime_now, "envelope": other == "assertive",
-            "reason": None if READONLY else (current.get("regime") or {}).get("reason"),   # public-redacted
+            "reason": (current.get("regime") or {}).get("reason"),   # §PV withholds it publicly
             "distance": cf_dist, "ctl": cf_ctl, "effort": cf_eff,
             "outcome": {"peak_ctl": cf_ft.get("at_ctl"), "finish": cf_ft.get("hms"),
                         "curve": cf_ft.get("curve"),
@@ -10025,7 +10334,7 @@ def api_plandrift():
                         "now_finish": (current.get("feasibility") or {}).get("finish_time", {}).get("hms")},
         }
 
-    return jsonify(
+    out = dict(
         ok=True,
         today=today.isoformat(),
         anchor={"for_date": anchor_row["for_date"], "created_at": anchor_row["created_at"],
@@ -10041,6 +10350,7 @@ def api_plandrift():
         counterfactual=counterfactual,
         duplicate_count=dup_count,
     )
+    return jsonify(public_view("drift", out) if READONLY else out)
 
 
 @app.get("/api/objectives")
@@ -10049,9 +10359,10 @@ def api_objectives():
     seed_objectives(db)
     resolve_passed_races(db)   # §RL — idempotent; keeps the list honest even between nightly re-plans
     rows = [dict(r) for r in db.execute("SELECT * FROM objectives ORDER BY date").fetchall()]
-    if READONLY:               # §RL/H7 — race RESULTS are personal: redact at the DATA layer (the UI
-        for r in rows:         # hiding the strip is cosmetic), same posture as the §6s reckoning gate.
-            r.pop("outcome", None); r.pop("resolved_at", None)
+    if READONLY:               # §PV/§RL/H7 — race RESULTS are personal, redacted at the DATA layer
+        rows = public_view("objectives", rows)   # (the UI hiding the strip is cosmetic). `SELECT *`
+                                                 # feeds this, so the allowlist is also what keeps a
+                                                 # NEW objectives column off the public box.
     return jsonify(rows)
 
 
@@ -10213,10 +10524,9 @@ def api_log():
     withheld on the public view, like the readiness note."""
     log = block_log(get_db())
     if log and READONLY:
-        for w in log["weeks"]:
-            for s in w["sessions"]:
-                s.pop("reflection", None)
-        _strip_av_public(log)   # §AV — the log spreads the week dicts whole: the away dates ride in them
+        log = public_view("log", log)   # §PV — the free-text reflections and the §AV away dates the
+                                        # log spreads whole are both absent by allowlist (0.27.1's
+                                        # leak was precisely a week dict nobody had enumerated)
     return jsonify(log)
 
 
@@ -10335,26 +10645,6 @@ def _plan_for_view(plan, db=None):
     return plan
 
 
-def _strip_av_public(obj):
-    """§AV/H7 — away dates on the public box are an empty-house broadcast: remove every
-    availability trace from a payload at the DATA layer (the week chip derives from these fields, so
-    stripping here silences the UI with no second render path — same posture as the §RL outcome
-    redaction). The re-laid session days themselves stay: they're just a plan. Walks EVERY dict at
-    any depth (0.27.1): the 0.27.0 strip enumerated base/build/peak/taper and so missed the re-base
-    and the chain segments (bridge1/peak1…), and it ran on /api/plan only while /api/log spreads the
-    same week dicts whole — in July 2026 the public log served one of the owner's away dates for a week
-    (Gemini review #1, widened by verification). A key-agnostic walk cannot be outrun by a new phase
-    key or a new payload; det/av-public-strip drives both endpoints."""
-    if isinstance(obj, dict):
-        obj.pop("av_dates", None)
-        obj.pop("av_shed", None)
-        for v in obj.values():
-            _strip_av_public(v)
-    elif isinstance(obj, list):
-        for v in obj:
-            _strip_av_public(v)
-
-
 @app.get("/api/plan")
 def api_plan():
     """The latest generated plan (or null if none yet)."""
@@ -10363,9 +10653,10 @@ def api_plan():
     plan = json.loads(row["plan"]) if row else None
     _plan_for_view(plan)   # §PRO14 — one definition, shared with /api/plan/generate
     if plan and READONLY:
-        plan.pop("adjustment", None)   # the adjustment carries free-text/medical context — withhold
-        plan.pop("cold_start", None)   # §33f-5 — the seeds carry AGE + an HRmax prior in bpm (H7-class)
-        _strip_av_public(plan)         # §AV — away days never reach the public box
+        plan = plan_public_view(plan)  # §PV — allowlist: the adjustment (free-text/medical), the
+                                       # §33f-5 cold-start seeds (AGE + an HRmax prior) and the §AV
+                                       # away dates are absent because they are not NAMED, not
+                                       # because they were remembered
     return jsonify(plan)
 
 
@@ -10390,8 +10681,12 @@ def api_readiness():
         assess = {"verdict": v, "action": action, "public": True}
         if done:
             assess["done"] = True
-        data = {"date": data.get("date"), "assessment": assess,
-                "session": data.get("session")}
+        # §PV — the WORDS are a projection too (generic copy above, never the private reasons), and
+        # the allowlist then decides which FIELDS survive: the check-in inputs, the free-text note,
+        # the HRV signal, the reasons and any halt/medical guidance are absent because unnamed. The
+        # session rides through the same session allowlist the plan and log use.
+        data = public_view("readiness", {"date": data.get("date"), "assessment": assess,
+                                         "session": data.get("session")})
     else:
         # §W1 — current pace/HR zones ride along so the workout instruction card can't render
         # from stale numbers (same det-locked grid as the effort monitor + zones card). Private
@@ -10463,9 +10758,9 @@ def _activity_payload(db, a):
             "index": next(i for i, p in enumerate(grp) if p["id"] == a.get("id")) + 1,
             "km": round(sum(p["distance"] or 0 for p in grp), 1),
             "min": round(sum(p["duration"] or 0 for p in grp) / 60)}
-    if READONLY:                      # per-run HR is private (same posture that drops HR from the public
-        payload.pop("hr_avg", None)   # effort-discipline read) — withhold it server-side on the public
-        payload.pop("hr_max", None)   # container, not just in the UI
+    if READONLY:                      # §PV — per-run HR is private (the same posture that drops HR
+        payload = public_view("activity", payload)   # from the public effort-discipline read),
+                                      # withheld server-side, not just in the UI
     return payload
 
 
@@ -10737,10 +11032,9 @@ def api_activity_profile(aid):
     # the chart hover, the zone band, and the effort monitor. Set on the endpoint (not baked into the cached
     # blob) so it stays live as LTHR drifts. bpm cutoffs are HR-derived ⇒ private, stripped on the public box.
     out["hrzones"] = hr_zones(db)
-    if READONLY:                       # the per-second HR stream is private, like avg/max HR — the public
-        out.pop("hr", None)            # container serves the profile for the pace overlay, but HR-stripped
-        out["hrmax"] = None
-        out["hrzones"] = None
+    if READONLY:                       # §PV — the per-second HR stream is private, like avg/max HR:
+        out = public_view("profile", out)   # the public container serves the profile for the pace
+                                       # overlay, HR-stripped (the chart reads `has_hr` and degrades)
     return jsonify(out)
 
 
@@ -10770,7 +11064,8 @@ def api_weekly():
     if err:
         return err
     rows = db_weekly_running()
-    return jsonify(rows[-weeks:] if weeks > 0 else rows)
+    rows = rows[-weeks:] if weeks > 0 else rows
+    return jsonify(public_view("weekly", rows) if READONLY else rows)
 
 
 @app.get("/api/vo2max")
@@ -10852,7 +11147,7 @@ def _parse_weather_cities(spec):
     return out
 
 
-WEATHER_CITIES = _parse_weather_cities(os.environ.get("SH_WEATHER_CITIES", ""))
+_config_swap(weather_cities=_parse_weather_cities(os.environ.get("SH_WEATHER_CITIES", "")))
 WEATHER_TTL = 1800          # 30 min — weather doesn't move faster than the cache is worth
 _weather_cache = {"at": 0.0, "data": None}
 _weather_lock = threading.Lock()
@@ -10912,7 +11207,7 @@ def get_weather():
         if cached and now - _weather_cache["at"] < WEATHER_TTL:
             return cached
     cities = []
-    for c in WEATHER_CITIES:
+    for c in config().weather_cities:
         try:
             cities.append(_fetch_city_weather(c))
         except Exception as e:  # one city failing shouldn't drop the others
@@ -11206,15 +11501,16 @@ def _render_app(page="dash"):
     # HOUSE_URL/NAME can now be set via the Settings panel (validated) OR raw env (unvalidated), and
     # are injected into header HTML — so escape at the render site regardless of source (defence in
     # depth, not relying on the save-time char check alone).
-    hublink = (f'<a class="hublink" href="{html.escape(HOUSE_URL, quote=True)}">'
-               f'← {html.escape(HOUSE_NAME or HOUSE_URL)}</a>'
-               if HOUSE_URL else "")
+    cfg = config()      # TECH-4 — one snapshot for the whole page render
+    hublink = (f'<a class="hublink" href="{html.escape(cfg.house_url, quote=True)}">'
+               f'← {html.escape(cfg.house_name or cfg.house_url)}</a>'
+               if cfg.house_url else "")
     doc = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
             # json.dumps escapes quotes/backslashes but NOT "/", so neutralise "</" → a value with
             # "</script>" (e.g. a raw env SH_PRIVATE_URL that bypassed validate_setting) can't close
             # the inline <script> and inject markup into the (public) page.
-            .replace("__SH_PRIVATE_URL__", json.dumps(PRIVATE_URL).replace("</", "<\\/"))
+            .replace("__SH_PRIVATE_URL__", json.dumps(cfg.private_url).replace("</", "<\\/"))
             .replace("__RUNALYZE_LOGO__", RUNALYZE_LOGO_SVG)
             # §RB — one document, two pages: <body data-page> selects the dashboard (status) or the
             # /runs explorer (look-up); CSS shows each page's sections, JS gates its loaders. Keeps
@@ -11291,16 +11587,16 @@ SYNC_AT_DEFAULT = "22:00"
 # Fire the nightly sync at your wall-clock hour, not the container's. Set SH_TZ to your IANA zone
 # (e.g. "Europe/Lisbon", "America/New_York"); defaults to UTC. Falls back to UTC on a bad name.
 try:
-    SYNC_TZ = ZoneInfo(os.environ.get("SH_TZ", "UTC"))
+    _config_swap(sync_tz=ZoneInfo(os.environ.get("SH_TZ", "UTC")))
 except Exception:
-    SYNC_TZ = ZoneInfo("UTC")
+    _config_swap(sync_tz=ZoneInfo("UTC"))
 
 
 def _seconds_until(hhmm):
     """Seconds until the next HH:MM in Luxembourg local time (DST-aware), so the job fires at the
     same wall-clock hour whatever timezone the container runs in (the NAS containers run UTC)."""
     h, m = (int(x) for x in hhmm.split(":"))
-    now = datetime.now(SYNC_TZ)
+    now = datetime.now(config().sync_tz)
     nxt = now.replace(hour=h, minute=m, second=0, microsecond=0)
     if nxt <= now:
         nxt += timedelta(days=1)
@@ -11410,7 +11706,7 @@ def _scheduler_loop(hhmm):
 def start_scheduler():
     """Start the nightly sync thread — only on a writable, tokened instance, and only once."""
     global _scheduler_started
-    if _scheduler_started or READONLY or not RUNALYZE_TOKEN:
+    if _scheduler_started or READONLY or not config().runalyze_token:
         return
     if os.environ.get("SH_SCHEDULE", "1").lower() not in ("1", "true", "yes"):
         return
@@ -11428,7 +11724,7 @@ def start_scheduler():
         hhmm = SYNC_AT_DEFAULT
     threading.Thread(target=_scheduler_loop, args=(hhmm,), daemon=True).start()
     _scheduler_started = True
-    print(f"Sparing Horse → scheduled daily sync at {hhmm} {SYNC_TZ.key}")
+    print(f"Sparing Horse → scheduled daily sync at {hhmm} {config().sync_tz.key}")
     # Boot catch-up (TECH-8): a container restart across the nightly minute used to skip the night
     # silently. If no successful run is recorded in the last 26 h, run one pass now — in its own
     # thread, so boot never blocks on a Runalyze pull.
@@ -12011,5 +12307,6 @@ if __name__ == "__main__":
         print(f"Run it:  SH_DB={target} RUNALYZE_TOKEN= python SparingHorse.py   "
               f"# private console, no token, fully populated")
         sys.exit(0)
-    print(f"Sparing Horse → http://127.0.0.1:{PORT}  (token {'set' if RUNALYZE_TOKEN else 'MISSING'})")
+    print(f"Sparing Horse → http://127.0.0.1:{PORT}  "
+          f"(token {'set' if config().runalyze_token else 'MISSING'})")
     app.run(host="127.0.0.1", port=PORT, debug=False)

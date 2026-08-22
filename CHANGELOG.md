@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.31.0] - 2026-08-22
+
+### Changed
+
+- **The public site now names what it publishes.** Every public endpoint used to serve the private
+  payload and then remove the fields someone remembered were personal. That is only ever as good as
+  the last person to think about it, and two things had slipped through: the shape endpoint was
+  serving the entire upstream snapshot record — including the HRV baseline and normal range — and
+  the same endpoint published the time of the household's nightly sync, which the health endpoint
+  deliberately withholds and which the page footer was printing. Both are gone. The rule is
+  inverted: a field reaches the public view because it is listed, not because nobody removed it, so
+  anything added in future is private until someone publishes it deliberately.
+- **Settings and keys are applied as one unit.** The values a self-hoster can set in the Settings
+  window were applied one at a time, which left a brief window where a page could render with half
+  the old configuration and half the new. They are now resolved first and published together.
+
+### Fixed
+
+- **Changing the Runalyze token in the Settings window now takes effect immediately.** The HTTP
+  session kept the key it was built with, so data pulls carried on authenticating with the replaced
+  token until the app was restarted — while the other half of the client picked the new one up at
+  once. Both now follow the change.
+- **Two simultaneous reconnections to Runalyze no longer trip over each other.** A page load and
+  the nightly sync could each start a new session at the same moment and the wrong one could win,
+  leaving the app holding a connection the server had already dropped.
+
 ## [0.30.1] - 2026-08-22
 
 ### Fixed
