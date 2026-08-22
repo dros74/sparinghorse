@@ -10,6 +10,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.29.0] - 2026-08-22
+
+### Changed
+
+- **The front end is code now.** The dashboard's markup, style and script — some 270 KB — used to
+  live inside the Python file as one giant string, where a syntax error in 2,600 lines of
+  JavaScript could only be found by opening the page and noticing nothing worked. It is three real
+  files (`static/index.html`, `app.css`, `app.js`), served versioned and checked in CI like
+  everything else. Nothing about the page should look different — and the proof that it doesn't
+  (byte-identical screenshots in all three themes) was part of the move.
+- **The app speaks in its own voice.** Every remaining browser `alert()`/`confirm()` is gone;
+  destructive questions and errors arrive in the app's own dialog, which explains the consequences
+  before you confirm.
+- **Colours belong to the theme.** The heart-rate zones were the last hard-coded hex values and are
+  per-theme tokens now. An activity's pace trace no longer ramps red→green — the one pair a
+  colourblind reader can't separate — but deepens a single hue, fastest of the run strongest, as
+  before. The square-polychrome tile overlay (a trial that never made it into the design document)
+  is removed; the code agrees with the document again.
+- **The keyboard reaches everything the mouse can.** The phase bar, week strip, completed-session
+  lines, per-run links, calendar days and metric chips take focus and press with Enter/Space, with
+  a visible focus ring, and "reduce motion" is honoured by the animations and the scrolling alike.
+  Segmented controls that announced themselves to screen readers as tab lists with no tabs now
+  describe themselves truthfully.
+- **Chart axes survive a phone.** The trend charts stretch to fill their width, and the axis labels
+  used to stretch with them — about 3px wide on a 390px screen: drawn, present, unreadable. The
+  labels are HTML now, they thin themselves rather than collide, and a resize, rotation or tab
+  switch re-fits them without a re-render.
+- **Small controls grew invisible padding.** The theme swatches, the "?" help bubbles, the A|B|C
+  priority segments and the health-range buttons all sat under the 24px touch floor; their hit
+  areas clear it now, with no change to how anything looks.
+- **The browser chrome follows the theme.** The tab and PWA title-bar colour, and the installed
+  window's splash, match Daylight, Charcoal or Aurora — whichever is active.
+
+### Added
+
+- **A freshness chip on the readiness card** (private view): "synced 3 h ago", amber past 26 h —
+  the same staleness threshold the nightly sync's own catch-up uses, so the screen and the
+  scheduler can't disagree. The public card stays silent on timing: a visitor has no business
+  learning the household's sync routine.
+- **An honest offline shell.** Open the installed app with no connection and each tile says it is
+  offline and dates its data from the last sync the app remembers — never a parked "Loading…".
+
+### Fixed
+
+- **The public box no longer points visitors at buttons it doesn't have.** The empty plan tile, the
+  "this plan is stale" banners, the readiness card's no-plan line and the drift view's empty state
+  all used to suggest hitting Generate plan — a control that exists only on the private console.
+- **Small repairs.** The gauge "you:" pill is clamped inside the gauge at the scale's ends; the
+  health form's date is prefilled to today; the activity profile hint keeps its text on a phone
+  rather than reserving legend space it no longer needs; the route map's tiles dim to match the
+  dark themes; and the stretched charts draw their strokes at constant width, as the design
+  document specifies.
+
 ## [0.28.1] - 2026-08-22
 
 ### Fixed

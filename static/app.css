@@ -1,0 +1,990 @@
+  /* House design system tokens (DESIGN.md §2.3) — apps reference TOKEN NAMES only, never raw hex,
+     so one data-theme switch re-skins the whole app. Light/Daylight is the CSS base (:root) so a
+     fresh load (JS off / pre-script) is light; Dark/Charcoal + Aurora/Electric are overrides. The
+     inline <head> script restores the saved preference per origin before first paint. Legacy aliases
+     (--surface-2/--terra/--ok-bright) map onto the canonical tokens so existing rules keep working. */
+  :root{   /* Daylight — warm paper, terracotta */
+    --bg:#f4f1ea; --surface:#fbf9f4; --surface2:#ece7db; --line:#ddd6c7;
+    --text:#2a2620; --muted:#6f6857; --accent:#b9542c;
+    --ok:#4f8c5f; --warn:#a9781f; --danger:#b5563f;
+    --readybg:#4d8a5c; --readybg2:#3c6a48;   /* spec greens (DESIGN.md §2.3) — deep enough for white */
+    --readyamber:var(--warn); --readyamber2:color-mix(in oklab,var(--warn),#000 30%);   /* amber/red ride the theme signals (mockup mapping) */
+    --readyred:var(--danger); --readyred2:color-mix(in oklab,var(--danger),#000 32%);
+    --onready:#fff;   /* ink on the readiness gradient (det/readiness-contrast pins ≥3:1 verdict, ≥4.5:1 footer) */
+    --onacc:#fff;
+    --z1:#7c8597; --z2:#3f7fd0; --z3:var(--ok); --z4:var(--warn); --z5:var(--danger);   /* HR intensity bands (UX-6) */
+    --focus:var(--accent);   /* keyboard focus ring — a reference, so it follows the theme's accent (UX-9) */
+    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);   /* legacy aliases */
+    --serif:'Fraunces',Georgia,serif; --sans:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+  }
+  [data-theme="dark"]{   /* Charcoal — neutral graphite, brighter terracotta so it reads as a glow */
+    --bg:#191a1d; --surface:#222327; --surface2:#2a2b30; --line:#3a3c43;
+    --text:#edeef1; --muted:#9b9da5; --accent:#fa7d42;
+    --ok:#33d98a; --warn:#f7b32b; --danger:#fc6a55;
+    --readybg:#2f9760; --readybg2:#1d6240;   /* green already passes vs white — unchanged */
+    --readyamber:color-mix(in oklab,var(--warn),#000 22%); --readyamber2:color-mix(in oklab,var(--warn),#000 46%);   /* neon amber darkened to white-legible */
+    --readyred:color-mix(in oklab,var(--danger),#000 10%); --readyred2:color-mix(in oklab,var(--danger),#000 40%);
+    --onready:#fff;
+    --onacc:#fff;
+    --z1:#7c8597; --z2:#3f7fd0; --z3:var(--ok); --z4:var(--warn); --z5:var(--danger);   /* HR intensity bands (UX-6) */
+    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
+  }
+  /* Keyboard focus (UX-9). :focus-visible, not :focus — a ring on every mouse click is noise, which
+     is why the two rules that had one blanked it outright and left the app's only two custom-focusable
+     elements with no visible focus at all. The outline follows the element's own border-radius; do
+     NOT set a radius here, that would reshape the element rather than the ring. */
+  :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+  /* One query, honoured app-wide (UX-9). A runner who asks the OS for less motion is asking every
+     surface, not the ones we remembered to ask about; the smooth scrolls are guarded in app.js the
+     same way, since scrollIntoView's behaviour is script, not style. */
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important;
+      animation-iteration-count:1!important}
+  }
+
+  [data-theme="aurora"]{   /* Electric — deep indigo, violet→cyan accents, neon signals */
+    --bg:#121226; --surface:#1c1d3e; --surface2:#262752; --line:#3a3c74;
+    --text:#eef0ff; --muted:#a2a6dc; --accent:#7b61ff; --accent2:#28d6ee;
+    --ok:#22e3a6; --warn:#ffc24d; --danger:#ff5d8a;
+    --readybg:#12b39a; --readybg2:#6bc6b2;   /* neon stays bright: dark ink + a LIFTED bottom stop */
+    --readyamber:var(--warn); --readyamber2:#ffd07d;   /* white-mix 22% */
+    --readyred:var(--danger); --readyred2:#ff7f9e;   /* white-mix 18% */
+    --onready:#121226;   /* dark indigo ink on the neon gradient */
+    --onacc:#fff;
+    --z1:#7c8597; --z2:#3f7fd0; --z3:var(--ok); --z4:var(--warn); --z5:var(--danger);   /* HR intensity bands (UX-6) */
+    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;min-height:100dvh;
+    font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+    transition:background .25s ease,color .25s ease}
+  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:radial-gradient(60% 45% at 50% 0%, color-mix(in oklab,var(--terra),transparent 88%), transparent 70%);}
+  .wrap{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:34px 26px 90px}
+
+  header{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--line);
+    padding-bottom:18px;margin-bottom:26px}
+  .brand{display:grid;grid-template-columns:auto 1fr;grid-template-areas:". eyebrow" "logo title";align-items:center;column-gap:14px}
+  .dotmark{grid-area:logo;width:38px;height:38px;flex:none;display:grid;place-items:center}
+  .dotmark svg{width:100%;height:100%;display:block}
+  h1{font-family:var(--serif);font-weight:600;font-size:30px;letter-spacing:-.01em;margin:0}
+  .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.22em;text-transform:uppercase;
+    color:var(--muted);margin:0 0 3px;grid-area:eyebrow}
+  .titlerow{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;grid-area:title}
+  .motto{font-family:var(--mono);font-size:11px;color:var(--accent);opacity:.9}
+  .motto small{color:var(--muted)}
+  .bar{display:flex;align-items:center;gap:12px;margin-left:auto}
+  .ro-badge{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:3px 9px}
+  .adminlink{font-family:var(--sans);font-size:12px;font-weight:500;color:var(--accent);text-decoration:none;
+    border:1px solid color-mix(in oklab,var(--accent),transparent 50%);border-radius:9px;padding:6px 11px;
+    transition:border-color .15s,background .15s}
+  .adminlink:hover{border-color:var(--accent);background:color-mix(in oklab,var(--accent),transparent 92%)}
+  button{font-family:var(--sans);font-size:13px;font-weight:500;color:var(--text);cursor:pointer;
+    background:var(--surface-2);border:1px solid var(--line);border-radius:9px;padding:8px 14px;
+    transition:border-color .15s,transform .1s}
+  button:hover{border-color:var(--accent)} button:active{transform:translateY(1px)}
+  button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:var(--onacc)}
+  button.ghost{background:transparent;color:var(--muted);font-size:12px;padding:8px 12px}
+  button.ghost:hover{color:var(--text)}
+  /* §RB — the header Runs/Dashboard link is an <a> wearing the ghost-button clothes */
+  a.ghost{font-family:var(--sans);font-size:12px;font-weight:500;color:var(--muted);cursor:pointer;
+    background:transparent;border:1px solid var(--line);border-radius:9px;padding:8px 12px;
+    text-decoration:none;display:inline-block;transition:border-color .15s}
+  a.ghost:hover{color:var(--text);border-color:var(--accent)}
+  a.mnav-btn{text-decoration:none}
+  button.danger{background:var(--danger);border-color:var(--danger);color:var(--onacc)}
+  button.danger:hover{border-color:var(--danger);filter:brightness(1.08)}
+  /* Consequence-explaining confirm dialog (destructive actions) — reuses dialog.modal chrome */
+  dialog.modal.confirm-modal{width:min(460px,92vw)}  /* .modal sets 680px at equal specificity + later — qualify to win */
+  .cf-body{padding:18px 22px;overflow:auto;flex:1 1 auto;min-height:0}
+  .cf-body p{margin:0 0 11px;font-size:13.5px;line-height:1.55}
+  .cf-body ul{margin:0 0 4px;padding-left:20px;font-size:12.5px;line-height:1.6;color:var(--muted)}
+  .cf-body li{margin:3px 0}
+  .cf-body .cf-alt{margin-top:12px;font-size:12.5px;color:var(--muted)}
+  .cf-body .cf-alt:empty{display:none}
+  .cf-foot{flex:none;display:flex;justify-content:flex-end;gap:10px;
+    padding:14px 22px;border-top:1px solid var(--line);background:var(--surface)}
+  /* shared house chrome: a fixed top-right control cluster (login + swatches) and a
+     top-left hub link. Swatches mirror bookworm's component (30px + accent underline);
+     the login pill sits to their left (the sparinghorse arrangement). */
+  .topctl{position:fixed;top:8px;right:16px;z-index:50;display:inline-flex;align-items:center;gap:10px}
+  .hublink{position:fixed;top:8px;left:16px;z-index:50;font-family:var(--mono);font-size:10.5px;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--muted);text-decoration:none}
+  .hublink:hover{color:var(--accent)}
+  .themes{display:inline-flex;gap:8px}
+  .swatch{width:30px;height:9px;border-radius:2px;border:1px solid var(--line);padding:0;
+    cursor:pointer;opacity:.55;position:relative;background:var(--sw);transition:opacity .12s}
+  .swatch:hover,.swatch[aria-pressed="true"]{opacity:1}
+  .swatch[aria-pressed="true"]::after{content:"";position:absolute;left:0;right:0;bottom:-5px;
+    height:2px;background:var(--accent);border-radius:2px}
+  /* UX-10 — the 30×9 swatch projects a transparent 30×25 hit area (the touch floor is 24px);
+     vertical-only, so the three swatches' hit areas never overlap each other */
+  .swatch::before{content:"";position:absolute;left:0;right:0;top:-8px;bottom:-8px}
+
+  .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  @media(max-width:880px){.grid{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:520px){.grid{grid-template-columns:1fr}}
+  .tile{background:linear-gradient(180deg,var(--surface),var(--surface-2));
+    border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px;position:relative;overflow:hidden}
+  .tile::before{content:"";position:absolute;left:0;top:0;height:3px;width:100%;background:linear-gradient(90deg,var(--accent),var(--accent2,var(--accent)));opacity:.9}
+  .tile .k{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  .tile .v{font-family:var(--serif);font-weight:600;font-size:34px;line-height:1.05;margin-top:8px}
+  .tile .v small{font-size:15px;color:var(--muted);font-family:var(--sans);font-weight:400}
+  .tile .sub{font-size:12px;color:var(--muted);margin-top:2px}
+  /* caption tiles: lift the title/value/subtitle up and reserve a clear band at the bottom
+     for the timeframe caption, so a long subtitle can never crowd or overlap it */
+  .tile.hascap{padding-top:14px;padding-bottom:30px}
+  .tile{cursor:help}
+  .tile .k,.tile .v,.tile .sub{position:relative;z-index:1}
+  /* VO₂max tile background sparkline (per-activity trend) */
+  .tilebg{position:absolute;inset:0;z-index:0;opacity:0;transition:opacity .5s ease;pointer-events:none}
+  .tilebg.on{opacity:1}
+  .tilebg svg{position:absolute;inset:0;width:100%;height:100%}
+  .tilebg .proffill{fill:color-mix(in oklab,var(--accent),transparent 92%);
+    stroke:color-mix(in oklab,var(--accent),transparent 70%);stroke-width:1}
+  .tilecap{position:absolute;right:12px;bottom:9px;z-index:1;font-family:var(--mono);
+    font-size:8.5px;letter-spacing:.04em;color:var(--muted);opacity:.7;cursor:help}
+  .info{opacity:.5;font-size:9px;cursor:help}
+  .dqwarn{border:1px solid var(--warn);background:color-mix(in oklab,var(--warn),transparent 90%);
+    border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--text);line-height:1.5}
+  .dqwarn b{color:var(--warn)}
+  .dqnote{border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin-bottom:16px;
+    font-size:12px;color:var(--muted);line-height:1.5}
+  .dqnote a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
+  .dqnote a:hover{opacity:.8}
+  /* First-run guided setup (private only; removed under SH_READONLY). Vanishes once the
+     instance is configured — token connected, history pulled, a race added. */
+  #firstrun:empty{display:none}
+  .firstrun{border:1px solid var(--accent);border-radius:12px;margin:14px 0;padding:14px 16px;
+    background:color-mix(in oklab,var(--accent),transparent 92%)}
+  .firstrun .fr-head{font-family:var(--serif);font-size:15px;margin-bottom:11px;color:var(--text)}
+  .fr-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+  .fr-step{display:flex;gap:11px;align-items:flex-start}
+  .fr-num{flex:0 0 22px;height:22px;border-radius:50%;display:grid;place-items:center;
+    font-family:var(--mono);font-size:11px;background:var(--surface2);color:var(--muted)}
+  .fr-step.done .fr-num{background:var(--ok);color:var(--onacc)}
+  .fr-step.active .fr-num{background:var(--accent);color:var(--onacc)}
+  .fr-label{font-weight:600;font-size:13px;color:var(--text)}
+  .fr-step.todo{opacity:.5}
+  .fr-desc{font-size:12px;color:var(--muted);line-height:1.5;margin:3px 0 7px}
+  .fr-desc code{font-family:var(--mono);font-size:11px;background:var(--surface2);
+    padding:1px 5px;border-radius:4px;color:var(--text)}
+  .fr-act{font-size:12px;padding:6px 12px}
+  /* recent activity + planned session metric rows */
+  .mrow{display:flex;flex-wrap:wrap;gap:8px 26px;align-items:baseline}
+  .mrow .ttl{font-family:var(--serif);font-weight:600;font-size:17px;margin-right:6px}
+  .metric{display:flex;flex-direction:column;gap:1px}
+  .metric .ml{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .metric .mv{font-size:16px;font-weight:600}
+  .metric .mv small{font-size:11px;color:var(--muted);font-weight:400}
+  .rkick{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--accent);margin-bottom:8px}
+  .planned{margin-top:16px}
+  /* latest-activity hover profile background */
+  #recent{position:relative;overflow:hidden}
+  /* the chart wrapper bounds the profile background to the metrics area (height), while its negative
+     margins let the chart still bleed to the tile edges — so the route map below it isn't overlapped */
+  .actwrap{position:relative;margin:-20px -20px 0;padding:20px 20px 0}
+  /* public tile: no route map follows, so the chart would otherwise leave a bare strip of panel
+     padding below it. When .actwrap is the panel's last child, bleed to the bottom edge too. */
+  .actwrap:last-child{margin-bottom:-20px;padding-bottom:20px}
+  .actbg{position:absolute;inset:0;z-index:0;opacity:0;transition:opacity .4s ease;pointer-events:none}
+  .actbg.on{opacity:1}
+  .actbg svg{position:absolute;inset:0;width:100%;height:100%}
+  /* low-contrast so the tile text stays readable */
+  .actbg .proffill{fill:color-mix(in oklab,var(--accent),transparent 94%);
+    stroke:color-mix(in oklab,var(--accent),transparent 78%);stroke-width:1}
+  /* Aurora's deep-indigo surface nearly swallows the faint accent area-fill — lift it toward white
+     so the shade under the trace reads a touch lighter than the background (not just more violet) */
+  [data-theme="aurora"] .actbg .proffill{fill:color-mix(in oklab,color-mix(in oklab,var(--accent),#fff 30%),transparent 86%)}
+  [data-theme="aurora"] .tilebg .proffill{fill:color-mix(in oklab,color-mix(in oklab,var(--accent),#fff 30%),transparent 84%)}
+  .actbg .avgline{stroke:var(--muted);stroke-width:1;stroke-dasharray:5 4;opacity:.4}
+  /* hovered metric traced on top of the locked area — value-coloured, no fill; non-scaling so the
+     stretched viewBox doesn't make the stroke uneven */
+  .actbg .profline{fill:none;stroke-width:1;vector-effect:non-scaling-stroke;
+    stroke-linejoin:round;stroke-linecap:round}
+  /* the chart hint (left) and the locked-variable label + HR-zone legend (right) share ONE baseline
+     row. profmeta is ABSOLUTE inside the relative .profbar (anchored bottom-right), so the legend
+     appearing on HR hover grows it sideways WITHOUT reflowing the row → the tile height never jumps.
+     The row's height is set by .profhint alone (constant); padding-right keeps the hint clear of it. */
+  .structline{color:var(--muted);font-size:12px;line-height:1.5;margin-top:8px}
+  .structline:empty{display:none}
+  .structline b{font-weight:600}
+  .structline .sdet{border-bottom:1px dotted var(--muted);cursor:help}
+  /* §SJ — the 1+1 chip marks a composite read (a deliberately split recording joined back) */
+  .sjchip{font-weight:600;font-size:10.5px;border:1px solid var(--muted);color:var(--muted);
+    border-radius:4px;padding:0 4px;margin-right:2px;cursor:help;letter-spacing:.03em;white-space:nowrap}
+  .structline .sqline{margin-top:2px}
+  .structline .sqline .sdet{cursor:help}
+  .profbar{position:relative;margin-top:12px;min-height:15px}
+  .profmeta{position:absolute;right:0;bottom:0;display:inline-flex;align-items:center;gap:12px;
+    white-space:nowrap;text-align:right;color:var(--muted);font-family:var(--mono);font-size:9.5px;letter-spacing:.04em}
+  .hrlegend{display:inline-flex;gap:9px}
+  /* the between-zone gap (14px) must exceed the square↔its-own-label gap (4px), else each square
+     reads as belonging to the previous zone's label */
+  .hrlegend .hrleg{display:inline-flex;gap:14px}
+  .hrlegend .hrz{display:inline-flex;align-items:center;gap:4px;color:var(--muted)}
+  .hrlegend .hrz i{width:9px;height:9px;border-radius:2px}
+  .actfg{position:relative;z-index:1}   /* profmeta now lives in-flow in .profbar — no reserved strip (was the public tile's empty gap) */
+  .metric.hovx{cursor:pointer;border-radius:7px;transition:background .15s,box-shadow .15s;padding:2px 6px;margin:-2px -6px}
+  .metric.hovx:hover{background:color-mix(in oklab,var(--accent),transparent 90%)}
+  /* lock = the same shade as hover (an underline collided with the value-coloured trace line);
+     the 🔒 marker is what tells the persistent lock apart from a transient hover */
+  .metric.hovx.locked{background:color-mix(in oklab,var(--accent),transparent 90%)}
+  .metric.hovx.locked .ml::after{content:" 🔒";font-size:8px}
+  .proflbl{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:none;
+    letter-spacing:0;margin-left:8px}
+  .profhint{font-size:11px;opacity:.75;padding-right:320px}
+  .profhint b{color:var(--accent)}
+  /* top row: the LATEST ACTIVITY kicker (left) + data-quality utilities (right corner). The two
+     actions are muted at rest, hover reveals intent (ignore→accent, delete→danger). */
+  .rtop{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+  .dqtools{display:inline-flex;gap:14px;flex-shrink:0;font-size:11px;color:var(--muted);white-space:nowrap}
+  .dqtools a{color:var(--muted);text-decoration:none;border-bottom:1px dotted color-mix(in oklab,var(--muted),transparent 40%)}
+  .dqtools a:hover{color:var(--accent);border-bottom-color:var(--accent)}
+  .dqtools a.delact:hover{color:var(--danger);border-bottom-color:var(--danger)}
+  /* workout route map (private only) — Leaflet renders into .actmap; needs an explicit height */
+  .actmap{position:relative;z-index:1;height:240px;margin-top:14px;border-radius:10px;
+    overflow:hidden;border:1px solid var(--line)}
+  .actmap .leaflet-container{height:100%;background:var(--surface-2);font-family:var(--sans)}
+  /* UX-11 — OSM tiles are drawn for a light page; on the dark themes a white map glares. Filter
+     the TILES only: the route line and markers are ours and already read the theme's tokens */
+  [data-theme="dark"] .actmap .leaflet-tile{filter:brightness(.72) invert(1) hue-rotate(185deg) saturate(.4) contrast(.92)}
+  [data-theme="aurora"] .actmap .leaflet-tile{filter:brightness(.68) invert(1) hue-rotate(215deg) saturate(.38) contrast(.88)}
+  [data-theme="dark"] .actmap .leaflet-control-attribution,
+  [data-theme="aurora"] .actmap .leaflet-control-attribution{
+    background:color-mix(in oklab,var(--surface),transparent 15%);color:var(--muted)}
+  [data-theme="dark"] .actmap .leaflet-control-attribution a,
+  [data-theme="aurora"] .actmap .leaflet-control-attribution a{color:var(--accent)}
+  /* cross-training note — shown when the most-recent activity isn't a run */
+  .crossnote{color:var(--muted);font-size:11.5px;line-height:1.5;margin-top:12px;
+    padding-top:9px;border-top:1px dashed var(--line)}
+  .mapempty{height:100%;display:flex;align-items:center;justify-content:center;color:var(--muted);
+    font-size:13px;background:color-mix(in oklab,var(--accent),var(--surface-2) 82%)}
+  .up{color:var(--ok)} .down{color:var(--danger)}
+
+  .section{margin-top:30px}
+  .section h2{font-family:var(--serif);font-weight:600;font-size:19px;margin:0 0 14px}
+  /* Collapsible sections (Plan drift, Fitness & fatigue, Weekly volume) load EXPANDED (`open`) by
+     default; the runner can still collapse them and the chevron rotates on [open] */
+  details.section > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:10px}
+  details.section > summary::-webkit-details-marker{display:none}
+  details.section > summary h2{margin:0}
+  details.section > summary::before{content:"";flex:none;width:7px;height:7px;margin-top:-3px;
+    border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);
+    transform:rotate(-45deg);transition:transform .15s}
+  details.section[open] > summary::before{transform:rotate(45deg)}
+  details.section > summary:hover::before{border-color:var(--accent)}
+  details.section > .panel{margin-top:14px}
+  .panel{background:linear-gradient(180deg,var(--surface),var(--surface-2));
+    border:1px solid var(--line);border-radius:14px;padding:20px}
+
+  /* ACWR gauge */
+  .gauge{position:relative;height:34px;border-radius:8px;border:1px solid var(--line);
+    background:var(--surface-2);margin-top:26px}
+  .gauge .band{position:absolute;top:0;bottom:0;background:color-mix(in oklab,var(--ok),transparent 72%);
+    border-radius:8px}
+  .gauge .mark{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--accent);border-radius:2px;
+    box-shadow:0 0 0 2px var(--bg)}
+  /* the "you:" pill follows the mark via --gx, clamped so it can never overhang the gauge's ends
+     at the scale's extremes (UX-11); the mark itself keeps the exact ratio position */
+  .gyou{position:absolute;top:-24px;left:clamp(40px,var(--gx,50%),calc(100% - 40px));
+    transform:translateX(-50%);white-space:nowrap}
+  .gyou span{font-family:var(--mono);font-size:11px;font-weight:500;padding:2px 7px;border-radius:6px}
+  .gyou .inb{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 55%)}
+  .gyou .out{color:var(--danger);border:1px solid color-mix(in oklab,var(--danger),transparent 50%)}
+  .gyou .low{color:var(--muted);border:1px solid color-mix(in oklab,var(--muted),transparent 50%)}
+  .gauge-scale{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;
+    color:var(--muted);margin-top:6px}
+  .gauge-scale b{color:var(--ok)}
+
+  /* weekly bars */
+  .chart{cursor:grab}
+  .chart.grabbing{cursor:grabbing}
+  .chart .bars,.chart .ruler{user-select:none}
+  .chart .bars{display:flex;align-items:flex-end;gap:4px;height:150px}
+  .chart .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px;min-width:0}
+  .chart .col .barb{width:100%;background:var(--accent);border-radius:3px 3px 0 0;opacity:.82;
+    transition:height .4s ease,opacity .15s}
+  .chart .col:hover .barb{opacity:1}
+  .chart .vlbl{font-family:var(--mono);font-size:8.5px;color:var(--muted);height:11px;line-height:11px}
+  .chart .ruler{position:relative;height:16px;margin-top:7px;border-top:1px solid var(--line)}
+  .chart .tick{position:absolute;top:5px;font-family:var(--mono);font-size:9.5px;color:var(--muted);
+    transform:translateX(-1px)}
+  .chart .tick::before{content:"";position:absolute;top:-6px;left:0;width:1px;height:5px;background:var(--line)}
+  /* readiness gate */
+  .ready{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+  .light{width:54px;height:54px;border-radius:50%;flex:none;position:relative;
+    box-shadow:0 0 0 4px color-mix(in oklab,var(--rc),transparent 80%)}
+  .light.green{--rc:var(--ok-bright)} .light.amber{--rc:var(--warn)} .light.red{--rc:var(--danger)}
+  .light{background:var(--rc)}
+  .ready .rbody{flex:1;min-width:240px}
+  .ready .rv{font-family:var(--serif);font-weight:600;font-size:18px;text-transform:capitalize}
+  .ready .raction{font-size:14px;color:var(--text);margin-top:3px;line-height:1.5}
+  .ready .rwhy{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:6px}
+  .ready .rhrv{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:4px}
+  .ready .raisrc{font-family:var(--mono);font-size:10px;color:var(--accent);margin-top:5px;letter-spacing:.04em}
+  /* §3 status card — "lead with the verdict" (DESIGN.md Almanac). The bg swaps with the state. */
+  .statuscard{position:relative;overflow:hidden;border-radius:16px;padding:20px 22px;color:var(--onready);
+    background:linear-gradient(155deg,var(--readybg),var(--readybg2));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--readybg),transparent 60%)}
+  .statuscard.amber{background:linear-gradient(155deg,var(--readyamber),var(--readyamber2));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--readyamber),transparent 60%)}
+  .statuscard.red{background:linear-gradient(155deg,var(--readyred),var(--readyred2));
+    box-shadow:0 8px 22px color-mix(in oklab,var(--readyred),transparent 55%)}
+  .statuscard .sc-orb{position:absolute;border-radius:50%;background:color-mix(in oklab,var(--onready),transparent 91%);pointer-events:none}
+  .statuscard .sc-top{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative}
+  .statuscard .sc-eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;color:color-mix(in oklab,var(--onready),transparent 22%)}
+  .statuscard .sc-pill{display:inline-flex;align-items:center;gap:7px;background:color-mix(in oklab,var(--onready),transparent 84%);
+    border:1px solid color-mix(in oklab,var(--onready),transparent 72%);border-radius:999px;padding:4px 11px;
+    font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--onready)}
+  .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--onready);box-shadow:0 0 8px color-mix(in oklab,var(--onready),transparent 10%)}
+  .statuscard .sc-verdict{font-family:var(--serif);font-weight:600;font-size:23px;margin-top:14px;line-height:1.18;position:relative}
+  .statuscard .halt{font-weight:600;margin-top:10px;position:relative}
+  .statuscard .sc-foot{font-family:var(--mono);font-size:10.5px;color:color-mix(in oklab,var(--onready),transparent 18%);
+    margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in oklab,var(--onready),transparent 80%);position:relative;line-height:1.6;
+    display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
+  .statuscard .sc-fresh{font-family:var(--mono);font-size:10px;letter-spacing:.06em;
+    color:color-mix(in oklab,var(--onready),transparent 35%)}
+  .statuscard .sc-fresh:empty{display:none}
+  /* Past the nightly's own staleness window the chip stops being a footnote and says so. */
+  .statuscard .sc-fresh.stale{color:var(--onready);font-weight:600}
+  .statuscard .sc-fresh.stale::before{content:"⚠ "}
+  .statuscard .sc-wx{display:inline-flex;gap:12px;margin-left:auto}
+  .statuscard .sc-wx .wxc{display:inline-flex;align-items:center;gap:4px;color:color-mix(in oklab,var(--onready),transparent 8%)}
+  .statuscard .sc-wx .wxk{opacity:.6;font-size:9px;letter-spacing:.06em}
+  /* readiness ⨉ chronic-load, side by side (mockup Almanac) */
+  .rgrid{display:grid;grid-template-columns:1.45fr 1fr;gap:16px;align-items:stretch}
+  @media(max-width:760px){.rgrid{grid-template-columns:1fr}}
+  /* readiness + today's session share one surface tile (same bg as the load tile); the green
+     status card bleeds to the tile's top edges — top corners curved, bottom corners squared so
+     it reads as the tile's header, with the session in the body below. */
+  #readiness{background:linear-gradient(180deg,var(--surface),var(--surface-2));
+    border:1px solid var(--line);border-radius:14px;padding:20px;overflow:hidden}
+  #readiness .statuscard{margin:-20px -20px 0;border-radius:14px 14px 0 0;box-shadow:none}
+  .acwrcard{display:flex;flex-direction:column}
+  .acwrcard .acwr-title{font-family:var(--serif);font-weight:600;font-size:15px;margin-bottom:34px}
+  /* CTL ramp readout — the divider sits just under the ACWR explanation, then the ramp FILLS the
+     rest of the tile (flex:1) and vertically centres its readout in that lower half (so it isn't
+     crammed against the divider on a stretched tile) */
+  .acwrcard .acwr-foot{position:relative;overflow:hidden;margin-top:16px;flex:1;display:flex;
+    flex-direction:column;justify-content:center;min-height:84px;padding-top:16px;border-top:1px solid var(--line)}
+  .acwrcard .acwr-foot .acwr-foot-txt{position:relative;z-index:1}
+  .acwrcard .acwr-foot .k{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  .acwrcard .acwr-foot .v{display:block;font-family:var(--serif);font-weight:600;font-size:22px;line-height:1;margin-top:5px}
+  .acwrcard .acwr-foot .v small{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--muted)}
+  .acwrcard .acwr-foot .cap{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px}
+  /* A-race pill bar */
+  .objbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line);
+    border-radius:12px;padding:12px 16px;margin-bottom:22px;background:var(--surface)}
+  .objbar:empty{display:none}
+  .objbar .objlabel{flex-basis:100%;font-family:var(--mono);font-size:10px;letter-spacing:.18em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:-4px}
+  .objbar .arace{font-family:var(--mono);font-size:9px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--onacc);background:linear-gradient(135deg,var(--accent),var(--accent2,var(--accent)));
+    padding:3px 8px;border-radius:5px;white-space:nowrap}
+  .objbar .oname{font-family:var(--serif);font-weight:600;font-size:19px}
+  .objbar .owhen{font-family:var(--mono);font-size:11px;color:var(--accent)}
+  .objbar .overdict{margin-left:auto;font-size:12px;color:var(--muted)}
+  .checkin .cinote{flex:1;min-width:200px;font-family:var(--sans);font-size:13px;color:var(--text);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+  .halt{border:1px solid var(--danger);background:color-mix(in oklab,var(--danger),transparent 90%);
+    border-radius:10px;padding:10px 14px;margin-top:10px;color:var(--danger);font-size:13px;font-weight:500}
+  .checkin{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px;
+    border-top:1px solid var(--line);padding-top:14px}
+  .checkin label{font-family:var(--mono);font-size:10px;text-transform:uppercase;
+    letter-spacing:.1em;color:var(--muted)}
+  .checkin select{font-family:var(--sans);font-size:13px;color:var(--text);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+  /* Quiet at rest, loud only when it is actually saying something: an inactive medical control that
+     renders in the danger colour shouts every day nothing is wrong. Muted matches its ENERGY/SLEEP
+     siblings; the box itself still paints danger when ticked (accent-color inherits). */
+  .checkin .stop{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);
+    accent-color:var(--danger)}
+  .checkin .stop:has(:checked){color:var(--danger)}
+
+  /* training plan */
+  .objline{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 16px;margin-bottom:14px}
+  .objline .race{font-family:var(--serif);font-weight:600;font-size:20px}
+  .objline .away{font-family:var(--mono);font-size:11px;color:var(--accent)}
+  .feas{font-size:13px;color:var(--muted);line-height:1.5;margin:0 0 16px;
+    border-left:2px solid var(--accent);padding-left:12px}
+  .feas b{color:var(--text);font-weight:600}
+  /* §PRO — finish-time projection (the honesty valve: more runway → faster) + training-regime posture */
+  .finishcurve{display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;margin:-10px 0 16px;
+    padding-left:12px;font-size:12px;color:var(--muted)}
+  .fclabel{font-family:var(--serif);font-style:italic;color:var(--text)}
+  .fcpt b{font-family:var(--mono);color:var(--text);font-weight:600}
+  .fcpt.now b{color:var(--accent)}
+  .fcsep{opacity:.5}
+  .fcgain{font-family:var(--serif);font-style:italic;color:var(--accent);opacity:.9}
+  .fcstale{font-family:var(--serif);font-style:italic;color:var(--warn,#b45309);opacity:.95}
+  /* §PRO14 — plan-level staleness. Deliberately a BANNER, not the finish strip's inline chip: the
+     numbers a stale plan misreports are the weeks themselves, which is where the eye goes first. */
+  .stalebanner{margin:2px 0 12px;padding:10px 13px;border-radius:10px;font-size:12.5px;
+    line-height:1.5;border:1px solid color-mix(in oklab,var(--warn,#b45309),transparent 55%);
+    background:color-mix(in oklab,var(--warn,#b45309),transparent 92%);color:var(--text)}
+  .regimebar{display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;margin:2px 0 14px;
+    padding:9px 12px;border-radius:10px;font-size:12px;line-height:1.4;
+    border:1px solid var(--line);background:var(--surface2)}
+  .regimebar.assertive{border-color:color-mix(in oklab,var(--accent),transparent 55%);
+    background:color-mix(in oklab,var(--accent),transparent 92%)}
+  .rgbadge{font-family:var(--mono);font-weight:700;font-size:10.5px;letter-spacing:.04em;
+    text-transform:uppercase;color:var(--muted);white-space:nowrap}
+  .regimebar.assertive .rgbadge{color:var(--accent)}
+  .rgreason{color:var(--muted)}
+  .rgride{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--muted);text-align:right}
+  .phases{display:flex;gap:3px;margin:6px 0 4px;height:34px;border-radius:8px;overflow:hidden}
+  .phaseseg{display:flex;flex-direction:column;justify-content:center;align-items:center;
+    color:var(--text);font-family:var(--mono);font-size:9px;text-align:center;padding:0 4px;
+    background:color-mix(in oklab,var(--accent),var(--surface-2) var(--mix))}
+  .phaseseg b{font-size:10px}
+  /* the phase bar is a selector: each segment reveals its own phase's weeks below */
+  .phaseseg{cursor:pointer;opacity:.5;transition:opacity .15s,box-shadow .15s}
+  .phaseseg:hover{opacity:.8}
+  .phaseseg.active{opacity:1;box-shadow:inset 0 0 0 2px var(--accent)}
+  /* only the active phase's weeks are shown; the rest live behind their bar segment */
+  .phasepanel{display:none}
+  .phasepanel.active{display:block}
+  /* week strip — a second-level selector INSIDE a phase (echoes the phase bar): one segment per
+     week, only the selected week's detail is shown below, keeping the tile glanceable on load */
+  .weekstrip{display:flex;gap:3px;margin:10px 0 8px;border-radius:8px;overflow:hidden}
+  .weekseg{flex:1;display:flex;align-items:center;justify-content:center;gap:3px;min-width:30px;
+    font-family:var(--mono);font-size:10px;line-height:1;padding:6px 3px;cursor:pointer;
+    color:var(--text);background:color-mix(in oklab,var(--accent),var(--surface-2) 30%);
+    opacity:.5;transition:opacity .15s,box-shadow .15s}
+  .weekseg:hover{opacity:.8}
+  .weekseg.active{opacity:1;box-shadow:inset 0 0 0 2px var(--accent)}
+  .weekseg.wsdown{background:color-mix(in oklab,var(--muted),var(--surface-2) 35%)}  /* recovery (down) week */
+  .weekseg .wlock{font-size:8px;opacity:.8}
+  .weekdetail{display:none}
+  .weekdetail.active{display:block}
+  .zones{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+  .zone{font-family:var(--mono);font-size:11px;border:1px solid var(--line);border-radius:8px;
+    padding:5px 10px;color:var(--muted)}
+  .zone b{color:var(--accent);font-weight:500}
+  .zone.hl{border-color:var(--accent)}
+  /* §6q/#2 — multi-A race-chain strip: one row per A-race, projected CTL + per-race verdict */
+  .chainstrip{margin:10px 0 2px}
+  .chainrace{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:7px 0;
+    border-top:1px solid var(--line)}
+  .chainrace .crole{font-family:var(--mono);font-size:9px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);border:1px solid var(--line);border-radius:6px;padding:2px 6px}
+  .chainrace .cname{font-family:var(--serif);font-weight:600;font-size:15px}
+  .chainrace .cwhen{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .chainrace .cctl{font-family:var(--mono);font-size:11px;color:var(--text);margin-left:auto}
+  .chainrace .cverd{font-family:var(--mono);font-size:10px;border-radius:6px;padding:2px 7px;
+    border:1px solid var(--line);color:var(--muted)}
+  .chainrace .cverd.ok{color:var(--ok);border-color:var(--ok)}
+  .chainrace .cverd.warn{color:var(--warn);border-color:var(--warn)}
+  .wk{display:grid;grid-template-columns:30px 1fr auto;gap:12px;align-items:center;
+    padding:10px 0;border-top:1px solid var(--line)}
+  .wk .wn{font-family:var(--serif);font-weight:600;font-size:17px;color:var(--accent)}
+  .wk .wbody{min-width:0}
+  .wk .wkm{font-weight:600}
+  .wk .wintent{font-size:12px;color:var(--muted);margin-top:2px}
+  .wk .wsess{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:4px;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* session log — planned vs actual + reflections (the daily-workflow journal) */
+  .wsesslog{margin-top:5px;display:flex;flex-direction:column;gap:2px}
+  .sline{font-family:var(--mono);font-size:10.5px;color:var(--muted);display:flex;
+    align-items:baseline;gap:5px;flex-wrap:wrap}
+  .sline.stoday{color:var(--text)}
+  /* a completed session is clickable → opens that run's tile + route map */
+  .sline.sclick{cursor:pointer;border-radius:5px;padding:1px 4px;margin:0 -4px}
+  .sline.sclick:hover{background:color-mix(in oklab,var(--accent),transparent 88%);color:var(--text)}
+  .sline.sclick::after{content:"🗺";font-size:9px;opacity:0;margin-left:2px;transition:opacity .12s}
+  .sline.sclick:hover::after{opacity:.7}
+  /* §W1 — structured-workout instruction card (Today tile: always open; week rows: click the
+     session label to expand). Rides inside the flex .sline, wrapping onto its own full row. */
+  .strid{color:var(--accent);border-bottom:1px dotted var(--muted);cursor:help}
+  .wsi.wsx{cursor:pointer;border-bottom:1px dotted var(--muted)}
+  .wsi.wsx:hover,.wsi.wsx:focus{color:var(--text)}   /* UX-9: the ring stays — :focus-visible draws it */
+  .wsxc{display:inline-block;font-size:8px;opacity:.7;transition:transform .12s}
+  .wsi.wsx.open .wsxc{transform:rotate(90deg)}
+  .wcard{display:none;flex-basis:100%;margin:3px 0 5px 1.6em;padding:7px 9px;overflow-x:auto;
+    border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:10.5px;
+    color:var(--muted);background:color-mix(in oklab,var(--accent),transparent 96%)}
+  @media (max-width:760px){ .wcard{margin-left:0} }   /* phones: the week-row gutter is dead weight — the cue line carries the how-to; the table swipes */
+  .wcard.open{display:block}
+  .planned .wcard{margin-left:0;background:color-mix(in oklab,var(--card),transparent 20%)}
+  .wcue{color:var(--text);font-weight:600;margin-bottom:5px;line-height:1.5}
+  .wctbl-wrap{overflow-x:auto}
+  .wctbl{border-collapse:collapse;width:100%;white-space:nowrap}
+  .wctbl th{text-align:left;font-weight:600;color:var(--muted);padding:0 12px 3px 0;
+    font-size:9px;text-transform:uppercase;letter-spacing:.05em}
+  .wctbl td{padding:2px 12px 2px 0}
+  .wctbl td:first-child{color:var(--text)}
+  .wctot{margin-top:5px;border-top:1px solid var(--line);padding-top:4px}
+  /* §RB — the /runs explorer page: one document, two pages. The dashboard hides the run-browser
+     section; the runs page keeps ONLY the calendar + the activity tile (the shared viewer). */
+  #sec-runs{display:none}
+  body[data-page="runs"] #sec-runs{display:block}
+  body[data-page="runs"] .section:not(#sec-runs):not(#sec-recent),
+  body[data-page="runs"] #objbar, body[data-page="runs"] #firstrun, body[data-page="runs"] #dqbanner,
+  body[data-page="runs"] #syncBtn, body[data-page="runs"] #settingsBtn, body[data-page="runs"] #backfillBtn{display:none!important}
+  /* on phones the runs page is its own tab-less scroll — every section visible regardless of data-mtab */
+  body[data-page="runs"] #sec-recent{display:block!important}
+  .rcal-wrap{display:flex;gap:28px;flex-wrap:wrap;align-items:flex-start}
+  .rcal{flex:1 1 460px;max-width:560px}
+  .rcal-stats{flex:1 1 300px;min-width:280px;border-left:1px solid var(--line);padding-left:26px}
+  @media (max-width:820px){ .rcal-stats{border-left:0;padding-left:0} }
+  .rst-title{font-family:var(--serif);font-size:15px;font-weight:600;margin-bottom:8px}
+  .rst3{display:grid;grid-template-columns:minmax(72px,auto) repeat(3,minmax(52px,1fr));gap:10px;
+    align-items:baseline;padding:5px 0;font-size:12px;color:var(--muted);
+    border-bottom:1px solid color-mix(in oklab,var(--line),transparent 45%)}
+  .rst3:last-of-type{border-bottom:0}
+  .rst3 i{font-style:normal;font-size:13px;color:var(--text);font-weight:600;text-align:right;white-space:nowrap}
+  /* fixed unit slot (sized for TRIMP, empty when unitless) so the NUMBERS share one right edge */
+  .rst3 i small{display:inline-block;width:30px;margin-left:3px;text-align:left;
+    font-size:9px;color:var(--muted);font-weight:400}
+  .rst3-head i{font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px}
+  .rst-since{margin-top:7px;font-size:10.5px;color:var(--muted);text-align:right}
+  .rcal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .rcal-head b{font-family:var(--serif);font-size:16px;font-weight:600}
+  .rcal-nav{font:inherit;font-size:15px;line-height:1;padding:3px 11px;background:none;color:var(--muted);
+    border:1px solid var(--line);border-radius:8px;cursor:pointer}
+  .rcal-nav:hover:not(:disabled){color:var(--text);border-color:var(--muted)}
+  .rcal-nav:disabled{opacity:.35;cursor:default}
+  .rcal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+  .rcal-dow{font-family:var(--mono);font-size:9px;color:var(--muted);text-transform:uppercase;
+    letter-spacing:.05em;text-align:center;padding-bottom:1px}
+  .rcal-day{position:relative;min-height:40px;border:1px solid var(--line);border-radius:7px;
+    padding:3px 0 0 6px;font-family:var(--mono);font-size:10.5px;color:var(--muted);background:var(--surface)}
+  .rcal-day.blank{border:0;background:none}
+  .rcal-day.today{border-color:var(--accent)}
+  .rcal-day.has{cursor:pointer}
+  .rcal-day.has:hover{border-color:var(--muted);color:var(--text)}
+  .rcal-day.sel{background:color-mix(in oklab,var(--accent),transparent 90%);border-color:var(--accent);color:var(--text)}
+  .rcal-dots{position:absolute;left:6px;bottom:3px;display:flex;gap:3px;align-items:center}
+  .rcal-dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+  .rcal-tick{width:5px;height:5px;border-radius:2px;background:var(--line)}
+  .rcal-more{font-size:9px;color:var(--muted)}
+  .rcal-legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;font-family:var(--mono);
+    font-size:10px;color:var(--muted);align-items:center}
+  .rcal-legend .rcal-dot,.rcal-legend .rcal-tick{margin-right:4px;vertical-align:middle;display:inline-block}
+  .rcal-pop{position:absolute;z-index:40;top:100%;left:0;margin-top:4px;background:var(--surface);
+    border:1px solid var(--line);border-radius:10px;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.18);
+    display:flex;flex-direction:column;gap:5px;min-width:180px}
+  .rcal-day:nth-child(7n) .rcal-pop,.rcal-day:nth-child(7n-1) .rcal-pop{left:auto;right:0}
+  .rcal-chip{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;
+    color:var(--text);padding:5px 9px;border:1px solid var(--line);border-radius:999px;cursor:pointer;background:none}
+  .rcal-chip:hover{border-color:var(--accent)}
+  .backlatest{font-family:var(--sans);text-transform:none;letter-spacing:0;font-size:11px;
+    margin-left:4px;color:var(--accent)}
+  .smk{width:1em;display:inline-block;text-align:center;color:var(--line)}
+  .smk.done{color:var(--ok)} .smk.missed{color:var(--danger)} .smk.today{color:var(--accent)}
+  .smk.extra{color:var(--accent)}
+  .sline .splan.exu{font-style:italic;opacity:.8}
+  .sline .splan{color:var(--muted)} .sline.stoday .splan{color:var(--text)}
+  .sline .sact{color:var(--accent)}
+  .sline .sdate{color:var(--muted);opacity:.85;min-width:104px;display:inline-block}
+  /* §T2 — component chip: which of the four fitness components a session chiefly builds */
+  .scomp{font-family:var(--sans);font-size:9px;letter-spacing:.02em;color:var(--muted);
+    border:1px solid var(--line);border-radius:8px;padding:0 5px;line-height:14px;
+    white-space:nowrap;cursor:help}
+  .sline:hover .scomp,.wcur .scomp{color:var(--text);
+    border-color:color-mix(in oklab,var(--accent),transparent 60%)}
+  .srefl{flex-basis:100%;margin-left:1.4em;color:var(--muted);font-family:var(--sans);
+    font-size:11px;font-style:italic}
+  /* a double's per-run breakdown (the combined actual split into AM/PM, each map-linkable) */
+  .srun{flex-basis:100%;margin-left:1.4em;color:var(--muted);font-size:9.5px}
+  .srun .brkrun[data-act-id]{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+  .srun .brkrun[data-act-id]:hover{color:var(--text)}
+  .adjreply{margin-bottom:5px;color:var(--text);line-height:1.45}
+  .acbadge{font-family:var(--mono);font-size:10px;padding:3px 8px;border-radius:20px;white-space:nowrap}
+  .acbadge.lo{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 60%)}
+  .acbadge.mid{color:var(--warn);border:1px solid color-mix(in oklab,var(--warn),transparent 55%)}
+  /* Reusable click-to-open help affordance — a small "?" that pops an explanation bubble */
+  .qhint{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;flex:none;
+    margin-left:6px;border:1px solid var(--line);border-radius:50%;font-family:var(--mono);font-size:9px;
+    font-weight:700;color:var(--muted);cursor:pointer;vertical-align:middle;user-select:none;position:relative}
+  .qhint::before{content:"";position:absolute;inset:-5px}   /* UX-10: the 15px circle projects a 25px hit area */
+  .qhint:hover,.qhint:focus,.qhint.open{color:var(--text);border-color:var(--muted)}   /* UX-9: ring stays */
+  .qtip{display:none;position:fixed;z-index:200;padding:9px 11px;background:var(--surface);color:var(--text);
+    border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 34px rgba(0,0,0,.22);font-family:var(--sans);
+    font-size:11.5px;font-weight:400;line-height:1.45;letter-spacing:0;text-transform:none;text-align:left;white-space:normal}
+  .qhint.open .qtip{display:block}
+  .wk.wdown{opacity:.82}
+  .wk.wfrozen{opacity:.5}
+  .wk.wcur{border-top-color:var(--accent)}
+  .wk.wcur .wn{color:var(--accent)}
+  .wk .wlock{font-size:11px;margin-left:1px;opacity:.8}
+  .wsi.qs{color:var(--accent)}
+  .wfz{color:var(--ok);font-size:11px}
+  .phasehdr{font-family:var(--serif);font-weight:600;font-size:16px;margin:22px 0 2px;
+    display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+  /* objectives manager + re-plan diff */
+  .objs{display:flex;flex-direction:column;gap:7px;margin:6px 0 12px}
+  .obj{display:flex;align-items:center;gap:10px;font-size:13px;
+    border:1px solid var(--line);border-radius:9px;padding:8px 11px}
+  .obj .pr{font-family:var(--mono);font-size:10px;font-weight:600;width:18px;height:18px;
+    display:flex;align-items:center;justify-content:center;border-radius:5px;flex:none;
+    background:var(--accent);color:var(--onacc)}
+  .obj .pr.B,.obj .pr.C{background:var(--surface-2);color:var(--muted);border:1px solid var(--line)}
+  /* inline A|B|C priority selector (private console) — the selected letter is accented, the rest dim.
+     UX-10: no overflow clip on the wrapper — it would cut the segments' hit expansion back off;
+     the corner paint the clip used to guarantee lives on the end segments' own radii now */
+  .prsel{display:inline-flex;flex:none;border:1px solid var(--line);border-radius:6px}
+  .prseg{font-family:var(--mono);font-size:10px;font-weight:600;width:18px;height:18px;line-height:1;
+    display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;position:relative;
+    border-left:1px solid var(--line);background:var(--surface-2);color:var(--muted)}
+  .prseg::before{content:"";position:absolute;inset:-3px}   /* UX-10: 18px visual → 24px hit. The 3px
+    boundary strip between neighbours resolves to the later segment — the way a native segmented
+    control resolves a boundary tap; there is no dead spot and no visual change */
+  .prseg:first-child{border-left:none;border-top-left-radius:5px;border-bottom-left-radius:5px}
+  .prseg:last-child{border-top-right-radius:5px;border-bottom-right-radius:5px}
+  .prseg:hover:not(.on){background:var(--surface);color:var(--text)}
+  .prseg.on{background:var(--accent);color:var(--onacc);cursor:default}
+  .obj .od{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+  .obj .x{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:6px;
+    padding:2px 8px;font-size:11px;background:none}
+  .obj .x:hover{color:var(--danger);border-color:var(--danger)}
+  .obj.anchor{border-color:var(--accent)}
+  .addobj{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-bottom:6px}
+  .addobj input,.addobj select{font-family:var(--sans);font-size:12px;color:var(--text);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:6px 8px}
+  /* natural-language objective parse (LLM, §6c) */
+  .nlobj{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:10px 0 8px}
+  .nlobj input{font-family:var(--sans);font-size:12px;color:var(--text);min-width:240px;
+    background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:6px 8px}
+  #ao_parse{font-size:12px;padding:6px 11px;border:1px solid color-mix(in oklab,var(--accent),transparent 40%);
+    color:var(--accent);background:color-mix(in oklab,var(--accent),transparent 92%)}
+  #ao_parse:hover{border-color:var(--accent)}
+  .nlinterp{font-size:11.5px;color:var(--muted);flex-basis:100%}
+  .nlinterp.guess{color:var(--warn)} .nlinterp.err{color:var(--danger)}
+  /* multi-objective conflict adjudication (LLM advises, engine periodizes, §6c) */
+  .conflictrow{margin:10px 0}
+  #adjBtn{font-size:12px;padding:6px 11px;border:1px solid color-mix(in oklab,var(--warn),transparent 40%);
+    color:var(--warn);background:color-mix(in oklab,var(--warn),transparent 90%)}
+  #adjBtn:hover{border-color:var(--warn)}
+  .adjudbox{border:1px solid var(--line);border-radius:12px;padding:13px 16px;margin-top:10px;
+    background:color-mix(in oklab,var(--warn),transparent 95%)}
+  .adjudbox .exh{font-family:var(--serif);font-weight:600;font-size:14px;margin-bottom:8px}
+  .adjudbox .expts{margin:0;padding-left:18px;font-size:13px;line-height:1.5}
+  .adjudbox .expts li{margin-bottom:8px}
+  .adjudbox .exfoot{font-family:var(--mono);font-size:9.5px;color:var(--muted);margin-top:8px;opacity:.7}
+  /* qualitative adjustment (LLM proposes, engine clamps, §6c) */
+  .adjbox,.adjmed{border-radius:10px;padding:11px 14px;margin:12px 0;font-size:13px;line-height:1.5}
+  .adjbox{border:1px solid var(--accent);background:color-mix(in oklab,var(--accent),transparent 92%)}
+  .adjmed{border:1px solid var(--danger);background:color-mix(in oklab,var(--danger),transparent 88%)}
+  .adjh{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent)}
+  .adjmed .adjh{color:var(--danger)}
+  .adjmeta{color:var(--muted);font-size:12px;margin-top:4px}
+  .adjhint{color:var(--muted);font-size:11px;line-height:1.4;margin-top:5px}
+  .adjhint b{color:var(--text);font-weight:600}
+  .gradnote{margin:6px 0 2px;padding:8px 11px;border-radius:9px;font-size:12px;line-height:1.45;
+    color:var(--text);border:1px solid color-mix(in oklab,var(--ok),transparent 60%);
+    background:color-mix(in oklab,var(--ok),transparent 90%)}
+  .adjclamp{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:5px}
+  .adjclamp.err{color:var(--danger)}
+  .adjask{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin:12px 0 4px}
+  .adjask input{flex:1;min-width:240px;font-family:var(--sans);font-size:12px;color:var(--text);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:7px;padding:6px 8px}
+  #adj_propose{font-size:12px;padding:6px 11px;border:1px solid color-mix(in oklab,var(--accent),transparent 40%);
+    color:var(--accent);background:color-mix(in oklab,var(--accent),transparent 92%)}
+  #adj_propose:hover{border-color:var(--accent)}
+  .adjpreview{flex-basis:100%}
+  .adjprop{border:1px dashed var(--line);border-radius:9px;padding:9px 12px;font-size:12.5px;margin-top:4px}
+  .eased{color:var(--accent);font-size:11px}
+  /* plan explanation (LLM narrates the engine's numbers, §6c) */
+  .explainrow{margin:12px 0 0}
+  #explainBtn{font-size:12px;padding:6px 11px;border:1px solid color-mix(in oklab,var(--accent),transparent 40%);
+    color:var(--accent);background:color-mix(in oklab,var(--accent),transparent 92%)}
+  #explainBtn:hover{border-color:var(--accent)}
+  .explainbox{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-top:10px;
+    background:color-mix(in oklab,var(--accent),transparent 95%)}
+  .explainbox .exh{font-family:var(--serif);font-weight:600;font-size:15px;margin-bottom:8px}
+  .explainbox .expts{margin:0;padding-left:18px;font-size:13px;line-height:1.6}
+  .explainbox .exchange{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);font-size:12.5px}
+  .explainbox .exfoot{font-family:var(--mono);font-size:9.5px;color:var(--muted);margin-top:9px;opacity:.7}
+  .diff{border:1px solid var(--accent);border-radius:10px;padding:11px 14px;margin:12px 0;
+    background:color-mix(in oklab,var(--accent),transparent 92%)}
+  .diff .dh{font-family:var(--mono);font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:.1em}
+  .diff ul{margin:6px 0 0;padding-left:18px;font-size:13px}
+  .diff li{margin:2px 0}
+
+  /* Chart axis labels — HTML over the chart rather than <text> inside it.
+     .ff and .drift stretch with preserveAspectRatio="none" so the trace fills the box at any width;
+     that same stretch squeezed 9px SVG type to about 3px wide on a phone. The layer covers the chart
+     exactly — its parent (#ffchart, .driftwrap) is the positioned box the SVG fills — `left` is a
+     percentage of the width, and `top` is the label's old SVG baseline: the -7px lifts an HTML line
+     box so its baseline lands there (9px/1 mono ⇒ ascent ≈ 7px). */
+  .axlbl{position:absolute;inset:0;pointer-events:none}
+  .axlbl .ax{position:absolute;font-family:var(--mono);font-size:9px;line-height:1;
+    color:var(--muted);white-space:nowrap;transform:translateY(-7px)}
+  .axlbl .ax.mid{transform:translate(-50%,-7px)}
+  .axlbl .ax.hide{display:none}          /* thinAxis(): a tick that would collide isn't drawn */
+  /* A y-axis VALUE label sits in the gutter the chart reserves for it (mkChart's padL) — but that
+     gutter is viewBox units, so it narrows with the box while the type, now, does not: measured at
+     390px, "1402 km" is 35px of type over an 11px gutter and lands on the trace. Squeezing used to
+     hide that by making the label illegible, which is not a fix. A halo in the surface colour keeps
+     it readable where it overlaps and paints nothing where it already fits. */
+  .axlbl .ax:not(.x){text-shadow:0 0 3px var(--surface),0 0 2px var(--surface),0 0 1px var(--surface)}
+
+  /* fitness/fatigue trend (reconstructed by the projector). These charts (.ff, and .drift below)
+     stretch with preserveAspectRatio="none" — so every stroke also carries vector-effect:
+     non-scaling-stroke, DESIGN.md's trend-chart spec ("keep strokes thin"); without it a stroke's
+     width is whatever the box's width says. Deferred from UX-8: it moves trace pixels, which that
+     change promised not to touch (UX-11) */
+  .ff{width:100%;height:200px;display:block;overflow:visible}
+  .ff .ctl{fill:none;stroke:var(--accent);stroke-width:2;vector-effect:non-scaling-stroke}
+  .ff .atl{fill:none;stroke:var(--muted);stroke-width:1.5;stroke-dasharray:4 3;vector-effect:non-scaling-stroke}
+  .ff .zero{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke}
+  .legend{display:flex;gap:18px;margin-bottom:10px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .legend i{display:inline-block;width:14px;height:0;border-top:2px solid currentColor;vertical-align:middle;margin-right:6px}
+  .legend .ctl{color:var(--accent)} .legend .atl{color:var(--muted)}
+  .valid{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:10px}
+  .valid b{color:var(--ok)}
+  .ff{cursor:crosshair}
+  .ff .cross{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:.7;vector-effect:non-scaling-stroke}
+  .ffdot{stroke:var(--bg);stroke-width:1.5;vector-effect:non-scaling-stroke}
+  .ffdot.ctl{fill:var(--accent)} .ffdot.atl{fill:var(--muted)}
+  #ffchart{position:relative}
+  .fftip{position:absolute;top:0;pointer-events:none;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:11px;
+    display:flex;flex-direction:column;gap:1px;z-index:3;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .fftip b{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:2px}
+  .fftip .t-ctl{color:var(--accent);font-weight:600}
+  .fftip .t-atl{color:var(--text)}
+
+  /* effort discipline (§6m) — are your easy days actually easy? */
+  .effort-head{display:flex;gap:18px;align-items:center;margin-bottom:14px}
+  .effort-score{font-family:var(--serif);font-weight:600;font-size:46px;line-height:1;flex:none}
+  .effort-score .pct{font-size:20px;opacity:.7}
+  .effort-cap .big{font-family:var(--serif);font-size:16px;margin-bottom:3px}
+  .effort-cap .muted{font-size:12px;line-height:1.5}
+  table.efftbl{border-collapse:collapse;width:100%;font-size:12.5px}
+  table.efftbl th{text-align:left;font-family:var(--mono);font-size:9px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);padding:4px 8px;border-bottom:1px solid var(--line)}
+  table.efftbl td{padding:5px 8px;border-bottom:1px solid var(--line)}
+  .efftbl-rot{display:none}   /* phone-only "rotate for the secondary columns" hint; shown in the ≤760px block */
+  /* plan drift — the original road vs the road as it stands (§6b made visible) */
+  /* scorecard — the four series synthesized into one 'who's winning' verdict (§6j) */
+  .scorecard{border:1px solid var(--line);border-radius:12px;padding:15px 18px;margin-bottom:22px;
+    background:linear-gradient(180deg,var(--surface),var(--surface-2))}
+  .scorecard .sc-head{font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;text-transform:uppercase;
+    color:var(--muted);margin-bottom:12px}
+  .scorecard .sc-rows{display:flex;flex-wrap:wrap;gap:8px 26px;margin-bottom:13px}
+  .scorecard .sc-row{display:flex;flex-direction:column;gap:2px;min-width:150px}
+  .scorecard .sc-k{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .scorecard .sc-v{font-family:var(--serif);font-weight:600;font-size:16px;line-height:1.15}
+  .scorecard .sc-v.ahead{color:var(--ok)} .scorecard .sc-v.behind{color:var(--danger)}
+  .scorecard .sc-v.level,.scorecard .sc-v.unknown{color:var(--muted)}
+  .scorecard .sc-v .sub{font-family:var(--mono);font-size:9.5px;font-weight:400;color:var(--muted);letter-spacing:0}
+  .scorecard .sc-verdict{font-family:var(--serif);font-size:14.5px;line-height:1.45;color:var(--text);
+    padding-top:11px;border-top:1px solid var(--line)}
+  .scorecard .sc-verdict .wks{font-family:var(--mono);font-size:10px;color:var(--muted)}
+  /* §6q/#3 — per-peak chain drift rows (multi-A only) */
+  .scorecard .sc-chain{margin:2px 0 13px;padding:11px 0 1px;border-top:1px dashed var(--line)}
+  .scorecard .sc-crow{display:flex;align-items:baseline;gap:8px;padding:3px 0}
+  .scorecard .sc-crow .sc-cname{font-family:var(--serif);font-weight:600;font-size:13.5px}
+  .scorecard .sc-crow .sc-cwhen{font-family:var(--mono);font-size:9.5px;color:var(--muted)}
+  .scorecard .sc-crow .sc-cv{font-family:var(--mono);font-size:11px;margin-left:auto}
+  .scorecard .sc-crow .sc-cv.ahead{color:var(--ok)} .scorecard .sc-crow .sc-cv.behind{color:var(--danger)}
+  .scorecard .sc-crow .sc-cv.level,.scorecard .sc-crow .sc-cv.unknown{color:var(--muted)}
+  .scorecard .sc-crow .sc-cv .sub{font-size:9px;letter-spacing:.04em}
+  .driftcap{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:20px;line-height:1.5}
+  .driftcap .warn{color:var(--warn)}
+  .driftblock{margin-bottom:26px} .driftblock:last-child{margin-bottom:0}
+  .driftblock h3{font-family:var(--serif);font-size:15px;font-weight:600;margin:0 0 2px}
+  .driftblock .note{font-size:11.5px;color:var(--muted);margin:0 0 9px;max-width:62ch}
+  .driftwrap{position:relative}
+  .drift{width:100%;height:170px;display:block;overflow:visible;cursor:crosshair}
+  .driftseg{display:inline-flex;gap:2px;margin:0 0 14px;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .driftseg button{font:inherit;font-size:12px;padding:5px 12px;background:transparent;color:var(--muted);border:0;cursor:pointer}
+  .driftseg button.on{background:var(--accent);color:#fff}
+  .driftcaveat{background:color-mix(in oklab,var(--accent2, var(--accent)),transparent 90%);border-left:3px solid var(--accent2, var(--accent));padding:8px 12px;border-radius:6px;margin-bottom:18px}
+  .cfout{font-size:13px;line-height:1.9}.cfout .k{font-weight:600}
+  .drift .dl.cf{stroke:var(--accent2, var(--accent))}
+  .drift .dl{fill:none;stroke-width:2;vector-effect:non-scaling-stroke}
+  .drift .dl.init{stroke:var(--muted);stroke-width:1.5}
+  .drift .dl.actual{stroke:var(--accent)}
+  .drift .dl.proj{stroke:var(--accent)}
+  .drift .grid{stroke:var(--line);stroke-width:1;opacity:.45;vector-effect:non-scaling-stroke}
+  .drift .now{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3;opacity:.65;vector-effect:non-scaling-stroke}
+  .drift .cross{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 3;opacity:.7;vector-effect:non-scaling-stroke}
+  .drift .ddot{stroke:var(--bg);stroke-width:1.5;fill:var(--accent);vector-effect:non-scaling-stroke}
+  .drifttip{position:absolute;top:0;pointer-events:none;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:11px;
+    display:none;flex-direction:column;gap:1px;z-index:3;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .drifttip b{font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:2px}
+
+  /* health markers — small multiples */
+  .hgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:760px){.hgrid{grid-template-columns:1fr}}
+  .hcard{background:linear-gradient(180deg,var(--surface),var(--surface-2));
+    border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .hcard .hk{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .hcard .hv{font-family:var(--serif);font-weight:600;font-size:24px;margin-top:3px}
+  .hcard .hv small{font-size:12px;color:var(--muted);font-family:var(--sans);font-weight:400}
+  .hcard .hv .flag{font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:20px;margin-left:6px;vertical-align:middle}
+  .flag.ok{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 60%)}
+  .flag.bad{color:var(--danger);border:1px solid color-mix(in oklab,var(--danger),transparent 55%)}
+  .hcard svg{display:block;width:100%;height:54px;margin-top:8px;overflow:visible}
+  .spark{fill:none;stroke:var(--accent);stroke-width:2}
+  .sparkdot{fill:var(--accent)}
+  .refband{fill:color-mix(in oklab,var(--ok),transparent 86%)}
+  .refline{stroke:color-mix(in oklab,var(--ok),transparent 45%);stroke-width:1;stroke-dasharray:3 3}
+  .hhead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+  /* Segmented control: ONE continuous outline on the wrapper; the buttons are borderless segments
+     split by divider lines, so the selected state can tint its segment without breaking the
+     outline's continuity. UX-10: the end buttons carry the corner radii now — an overflow clip
+     would cut off their hit expansion. */
+  .hrange{display:flex;flex:none;border:1px solid var(--line);border-radius:7px}
+  .hrange button{font-family:var(--mono);font-size:9px;letter-spacing:.06em;color:var(--muted);
+    background:none;border:none;border-radius:0;padding:2px 7px;cursor:pointer;line-height:1.4;position:relative}
+  .hrange button::before{content:"";position:absolute;left:0;right:0;top:-4px;bottom:-4px}   /* UX-10:
+    the ~17px-tall buttons project a ~25px hit area; widths already clear the floor */
+  .hrange button:first-child{border-top-left-radius:6px;border-bottom-left-radius:6px}
+  .hrange button:last-child{border-top-right-radius:6px;border-bottom-right-radius:6px}
+  .hrange button+button{border-left:1px solid var(--line)}
+  .hrange button.on{color:var(--accent);
+    background:color-mix(in oklab,var(--accent),transparent 90%)}
+  .hchart{position:relative}
+  .htip{position:absolute;top:-4px;pointer-events:none;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:8px;padding:4px 8px;font-family:var(--mono);
+    font-size:10px;white-space:nowrap;display:none;z-index:3;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+  .htip b{color:var(--muted);font-weight:400;margin-right:6px}
+  .hcrossln{stroke:var(--muted);stroke-width:1;stroke-dasharray:2 3}
+  .hcrossdot{fill:var(--accent);stroke:var(--bg);stroke-width:1.5}
+  .hform{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:14px}
+  .hform select,.hform input{font-family:var(--sans);font-size:13px;color:var(--text);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
+  .hform input{width:110px}
+  /* Settings panel — one labelled row per setting, full-width inputs/textarea */
+  .setform{display:flex;flex-direction:column;gap:16px;margin-top:6px}
+  .setrow label{display:block;font-size:13px;font-weight:600;margin-bottom:4px}
+  .setrow .src{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--muted);font-weight:400;margin-left:8px}
+  .setrow input,.setrow textarea{width:100%;box-sizing:border-box;font-family:var(--sans);
+    font-size:13px;color:var(--text);background:var(--surface-2);border:1px solid var(--line);
+    border-radius:8px;padding:8px 10px}
+  .setrow textarea{min-height:64px;resize:vertical;line-height:1.5}
+  .setrow .help{font-size:11px;color:var(--muted);margin-top:4px;line-height:1.5}
+  .setrow .err{color:var(--danger);font-size:11px;margin-top:4px}
+  .setbar{display:flex;align-items:center;gap:12px;margin-top:4px}
+  .setbar .ok{color:var(--accent);font-size:12px}
+  /* Settings — keys block (write-only secrets: status shown, value never echoed) */
+  .secblock{display:flex;flex-direction:column;gap:16px;margin:6px 0 18px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+  .sectitle{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .setrow .src.ok{color:var(--ok)}
+  .setrow .src.warn{color:var(--warn)}
+  .setrow .src.bad{color:var(--danger)}
+  .secinput{display:flex;gap:8px;align-items:center}
+  .secinput input{flex:1}
+  #secretsBox:not(:empty){padding:20px 22px 0}  /* match #settings/modal-head inset so the keys block isn't flush-left */
+  /* Settings modal — native <dialog>, centered, backdrop-dimmed */
+  dialog.modal{border:none;border-radius:16px;padding:0;width:min(680px,94vw);max-height:86vh;
+    background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
+  /* flex ONLY when open — a bare display: on a dialog overrides the UA dialog:not([open]){display:none},
+     so a closed dialog would render in-flow (the panel-at-the-bottom bug). Scope it to [open]. */
+  dialog.modal[open]{display:flex;flex-direction:column}
+  dialog.modal::backdrop{background:rgba(0,0,0,.55);backdrop-filter:blur(2px)}
+  .modal-head{flex:none;display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:18px 22px;border-bottom:1px solid var(--line);background:var(--surface)}
+  .modal-head h2{margin:0}
+  .modal-x{background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;
+    line-height:1;padding:4px 8px;border-radius:8px}
+  .modal-x:hover{color:var(--text);background:var(--surface-2)}
+  /* ONE scroll region for the whole dialog body (secrets + settings together): with the §SG key
+     rows the secrets box alone can exceed 86vh, which collapsed the old #settings-only scroller
+     to zero height — nothing scrolled and everything below the keys was unreachable. */
+  .modal-body{overflow:auto;flex:1 1 auto;min-height:0}
+  #settings{padding:20px 22px}
+  /* Weather city picker — chips + typeahead, replaces the raw lat/lon string */
+  .wxchips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}
+  .wxchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);
+    border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;font-size:13px}
+  .wxchip b{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--muted)}
+  .wxchip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;
+    line-height:1;padding:0 2px;border-radius:6px}
+  .wxchip button:hover{color:var(--danger)}
+  .wxsearchrow{display:flex;gap:8px}
+  .wxsearchrow input{flex:1}
+  .wxresults{list-style:none;margin:6px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;
+    overflow:hidden}
+  .wxresults:empty{display:none}
+  .wxresults li{padding:8px 11px;cursor:pointer;font-size:13px;border-top:1px solid var(--line)}
+  .wxresults li:first-child{border-top:none}
+  .wxresults li:hover{background:var(--surface-2)}
+  .wxresults .sub{color:var(--muted);font-size:11px}
+  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
+  .empty{color:var(--muted);font-style:italic;padding:8px 0}
+  .tilefail{font-style:normal}
+  .tilefail .tf-retry{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);font-style:normal}
+  button.primary.err{background:var(--danger);border-color:var(--danger)}
+  footer{margin-top:48px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--muted);text-align:center;
+    display:flex;flex-direction:column;align-items:center;gap:13px}
+  /* Runalyze attribution — the wordmark inherits currentColor (var(--text)) so it adapts per theme;
+     the brand icon keeps its colours. Subtle by default, full-strength on hover. */
+  .ralink{display:inline-flex;align-items:center;gap:8px;color:var(--text);text-decoration:none;
+    opacity:.65;transition:opacity .15s}
+  .ralink:hover{opacity:1}
+  .ralink svg{height:15px;width:auto;display:block}
+  /* ── Mobile app shell (≤760px): a fixed bottom tab bar + one section-group per tab, so the phone
+     reads as an app (thumb navigation) instead of an endless-scroll page. Purely additive — above the
+     breakpoint .mobnav stays hidden and the full single-page desktop stack is untouched. Each content
+     block carries data-mtab="<tab>"; the active tab lives on <body data-mtab>; nav buttons use data-goto
+     so they're never caught by the view-toggle. ─────────────────────────────────────────────────── */
+  .mobnav{display:none}
+  @media(max-width:760px){
+    html{-webkit-text-size-adjust:100%}
+    body{overscroll-behavior-y:none}                 /* no rubber-band that exposes "this is a webpage" */
+    /* top strip: hub link (left) + theme swatches / read-only / login (right) — one in-flow row so the
+       fixed-overlay versions stop colliding with the brand eyebrow on a narrow screen */
+    .topbar{position:static;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 15px 2px}
+    .hublink,.topctl{position:static;top:auto;left:auto;right:auto}
+    .topctl{margin-left:auto}
+    .wrap{padding:8px 15px calc(82px + max(env(safe-area-inset-bottom),22px))}   /* top tight (topbar owns it); bottom clears the fixed nav + a home-indicator buffer */
+    /* compact app-bar */
+    header{flex-wrap:wrap;gap:10px;margin-bottom:16px;padding-bottom:12px}
+    h1{font-size:22px}
+    .motto{display:none}
+    .bar{margin-left:auto;gap:8px}
+    .bar .primary,.bar .ghost{font-size:12px;padding:7px 11px}
+    #backfillBtn{display:none}                        /* rare one-time admin op — desktop only */
+    /* UX-11 — the profile hint's 320px reserve (for the absolute legend) would crush it to a
+       sliver here; the legend simply wraps below the hint instead */
+    .profhint{padding-right:0}
+    .profmeta{position:static;display:flex;flex-wrap:wrap;justify-content:flex-end;margin-top:3px}
+    /* show only the active tab's blocks (id selectors like #tiles outrank a plain class, so force it) */
+    body[data-mtab="today"]   [data-mtab]:not([data-mtab~="today"]),
+    body[data-mtab="plan"]    [data-mtab]:not([data-mtab~="plan"]),
+    body[data-mtab="fitness"] [data-mtab]:not([data-mtab~="fitness"]),
+    body[data-mtab="body"]    [data-mtab]:not([data-mtab~="body"]){display:none!important}
+    /* effort table on a phone: hide the two engine-flagged secondary columns (GAP, TE) so HR + verdict
+       stay on screen without scrolling or cramming; landscape/desktop bring them back */
+    table.efftbl{font-size:11.5px}
+    .efftbl th,.efftbl td{white-space:nowrap;padding:5px 6px}
+    .efftbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}   /* landscape: scroll the full 8 cols if they exceed the width */
+    .efftbl-rot{margin-top:7px;font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted)}
+    /* bottom tab bar */
+    .mobnav{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;position:fixed;left:0;right:0;bottom:0;z-index:50;
+      background:color-mix(in oklab,var(--surface),transparent 6%);border-top:1px solid var(--line);
+      backdrop-filter:saturate(1.4) blur(12px);-webkit-backdrop-filter:saturate(1.4) blur(12px);
+      padding-bottom:max(env(safe-area-inset-bottom),22px);user-select:none;-webkit-user-select:none}
+    .mnav-btn{appearance:none;-webkit-appearance:none;background:none;border:0;cursor:pointer;
+      display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+      padding:8px 0 7px;min-height:54px;color:var(--muted);-webkit-tap-highlight-color:transparent;
+      -webkit-touch-callout:none;font-family:var(--mono);font-size:10px;letter-spacing:.04em}
+    .mnav-btn svg{width:23px;height:23px;fill:none;stroke:currentColor;stroke-width:1.7;
+      stroke-linecap:round;stroke-linejoin:round}
+    .mnav-btn[aria-current="page"]{color:var(--accent)}
+  }
+  /* Effort table column trim is gated on PORTRAIT, not width — some mobile browsers (Orion) keep a
+     <=760px CSS viewport even in landscape, so a width-only rule would never reveal the hidden columns.
+     Tying it to orientation makes "rotate to landscape" actually true: portrait hides GAP/TE/feel +
+     shows the hint; any landscape brings all 8 back (the .efftbl-wrap scrolls if they don't fit). */
+  @media(max-width:760px) and (orientation:portrait){
+    .efftbl .col-sec,.efftbl .hrpct{display:none}
+    .efftbl-rot{display:block}
+  }
+
+  /* ====================================================================== */

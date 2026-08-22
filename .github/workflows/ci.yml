@@ -31,6 +31,13 @@ jobs:
         run: |
           python -m py_compile SparingHorse.py sh_selftest.py
 
+      - name: The front end parses
+        run: |
+          # Only possible since TECH-11 moved the SPA out of a Python string literal: until then a
+          # syntax error in 2,600 lines of application JavaScript could only be found by loading the
+          # page in a browser and noticing that nothing worked.
+          node --check static/app.js
+
       - name: Seed a synthetic database
         run: SH_DB="$RUNNER_TEMP/ci.db" python SparingHorse.py seed
 

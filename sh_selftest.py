@@ -174,8 +174,14 @@ def _stc_mobile_nav():
                 # the tab must own content: data-mtab="t" or a space-joined group like "today plan"
                 if not S.re.search(rf'data-mtab="(?:[a-z ]*\b{t}\b[a-z ]*)"', doc):
                     fail.append(f"{tg}: tab '{t}' has no content block")
-            if "history.replaceState" not in doc:
-                fail.append(f"{tg}: deep-link/tab-restore wiring missing")
+            # The markup checks above read the SERVED document; the wiring is script, and since
+            # TECH-11 the script is a file the browser fetches rather than part of that document —
+            # so this tooth reads app.js. (The served shell must still point AT it, hence the tag
+            # check: a page that never loads the script has no wiring either, however good the file.)
+            if "history.replaceState" not in S.APP_JS:
+                fail.append(f"{tg}: deep-link/tab-restore wiring missing from app.js")
+            if '/static/app.js' not in doc:
+                fail.append(f"{tg}: the served page does not load /static/app.js")
     finally:
         S.READONLY = saved
     return _st("det", "mobile-nav",
@@ -334,15 +340,15 @@ def _stcss_gradient_stops(rule_body):
 
 def _stc_readiness_contrast():
     fail, report = [], {}
-    root = _stcss_decls(_stcss_rule(S.INDEX_HTML, ":root"))
-    base = _stcss_decls(_stcss_rule(S.INDEX_HTML, ".statuscard"))
-    foot = _stcss_decls(_stcss_rule(S.INDEX_HTML, ".statuscard .sc-foot"))
-    states = {"green": base, "amber": _stcss_decls(_stcss_rule(S.INDEX_HTML, ".statuscard.amber")),
-              "red": _stcss_decls(_stcss_rule(S.INDEX_HTML, ".statuscard.red"))}
+    root = _stcss_decls(_stcss_rule(S.APP_CSS, ":root"))
+    base = _stcss_decls(_stcss_rule(S.APP_CSS, ".statuscard"))
+    foot = _stcss_decls(_stcss_rule(S.APP_CSS, ".statuscard .sc-foot"))
+    states = {"green": base, "amber": _stcss_decls(_stcss_rule(S.APP_CSS, ".statuscard.amber")),
+              "red": _stcss_decls(_stcss_rule(S.APP_CSS, ".statuscard.red"))}
     if not base.get("color"):
         fail.append(".statuscard base rule missing a text color")
     for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]'), ("aurora", '[data-theme="aurora"]')):
-        props = {**root, **_stcss_decls(_stcss_rule(S.INDEX_HTML, sel))}
+        props = {**root, **_stcss_decls(_stcss_rule(S.APP_CSS, sel))}
         try:
             ink, ink_a = _stcss_color(base["color"], props)
             foot_c, foot_a = _stcss_color(foot["color"], props)
@@ -6793,29 +6799,38 @@ def _stc_error_shape():
 
 
 def _stc_accent2_fallback():
-    """UX-5a (0.27.2) — no bare var(--accent2) outside the polychrome trial overlay. The overlay is
-    marked 'remove this whole block to revert'; Daylight/Charcoal define --accent2 ONLY inside it, so a
-    bare reference outside would go invalid-at-computed-value the day the block is pulled (the drift
-    caveat loses its tint, the chain-fit line its stroke, the drift JS its series colour). Every
-    outside use must carry the `var(--accent2, var(--accent))` fallback DESIGN.md promises."""
+    """UX-5a → UX-5b — every `var(--accent2)` carries a fallback, everywhere, because only ONE theme
+    defines it.
+
+    The polychrome trial overlay was REMOVED on the owner's word (UX-5b, PROJECT_LOG §75). It was the
+    only place Daylight and Charcoal ever defined --accent2/3/4, so what used to be "no bare reference
+    OUTSIDE the overlay" is now simply "no bare reference": Aurora still declares --accent2 as part of
+    its own palette (violet → cyan is that theme's identity), and in the other two the fallback to
+    --accent is what paints. A bare use would go invalid-at-computed-value in two themes out of three —
+    the drift caveat losing its tint, the chain-fit line its stroke, the tile top-rule its gradient.
+
+    --accent3 and --accent4 left with the overlay and must not come back without a definition: a
+    reference to a token no theme declares paints nothing, silently."""
     fails = []
-    banner = S.INDEX_HTML.index("SQUARE POLYCHROME PALETTE")
-    overlay_end = S.INDEX_HTML.index("</style>", banner)
-    for m in S.re.finditer(r"var\(\s*--accent2\s*\)", S.INDEX_HTML):
-        if not (banner <= m.start() < overlay_end):
-            line = S.INDEX_HTML.count("\n", 0, m.start()) + 1
-            fails.append(f"bare var(--accent2) outside the overlay (line {line})")
+    for m in S.re.finditer(r"var\(\s*--accent2\s*\)", S.APP_CSS):
+        fails.append(f"bare var(--accent2) at app.css line {S.APP_CSS.count(chr(10), 0, m.start()) + 1}")
+    for m in S.re.finditer(r"var\(\s*--accent2\s*\)", S.APP_JS):
+        fails.append(f"bare var(--accent2) at app.js line {S.APP_JS.count(chr(10), 0, m.start()) + 1}")
     for needle, label in ((".driftcaveat", "drift caveat rule"),
                           (".drift .dl.cf", "chain-fit line rule")):
-        body = _stcss_rule(S.INDEX_HTML, needle)
+        body = _stcss_rule(S.APP_CSS, needle)
         if "var(--accent2, var(--accent))" not in body:
             fails.append(f"{label} lacks the var(--accent2, var(--accent)) fallback")
+    for tok in ("--accent3", "--accent4"):
+        if tok in S.APP_CSS or tok in S.APP_JS:
+            fails.append(f"{tok} is referenced again but no theme defines it — it paints nothing")
+    if "SQUARE POLYCHROME PALETTE" in S.APP_CSS:
+        fails.append("the polychrome overlay is back in the stylesheet (UX-5b removed it deliberately)")
     return _st("det", "accent2-fallback",
-               "no bare var(--accent2) outside the removable polychrome overlay — every outside use "
-               "carries var(--accent2, var(--accent)) (Daylight/Charcoal define --accent2 only in the overlay)",
-               passed=not fails, expect="0 bare uses outside the overlay; drift rules carry the fallback",
+               "every var(--accent2) carries var(--accent2, var(--accent)) — only Aurora defines the "
+               "token, so a bare use paints nothing in the other two themes; --accent3/4 stay retired",
+               passed=not fails, expect="0 bare uses; drift rules carry the fallback; no accent3/4",
                got={"violations": fails or "none"})
-
 
 def _stc_api_validation(db):
     """0.26.3 — the write endpoints reject junk at the door, and a write whose re-plan fails is never
@@ -6947,20 +6962,20 @@ def _stc_copy_posture(db):
     if "runner" not in desc or _re.search(r"\b(him|his|he)\b", desc):
         fails.append(f"(b) reply schema is owner-addressed: {desc!r}")
     # (c) — the SPA's ACWR copy and the regime badge.
-    low = S.INDEX_HTML.lower()
+    low = S.UI_SOURCE.lower()
     for phrase in ("sweet spot", "injury risk", "safe ceiling", "stay in the green band",
                    "you're detraining"):
         if phrase in low:
             fails.append(f"(c) SPA still says {phrase!r}")
-    if f"hard cap {S.ACWR_HARD:.2f}" not in S.INDEX_HTML:
+    if f"hard cap {S.ACWR_HARD:.2f}" not in S.UI_SOURCE:
         fails.append(f"(c) regime badge does not print the hard cap as ACWR_HARD={S.ACWR_HARD:.2f}")
-    if f"under a {S.ACWR_HARD:.2f} ceiling ({S.ACWR_SOFT:.2f} is its planning target)" not in S.INDEX_HTML:
+    if f"under a {S.ACWR_HARD:.2f} ceiling ({S.ACWR_SOFT:.2f} is its planning target)" not in S.UI_SOURCE:
         fails.append("(c) the ACWR tile's ceiling/target literals drifted from ACWR_HARD/ACWR_SOFT")
     # (d) — raw sinks + secrets-store mode.
-    if "${e}" in S.INDEX_HTML:
+    if "${e}" in S.UI_SOURCE:
         fails.append("(d) a catch→innerHTML sink still interpolates the raw error (${e})")
-    if S.INDEX_HTML.count("esc(String(e))") < 3:
-        fails.append(f"(d) expected ≥3 escaped adjustment catch sinks, found {S.INDEX_HTML.count('esc(String(e))')}")
+    if S.UI_SOURCE.count("esc(String(e))") < 3:
+        fails.append(f"(d) expected ≥3 escaped adjustment catch sinks, found {S.UI_SOURCE.count('esc(String(e))')}")
     for raw in ("${r.category}", "${r.id}", "${r.desc"):
         if raw in S.SELFTEST_HTML:
             fails.append(f"(d) self-test page row() interpolates {raw} raw")
@@ -7585,20 +7600,20 @@ def _stc_checkin_stop():
     open-ended part). Runs with no LLM, like the live box."""
     import sqlite3 as _sq
     out, ok = [], True
-    # (a) UI wiring (INDEX_HTML text — the same source the browser parses)
+    # (a) UI wiring (UI_SOURCE — shell + stylesheet + script, the same source the browser gets)
     ui_checks = [('id="ci_stop"', "stop checkbox rendered in the check-in row"),
                  ('class="stop"', "the orphaned .checkin .stop rule is now used"),
                  ("I had to stop", "label in the halt voice"),
                  ("stop_symptom:", "save handler includes the flag in the POST body"),
                  ('$("#ci_stop")', "handler reads the control")]
     for needle, label in ui_checks:
-        p = needle in S.INDEX_HTML
+        p = needle in S.UI_SOURCE
         out.append({"case": f"UI: {label}", "needle": needle, "passed": p}); ok = ok and p
     # (a2) posture — the control is QUIET at rest and loud only once it is checked. An inactive medical
     # control that renders in the danger colour shouts every day nothing is wrong; the plan asked for a
     # "quiet checkbox" and the rule it reuses predates that wording (validation review F3, 0.27.2).
-    rest_c = _stcss_decls(_stcss_rule(S.INDEX_HTML, ".checkin .stop")).get("color")
-    chk_c = _stcss_decls(_stcss_rule(S.INDEX_HTML, ".checkin .stop:has(:checked)")).get("color")
+    rest_c = _stcss_decls(_stcss_rule(S.APP_CSS, ".checkin .stop")).get("color")
+    chk_c = _stcss_decls(_stcss_rule(S.APP_CSS, ".checkin .stop:has(:checked)")).get("color")
     for got, want, label in ((rest_c, "var(--muted)", "at rest the stop label is muted, like its ENERGY/SLEEP siblings"),
                              (chk_c, "var(--danger)", "checked, it turns danger — the alarm is earned, not idle")):
         p = got == want
@@ -8571,6 +8586,426 @@ def _golden_week_diff(want, got):
     return lines[:14] + ([f"… {len(lines) - 14} more diff lines"] if len(lines) > 14 else [])
 
 
+def _stc_ui_dialogs():
+    """UX-7 / UX-4 (0.29.0) — the app speaks in its own voice, and says how old its data is.
+
+    (a) NO native `alert()` / `confirm()` outside the two documented no-<dialog> fallbacks. A native
+        dialog is modal to the whole browser, unstyled, unthemed, and on a phone reads like a browser
+        error rather than something this app is telling you — and it cannot be asserted on, which is
+        why eight of them survived this long.
+    (b) The freshness chip exists and is PRIVATE-ONLY: the public box answers /healthz with booleans
+        and no timestamps precisely so a stranger cannot learn when the household syncs (TECH-8), and
+        printing an age on the public card would hand that straight back. The chip's staleness
+        threshold must be the SAME 26 h the nightly catch-up uses, so the number on screen and the
+        number the scheduler acts on cannot disagree."""
+    fails = []
+    js = S.APP_JS
+    # strip line comments before counting: the fallbacks are documented in prose right above them
+    live = "\n".join(ln.split("//")[0] for ln in js.splitlines())
+    import re as _re
+    natives = [m.start() for m in _re.finditer(r"(?<![\w.])(?:alert|confirm)\s*\(", live)]
+    # the two legitimate ones sit inside the `typeof dlg.showModal!=="function"` fallbacks
+    legit = 0
+    for pos in natives:
+        window = live[max(0, pos - 400):pos]
+        if "showModal" in window and "function" in window:
+            legit += 1
+    stray = len(natives) - legit
+    if stray:
+        fails.append(f"(a) {stray} native alert()/confirm() call(s) outside the no-dialog fallbacks")
+    if "function notice(" not in js:
+        fails.append("(a) the house notice() helper is missing — alerts have nowhere to go")
+    if "sc-fresh" not in js or "paintFreshness" not in js:
+        fails.append("(b) no freshness chip in the readiness card")
+    if "SH_READONLY || !SYNC_LAST" not in js:
+        fails.append("(b) the freshness chip is not gated to the private box — a public age leaks the "
+                     "household's sync routine, which TECH-8's booleans-only /healthz exists to prevent")
+    if "hrs > 26" not in js:
+        fails.append("(b) the chip's staleness threshold is not the nightly's 26 h")
+    if ".weather.stale" in S.APP_CSS:
+        fails.append("(b) the dead .weather.stale rule is still in the stylesheet")
+    return _st("det", "ui-dialogs",
+               "no native alert/confirm outside the no-<dialog> fallbacks (the app speaks in its own "
+               "voice), and the readiness card carries a private-only freshness chip on the nightly's "
+               "own 26 h threshold",
+               passed=not fails, expect="0 stray natives; chip present, private-only, 26 h",
+               got={"violations": fails or "none", "native_calls": len(natives), "in_fallbacks": legit})
+
+
+def _stc_axis_legibility():
+    """UX-8 (0.29.0) — a chart's axis stays readable at the width a phone actually has.
+
+    Every trend chart in here is drawn with `preserveAspectRatio="none"` so the trace fills its box
+    whatever the width. That same stretch scales the glyphs of anything lettered INSIDE the SVG: a
+    9px `<text>` in a 1000-unit viewBox came out about 3px wide on a 340px phone — drawn, present in
+    the DOM, and unreadable. Nothing caught it because the browser run only ever opened a 1280px
+    window, where the stretch is roughly 1:1 and the labels look fine.
+
+      (a) no `<text>` inside a stretched SVG — the invariant that was broken. Checked TWICE, and the
+          second check is the one that matters: the slice between an opening `<svg …>` and its
+          `</svg>` catches an inline label and names its line, but the code this det replaced built
+          its month ticks into an ACCUMULATOR and interpolated `${ticks}` into the markup — so the
+          `<text>` never appeared between those two tags at all, and a slice-only det would have
+          watched the original defect walk back in. Every chart in this app stretches, so the honest
+          rule is the flat one: no `<text>` anywhere in app.js. A future chart that does NOT stretch
+          may letter itself in SVG — and this det is where that decision gets recorded.
+      (b) the replacement is real and both charts use it: an `axisLayer()` that builds the
+          absolutely-positioned `.axlbl`, a `thinAxis()` that drops ticks which would now collide
+          (real type overlaps where 3px-wide type merely looked like dust), and a `mountAxis()` per
+          chart. A layer that nothing emits would pass a source-only check for the CSS alone.
+      (c) the layer is anchored to the CHART. `#ffchart` and `.driftwrap` are the positioned boxes
+          the SVGs fill; if either stops being `position:relative` every label lands somewhere else
+          on the page — a total break that reads perfectly fine in the source.
+      (d) a label's `top` is its old SVG baseline in user units, which only lands where it belongs
+          while the chart is drawn 1:1 vertically. Pin the pair: the viewBox height in the script
+          and the CSS box height must agree, or every label on both charts slides.
+      (e) the `.ff .axis` / `.drift .axis` rules are gone — they style nothing now."""
+    fails = []
+    js, css = S.APP_JS, S.APP_CSS
+    # comment-stripped copy: this det's own rationale, and the helper block's, both name <text>
+    live_js = "\n".join(ln.split("//")[0] for ln in js.splitlines())
+    stretched = 0
+    # Match the opening TAG, not the bare string: the helper block above these charts explains the
+    # stretch in prose, and a scanner that reads its own rationale as a violation is useless.
+    for m in S.re.finditer(r'<svg\b[^>]*preserveAspectRatio="none"[^>]*>', js):
+        stretched += 1
+        end = js.find("</svg>", m.end())
+        body = js[m.end():end if end != -1 else len(js)]
+        if S.re.search(r"<text[\s>]", body):          # <textarea> is not a label
+            fails.append(f"(a) the SVG at app.js line {js.count(chr(10), 0, m.start()) + 1} stretches "
+                         f"AND letters itself in <text> — those glyphs are squeezed with the trace")
+    if stretched != 5:
+        fails.append(f"(a) expected the 5 stretched charts, found {stretched}")
+    # …and the flat rule, which is what actually closes the accumulator hole
+    for m in S.re.finditer(r"<text[\s>]", live_js):
+        fails.append(f"(a) app.js line {live_js.count(chr(10), 0, m.start()) + 1} builds an SVG <text>: "
+                     f"every chart here stretches, so its glyphs would be squeezed with the trace")
+    for needle, why in (("function axisLayer(", "the HTML label-layer builder"),
+                        ("function thinAxis(", "the collision thinner"),
+                        ("function mountAxis(", "the mount/observe hook")):
+        if needle not in js:
+            fails.append(f"(b) {why} ({needle}…) is missing from app.js")
+    for name in ("axisLayer(", "mountAxis("):
+        # one definition + one call per chart (the projector, and mkChart for all five drift charts)
+        if js.count(name) < 3:
+            fails.append(f"(b) only {js.count(name)} {name} references — both charts must use it")
+    for sel in ("#ffchart", ".driftwrap"):
+        pos = _stcss_decls(_stcss_rule(css, sel)).get("position")
+        if pos != "relative":
+            fails.append(f"(c) {sel} is position:{pos} — the axis layer would position against the "
+                         f"page instead of the chart it labels")
+    if _stcss_decls(_stcss_rule(css, ".axlbl")).get("position") != "absolute":
+        fails.append("(c) .axlbl is not position:absolute — it would not overlay the chart")
+    if _stcss_decls(_stcss_rule(css, ".axlbl .ax")).get("position") != "absolute":
+        fails.append("(c) .axlbl .ax is not position:absolute — labels would stack, not land")
+    boxes = {}
+    m = S.re.search(r"const W=1000, H=(\d+), pad=", js)      # the projector chart
+    if m:
+        boxes[".ff"] = m.group(1)
+    m = S.re.search(r"const W=1000, H=(\d+), padL=", js)     # mkChart — the drift charts
+    if m:
+        boxes[".drift"] = m.group(1)
+    for sel in (".ff", ".drift"):
+        vb = boxes.get(sel)
+        # EVERY rule for the selector, not the first: _stcss_rule stops at one, so a height override
+        # inside a @media block — the phone, which is the whole reason this fix exists — would have
+        # slid past a check that only ever read the desktop rule.
+        heights = [h for h in (_stcss_decls(m.group(1)).get("height")
+                               for m in S.re.finditer(r"(?:^|\n)\s*" + S.re.escape(sel) + r"\s*\{([^{}]*)\}", css))
+                   if h]
+        if vb is None:
+            fails.append(f"(d) could not read {sel}'s viewBox height out of app.js")
+        elif not heights:
+            fails.append(f"(d) {sel} declares no height — the label geometry has nothing to agree with")
+        else:
+            for h in heights:
+                if h != f"{vb}px":
+                    fails.append(f"(d) a {sel} rule is {h} tall but its viewBox is {vb} units — a "
+                                 f"label's `top` IS a viewBox baseline, and only lands right while "
+                                 f"the two agree ({len(heights)} height rule(s) seen)")
+    for dead in (".ff .axis", ".drift .axis"):
+        if dead in css:
+            fails.append(f"(e) the dead `{dead}` rule is still in the stylesheet")
+    return _st("det", "axis-legibility",
+               "axis labels are HTML over the chart, not <text> inside a preserveAspectRatio=\"none\" "
+               "SVG — so 9px type stays 9px wide on a phone instead of ~3px; layer anchored to the "
+               "chart, viewBox and box height pinned 1:1, colliding ticks thinned",
+               passed=not fails,
+               expect="0 <text> in a stretched SVG; layer + thinner present, anchored, 1:1 vertically",
+               got={"violations": fails or "none", "stretched_svgs": stretched,
+                    "viewbox_heights": boxes})
+
+
+def _stc_keyboard_reach():
+    """UX-9 (0.29.0) — everything the mouse can press, the keyboard can reach and press.
+
+    Six of the plan's controls were `<div>`s and `<span>`s carrying click handlers: fine with a
+    mouse, invisible to Tab, and silent to a screen reader. Two more had been given `role="button"`
+    and a tab stop, and then had their focus ring blanked by an `outline:none`, so a keyboard user
+    could operate them without ever seeing where they were.
+
+      (a) THE PAIR. `role="button"` and `tabindex="0"` travel together, because either alone is its
+          own bug: a role with no tab stop announces a button the keyboard cannot reach, and a tab
+          stop with no role is a focus stop that announces nothing. Checked on every opening tag in
+          the script that carries either.
+      (b) THE KEYS. One delegated handler keyed off the ARIA itself, not a list of class names — an
+          element that takes the role takes the keys, with nothing to remember and nothing to
+          re-bind. (Most of these re-render on every paint; per-element handlers would rot.)
+      (c) THE RING. A `:focus-visible` rule that actually draws an outline, and no rule that blanks
+          the outline on `:focus` — the exact shape that hid the ring on the only two elements this
+          app had made focusable.
+      (d) NO LYING STRUCTURE. `role="tablist"` only where there are `role="tab"` children. The drift
+          control claimed to be a tablist over plain buttons; a screen reader announced a tab list
+          with no tabs in it. It is a group of pressed buttons now, the same shape the theme
+          switcher has always used.
+      (e) MOTION. A `prefers-reduced-motion` query in the stylesheet, and no bare smooth scroll left
+          in the script: a transition is style, but `scrollIntoView`'s smoothness is an argument no
+          media query can reach, so every jump goes through the one helper that reads the setting.
+      (f) STATE. The three segmented controls keep `aria-pressed` truthful — they toggle a class in
+          place rather than re-rendering, so the ARIA has to be moved alongside it or it goes stale
+          on the first click and stays wrong."""
+    fails = []
+    js, css, shell = S.APP_JS, S.APP_CSS, S.INDEX_HTML
+    # strip line comments: this det's own rationale, and the handler's, both name these attributes
+    live = "\n".join(ln.split("//")[0] for ln in js.splitlines())
+    # (a) every opening tag carrying either half must carry both
+    for m in S.re.finditer(r'<[a-z]+\b[^>]*(?:role="button"|tabindex="0")[^>]*>', live):
+        tag = m.group(0)
+        if ('role="button"' in tag) != ('tabindex="0"' in tag):
+            line = live.count(chr(10), 0, m.start()) + 1
+            missing = "tabindex=\"0\"" if 'role="button"' in tag else 'role="button"'
+            fails.append(f"(a) app.js line {line}: an element carries one half of the pair and not "
+                         f"the other — {missing} is missing")
+    # (b) the handler, and that it reads the ARIA rather than a class list
+    if 'closest(\'[role="button"][tabindex="0"]\')' not in js:
+        fails.append("(b) no delegated Enter/Space handler keyed off [role=button][tabindex=0] — a "
+                     "role nothing listens for is a button a keyboard user cannot press")
+    # (c) the ring exists, and nothing blanks it on :focus
+    ring = _stcss_decls(_stcss_rule(css, ":focus-visible"))
+    if "outline" not in ring:
+        fails.append("(c) no :focus-visible rule draws an outline — keyboard focus would be invisible")
+    elif "none" in ring.get("outline", ""):
+        fails.append(f"(c) the :focus-visible rule draws outline:{ring['outline']}")
+    for m in S.re.finditer(r"(?:^|\n)\s*([^{}\n]*:focus[^{}\n]*)\{([^{}]*)\}", css):
+        sel, body = m.group(1), m.group(2)
+        if ":focus-visible" in sel:
+            continue
+        if S.re.search(r"outline\s*:\s*none", body):
+            fails.append(f"(c) `{sel.strip()}` blanks the focus ring with outline:none")
+    # (d) a tablist must have tabs
+    for src_name, src in (("app.js", js), ("index.html", shell)):
+        if 'role="tablist"' in src and 'role="tab"' not in src:
+            fails.append(f"(d) {src_name} declares role=\"tablist\" with no role=\"tab\" children — "
+                         f"a screen reader is told about a structure that is not there")
+    # (e) motion
+    if "prefers-reduced-motion" not in css:
+        fails.append("(e) no prefers-reduced-motion query in the stylesheet")
+    if "prefers-reduced-motion" not in js:
+        fails.append("(e) the script never reads prefers-reduced-motion — scrollIntoView's smoothness "
+                     "is an argument, and no media query can reach it")
+    stray = live.count('behavior:"smooth"') + live.count("behavior: \"smooth\"")
+    if stray:
+        fails.append(f"(e) {stray} bare smooth scroll(s) left in app.js — they must go through the "
+                     f"one helper that reads the setting")
+    # (f) the three in-place segmented controls move their ARIA with their class
+    for sel, why in ((".phaseseg", "the plan's phase bar"),
+                     (".weekseg", "the week strip"),
+                     (".driftseg button", "the drift comparison control")):
+        # finditer with a window I slice myself: findall would CONSUME the outer binding site and
+        # hide the inner call that does the toggling, which is the one this tooth is about. The
+        # selector may also be a template literal carrying quotes, so stop at the closing paren.
+        paired = False
+        for m in S.re.finditer(r"querySelectorAll\([^)]*" + S.re.escape(sel) + r"[^)]*\)", live):
+            win = live[m.end():m.end() + 200]
+            if ('classList.toggle("active"' in win or 'classList.toggle("on"' in win) \
+                    and "aria-pressed" in win:
+                paired = True
+        if not paired:
+            fails.append(f"(f) {why} toggles its selected class without moving aria-pressed — the "
+                         f"state goes stale on the first click and stays wrong")
+    return _st("det", "keyboard-reach",
+               "everything clickable is reachable and pressable from a keyboard: role=button and "
+               "tabindex=0 travel together, one delegated handler keyed off the ARIA gives them all "
+               "Enter/Space, a :focus-visible ring nothing blanks, no tablist without tabs, and "
+               "reduce-motion honoured in style AND script",
+               passed=not fails,
+               expect="pair intact; handler ARIA-keyed; ring present, unblanked; no orphan tablist; "
+                      "reduced-motion in css+js; segmented controls keep aria-pressed",
+               got={"violations": fails or "none",
+                    "custom_buttons_in_source": live.count('role="button"')})
+
+
+def _stc_touch_targets():
+    """UX-10 (0.29.0) — the sub-floor controls project a ≥24px transparent hit area.
+
+    Strategic review §10: the 30×9px theme swatches, the 15px `.qhint` help bubbles, the 18px
+    `.prseg` priority segments and the ~17px-tall `.hrange` range buttons all sit under the 24px
+    touch floor. Each grows a `::before` hit expansion — transparent, so the calm density survives
+    and the thumb stops missing. The two segmented wrappers had to drop `overflow:hidden`, which
+    would clip the expansion back off, and the corner paint the clip used to guarantee moved to
+    explicit end-segment radii. The LIVE geometry is the Playwright half's job (elementFromPoint
+    at the extended coordinates); these teeth pin the source so a tidy-up can't hand the pixels
+    back silently."""
+    fails = []
+    css = S.APP_CSS
+    # (a) each control projects a hit pseudo — a ::before without `content` generates no box at all
+    for sel in (".swatch::before", ".qhint::before", ".prseg::before", ".hrange button::before"):
+        decls = _stcss_decls(_stcss_rule(css, sel))
+        if not decls.get("content"):
+            fails.append(f"(a) {sel}: no hit-expansion rule (or one without `content` — paints no box)")
+    # (b) the segmented wrappers must not clip their own expansion, and the end corners the clip
+    #     used to round must live on explicit radii now
+    for wrap, seg in ((".prsel", ".prseg"), (".hrange", ".hrange button")):
+        if "overflow:hidden" in S.re.sub(r"\s+", "", _stcss_rule(css, wrap)):
+            fails.append(f"(b) {wrap}: overflow:hidden clips the very hit area its segments grow")
+        for side in (":first-child", ":last-child"):
+            if "radius" not in _stcss_rule(css, seg + side):
+                fails.append(f"(b) {seg}{side}: no corner radius — without the wrapper's clip the "
+                             f"end segment's background pokes past the rounded outline")
+    # (c) every expansion anchors on its own element (an unpositioned origin would anchor the
+    #     pseudo on some ancestor and grow the wrong box)
+    for sel in (".swatch", ".qhint", ".prseg", ".hrange button"):
+        if "relative" not in _stcss_decls(_stcss_rule(css, sel)).get("position", ""):
+            fails.append(f"(c) {sel}: not position:relative — its ::before would anchor elsewhere")
+    return _st("det", "touch-targets",
+               "the four sub-floor controls (theme swatches, ? hints, priority segments, health "
+               "range buttons) project a transparent ::before hit area of ≥24px with no visual "
+               "change; the segmented wrappers no longer clip it",
+               passed=not fails,
+               expect="hit pseudo on all four; no overflow clip on .prsel/.hrange; origins positioned",
+               got={"violations": fails or "none"})
+
+
+def _stc_pwa_polish():
+    """UX-11 (0.29.0) — PWA polish + the small repairs, each pinned where it lives.
+
+      (a) THEME CHROME. The shell's head script maps all three themes to their --bg and sets both
+          the theme-color meta and the themed manifest link at parse time; app.js's paintTheme()
+          keeps both in step on a switch; the manifest route honours ?theme= (whitelisted, so the
+          INSTALLED window's chrome matches too — the meta alone can't reach that).
+      (b) OFFLINE HONESTY. The last-sync stamp persists to localStorage (private only) and
+          tileFail's offline line falls back to it — a service-worker shell opened offline still
+          says how old the data is instead of shrugging.
+      (c) THE MAP stops glaring white on the dark themes: OSM tiles take a filter under Charcoal /
+          Aurora (the route line and markers are ours and already theme-read).
+      (d) THE PUBLIC EMPTY STATE never points a visitor at the Generate button it removes — nor do
+          the two staleness banners.
+      (e) THE HEALTH FORM prefills today's date.
+      (f) .profhint's 320px reserve is capped on mobile (the legend wraps below instead).
+      (g) THE GAUGE PILL is clamped inside the gauge (--gx + clamp, not a raw left%).
+      (h) THE DEAD .weather BLOCK is gone (the live chips are .sc-wx).
+      (i) THE .ff/.drift STROKES carry vector-effect:non-scaling-stroke — DESIGN.md's trend-chart
+          spec, deferred from UX-8 because it moves trace pixels."""
+    fails = []
+    js, css, shell = S.APP_JS, S.APP_CSS, S.INDEX_HTML
+    # (a) theme chrome: the shell map + the two writes at parse time, and the switch-side upkeep
+    for hexv in ("#f4f1ea", "#191a1d", "#121226"):
+        if hexv not in shell or hexv not in js:
+            fails.append(f"(a) theme bg {hexv} missing from {'shell' if hexv not in shell else 'app.js'} "
+                         f"— one theme's chrome would fall back to Daylight")
+    if 'meta[name="theme-color"]' not in shell or "?theme=" not in shell:
+        fails.append("(a) the shell's head script sets neither the theme-color meta nor the themed "
+                     "manifest link at parse time")
+    if 'meta[name="theme-color"]' not in js or "?theme=" not in js:
+        fails.append("(a) paintTheme() does not keep theme-color/manifest in step on a switch")
+    saved = S.READONLY
+    try:
+        for ro in (False, True):
+            S.READONLY = ro                      # the route is public-safe under either
+            c = S.app.test_client()
+            plain = S.json.loads(c.get("/manifest.webmanifest").get_data(as_text=True))
+            dark = S.json.loads(c.get("/manifest.webmanifest?theme=dark").get_data(as_text=True))
+            junk = S.json.loads(c.get("/manifest.webmanifest?theme=evil").get_data(as_text=True))
+            if dark.get("theme_color") != "#191a1d" or dark.get("background_color") != "#191a1d":
+                fails.append(f"(a) ?theme=dark manifest colours {dark.get('theme_color')!r} "
+                             f"(READONLY={ro}) — an installed Charcoal window would wear Daylight chrome")
+            if plain.get("theme_color") != "#f4f1ea" or junk.get("theme_color") != "#f4f1ea":
+                fails.append(f"(a) default/garbage theme did not fall back to Daylight (READONLY={ro})")
+    finally:
+        S.READONLY = saved
+    # (b) the offline stamp: persisted (private only) and read back by the failure terminus
+    if "sh-last-sync" not in js:
+        fails.append("(b) nothing persists the last-sync stamp — the offline shell can't date its data")
+    tf = js[js.find("function tileFail("):js.find("function tileFail(") + 900]
+    if "storedSync(" not in tf:
+        fails.append("(b) tileFail never reads the stored stamp — the offline line stays ageless")
+    # (c) dark-map filters
+    for theme in ("dark", "aurora"):
+        body = _stcss_rule(css, f'[data-theme="{theme}"] .actmap .leaflet-tile')
+        if "filter" not in _stcss_decls(body):
+            fails.append(f"(c) no tile filter for {theme} — the OSM map glares white on a dark theme")
+    # (d) the public empty state + banners
+    if "No plan published yet" not in js:
+        fails.append("(d) loadPlan's empty state has no public copy — the public box still tells a "
+                     "visitor to hit a button it removes")
+    ph = shell.split('id="plan"><div class="empty"', 1)   # the exact placeholder — NOT id="planBtn"
+    if len(ph) < 2 or "Generate plan" in ph[1].split("</div>", 1)[0]:
+        fails.append("(d) the shell's static #plan placeholder still references Generate plan — "
+                     "the public first paint points at a button that isn't there")
+    for m in S.re.finditer(S.re.escape("Hit <b>Generate plan</b>"), js):
+        win = js[max(0, m.start() - 260):m.start()]
+        if "SH_READONLY" not in win:
+            line = js.count(chr(10), 0, m.start()) + 1
+            fails.append(f"(d) app.js line {line}: 'Hit Generate plan' reachable on the public box, "
+                         f"where the button was removed")
+    m = js.find("generate one below")          # the readiness card's no-plan line, same shape
+    if m >= 0 and "SH_READONLY" not in js[max(0, m - 260):m]:
+        fails.append("(d) the readiness card's no-plan line points at a control the public box removes")
+    # and the drift endpoint's no-plan error, probed on an empty in-memory DB under both postures
+    mem = S.sqlite3.connect(":memory:"); mem.row_factory = S.sqlite3.Row
+    mem.executescript(S.SCHEMA)
+    real_getdb = S.get_db
+    try:
+        S.get_db = lambda: mem
+        c2 = S.app.test_client()
+        for ro in (False, True):
+            S.READONLY = ro
+            err = (c2.get("/api/plandrift").get_json() or {}).get("error", "")
+            if ro and "generate a plan first" in err:
+                fails.append("(d) /api/plandrift's no-plan error tells the PUBLIC box to generate a plan")
+            if not ro and "generate a plan first" not in err:
+                fails.append("(d) /api/plandrift's no-plan error lost its private-side guidance")
+    finally:
+        S.get_db = real_getdb
+        S.READONLY = saved
+        mem.close()
+    # (e) the health date prefill
+    if '#hdate' not in js or not S.re.search(r'hdate"\)\s*;?\s*if\([^)]*!hd\.value', js):
+        fails.append("(e) the health form's date is not prefilled — every reading starts with a "
+                     "date-picker detour")
+    # (f) the profhint cap inside the mobile media block
+    mobile = css[css.find("@media(max-width:760px)"):]
+    if not S.re.search(r"\.profhint\{[^}]*padding-right\s*:\s*0", mobile):
+        fails.append("(f) .profhint keeps its 320px reserve on a phone — the hint crushes to a sliver")
+    # (g) the gauge pill clamp
+    gyou = _stcss_decls(_stcss_rule(css, ".gyou"))
+    if "clamp(" not in gyou.get("left", "") or "--gx" not in gyou.get("left", ""):
+        fails.append("(g) .gyou is not clamped — at the scale's ends the pill overhangs the gauge")
+    if 'setProperty("--gx"' not in js and "setProperty('--gx'" not in js:
+        fails.append("(g) loadShape still positions the pill by a raw left%, not the clamped --gx")
+    # (h) the dead weather block (the live chips are .sc-wx — pinned so a revert can't sneak back)
+    if S.re.search(r"(?:^|\n)\s*\.weather\{", css):
+        fails.append("(h) the dead .weather block is back — nothing emits class=weather any more")
+    if not _stcss_rule(css, ".statuscard .sc-wx"):
+        fails.append("(h) the LIVE weather chips (.sc-wx) lost their rule")
+    # (i) non-scaling strokes on the stretched charts
+    for sel in (".ff .ctl", ".ff .atl", ".ff .zero", ".ff .cross",
+                ".drift .dl", ".drift .grid", ".drift .now", ".drift .cross"):
+        if "vector-effect" not in _stcss_decls(_stcss_rule(css, sel)):
+            fails.append(f"(i) {sel}: stroke still stretches with the viewBox (DESIGN.md asks for "
+                         f"non-scaling-stroke)")
+    return _st("det", "pwa-polish",
+               "PWA polish + small repairs: theme-color/manifest follow the active theme (incl. a "
+               "whitelisted ?theme= manifest for the installed window), the offline shell dates its "
+               "data, OSM tiles dark-filter, the public empty state and banners never reference the "
+               "removed Generate button, the health date prefills, .profhint's reserve is capped on "
+               "mobile, the gauge pill is clamped, the dead .weather block is gone, and the "
+               "stretched charts' strokes don't scale",
+               passed=not fails,
+               expect="every tooth listed in the docstring",
+               got={"violations": fails or "none"})
+
+
 def _stc_client_probe():
     """§SELFTEST — the browser self-check reads the payload the server actually sends.
 
@@ -8700,7 +9135,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),

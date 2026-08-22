@@ -1,0 +1,182 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sparing Horse — running</title>
+<meta name="theme-color" content="#f4f1ea">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,900&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Sparing Horse">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="mobile-web-app-capable" content="yes">
+<script>var t="light";try{var s=localStorage.getItem("sh-theme");if(s==="dark"||s==="aurora")t=s;}catch(e){}
+document.documentElement.dataset.theme=t;
+window.SH_THEME_BG={light:"#f4f1ea",dark:"#191a1d",aurora:"#121226"};   // each theme's --bg (app.css)
+// UX-11 — the browser chrome follows the saved theme at parse time, before first paint: the
+// theme-color meta (tab / PWA title bar) and the manifest link an install will read
+document.querySelector('meta[name="theme-color"]').setAttribute("content",window.SH_THEME_BG[t]);
+document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.webmanifest?theme="+t);</script>
+<script>if("serviceWorker" in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/sw.js").catch(function(){})})}</script>
+<link rel="stylesheet" href="/static/app.css?v=__SH_VER__"></head>
+<body data-mtab="today" data-page="__SH_PAGE__">
+  <div class="topbar">
+    __SH_HUBLINK__
+    <div class="topctl">
+      <span class="themes" id="themes">
+        <button class="swatch" data-theme="light" title="Daylight" style="--sw:linear-gradient(90deg,#f4f1ea 50%,#b9542c 50%)"></button>
+        <button class="swatch" data-theme="dark"  title="Charcoal" style="--sw:linear-gradient(90deg,#191a1d 50%,#fa7d42 50%)"></button>
+        <button class="swatch" data-theme="aurora" title="Aurora" style="--sw:linear-gradient(90deg,#121226 50%,#7b61ff 50%)"></button>
+      </span>
+    </div>
+  </div>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <span class="dotmark"><svg class="" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="46" fill="none" stroke="var(--text)" stroke-width="1.1" opacity=".22"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(45 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(135 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(225 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(315 50 50)"/><path d="M50.0,16.0 L51.2,16.1 L52.3,16.4 L53.5,16.9 L54.5,17.6 L55.5,18.5 L56.5,19.6 L57.3,20.9 L57.9,22.3 L58.5,23.8 L58.9,25.5 L59.2,27.3 L59.3,29.2 L59.2,31.2 L58.9,33.2 L58.5,35.3 L57.9,37.4 L57.1,39.4 L56.2,41.5 L55.1,43.5 L53.8,45.5 L52.4,47.4 L50.8,49.1 L49.1,50.8 L47.4,52.4 L45.5,53.8 L43.5,55.1 L41.5,56.2 L39.4,57.1 L37.4,57.9 L35.3,58.5 L33.2,58.9 L31.2,59.2 L29.2,59.3 L27.3,59.2 L25.5,58.9 L23.8,58.5 L22.3,57.9 L20.9,57.3 L19.6,56.5 L18.5,55.5 L17.6,54.5 L16.9,53.5 L16.4,52.3 L16.1,51.2 L16.0,50.0 L16.1,48.8 L16.4,47.7 L16.9,46.5 L17.6,45.5 L18.5,44.5 L19.6,43.5 L20.9,42.7 L22.3,42.1 L23.8,41.5 L25.5,41.1 L27.3,40.8 L29.2,40.7 L31.2,40.8 L33.2,41.1 L35.3,41.5 L37.4,42.1 L39.4,42.9 L41.5,43.8 L43.5,44.9 L45.5,46.2 L47.4,47.6 L49.1,49.2 L50.8,50.9 L52.4,52.6 L53.8,54.5 L55.1,56.5 L56.2,58.5 L57.1,60.6 L57.9,62.6 L58.5,64.7 L58.9,66.8 L59.2,68.8 L59.3,70.8 L59.2,72.7 L58.9,74.5 L58.5,76.2 L57.9,77.7 L57.3,79.1 L56.5,80.4 L55.5,81.5 L54.5,82.4 L53.5,83.1 L52.3,83.6 L51.2,83.9 L50.0,84.0 L48.8,83.9 L47.7,83.6 L46.5,83.1 L45.5,82.4 L44.5,81.5 L43.5,80.4 L42.7,79.1 L42.1,77.7 L41.5,76.2 L41.1,74.5 L40.8,72.7 L40.7,70.8 L40.8,68.8 L41.1,66.8 L41.5,64.7 L42.1,62.6 L42.9,60.6 L43.8,58.5 L44.9,56.5 L46.2,54.5 L47.6,52.6 L49.2,50.9 L50.9,49.2 L52.6,47.6 L54.5,46.2 L56.5,44.9 L58.5,43.8 L60.6,42.9 L62.6,42.1 L64.7,41.5 L66.8,41.1 L68.8,40.8 L70.8,40.7 L72.7,40.8 L74.5,41.1 L76.2,41.5 L77.7,42.1 L79.1,42.7 L80.4,43.5 L81.5,44.5 L82.4,45.5 L83.1,46.5 L83.6,47.7 L83.9,48.8 L84.0,50.0 L83.9,51.2 L83.6,52.3 L83.1,53.5 L82.4,54.5 L81.5,55.5 L80.4,56.5 L79.1,57.3 L77.7,57.9 L76.2,58.5 L74.5,58.9 L72.7,59.2 L70.8,59.3 L68.8,59.2 L66.8,58.9 L64.7,58.5 L62.6,57.9 L60.6,57.1 L58.5,56.2 L56.5,55.1 L54.5,53.8 L52.6,52.4 L50.9,50.8 L49.2,49.1 L47.6,47.4 L46.2,45.5 L44.9,43.5 L43.8,41.5 L42.9,39.4 L42.1,37.4 L41.5,35.3 L41.1,33.2 L40.8,31.2 L40.7,29.2 L40.8,27.3 L41.1,25.5 L41.5,23.8 L42.1,22.3 L42.7,20.9 L43.5,19.6 L44.5,18.5 L45.5,17.6 L46.5,16.9 L47.7,16.4 L48.8,16.1 L50.0,16.0 Z" fill="color-mix(in oklab,var(--accent),transparent 86%)" stroke="color-mix(in oklab,var(--accent),transparent 50%)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M50,4 L52.3,9.6 L50,7.7 L47.7,9.6 Z" fill="var(--accent)"/><circle cx="50" cy="50" r="3.2" fill="var(--accent)"/></svg></span>
+        <p class="eyebrow">Running</p>
+        <div class="titlerow">
+          <h1>Sparing Horse</h1>
+          <span class="motto">Νενικήκαμεν&nbsp;<small>· we have won</small></span>
+        </div>
+      </div>
+      <div class="bar">
+        <a class="ghost" id="runsLink" href="/runs" title="Run browser — a calendar of your whole training history; open any past run on the activity tile">🗓 Runs</a>
+        <button class="primary" id="syncBtn">Sync now</button>
+        <button class="primary" id="settingsBtn" title="Personalization — athlete context, weather cities, links, sync timezone">⚙ Settings</button>
+        <button class="ghost" id="backfillBtn" title="One-time full-history pull — walks every page back to your first activity. Use on a fresh machine or if old history is missing.">Backfill all</button>
+      </div>
+    </header>
+
+    <div id="firstrun"></div>
+    <div id="dqbanner"></div>
+    <div id="objbar" class="objbar" data-mtab="today"></div>
+
+    <div class="section" id="sec-readiness" data-mtab="today">
+      <h2>Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
+      <div class="rgrid">
+        <div id="readiness"><div class="empty">Loading…</div></div>
+        <div class="panel acwrcard">
+          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:10px;font-weight:400">— this week's load against your base</span></div>
+          <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
+          <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
+          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine keeps every planned week under a 1.30 ceiling (1.25 is its planning target). It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
+          <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section" id="sec-runs">
+      <h2>Run browser <span class="muted mono" style="font-size:12px">— pick a day, the run opens below</span></h2>
+      <div class="panel" id="runscal"><div class="empty">Loading calendar…</div></div>
+    </div>
+
+    <div class="section" id="sec-recent" data-mtab="today">
+      <div class="panel" id="recent"><div class="empty">Loading latest activity…</div></div>
+    </div>
+
+    <div class="section" id="sec-plan" data-mtab="plan">
+      <h2>Training plan <span class="muted mono" style="font-size:12px">— objective-driven, bounded by your fitness</span>
+        <button class="primary" id="planBtn" style="float:right;font-size:12px;padding:6px 12px">Generate plan</button></h2>
+      <div class="panel" id="plan"><div class="empty">No plan yet.</div></div>
+    </div>
+
+    <details class="section" id="sec-drift" data-mtab="plan" open>
+      <summary><h2>Plan drift <span class="muted mono" style="font-size:12px">— how far the road has moved from its founding statement</span></h2></summary>
+      <div class="panel" id="drift"><div class="empty">Loading…</div></div>
+    </details>
+
+    <div class="section" id="sec-shape" data-mtab="fitness">
+      <h2>Current shape <span class="muted mono" style="font-size:12px">— your headline fitness numbers, right now</span></h2>
+      <div class="grid" id="tiles"><div class="empty">Loading current shape…</div></div>
+    </div>
+
+    <div class="section" id="sec-effort" data-mtab="fitness">
+      <h2>Effort discipline <span class="muted mono" style="font-size:12px">— are your easy days actually easy?</span></h2>
+      <div class="panel" id="effort"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="section" id="sec-zones" data-mtab="fitness">
+      <h2>Current zones <span class="muted mono" style="font-size:12px">— today's pace &amp; HR targets, tracking your fitness</span></h2>
+      <div class="panel" id="zones"><div class="empty">Loading…</div></div>
+    </div>
+
+    <details class="section" id="sec-ff" data-mtab="fitness" open>
+      <summary><h2>Fitness &amp; fatigue <span class="muted mono" style="font-size:12px">— reconstructed from your training load (CTL/ATL model)</span></h2></summary>
+      <div class="panel">
+        <div class="legend">
+          <span class="ctl"><i></i>Fitness (CTL)</span>
+          <span class="atl"><i></i>Fatigue (ATL)</span>
+        </div>
+        <div id="ffchart"><div class="empty">No activities synced yet.</div></div>
+        <div class="valid" id="ffvalid"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-vol" data-mtab="fitness" open>
+      <summary><h2>Weekly running volume <span class="muted mono" id="wkrange" style="font-size:12px">— last 26 weeks</span></h2></summary>
+      <div class="panel"><div class="chart" id="chart"><div class="empty">No activities synced yet.</div></div></div>
+    </details>
+
+    <div class="section" id="sec-health" data-mtab="body">
+      <h2>Health markers <span class="muted mono" style="font-size:12px">— metabolism &amp; the body behind the engine</span></h2>
+      <div class="hgrid" id="health"><div class="empty">No markers yet — add one below.</div></div>
+      <form class="hform" id="hform">
+        <select id="hmarker" required></select>
+        <input id="hdate" type="date" required>
+        <input id="hvalue" type="number" step="any" placeholder="value" required>
+        <button class="primary" type="submit">Add reading</button>
+      </form>
+    </div>
+
+    <dialog id="settingsDialog" class="modal">
+      <div class="modal-head">
+        <h2>Settings <span class="muted mono" style="font-size:12px">— keys &amp; personalization, stored privately on your instance</span></h2>
+        <button class="modal-x" id="settingsClose" aria-label="Close settings">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="secretsBox"></div>
+        <div id="settings"><div class="empty">Loading…</div></div>
+      </div>
+    </dialog>
+
+    <!-- Reusable consequence-explaining confirmation for destructive actions (house-styled, replaces the
+         bare browser confirm). Body filled in by confirmDanger(); returns a Promise<bool>. -->
+    <dialog id="confirmDialog" class="modal confirm-modal" aria-labelledby="cfTitle">
+      <div class="modal-head"><h2 id="cfTitle">Are you sure?</h2></div>
+      <div class="cf-body">
+        <p id="cfIntro"></p>
+        <ul id="cfList"></ul>
+        <p id="cfAlt" class="cf-alt"></p>
+      </div>
+      <div class="cf-foot">
+        <button type="button" class="ghost" id="cfCancel">Cancel</button>
+        <button type="button" class="danger" id="cfOk">Delete</button>
+      </div>
+    </dialog>
+
+    <footer data-mtab="today">
+      <span id="foot">Spares the horse by being the horse · not synced yet</span>
+      <a class="ralink" href="https://runalyze.com" target="_blank" rel="noopener noreferrer"
+         title="Sparing Horse runs on your Runalyze training data">powered by __RUNALYZE_LOGO__</a>
+    </footer>
+  </div>
+
+  <!-- Bottom tab bar — shown only ≤760px (CSS). Buttons use data-goto (not data-mtab) so the
+       view-toggle never hides them; the wiring lives at the end of the main script. -->
+  <nav class="mobnav" aria-label="Sections">
+    <button class="mnav-btn" type="button" data-goto="today" aria-current="page" aria-label="Today">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2 5 4-12 2 7h6"/></svg><span>Today</span></button>
+    <button class="mnav-btn" type="button" data-goto="plan" aria-current="false" aria-label="Plan">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="16.5" rx="2"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/></svg><span>Plan</span></button>
+    <button class="mnav-btn" type="button" data-goto="fitness" aria-current="false" aria-label="Fitness">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg><span>Fitness</span></button>
+    __MOBNAV_BODY__
+    __MOBNAV_RUNS__
+  </nav>
+
+<script>window.SH={readonly:__SH_READONLY__,privateUrl:__SH_PRIVATE_URL__};</script>
+<script nonce="__SH_NONCE__" src="/static/app.js?v=__SH_VER__"></script>
+</body></html>

@@ -151,6 +151,287 @@ async function runFull() {
 
   await page.screenshot({ path: `${SHOTS}/06-flows.png`, fullPage: true });
 
+  // ── UX-8: the axis survives a phone ──────────────────────────────────────
+  // Both trend charts stretch (preserveAspectRatio="none"), so anything lettered INSIDE the SVG is
+  // squeezed horizontally by the same factor as the trace: at 390px the old 9px <text> measured
+  // about 3px wide — drawn, in the DOM, unreadable. This run's 1280px window is exactly where that
+  // lie is invisible (the stretch is ~1:1 there), so drive a real phone width and MEASURE the glyph
+  // boxes. A source check can see the markup change; only this can see the type.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => document.querySelector('.mnav-btn[data-goto="fitness"]')?.click());
+  await page.waitForTimeout(500);
+  const ax = await page.evaluate(() => {
+    const vis = [...document.querySelectorAll('#ffchart .axlbl .ax')].filter(e => e.offsetParent);
+    const w = vis.map(e => e.getBoundingClientRect().width);
+    return { n: vis.length, min: w.length ? Math.min(...w) : 0,
+             // BOTH lettered charts, not just this one: #drift holds five more, and a check
+             // scoped to #ffchart would have watched the defect survive in all of them
+             svgText: document.querySelectorAll('#ffchart svg text, #drift svg text').length,
+             host: (document.querySelector('#ffchart') || {}).clientWidth || 0 };
+  });
+  ok(`fitness chart is on screen at 390px (host ${ax.host}px)`, ax.host > 200 && ax.host < 390);
+  ok('both lettered charts keep their axis in HTML, not inside the stretched SVG', ax.svgText === 0);
+  ok(`axis labels keep real width on a phone (${ax.n} shown, narrowest ${Math.round(ax.min)}px \u2265 8)`,
+     ax.n > 0 && ax.min >= 8);
+  // Nothing clips an axis label. This is a NET, not a proof, and worth saying so: measured, it stays
+  // green with the thinner removed entirely, because the cards sit inside the wrap's 15px padding and
+  // a label can hang off a chart without ever widening the document. It is here to catch a future
+  // regression at the page boundary, not to demonstrate anything about the thinner.
+  const oflow = await page.evaluate(() =>
+    ({ doc: document.documentElement.scrollWidth, win: window.innerWidth }));
+  ok(`no horizontal page overflow at 390px (${oflow.doc} ≤ ${oflow.win})`, oflow.doc <= oflow.win);
+  await page.screenshot({ path: `${SHOTS}/09-axis-phone.png`, fullPage: true });
+  // Real type collides where 3px-wide type merely looked like dust, so the labels thin themselves —
+  // but the thinner only has a job on a span long enough to crowd, and the seeded plan is four
+  // months. Drive the REAL renderer with a synthetic 30-month series: the only way to watch the one
+  // piece of logic this change added actually do its work.
+  await page.evaluate(() => {
+    document.querySelector('.mnav-btn[data-goto="plan"]')?.click();
+    const d = document.querySelector('#sec-drift'); if (d) d.open = true;
+  });
+  await page.waitForTimeout(500);
+  const thin = await page.evaluate(() => {
+    const pts = [], d0 = new Date(2024, 0, 1);
+    for (let i = 0; i < 900; i++)
+      pts.push({ date: new Date(d0.getTime() + i * 86400000).toISOString().slice(0, 10),
+                 val: 40 + 20 * Math.sin(i / 40) });
+    const host = document.querySelector('#drift-ctl');
+    mkChart(host, [{ pts, cls: 'actual', color: '#c60', label: 'ctl' }], { fmt: v => v.toFixed(0) });
+    const all = [...host.querySelectorAll('.axlbl .ax.x')];
+    const r = all.filter(e => e.offsetParent).map(e => e.getBoundingClientRect())
+                 .sort((a, b) => a.left - b.left);
+    let overlaps = 0;
+    for (let i = 1; i < r.length; i++) if (r[i].left < r[i - 1].right) overlaps++;
+    return { built: all.length, shown: r.length, overlaps };
+  });
+  // `shown > 3` is not decoration: a hidden tab measures zero and every label reports no layout box,
+  // which would satisfy "fewer shown than built, none overlapping" with the axis entirely blank.
+  ok(`a 30-month axis thins to fit a phone (${thin.shown} of ${thin.built} shown, ${thin.overlaps} overlapping)`,
+     thin.built >= 25 && thin.shown > 3 && thin.shown < thin.built && thin.overlaps === 0);
+  // …and widening gives them back with NO re-render: the ResizeObserver is what makes a rotation,
+  // a tab switch and a <details> toggle all the same event as far as the labels are concerned.
+  await page.setViewportSize({ width: 1280, height: 1700 });
+  await page.waitForTimeout(400);
+  const back = await page.evaluate(() =>
+    [...document.querySelectorAll('#drift-ctl .axlbl .ax.x')].filter(e => e.offsetParent).length);
+  ok(`widening the window gives every thinned label back, no re-render (${back} of ${thin.built})`,
+     back === thin.built);
+
+  // ── UX-9: the keyboard reaches it, and pressing it does something ─────────
+  // Six of the plan's controls were divs and spans with click handlers: reachable by mouse, invisible
+  // to Tab. The rule the app now holds is a pair — role="button" and tabindex="0" travel together —
+  // because either one alone is its own bug. A role with no tab stop announces a button a keyboard
+  // user cannot reach; a tab stop with no role is a focus stop that announces nothing. Scan the LIVE
+  // DOM rather than the source: three of these sites build their attributes at render time.
+  const aria = await page.evaluate(() => {
+    const roleNoTab = [...document.querySelectorAll('[role="button"]')]
+      .filter(e => e.getAttribute('tabindex') !== '0' && e.tagName !== 'BUTTON')
+      .map(e => e.className || e.tagName);
+    const tabNoRole = [...document.querySelectorAll('[tabindex="0"]')]
+      .filter(e => e.getAttribute('role') !== 'button')
+      .map(e => e.className || e.tagName);
+    // a tablist whose children are not tabs tells a screen reader about a structure that isn't there
+    const orphanTablists = [...document.querySelectorAll('[role="tablist"]')]
+      .filter(t => !t.querySelector('[role="tab"]')).length;
+    return { roleNoTab, tabNoRole, orphanTablists,
+             custom: document.querySelectorAll('[role="button"]:not(button)').length };
+  });
+  ok(`custom buttons are keyboard-reachable (${aria.custom} found, 0 missing a tab stop)`,
+     aria.custom >= 4 && aria.roleNoTab.length === 0);
+  ok(`no focus stop without a role${aria.tabNoRole.length ? ' — ' + aria.tabNoRole.join(', ') : ''}`,
+     aria.tabNoRole.length === 0);
+  ok('no tablist without tabs (the drift control is a group of pressed buttons)',
+     aria.orphanTablists === 0);
+
+  // Pressing Enter on a focused week does what clicking it does. This is the whole point: the
+  // delegated handler keys off the ARIA, so every element that takes the role takes the keys.
+  const kb = await page.evaluate(async () => {
+    const segs = [...document.querySelectorAll('.weekseg')];
+    const off = segs.find(s => s.getAttribute('aria-pressed') === 'false');
+    if (!off) return { ran: false };
+    const pk = off.dataset.pk, wk = off.dataset.wk;
+    off.focus();
+    return { ran: true, focused: document.activeElement === off, pk, wk,
+             before: off.getAttribute('aria-pressed') };
+  });
+  ok('a week segment takes keyboard focus', kb.ran && kb.focused);
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  const after = await page.evaluate(({ pk, wk }) => {
+    const seg = document.querySelector(`.weekseg[data-pk="${pk}"][data-wk="${wk}"]`);
+    const detail = document.querySelector(`.weekdetail[data-pk="${pk}"][data-wk="${wk}"]`);
+    return { pressed: seg && seg.getAttribute('aria-pressed'),
+             shown: !!(detail && detail.classList.contains('active')),
+             onlyOne: document.querySelectorAll(`.weekstrip[data-pk="${pk}"] .weekseg[aria-pressed="true"]`).length };
+  }, { pk: kb.pk, wk: kb.wk });
+  ok(`Enter on a focused week opens it (pressed ${kb.before} → ${after.pressed}, detail shown ${after.shown})`,
+     after.pressed === 'true' && after.shown && after.onlyOne === 1);
+
+  // The focus ring itself. Two rules used to blank the outline on the only elements the app had made
+  // focusable, so a keyboard user could operate them without ever seeing where they were. Tab for
+  // real — :focus-visible is about the input modality, and a programmatic .focus() does not prove it.
+  await page.keyboard.press('Tab');
+  const ring = await page.evaluate(() => {
+    const a = document.activeElement;
+    const s = getComputedStyle(a);
+    return { el: a.className || a.tagName, width: s.outlineWidth, style: s.outlineStyle,
+             color: s.outlineColor };
+  });
+  ok(`keyboard focus draws a visible ring (${ring.el}: ${ring.width} ${ring.style})`,
+     parseFloat(ring.width) >= 1 && ring.style !== 'none' && !/transparent|rgba\(0, 0, 0, 0\)/.test(ring.color));
+
+  // "Reduce motion" is an OS setting, and the app has to honour it in style AND in script: a
+  // transition is CSS, but scrollIntoView's smoothness is a JS argument no media query can reach.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const rm = await page.evaluate(() => {
+    const probe = document.querySelector('.tile') || document.body;
+    return { js: typeof REDUCE === 'function' ? REDUCE() : null,
+             css: getComputedStyle(probe).transitionDuration };
+  });
+  ok('reduce-motion is honoured in script (the smooth scrolls read the media query)', rm.js === true);
+  ok(`reduce-motion is honoured in style (transition-duration ${rm.css})`,
+     /^0s|0\.00001s|0ms/.test(rm.css) || parseFloat(rm.css) < 0.01);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+
+  // ── UX-10: the sub-floor controls project a ≥24px transparent hit area ────
+  // The visuals did not change; what grew is a ::before the eye can't see. elementFromPoint sees
+  // through it to the origin element, so sampling the extended coordinates measures the REAL
+  // hittable box — a source grep can only claim one. The range control needs a real series first:
+  // 65 readings across 192 days clears its own eligibility rule (>50 points spanning >183 days),
+  // driven through the real API and the real renderer.
+  await page.evaluate(async () => {
+    const key = document.querySelector('#hmarker').options[0].value;
+    for (let i = 0; i < 65; i++) {
+      const d = new Date(Date.now() - (210 - i * 3) * 86400000);
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      await fetch('/api/health', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ marker: key, date: iso, value: 70 + (i % 7) * 0.3, source: 'manual' }) });
+    }
+    await loadHealth();
+  });
+  const hits = await page.evaluate(() => {
+    // elementFromPoint only sees what's on screen — bring each control into view before sampling
+    const probe = (el, pts) => {
+      el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      const r = el.getBoundingClientRect();
+      return pts.map(([dx, dy]) => {
+        const t = document.elementFromPoint(r.left + r.width / 2 + dx, r.top + r.height / 2 + dy);
+        return t ? (t === el || el.contains(t) ? 'self' : (t.className || t.tagName)) : 'void';
+      });
+    };
+    const out = {};
+    const sw = document.querySelector('.swatch');                                  // 30×9 visual
+    out.swatch = probe(sw, [[0, 0], [0, -11], [0, 11]]);
+    const q = [...document.querySelectorAll('#zones .qhint')].find(e => e.offsetParent);   // 15×15
+    out.qhint = q ? probe(q, [[0, 0], [0, -11], [0, 11], [-11, 0], [11, 0]]) : null;
+    const segs = [...document.querySelectorAll('#plan .prseg')];                   // 18×18
+    out.prseg = segs.map(s => probe(s, [[0, 0], [0, -11], [0, 11], [-6, 0], [6, 0]]));
+    // every point of each segment's nominal 24px box resolves to A segment of the control: the
+    // 3px boundary strips belong to a sibling by paint order (native segmented controls resolve
+    // a boundary tap the same way) — what must never happen is a dead spot
+    out.prsegVoid = 0;
+    segs.forEach(s => {
+      s.scrollIntoView({ behavior: 'auto', block: 'center' });
+      const r = s.getBoundingClientRect();
+      for (const dx of [-11, 0, 11]) for (const dy of [-11, 0, 11]) {
+        const t = document.elementFromPoint(r.left + r.width / 2 + dx, r.top + r.height / 2 + dy);
+        if (!(t && t.classList && t.classList.contains('prseg'))) out.prsegVoid++;
+      }
+    });
+    const hb = [...document.querySelectorAll('.hrange button')];                   // ~17px tall
+    out.hrange = hb.map(b => probe(b, [[0, 0], [0, -11], [0, 11]]));
+    return out;
+  });
+  ok(`theme swatch hittable 11px beyond its 9px-tall box (${hits.swatch})`,
+     hits.swatch.every(v => v === 'self'));
+  ok(`? hint hittable 11px out in all four directions (${hits.qhint})`,
+     !!hits.qhint && hits.qhint.every(v => v === 'self'));
+  ok(`priority segments hittable 11px above/below + across their heart (${hits.prseg.length} segments)`,
+     hits.prseg.length >= 3 && hits.prseg.every(a => a.every(v => v === 'self')));
+  ok(`no dead spots anywhere in the priority selector (${hits.prsegVoid} alien hits)`, hits.prsegVoid === 0);
+  ok(`health range buttons hittable 11px above/below (${hits.hrange.length} buttons)`,
+     hits.hrange.length >= 3 && hits.hrange.every(a => a.every(v => v === 'self')));
+
+  // ── UX-11: the browser chrome follows the theme, and the small repairs ────
+  const chrome0 = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
+  await page.locator('.swatch[data-theme="dark"]').click();
+  const chrome1 = await page.evaluate(() => ({
+    meta: document.querySelector('meta[name="theme-color"]').content,
+    man: document.querySelector('link[rel="manifest"]').getAttribute('href') }));
+  await page.locator('.swatch[data-theme="light"]').click();   // leave the run in Daylight
+  ok(`theme-color starts on Daylight (${chrome0})`, chrome0 === '#f4f1ea');
+  ok(`theme chrome follows the switch (${chrome1.meta} · ${chrome1.man})`,
+     chrome1.meta === '#191a1d' && (chrome1.man || '').includes('theme=dark'));
+
+  // the gauge "you:" pill is clamped inside the gauge even at the scale's very ends
+  const pill = await page.evaluate(() => {
+    const g = document.getElementById('gauge'), you = document.getElementById('gyou');
+    if (!g || !you || !you.textContent.trim()) return null;
+    const gr = g.getBoundingClientRect();
+    const margin = v => { you.style.setProperty('--gx', v); const r = you.getBoundingClientRect();
+      return Math.min(r.left - gr.left, gr.right - r.right); };
+    const hi = margin('100%'), lo = margin('0%');
+    you.style.removeProperty('--gx');
+    return { hi, lo };
+  });
+  ok(`gauge pill never overhangs the gauge (end margins ${pill && Math.round(pill.hi)}/${pill && Math.round(pill.lo)}px)`,
+     !!pill && pill.hi >= -1 && pill.lo >= -1);
+
+  // the health form's date is prefilled to today (local, not UTC)
+  const hd = await page.evaluate(() => {
+    const n = new Date();
+    return { val: document.getElementById('hdate').value,
+             iso: `${n.getFullYear()}-${String(n.getMonth() + 1).padStart(2, '0')}-${String(n.getDate()).padStart(2, '0')}` };
+  });
+  ok(`health-form date prefilled to today (${hd.val})`, hd.val === hd.iso);
+
+  // the OSM tiles take a theme filter. The seed records no GPS, so no real map renders — this
+  // measures the cascade on a real element carrying the real class inside the real map host.
+  const tileCss = await page.evaluate(() => {
+    const host = document.getElementById('actmap');
+    if (!host) return null;
+    const t = document.createElement('img'); t.className = 'leaflet-tile'; host.appendChild(t);
+    const read = () => getComputedStyle(t).filter;
+    const light = read();
+    document.documentElement.dataset.theme = 'dark'; const dark = read();
+    document.documentElement.dataset.theme = 'aurora'; const aurora = read();
+    document.documentElement.dataset.theme = 'light'; t.remove();
+    return { light, dark, aurora };
+  });
+  ok(`map tiles unfiltered on Daylight, filtered on Charcoal/Aurora (${tileCss && tileCss.dark})`,
+     !!tileCss && tileCss.light === 'none' && tileCss.dark !== 'none' && tileCss.aurora !== 'none');
+
+  // .profhint's 320px reserve is a desktop arrangement — on a phone the legend wraps below instead
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => document.querySelector('.mnav-btn[data-goto="today"]')?.click());
+  await page.waitForTimeout(300);
+  const ph = await page.evaluate(() => {
+    const h = document.querySelector('#recent .profhint'), pm = document.querySelector('#recent .profmeta');
+    if (!h || !pm) return null;
+    return { pad: parseFloat(getComputedStyle(h).paddingRight), meta: getComputedStyle(pm).position };
+  });
+  ok(`.profhint reserve capped on a phone (${ph && ph.pad}px, legend ${ph && ph.meta})`,
+     !!ph && ph.pad <= 20 && ph.meta === 'static');
+  await page.setViewportSize({ width: 1280, height: 1700 });
+  await page.waitForTimeout(300);
+
+  // the offline shell dates its data: the stamp persisted while online is what the failure
+  // terminus reads when the service worker serves the shell with the API unreachable
+  const stamp = await page.evaluate(() => localStorage.getItem('sh-last-sync'));
+  ok(`last-sync stamp persisted for the offline shell (${stamp})`, !!stamp);
+  await page.route('**/api/**', r => r.abort());
+  await page.route('**/healthz', r => r.abort());
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForTimeout(3000);   // let every loader settle into its terminus
+  const offline = await page.evaluate(() => {
+    const els = [...document.querySelectorAll('.tilefail')].map(e => e.innerText);
+    return { n: els.length, dated: els.filter(t => /data as of your last sync/.test(t)).length,
+             sample: (els[0] || '').slice(0, 90) };
+  });
+  ok(`offline termini date the data from the stored stamp (${offline.dated}/${offline.n} — "${offline.sample}…")`,
+     offline.n >= 5 && offline.dated === offline.n);
+  await page.unroute('**/api/**'); await page.unroute('**/healthz');
+
   // ── First-run step ③: with data but no objective, the card surfaces "Add a race" ──
   const objs = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
   for (const o of objs)
@@ -274,6 +555,26 @@ async function runCold() {
   await page.screenshot({ path: `${SHOTS}/05-coldstart.png`, fullPage: true });
 }
 
+async function runPublic() {
+  // UX-11 — the public read-only box never points a visitor at a control it doesn't have, and the
+  // theme chrome works there too. Driven against the no-plan fixture, so the plan tile shows its
+  // empty state: the copy must not send a stranger hunting for the (removed) Generate button.
+  await page.waitForSelector('#plan .empty', { timeout: 15000 });
+  const bodyText = await page.locator('body').innerText();
+  ok('the public box never points a visitor at generating (no such control exists there)',
+     !/generate/i.test(bodyText));
+  ok('public plan empty state renders honest copy',
+     /No plan published yet/.test(await page.locator('#plan .empty').innerText()));
+  ok('no health form on the public box', await page.locator('#hform').count() === 0);
+  const chip = await page.evaluate(() => {
+    const e = document.querySelector('#scFresh'); return e ? e.textContent.trim() : ''; });
+  ok('public readiness card carries no sync age (the household routine stays private)', chip === '');
+  await page.locator('.swatch[data-theme="dark"]').click();
+  const tc = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
+  ok('theme-color follows the switch on the public box too', tc === '#191a1d');
+  await page.screenshot({ path: `${SHOTS}/10-public.png`, fullPage: true });
+}
+
 try {
   console.log(`\n→ driving ${BASE}  (mode=${MODE})\n`);
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
@@ -282,6 +583,7 @@ try {
   else if (MODE === 'settled') await runSettled();
   else if (MODE === 'cold') await runCold();
   else if (MODE === 'blocked') await runBlocked();
+  else if (MODE === 'public') await runPublic();
   else await runFull();
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));

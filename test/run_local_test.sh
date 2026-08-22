@@ -3,8 +3,9 @@
 # with Playwright, then tear down. No Runalyze token or network needed. Two phases:
 #   1. full  — a synthetic-seeded instance (dashboard, #67 dialog cycle, first-run hidden + step ③)
 #   2. empty — a fresh dataless instance (first-run card step ①)
-#   (+ noplan / settled / cold / blocked — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
-#    and asserts every tile reaches a failure terminus with a working retry, UX-3)
+#   (+ noplan / settled / cold / blocked / public — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
+#    and asserts every tile reaches a failure terminus with a working retry, UX-3; "public" runs the
+#    READONLY shell over the no-plan fixture, UX-11)
 #
 #   ./test/run_local_test.sh
 #
@@ -34,11 +35,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# launch_and_drive <db> <port> <mode> <label>
+# launch_and_drive <db> <port> <mode> <label> [readonly=1]
 launch_and_drive() {
-  local db="$1" port="$2" mode="$3" label="$4"
-  echo "▸ [$label] launching tokenless PRIVATE instance on :$port"
-  SH_DB="$db" RUNALYZE_TOKEN= SH_PORT="$port" "$PY" SparingHorse.py >"$WORK/server-$mode.log" 2>&1 &
+  local db="$1" port="$2" mode="$3" label="$4" ro="${5:-0}"
+  local kind="PRIVATE"; [ "$ro" = "1" ] && kind="PUBLIC"
+  echo "▸ [$label] launching tokenless $kind instance on :$port"
+  SH_DB="$db" RUNALYZE_TOKEN= SH_PORT="$port" SH_READONLY="$ro" "$PY" SparingHorse.py >"$WORK/server-$mode.log" 2>&1 &
   PIDS+=("$!")
   local up=0
   for _ in $(seq 1 40); do
@@ -85,6 +87,13 @@ launch_and_drive "$COLD_DB" "$((PORT + 4))" cold "cold" || RC=$?
 
 # Phase 6 — blocked (UX-3): /api/* + /healthz unreachable ⇒ every loader reaches a failure terminus
 launch_and_drive "$FULL_DB" "$((PORT + 5))" blocked "blocked" || RC=$?
+
+# Phase 7 — public (UX-11): the READONLY shell over the no-plan fixture — the empty state must not
+# point a visitor at the private console's controls; the theme chrome still follows the switch
+PUB_DB="$WORK/public.db"
+echo "▸ seeding $PUB_DB (--no-objective)"
+SH_DB="$PUB_DB" "$PY" SparingHorse.py seed --no-objective >/dev/null
+launch_and_drive "$PUB_DB" "$((PORT + 6))" public "public" 1 || RC=$?
 
 echo "▸ artifacts: $WORK (server logs + screenshots)"
 exit $RC

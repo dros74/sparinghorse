@@ -8,6 +8,9 @@ COPY SparingHorse.py .
 # point the /api/selftest/run route spawns as its own process.
 COPY sh_selftest.py .
 COPY test/golden ./test/golden
+# The front end (TECH-11): shell + stylesheet + script, served from /static. Without these the
+# app boots and then serves a page with no CSS and no JS — it must fail the build, not the user.
+COPY static ./static
 ENV SH_DB=/data/sparinghorse.db
 # §55e — WITHOUT THIS, EVERY `print()` IN THE APP IS INVISIBLE IN `docker logs`. Container stdout is a
 # pipe, not a tty, so Python block-buffers it (8 KB); a long-running server never fills that buffer, so
