@@ -302,7 +302,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.31.1"
+ENGINE_VERSION = "0.31.2"
 
 
 def activity_profile(activity_id, n=120):
@@ -9545,9 +9545,11 @@ _PV_QUALITY = {"attach": True, "component": True, "frac": True, "kind": True, "l
                "rec_min": True, "rep_min": True, "structure": True, "zone": True}
 # NOT `reflection`: the free-text "how it felt" is the readiness-note posture — private (§H7).
 _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "component": True,
-               "date": True, "done": True, "kind": True, "km": True, "minutes": True,
-               "missed": True, "note": True, "pace_zone": True, "reps": _PV_REPS, "runs": True,
-               "strides": True, "trimp": True, "zone": True}
+               "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
+               "minutes": True, "missed": True, "note": True, "optional": True,
+               "pace_zone": True, "reps": _PV_REPS, "runs": True, "strides": True, "trimp": True,
+               "zone": True}   # `optional` = the week-complete rest day; without it the card reads
+                               # "Rest day" where the private box reads "Optional — week complete"
 # NOT `av_dates` / `av_shed`: away days are an empty-house broadcast (§AV). The 0.27.1 recursive
 # strip stays in place for anything outside these views; here the allowlist makes them unreachable
 # by construction — a new phase key or a new payload cannot outrun it.
@@ -9557,6 +9559,13 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
             "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
             "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,
+            # the governor's own annotations — the chips the week card renders. Same class as
+            # `clipped`/`proj_acwr` above: they describe the PRESCRIPTION, not the athlete. Missed on
+            # the first pass because the seeded fixture never triggers them (found on the live plan,
+            # 2026-08-22): `long_step_capped` prints "long-run held (+10%)", `fatigue_capped` feeds
+            # the ease note, `long_capped`/`long_flat` say why a week has no distinct long run.
+            "fatigue_capped": True, "long_capped": True, "long_flat": True,
+            "long_step_capped": True,
             "runs_ahead": True, "runs_done": True, "sessions": _PV_SESSION, "start": True,
             "strides": True, "trimp_total": True, "volume_met": True, "wk": True}
 _PV_PHASE = {"builds": True, "clipped_by_acwr": True, "end_atl": True, "end_ctl": True,
@@ -9596,8 +9605,11 @@ _PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ct
                          "was_from": True},
             "shape": {"atl": True, "ctl": True, "effective_vo2max": True,
                       "seed": {"bridged_days": True, "fallback": True, "from": True}},
-            "shape_response": {"basis": True, "factor": True, "projected": True, "realized": True,
-                               "ride_cap": True},
+            # `ratio` matters more than it looks: the ease line renders `Math.round((ratio||0)*100)%`,
+            # so withholding it does not blank the line — it prints "measured fitness 0% of
+            # projection", which is WRONG rather than absent.
+            "shape_response": {"basis": True, "factor": True, "projected": True, "ratio": True,
+                               "realized": True, "ride_cap": True},
             "tune_ups": {"date": True, "label": True, "priority": True, "type": True}}
 
 # NOT `last_sync` (the household's routine — /healthz gives booleans, so must this) and NOT
@@ -9687,6 +9699,38 @@ _PV_PROFILE = {"cadence": True, "dist": True, "elevation": True, "error": True, 
 # (TECH-8). api_healthz builds the public booleans itself; this is the gate that keeps them so.
 _PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True, "readonly": True,
                "sync_ok": True, "sync_stale": True, "token_configured": True}
+
+# The COUNTERPART to the specs, and the thing that makes them auditable. "Not in PUBLIC_VIEWS"
+# otherwise means two very different things at once — "private on purpose" and "nobody has looked at
+# this field yet" — and the second is how a leak arrives. Every field the engine can put on a public
+# payload must appear in one list or the other; `det/public-view-coverage` fails on a field that is
+# in neither, which is what a NEW engine field looks like before anyone has classified it.
+#
+# Written after shipping the opposite mistake: the first specs were built from the `seed` fixture,
+# which never triggers the long-run/fatigue governors, so four annotations the LIVE plan carries
+# (`long_step_capped`, `fatigue_capped`, `long_capped`, `long_flat`), the rest day's `optional`
+# marker and `shape_response.ratio` were dropped from the public box on 0.31.0 — the tightening
+# direction, visible rather than dangerous, but a regression all the same.
+_PV_WITHHELD = {
+    "plan.adjustment",                       # free-text / medical context
+    "plan.cold_start",                       # §33f-5 — AGE + an HRmax prior, H7-class
+    "plan.<phase>.weeks[].av_dates",         # §AV — away days are an empty-house broadcast
+    "plan.<phase>.weeks[].av_shed",
+    "plan.<phase>.weeks[].sessions[].reflection",   # free text, the readiness-note posture
+    "log.weeks[].sessions[].reflection",
+    "log.weeks[].av_dates", "log.weeks[].av_shed",
+    "shape.last_sync",                       # the household routine — /healthz gives booleans (TECH-8)
+    "shape.latest.raw",                      # the whole upstream snapshot payload
+    "shape.latest.hrv_baseline",             # physiological, H7-class, read by nothing
+    "shape.latest.monotony", "shape.latest.training_strain",
+    "objectives[].created_at",               # when the athlete planned their season
+    "objectives[].outcome", "objectives[].resolved_at",      # §RL — a race RESULT is personal
+    "activity.hr_avg", "activity.hr_max", "activity.cross_training",
+    "drift.scorecard.reckoning",             # the settled race result (also not COMPUTED publicly)
+    "drift.counterfactual.reason",           # the regime rationale names the athlete's history
+    "healthz.last_sync", "healthz.last_ok",
+    "profile.hr", "profile.hr_avg", "profile.hrmax", "profile.hrzones", "profile.path",
+}
 
 PUBLIC_VIEWS = {"activity": _PV_ACTIVITY, "drift": _PV_DRIFT, "healthz": _PV_HEALTHZ,
                 "log": _PV_LOG, "objectives": _PV_OBJECTIVES, "plan": _PV_PLAN,

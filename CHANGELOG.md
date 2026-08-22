@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.31.2] - 2026-08-22
+
+### Fixed
+
+- **The public plan gets its detail back.** Tightening the public view in 0.31.0 also removed seven
+  small fields it should have kept — the "long-run held" chip, the marker that turns a completed
+  week's rest day into "optional", the flags explaining why a week has no distinct long run, and
+  the number behind the "measured fitness is X% of projection" line, which without it read 0%.
+  None of them say anything about the athlete; they describe the plan. They are back, and there is
+  now a check that every field the plan engine produces has been deliberately classified as either
+  published or withheld — the list built from test data alone had missed the ones that only appear
+  when the training-load governors act.
+
 ## [0.31.1] - 2026-08-22
 
 ### Fixed

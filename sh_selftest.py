@@ -761,6 +761,103 @@ def _stc_quality_forward():
                got="ok" if not bad else f"fails: {bad}", output=detail)
 
 
+def _stc_public_view_coverage(db):
+    """§PV — EVERY field the engine can put on a public payload must be CLASSIFIED: named in a
+    `PUBLIC_VIEWS` spec (published) or in `_PV_WITHHELD` (private on purpose). A field in neither is
+    what a new engine field looks like before anyone has thought about it, and the allowlist then
+    drops it silently.
+
+    Written because 0.31.0 shipped exactly that, in the tightening direction. The specs were built
+    from the `seed` fixture, which never trips the long-run or fatigue governors, so the LIVE plan's
+    `long_step_capped` / `fatigue_capped` / `long_capped` / `long_flat`, the rest day's `optional`
+    marker and `shape_response.ratio` were all absent from the specs — and vanished from the public
+    box. Visible rather than dangerous (`ratio` was the sharp one: the ease line renders
+    `(ratio||0)*100`, so a missing value reads "0% of projection", wrong rather than blank). A
+    fixture thinner than production is not a safety net.
+
+    Walks plans from several roads AND a payload carrying every governor annotation the engine can
+    emit — those fire only under conditions no single fixture reaches, so they are pinned explicitly
+    rather than hoped for."""
+    from datetime import date as _d
+    fails, unclassified, seen = [], [], set()
+
+    def _paths(o, where, out):
+        """Key paths, with list indices collapsed and phase blocks normalised to <phase> (base,
+        build, bridge1 … are all the same shape)."""
+        if isinstance(o, list):
+            for v in o[:6]:
+                _paths(v, where + "[]", out)
+            return out
+        if not isinstance(o, dict):
+            return out
+        for k, v in o.items():
+            seg = "<phase>" if (isinstance(v, dict) and "weeks" in v) else k
+            p = f"{where}.{seg}"
+            out.add(p)
+            _paths(v, p, out)
+        return out
+
+    def _classified(path, spec):
+        """Is this path reachable through the spec? Walks the spec in step with the path."""
+        cur = spec
+        for seg in path.split(".")[1:]:
+            seg = seg[:-2] if seg.endswith("[]") else seg
+            if cur is True:
+                return True                      # published verbatim from here down
+            if seg == "<phase>":
+                cur = S._PV_PHASE
+                continue
+            if not isinstance(cur, dict) or seg not in cur:
+                return False
+            cur = cur[seg]
+        return True
+
+    # (a) real roads: the ambient DB in both regimes, and a constructed race road
+    plans = []
+    for regime in ("caution", "assertive"):
+        plans.append(S.generate_plan(db, force_regime=regime))
+    fx, fx_today = _race_fixture_db("marathon")
+    try:
+        plans.append(S.generate_plan(fx, today=fx_today))
+    finally:
+        fx.close()
+    # (b) the governor annotations, pinned: `_mark_load_integrity` and the §PRO9 long-run cap set
+    # these only when they bite, and the rest-day `optional` marker needs a week already complete.
+    plans.append({"base": {"weeks": [{"wk": 1, "start": "2026-08-17", "km": 40, "runs": 5,
+                                      "long_capped": True, "long_flat": True,
+                                      "fatigue_capped": True, "long_step_capped": 12.4,
+                                      "sessions": [{"date": "2026-08-22", "kind": "rest", "km": 0.0,
+                                                    "optional": True, "note": "week complete",
+                                                    "long_step_capped": True}]}]},
+                  "shape_response": {"basis": "b", "factor": 1.0, "projected": 1.0, "ratio": 0.994,
+                                     "realized": 1.0, "ride_cap": 1.25}})
+    for plan in plans:
+        seen |= _paths(plan, "plan", set())
+    for path in sorted(seen):
+        if _classified(path, S._PV_PLAN) or path in S._PV_WITHHELD:
+            continue
+        # a phase block itself is matched structurally by plan_public_view
+        if path == "plan.<phase>":
+            continue
+        unclassified.append(path)
+    if unclassified:
+        fails.append(f"{len(unclassified)} plan field(s) in NEITHER the spec nor _PV_WITHHELD: "
+                     f"{unclassified[:8]}")
+    # the withheld register must stay HONEST: a path listed there must not also be published
+    both = [p for p in S._PV_WITHHELD if p.startswith("plan.") and _classified(p, S._PV_PLAN)]
+    if both:
+        fails.append(f"listed as withheld but the spec publishes it: {both}")
+    return _st("det", "public-view-coverage",
+               "§PV every field the engine puts on a plan is CLASSIFIED — published by a spec or "
+               "named in _PV_WITHHELD; a field in neither (what a new engine field looks like) "
+               "fails, which is how 0.31.0 silently dropped the governor chips, the rest day's "
+               "`optional` marker and shape_response.ratio from the public box",
+               passed=not fails,
+               expect="every emitted plan field classified; nothing both published and withheld",
+               got={"fields_seen": len(seen), "unclassified": unclassified or "none",
+                    "failures": fails or "none"})
+
+
 def _stc_public_allowlist():
     """§PV/TECH-3 — the public projection is an ALLOWLIST. The old posture served the private payload
     and popped what someone remembered was personal, which had already failed in the field (the §AV
@@ -9925,7 +10022,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_public_allowlist(), lambda: _stc_runtime_config(),
+                 lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),
