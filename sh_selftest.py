@@ -6314,6 +6314,35 @@ def _stc_taper():
                output={"acwr": [w.get("proj_acwr") for w in weeks]})
 
 
+def _race_fixture_db(race_type="marathon", weeks_out=20, today=None):
+    """An in-memory DB holding ONE upcoming race and eight weeks of plain history — enough runway for
+    the periodizer to publish a full block (rebase → base → build → peak → taper) with the race week
+    inside it. Dets that assert on a RACE road use this instead of the ambient DB: `--past-race`
+    (and any race-less instance) plans in maintenance mode, where there is no taper, no race week and
+    nothing to freeze — so an ambient-only tooth reads "saw nothing" and fails for the environment
+    rather than for the code. Returns (db, today); the caller closes it."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    today = today or _d(2026, 6, 1)
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    d = today - _td(days=56)
+    while d < today:
+        if d.weekday() in (0, 2, 4, 6):
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                      "VALUES(?,?,?,?,?,?)",
+                      (d.isoformat(), d.isoformat() + "T18:00", S.RUNNING_SPORT, 10.0, 3600, 60.0))
+        d += _td(days=1)
+    m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
+              "VALUES(?,?,?,?)", ((today - _td(days=1)).isoformat(), 50.0, 45.0, 42.0))
+    m.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+              "VALUES(?,?,?,?,?,?,?)",
+              (race_type, "Fixture race", (today + _td(weeks=weeks_out)).isoformat(),
+               "3:45" if race_type == "marathon" else "42:00", "A", "upcoming", S._now_iso()))
+    m.commit()
+    return m, today
+
+
 def _stc_taper_touch(db):
     """§TT — the taper's sharpening touch runs at the RACE'S pace. It was hardcoded to the threshold
     zone under the label "short race-pace touch": for a marathon that prescribed the block's ONLY
@@ -6325,7 +6354,10 @@ def _stc_taper_touch(db):
           twice) — a revert that stops PASSING the zone leaves the shaper correct and unused, so the
           det must read the plan, not the helper. Every structured taper touch in the generated plan
           must run at the anchoring race's pace: marathon anchor ⇒ the marathon zone, any other ⇒
-          threshold. Asserted from the plan's own chain, so the det is valid on any DB it runs on.
+          threshold. Asserted from the plan's own chain on CONSTRUCTED roads for BOTH anchors (plus
+          the ambient road when it carries a taper), so the det is valid on any DB it runs on — a
+          race-less instance has no taper to read, and the anti-vacuity guard used to fail there for
+          the environment rather than for the code.
       (c) The touch must not be the block's only visit to its zone out of nowhere: for a marathon
           anchor, the build phase must already carry sessions in the same zone (the MP long-run
           finishes) — the taper rehearses, never debuts."""
@@ -6341,29 +6373,50 @@ def _stc_taper_touch(db):
         fails.append(f"default zone moved — legacy callers are no longer byte-identical: {zq(sh_d)}")
     if (sh_m[-1].get("quality") or sh_d[-1].get("quality")):
         fails.append("race week grew structured quality")
-    # (b) the published plan
-    plan = S.generate_plan(db)
-    anchor = ((plan.get("chain") or [{}])[-1].get("type") or
-              (plan.get("objective") or {}).get("type") or "").lower()
-    want = "marathon" if anchor == "marathon" else "threshold"
-    touches = [(w.get("start"), s.get("pace_zone") or "")
-               for k, v in plan.items()
-               if str(k).startswith("taper") and isinstance(v, dict)
-               for w in v.get("weeks", [])
-               for s in w.get("sessions") or [] if s.get("reps")]
-    wrong = [t for t in touches if want not in t[1]]
-    if touches and wrong:
-        fails.append(f"published taper touch not at the race's pace (want {want}): {wrong}")
-    if not touches:
-        fails.append("plan published no structured taper touch — the call-site tooth saw nothing")
-    # (c) rehearsed, not debuted
-    if anchor == "marathon":
-        build_zones = {(s.get("pace_zone") or "").split("/km ")[-1]
-                       for w in (plan.get("build") or {}).get("weeks", [])
-                       for s in w.get("sessions") or []}
-        if "marathon" not in build_zones:
-            fails.append(f"taper sharpens at a pace the build never rehearsed (build zones: "
-                         f"{sorted(z for z in build_zones if z)})")
+    # (b) + (c) on the PUBLISHED plan. Both anchors are exercised on CONSTRUCTED roads, because the
+    # ambient DB carries at most one of them and may carry neither: on a race-less instance
+    # (`--past-race`, any maintenance road) the plan has no taper at all, and the anti-vacuity guard
+    # below then failed for the ENVIRONMENT rather than for the code. The fixtures also close the
+    # other half of the claim — the "any other race ⇒ threshold" branch has no live road at all
+    # while the owner's anchor is a marathon.
+    def _road(plan, tag):
+        anchor = ((plan.get("chain") or [{}])[-1].get("type") or
+                  (plan.get("objective") or {}).get("type") or "").lower()
+        want = "marathon" if anchor == "marathon" else "threshold"
+        touches = [(w.get("start"), s.get("pace_zone") or "")
+                   for k, v in plan.items()
+                   if str(k).startswith("taper") and isinstance(v, dict)
+                   for w in v.get("weeks", [])
+                   for s in w.get("sessions") or [] if s.get("reps")]
+        wrong = [t for t in touches if want not in t[1]]
+        if touches and wrong:
+            fails.append(f"{tag}: published taper touch not at the race's pace (want {want}): {wrong}")
+        # (c) rehearsed, not debuted
+        if anchor == "marathon":
+            build_zones = {(s.get("pace_zone") or "").split("/km ")[-1]
+                           for w in (plan.get("build") or {}).get("weeks", [])
+                           for s in w.get("sessions") or []}
+            if "marathon" not in build_zones:
+                fails.append(f"{tag}: taper sharpens at a pace the build never rehearsed "
+                             f"(build zones: {sorted(z for z in build_zones if z)})")
+        return anchor, want, touches
+
+    published = {}
+    for rtype in ("marathon", "half"):
+        fx, fx_today = _race_fixture_db(rtype)
+        try:
+            f_anchor, f_want, f_touches = _road(S.generate_plan(fx, today=fx_today), f"fixture/{rtype}")
+        finally:
+            fx.close()
+        published[rtype] = len(f_touches)
+        if f_anchor != rtype:
+            fails.append(f"fixture/{rtype}: road anchored on {f_anchor!r} — the fixture didn't build "
+                         f"the road the tooth needs")
+        elif not f_touches:
+            fails.append(f"fixture/{rtype}: road published no structured taper touch — the call-site "
+                         f"tooth saw nothing")
+    # …and the ambient road too, when it has a taper to show (a real race on the live DB).
+    anchor, want, touches = _road(S.generate_plan(db), "ambient")
     return _st("det", "taper-touch",
                "§TT the taper's 'race-pace touch' runs at the RACE'S pace — marathon anchor ⇒ the "
                "marathon zone the build rehearsed for 9 weeks, others keep threshold; asserted on "
@@ -6371,8 +6424,9 @@ def _stc_taper_touch(db):
                passed=not fails,
                expect="shaper threads race_zone · default untouched · published touches at the "
                       "anchor's pace · rehearsed in build · race week clean",
-               got={"anchor": anchor or None, "want_zone": want,
-                    "published_touches": len(touches), "failures": fails or "none"})
+               got={"ambient_anchor": anchor or None, "ambient_want_zone": want,
+                    "ambient_touches": len(touches), "fixture_touches": published,
+                    "failures": fails or "none"})
 
 
 def _stc_freeze_continuity():
@@ -7167,12 +7221,41 @@ def _stc_card_truth(db):
                     if w.get("start") and w["start"] <= rd <= (S._date(w["start"])
                                                               + timedelta(days=6)).isoformat():
                         saw_trimmed = True     # the race week passed through _trim_post_race
+    # §PER1 — THE RACE WEEK, as a CONSTRUCTED road: the sweep above meets one only when the ambient
+    # DB happens to hold an upcoming race, and a race-less instance (`--past-race`, any maintenance
+    # road) has none — the coverage tooth then failed for the environment, not for the code. The
+    # fixture road always carries its race week, and the same header-vs-listing rules are applied to
+    # it: a trimmed week must still state what it lists.
+    if not saw_trimmed:
+        _fx, _fx_today = _race_fixture_db("marathon")
+        try:
+            _fxp = S.generate_plan(_fx, today=_fx_today)
+            _rd = ((_fxp.get("chain") or [{}])[-1].get("date")
+                   or (_fxp.get("objective") or {}).get("date"))
+            for _ph in ("rebase", "base", "build", "peak", "taper"):
+                for _w in (_fxp.get(_ph) or {}).get("weeks") or []:
+                    if not (_w.get("start") and _rd and _w["start"] <= _rd
+                            <= (S._date(_w["start"]) + timedelta(days=6)).isoformat()):
+                        continue
+                    saw_trimmed = True          # the race week passed through _trim_post_race
+                    _ss = _w.get("sessions") or []
+                    _laid = len(NONREST(_ss))
+                    if _w.get("runs") != _laid:
+                        fails.append(f"fixture/race-week {_w.get('start')}: card says "
+                                     f"{_w.get('runs')} runs, lists {_laid}")
+                    _km = round(sum(x.get("km") or 0.0 for x in _ss), 1)
+                    if abs((_w.get("km") or 0.0) - _km) > 0.05:
+                        fails.append(f"fixture/race-week {_w.get('start')}: card says "
+                                     f"{_w.get('km')} km, sessions sum to {_km}")
+                    if _w.get("intent_runs") != _w.get("runs"):
+                        fails.append(f"fixture/race-week {_w.get('start')}: intent_runs "
+                                     f"{_w.get('intent_runs')} ≠ laid count {_w.get('runs')}")
+        finally:
+            _fx.close()
     if not saw_partial:
         fails.append("sweep never met a partial (straddle) week — the branch that lied is untested")
     if not saw_trimmed:
-        fails.append("sweep never met a race week — §PER1's trim path is untested")
-    if not saw_frozen:
-        fails.append("sweep never met a frozen week — §CARD3's true-up path is untested")
+        fails.append("no race week reached the header rules — §PER1's trim path is untested")
     # §CARD2 (d) — SAME-DAY REGEN NEVER COUNTS TODAY TWICE, as a CONSTRUCTED fixture: the live-DB
     # sweep above can only exercise the supersede rule when the real DB happens to hold a run on the
     # det's forced `today` — it doesn't, so a revert of the rule passed the sweep unseen (the
@@ -7246,7 +7329,14 @@ def _stc_card_truth(db):
         if _fw.get("intent_runs") != 5:
             fails.append(f"fossil prescription bar lost: intent_runs={_fw.get('intent_runs')} "
                          f"(want the pre-fix header's 5)")
-    _m.close()
+        if _fw.get("frozen"):
+            saw_frozen = True       # (e) IS the true-up path, driven through generate_plan's own
+    _m.close()                      # call site — coverage is satisfied by construction, not by luck
+    # …so the frozen guard is asserted only after (e): the live sweep's frozen week comes and goes
+    # with the ambient DB (a race-less road has no lived week to freeze at all), while the fossil
+    # always exercises §CARD3. What must never happen is BOTH going silent.
+    if not saw_frozen:
+        fails.append("no frozen week reached the true-up rules — §CARD3's path is untested")
     return _st("det", "card-truth",
                "§CARD a week's header states what its own listing shows: runs == non-rest sessions "
                "and km == the sessions' sum, swept over every published week in both regimes with "
@@ -7260,7 +7350,8 @@ def _stc_card_truth(db):
                       "+ frozen weeks all present in the sweep; the fossil trues up and stays "
                       "unbankable",
                got={"weeks_swept": n_weeks, "saw_partial": saw_partial, "saw_race_week": saw_trimmed,
-                    "saw_frozen": saw_frozen, "failures": fails or "none"})
+                    "saw_frozen": saw_frozen, "failures": fails or "none"})   # race/frozen: swept
+                    # on the ambient road when it has them, on the fixtures otherwise
 
 
 def _stc_plan_structure(db):
@@ -7548,6 +7639,68 @@ def _stc_block_generator():
                got={"rebase_identical": identical, "acwr_over": over or "none"},
                output={"arbitrary_shape_weeks": len(weeks), "end_ctl": bound.get("end_ctl"),
                        "end_atl": bound.get("end_atl")})
+
+
+def _stc_snapshot_payload_guard():
+    """§77 — `shape_snapshots.raw` is a NULLABLE TEXT column, and hrv_signal used to `json.loads` it
+    bare. Every sync-written row carries the payload, so the hole was latent — but any other writer
+    (a fixture, an interrupted write, the §BX import) leaves it NULL, and then a TypeError comes out
+    of the READINESS read: the safety-critical card 500s over a missing nice-to-have. Driven through
+    `assess_readiness` (the call site), not just the helper, on a DB whose LATEST snapshot carries
+    each payload shape in turn: NULL, blank, and malformed must degrade to "no HRV signal" and still
+    return a verdict; a GOOD payload must still read its band (the guard must not swallow the signal);
+    and the stop-symptom floor must still halt on the very row that used to raise."""
+    import sqlite3 as _sq
+    from datetime import date as _d
+    fails = []
+
+    def _one(label, raw, want_state):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)
+        if raw is None:
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,fitness,fatigue) VALUES(?,?,?)",
+                      (_d(2026, 6, 1).isoformat(), 40.0, 38.0))
+        else:
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,fitness,fatigue,raw) VALUES(?,?,?,?)",
+                      (_d(2026, 6, 1).isoformat(), 40.0, 38.0, raw))
+        m.commit()
+        got = {"label": label}
+        try:
+            sig = S.hrv_signal(m)
+            got["state"] = sig.get("state")
+            got["band"] = sig.get("band")
+            if sig.get("state") != want_state:
+                fails.append(f"{label}: hrv state {sig.get('state')!r}, want {want_state!r}")
+            # the call site: a readiness verdict must come back, and the safety floor must still bite
+            r = S.assess_readiness(m, {"energy": "good", "sleep": "good"})
+            got["verdict"] = r.get("verdict")
+            if not r.get("verdict"):
+                fails.append(f"{label}: assess_readiness returned no verdict")
+            halt = S.assess_readiness(m, {"stop_symptom": True})
+            got["stop_halt"] = bool(halt.get("halt")) and halt.get("verdict") == "red"
+            if not got["stop_halt"]:
+                fails.append(f"{label}: the stop-symptom floor stopped halting")
+        except Exception as e:                     # the defect itself: the read RAISES
+            fails.append(f"{label}: readiness read raised {type(e).__name__}: {e}")
+        finally:
+            m.close()
+        return got
+
+    good = S.json.dumps({"hrvBaseline": 38.0, "hrvNormalRange": [45.0, 65.0]})
+    cases = [_one("raw NULL", None, None),
+             _one("raw blank", "", None),
+             _one("raw malformed", "{not json", None),
+             _one("raw good payload", good, "low")]
+    if cases[-1].get("band") != [45.0, 65.0]:
+        fails.append(f"the good payload lost its band: {cases[-1].get('band')} — the guard "
+                     f"swallowed the signal instead of only catching the empty case")
+    return _st("det", "snapshot-payload-guard",
+               "§77 a snapshot row with no `raw` payload degrades to 'no HRV signal' instead of "
+               "raising out of the readiness card: NULL / blank / malformed all return a verdict "
+               "(and still halt on a stop-symptom), while a good payload keeps reading its band",
+               passed=not fails,
+               expect="NULL/blank/malformed ⇒ state None + a served verdict; good ⇒ 'low' with band",
+               got={"cases": cases, "failures": fails or "none"})
 
 
 def _stc_readiness_floor(db):
@@ -9286,7 +9439,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
                  lambda: _stc_api_validation(db),
-                 lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db), lambda: _stc_readiness_floor(db),
+                 lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
+                 lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_checkin_stop(), lambda: _stc_medical_track(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),

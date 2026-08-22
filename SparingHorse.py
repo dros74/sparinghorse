@@ -232,7 +232,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.30.0"
+ENGINE_VERSION = "0.30.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -8741,7 +8741,14 @@ def hrv_signal(db):
     row = latest_snapshot(db)
     if not row:
         return {"state": None}
-    s = json.loads(row["raw"])
+    # `raw` is a nullable TEXT column: every sync-written row carries the payload, but a row written
+    # by any other path (a fixture, a partial write, an import) can hold NULL — and a bare
+    # json.loads(None) raises TypeError out of a READINESS read, i.e. the safety-critical card 500s
+    # over a missing nice-to-have. Same `or "{}"` guard the other raw readers already use.
+    try:
+        s = json.loads(row["raw"] or "{}")
+    except ValueError:                      # malformed payload — no HRV signal, not a broken page
+        return {"state": None}
     b, rng = s.get("hrvBaseline"), s.get("hrvNormalRange")
     if b is None or not rng:
         return {"state": None}

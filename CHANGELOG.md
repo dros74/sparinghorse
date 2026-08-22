@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.30.1] - 2026-08-22
+
+### Fixed
+
+- **The readiness card no longer depends on a payload it doesn't need.** The HRV signal read the
+  latest shape snapshot's raw payload without checking there was one. Every row the sync writes
+  carries it, so the hole was latent — but any other writer (a restored backup, an interrupted
+  write, a test fixture) leaves it empty, and the whole readiness card would then fail with it,
+  over a nice-to-have. A missing or unreadable payload now reads as "no HRV signal", the card
+  still renders, and the stop-symptom safety floor still halts.
+- **Two self-test checks that could only pass on one kind of database.** The taper's race-pace
+  check and the week-card truth check both read whatever plan the running instance happened to
+  hold. On an instance with no upcoming race — a demo instance after its race day, or any runner
+  between goals — there is no taper and no race week to inspect, so both checks reported a failure
+  that was about the data, not the code. They now build the road they need (a marathon anchor and
+  a non-marathon one) and assert on that, keeping the live instance as an extra check when it has
+  one to give. Net effect: the suite is green on every seeded variant, and both checks now cover
+  ground they never reached before — the non-marathon taper pace had no live road at all, and the
+  race-week card rule is now checked on every instance rather than only on one mid-block.
+
 ## [0.30.0] - 2026-08-22
 
 ### Changed
