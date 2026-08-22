@@ -302,7 +302,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.31.0"
+ENGINE_VERSION = "0.31.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -2158,10 +2158,37 @@ def _suunto_existing_guides(headers):
     return out
 
 
+def _guide_ext_date(ext):
+    """The plan date inside one of OUR guide externalIds ('sh-YYYY-MM-DD-kind'), or None for any id
+    we did not write. The cleanup below deletes guides, so this is the safety gate: the athlete's own
+    guides — and anything another tool uploaded — must never match."""
+    m = re.match(r"^sh-(\d{4}-\d{2}-\d{2})-", ext or "")
+    if not m:
+        return None
+    try:                          # the SHAPE of a date is not a date: '2026-13-99' matches the
+        _date(m.group(1))         # pattern and would then be compared as a string against the
+    except ValueError:            # horizon. On a path that DELETES, an id we cannot read is an id
+        return None               # we leave alone.
+    return m.group(1)
+
+
+def _suunto_delete_guide(headers, gid):
+    """Remove one guide from the connected account. True when it is GONE — a 404 counts, because the
+    goal is absence, not a particular status code. Never raises: cleanup runs after a push that has
+    already succeeded and must not turn a good night into a failed one."""
+    try:
+        r = requests.delete(f"{SUUNTO_API_BASE}/v2/guides/files/{gid}", headers=headers, timeout=15)
+        return r.status_code in (200, 202, 204, 404)
+    except requests.RequestException:
+        return False
+
+
 def push_guides(db, days=None):
     """Push the plan's next `days` sessions (today inclusive) to the connected Suunto account as
     Guides. Idempotent via externalId: existing → PUT update, new → POST, so the nightly re-push
-    after a re-plan silently keeps the watch current. Returns a per-session summary; never raises
+    after a re-plan silently keeps the watch current — and a cleanup pass then DELETES our own guides
+    the re-plan superseded (a changed kind, a moved run, a day gone past), so the watch shows one
+    guide per planned day and nothing behind today. Returns a per-session summary; never raises
     (the scheduler must survive a flaky Suunto night the same way it survives Runalyze)."""
     days = days or SUUNTO_PUSH_DAYS
     if READONLY:
@@ -2194,6 +2221,7 @@ def push_guides(db, days=None):
         return {"ok": False, "error": f"could not list existing guides: {e}"}
     up_headers = dict(headers, **{"Content-Type": "application/zip"})
     results, pushed = [], 0
+    current_ext, failed_dates = set(), set()   # §SG cleanup inputs — see the pass after this loop
     for s in sessions:
         ext = session_guide_external_id(s)
         try:
@@ -2209,17 +2237,42 @@ def push_guides(db, days=None):
                 action = "created"
             if r.status_code in (200, 201, 204):
                 pushed += 1
+                current_ext.add(ext)
                 results.append({"date": s["date"], "kind": s.get("kind"), "action": action})
             elif r.status_code == 409 and action == "created":
                 # already there under this externalId (list was stale) — counts as current
+                current_ext.add(ext)
                 results.append({"date": s["date"], "kind": s.get("kind"), "action": "exists"})
             else:
+                failed_dates.add(s["date"])
                 results.append({"date": s["date"], "kind": s.get("kind"),
                                 "error": f"{action} {r.status_code}: {r.text[:120]}"})
         except Exception as e:
+            failed_dates.add(s["date"])
             results.append({"date": s["date"], "kind": s.get("kind"), "error": str(e)[:200]})
+    # §SG — the watch MIRRORS the current plan; it is not an append-only log. Two ways one of our
+    # guides goes stale, and until 2026-08-22 neither could be cleared because no DELETE existed:
+    #  · a KIND FLIP on a date already pushed. The externalId carries the kind (`sh-{date}-{kind}`)
+    #    and kind is NOT stable across regenerations — an easy-only check-in demotes a tempo to easy
+    #    (`_apply_adjustment`), and the ACWR ceiling relabels a clipped long run as easy
+    #    (`_mark_load_integrity`). The new id misses the lookup, POSTs a second guide, and the
+    #    superseded one stays on the wrist. Every regen with a flip could stack another.
+    #  · a date that has gone PAST, or one still inside the window that no longer carries a session
+    #    at all (the re-plan moved the run, or eased the day to rest).
+    # Both reduce to one rule: OUR guide, dated at or before this push's horizon, that is not what we
+    # just pushed, goes. Two guards on top — a date whose push FAILED keeps its old guide (a stale
+    # guide beats no guide), and `_guide_ext_date` returning None means the id is not ours to delete.
+    # Best-effort: a delete that fails is reported, never raised, so a flaky Suunto night still ends
+    # with the sessions pushed.
+    removed, rm_failed = [], []
+    for ext, gid in existing.items():
+        d = _guide_ext_date(ext)
+        if not gid or not d or d > horizon or ext in current_ext or d in failed_dates:
+            continue
+        (removed if _suunto_delete_guide(headers, gid) else rm_failed).append(ext)
     errs = [r for r in results if r.get("error")]
     return {"ok": not errs, "pushed": pushed, "results": results,
+            "removed": removed, **({"remove_failed": rm_failed} if rm_failed else {}),
             **({"error": f"{len(errs)} of {len(results)} failed"} if errs else {})}
 
 
@@ -6542,13 +6595,6 @@ def _ft_band(pred_s, weeks_away, sigma_race=None, n_races=0, sens_per_pt=0.0, di
                            "horizon": round(sh, 4), "disp_a": round(disp_a, 3)}}
 
 
-def _fmt_hms(sec):
-    if not sec or sec <= 0:
-        return "—"
-    sec = int(round(sec))
-    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
-
-
 def _ft_base_time(vo2max, typ):
     """§FT1 speed axis — the prepared-athlete finish time (seconds) at `vo2max`, per distance.
     Marathon runs the pace_zones marathon fraction CONTINUOUSLY (§33f-11); the other RACE_KM
@@ -7421,7 +7467,13 @@ def _parse_goal_seconds(target, race_type):
 
 
 def _fmt_hms(seconds):
-    """Seconds → 'H:MM:SS' (drop the hour when 0)."""
+    """Seconds → 'H:MM:SS' (drop the hour when 0).
+
+    THE ONLY ONE. A second module-level `_fmt_hms` used to sit in the §FT block above — always
+    H:MM:SS, "—" for None/0 — and Python's later-def-wins made it dead code from the day it was
+    written: every caller, including the §FT band and curve reads physically above it, resolved
+    here. Removed 2026-08-22 (cloud review). Dropping the hour is the RIGHT shape and the one that
+    has always shipped: a 5k band reads "19:23", not "0:19:23". Don't "restore" the other one."""
     if seconds is None:
         return None
     s = int(round(seconds))

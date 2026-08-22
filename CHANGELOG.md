@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.31.1] - 2026-08-22
+
+### Fixed
+
+- **The watch stops collecting guides it should have thrown away.** A planned session's guide is
+  identified by its date and its kind, but a re-plan can change the kind on a day already sent — an
+  easy-only check-in turns a tempo into an easy run, and the load ceiling turns a clipped long run
+  into a shakeout. The new guide was uploaded and the superseded one simply stayed on the watch,
+  because nothing in the app could delete a guide at all. The nightly push now removes its own
+  guides once they are superseded, once their day has passed, or once the day no longer carries a
+  session, so the watch shows one guide per planned day and nothing behind today. It never touches
+  a guide it didn't write, and a day whose upload failed keeps the guide it already had.
+- **A duplicated internal helper.** A time-formatting function was defined twice; the first copy had
+  been unreachable since it was written. Removed, with a check added so a shadowed definition can't
+  slip in again unnoticed — in a single-file application it produces no error of any kind.
+
 ## [0.31.0] - 2026-08-22
 
 ### Changed

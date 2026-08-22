@@ -3229,6 +3229,158 @@ def _stc_guides():
                note="pure — no DB/network; the push path (OAuth/upload) is exercised live, not here")
 
 
+def _stc_no_shadowed_defs():
+    """One file, 365 top-level definitions — and Python's later-def-wins means a name written twice
+    silently makes the first copy DEAD CODE, with no error, no warning, and no test failure. It had
+    already happened: `_fmt_hms` was defined twice (§FT block and the race-reckoning block), so every
+    caller — including the ones physically above the second copy — ran the second, and a maintainer
+    editing the first would have seen their change do nothing. Two cloud reviewers found it
+    independently on 2026-08-22; nothing in the battery could.
+
+    Parses BOTH files and asserts no module-level def/class name is bound twice. Generic on purpose:
+    it catches the NEXT shadowed name, not the one already fixed — a det written to re-assert
+    `_fmt_hms` alone would pass forever while a new pair goes unnoticed."""
+    import ast as _ast, collections as _c
+    fails, counts = [], {}
+    for fname in ("SparingHorse.py", "sh_selftest.py"):
+        path = S.Path(S.__file__).resolve().parent / fname
+        try:
+            tree = _ast.parse(path.read_text(encoding="utf-8"))
+        except OSError as e:
+            fails.append(f"{fname}: unreadable ({e})")
+            continue
+        seen = _c.defaultdict(list)
+        for node in tree.body:                    # MODULE level only — a nested def shadows nothing
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                seen[node.name].append(node.lineno)
+        counts[fname] = len(seen)
+        for name, lines in sorted(seen.items()):
+            if len(lines) > 1:
+                fails.append(f"{fname}: `{name}` defined {len(lines)}× at lines {lines} — the last "
+                             f"one wins and the others are dead code")
+    return _st("det", "no-shadowed-defs",
+               "no module-level def/class name is bound twice in either file: a duplicate makes the "
+               "earlier copy dead code silently (this is how `_fmt_hms` shipped two bodies, the "
+               "§FT one unreachable, until a 2026-08-22 review found it)",
+               passed=not fails, expect="every top-level name defined exactly once",
+               got={"top_level_names": counts, "failures": fails or "none"})
+
+
+def _stc_guide_cleanup():
+    """§SG — the watch MIRRORS the plan. `push_guides` bakes the session kind into the idempotency
+    key (`sh-{date}-{kind}`), and kind is not stable across regenerations: an easy-only check-in
+    demotes a tempo to easy, and the ACWR ceiling relabels a clipped long run as easy. Before
+    2026-08-22 the flipped id simply missed the lookup, POSTed a SECOND guide, and the superseded one
+    stayed on the wrist forever — no DELETE existed anywhere in the file (cloud review, run 1).
+
+    Drives the real `push_guides` against a faked Suunto (no network) with five guides already on the
+    account, and pins BOTH directions — what must go, and what must never be touched:
+      · `sh-{today}-long` — superseded by today's easy session (the KIND FLIP) ⇒ deleted
+      · `sh-{yesterday}-easy` — the day has gone past ⇒ deleted (the banked §SG follow-up)
+      · `sh-{today+2}-easy` — inside the window, no session there any more (the re-plan moved it or
+        eased the day to rest) ⇒ deleted
+      · `sh-{today+1}-tempo` — its date's push FAILED this run ⇒ KEPT. A stale guide beats no guide.
+      · `sh-{today+30}-easy` — beyond this push's horizon, not ours to judge this run ⇒ KEPT
+      · `my-own-interval-session` — NOT one of ours ⇒ KEPT. The athlete's own guides are not ours to
+        delete, and this is the tooth that matters most: everything else is an inconvenience, this
+        one would destroy someone else's data."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    today = _d.today()
+    day = lambda n: (today + _td(days=n)).isoformat()
+
+    existing = {f"sh-{day(0)}-long": "GID_KINDFLIP",      # superseded by today's easy
+                f"sh-{day(-1)}-easy": "GID_PAST",          # yesterday
+                f"sh-{day(2)}-easy": "GID_NOSESSION",      # in-window, no session any more
+                f"sh-{day(1)}-tempo": "GID_FAILEDDATE",    # its push fails below
+                f"sh-{day(30)}-easy": "GID_FUTURE",        # beyond the horizon
+                "my-own-interval-session": "GID_FOREIGN"}  # not ours
+
+    plan = {"phases": [{"key": "base", "kind": "base"}],
+            "base": {"weeks": [{"wk": 1, "start": day(0), "km": 18, "runs": 2, "sessions": [
+                {"date": day(0), "kind": "easy", "km": 8.0, "minutes": 45, "trimp": 50.0,
+                 "pace_zone": "5:30/km easy"},
+                {"date": day(1), "kind": "intervals", "km": 10.0, "minutes": 55, "trimp": 80.0,
+                 "pace_zone": "4:10/km threshold"}]}]}}
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}',?)",
+              (S._now_iso(), day(0), S.json.dumps(plan)))
+    m.commit()
+
+    calls = {"post": 0, "put": [], "deleted": []}
+
+    class _R:
+        def __init__(self, code, text=""):
+            self.status_code, self.text = code, text
+
+    class _FakeRequests:
+        RequestException = Exception
+
+        def post(self, url, data=None, headers=None, timeout=None):
+            calls["post"] += 1
+            # the SECOND session's push fails — its date must then keep its old guide
+            return _R(500, "upstream boom") if calls["post"] == 2 else _R(201)
+
+        def put(self, url, data=None, headers=None, timeout=None):
+            calls["put"].append(url.rsplit("/", 1)[-1])
+            return _R(200)
+
+        def delete(self, url, headers=None, timeout=None):
+            calls["deleted"].append(url.rsplit("/", 1)[-1])
+            return _R(204)
+
+        def get(self, url, headers=None, timeout=None):
+            return _R(200, "{}")
+
+    saved = {k: getattr(S, k) for k in ("requests", "suunto_status", "suunto_access_token",
+                                        "_suunto_existing_guides", "READONLY")}
+    try:
+        S.requests = _FakeRequests()
+        S.suunto_status = lambda: {"configured": True, "connected": True}
+        S.suunto_access_token = lambda: "TOKEN"
+        S._suunto_existing_guides = lambda headers: dict(existing)
+        S.READONLY = False
+        out = S.push_guides(m, days=7)
+    finally:
+        for k, v in saved.items():
+            setattr(S, k, v)
+        m.close()
+
+    gone = set(calls["deleted"])
+    want_gone = {"GID_KINDFLIP", "GID_PAST", "GID_NOSESSION"}
+    want_kept = {"GID_FAILEDDATE", "GID_FUTURE", "GID_FOREIGN"}
+    for gid in want_gone - gone:
+        fails.append(f"{gid} survived — it should have been deleted")
+    for gid in want_kept & gone:
+        reason = {"GID_FAILEDDATE": "its push FAILED, so the watch would be left with nothing",
+                  "GID_FUTURE": "it is beyond this push's horizon",
+                  "GID_FOREIGN": "IT IS NOT OURS — the athlete's own guide was deleted"}[gid]
+        fails.append(f"{gid} was DELETED — {reason}")
+    if out.get("pushed") != 1:
+        fails.append(f"pushed={out.get('pushed')}, want 1 (the second session's push fails)")
+    if sorted(out.get("removed") or []) != sorted(
+            [f"sh-{day(0)}-long", f"sh-{day(-1)}-easy", f"sh-{day(2)}-easy"]):
+        fails.append(f"the report disagrees with what was deleted: {out.get('removed')}")
+    # the id parser is the safety gate — nothing outside our own shape may ever be claimed
+    for ext, want in ((f"sh-{day(0)}-easy", day(0)), ("sh-2026-13-99-easy", None),
+                      ("my-own-session", None), ("", None), (None, None),
+                      ("SH-2026-01-01-easy", None)):
+        got = S._guide_ext_date(ext)
+        if got != want:
+            fails.append(f"_guide_ext_date({ext!r}) = {got!r}, want {want!r}")
+    return _st("det", "guide-cleanup",
+               "§SG the watch mirrors the plan: a guide superseded by a KIND FLIP on the same date, "
+               "a past-dated guide and an in-window guide whose session is gone are all DELETED — "
+               "while a date whose push failed keeps its guide, a guide beyond the horizon is left "
+               "alone, and a guide that is NOT ours is never touched",
+               passed=not fails,
+               expect="deleted: kind-flip + past + no-session · kept: failed-date + future + foreign",
+               got={"deleted": sorted(gone), "pushed": out.get("pushed"),
+                    "failures": fails or "none"})
+
+
 def _stc_hr_zones():
     """§ HR-zone model (slice #3) — assert the ANCHOR-SELECTION + grid shape, NOT 'recovered the right
     zones' (flat synthetic HR can't tell a right LTHR from a wrong one). The ladder: a trustworthy
@@ -9731,7 +9883,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
-                 lambda: _stc_guides(),
+                 lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
+                 lambda: _stc_no_shadowed_defs(),
                  lambda: _stc_lt1(),
                  lambda: _stc_health_sync(), lambda: _stc_sleep_sync(),
                  lambda: _stc_rebase_anchor_derive(),
