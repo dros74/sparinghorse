@@ -497,6 +497,48 @@ def _stc_module_split():
                     "app_sources": list(APP_SOURCES), "failures": fails or "none"})
 
 
+def _stc_ci_cache():
+    """A workflow may not declare a dependency cache and then install with it disabled.
+
+    CI failed on EVERY run from the day it landed — seventeen of them — with every test step green
+    and only `Post Run actions/setup-python` red: `cache: pip` makes setup-python save
+    `~/.cache/pip` in a post-job step, and that step errors when the folder does not exist, which is
+    exactly what `pip install --no-cache-dir` guarantees. The two lines sat four apart and each was
+    reasonable on its own.
+
+    It is worth a tooth rather than a fix alone because of the SHAPE of the failure: a gate that is
+    permanently red for a reason unrelated to the code is worse than no gate, since the only sane
+    response to it is to stop reading it. This checks the contradiction, not the symptom — declare a
+    cache anywhere in the workflow and no install line may turn it off.
+
+    Skipped where the workflow is not shipped (it is not COPYed into the image)."""
+    path = S.Path(S.__file__).resolve().parent / ".github" / "workflows" / "ci.yml"
+    if not path.exists():
+        return _st("det", "ci-cache",
+                   "the CI workflow never disables the dependency cache it declares (skipped: no "
+                   "workflow in this image)", passed=None, expect="run on a checkout",
+                   got={"workflow": "absent"})
+    fails, declares = [], []
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        code = line.split("#", 1)[0]                       # a comment may name the flag; only code counts
+        if S.re.search(r"^\s*cache:\s*(pip|npm|yarn|poetry)\s*$", code):
+            declares.append(code.strip().split(":")[1].strip())
+        if S.re.search(r"\bpip install\b", code) and "--no-cache-dir" in code:
+            fails.append(f"line {i}: pip install --no-cache-dir while a cache is declared")
+        if S.re.search(r"\bnpm (install|ci)\b", code) and "--no-cache" in code:
+            fails.append(f"line {i}: npm install --no-cache while a cache is declared")
+    if not declares:
+        fails = []                                         # no cache declared ⇒ nothing to contradict
+    elif not S.re.search(r"pip install", path.read_text(encoding="utf-8")):
+        fails.append("a pip cache is declared but nothing installs with pip — the post-job save "
+                     "will find an empty folder and error")
+    return _st("det", "ci-cache",
+               "the CI workflow never disables the dependency cache it declares — the post-job save "
+               "errors on a folder that was never written, and a permanently red gate stops being read",
+               passed=not fails, expect="no --no-cache-dir under a declared cache",
+               got={"caches_declared": declares, "failures": fails or "none"})
+
+
 def _stc_image_completeness():
     """The image must carry every file the app imports, or the container boots into an ImportError.
 
@@ -10912,7 +10954,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),

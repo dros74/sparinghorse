@@ -25,7 +25,12 @@ jobs:
         with:
           python-version: '3.12'          # matches the Dockerfile's base image
           cache: pip
-      - run: pip install --no-cache-dir -r requirements.txt
+      # NOT --no-cache-dir: `cache: pip` above makes setup-python save ~/.cache/pip in a post-job
+      # step, and that step ERRORS when the folder does not exist ("Cache folder path is
+      # retrieved for pip but doesn't exist on disk"). Disabling the cache while declaring it
+      # failed every run from the day CI landed, with every test step green — the worst shape a
+      # broken gate can take, because it teaches you to read the red X as noise.
+      - run: pip install -r requirements.txt
 
       - name: Every module compiles
         run: |
@@ -88,7 +93,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install --no-cache-dir -r requirements.txt
+      - run: pip install -r requirements.txt
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
