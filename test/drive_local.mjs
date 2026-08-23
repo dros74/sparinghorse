@@ -50,6 +50,36 @@ async function runFull() {
 
   await page.screenshot({ path: `${SHOTS}/01-dashboard.png`, fullPage: true });
 
+  // ── Footer chrome + the check-in row's type scale ───────────────────────────
+  // The footer names the release that actually served the page: the same string the asset
+  // cache-buster rides on, so a screenshot can never claim a version the browser didn't load.
+  const foot = await page.evaluate(() => {
+    const f = document.querySelector('#footver'), sync = document.querySelector('#foot'),
+          att = document.querySelector('footer .ralink');
+    const js = [...document.querySelectorAll('script[src]')].map(e => e.src).find(u => /app\.js/.test(u)) || '';
+    return { txt: f && f.textContent.trim(), bust: (js.match(/[?&]v=([^&]+)/) || [])[1],
+             ordered: !!(f && sync && att)
+               && !!(sync.compareDocumentPosition(f) & Node.DOCUMENT_POSITION_FOLLOWING)
+               && !!(f.compareDocumentPosition(att) & Node.DOCUMENT_POSITION_FOLLOWING) };
+  });
+  ok(`footer names the running version (${foot.txt})`,
+     /^v\d+\.\d+\.\d+$/.test(foot.txt || '') && foot.txt === 'v' + foot.bust);
+  ok('the version tag sits between the sync line and the Runalyze attribution', foot.ordered);
+
+  // The stop-the-run control is a label among labels. It used to be set 13px against its 10px
+  // ENERGY/SLEEP siblings in the same uppercase mono — bigger, so it read as a different font
+  // instead of an emphasis. Computed style, not the stylesheet: this is what the cascade did.
+  await page.waitForSelector('.checkin .stop', { timeout: 15000 });
+  const type = await page.evaluate(() => {
+    const g = e => { const c = getComputedStyle(e);
+      return [c.fontSize, c.fontFamily, c.textTransform, c.letterSpacing].join(' | '); };
+    const stop = document.querySelector('.checkin .stop');
+    const sib = [...document.querySelectorAll('.checkin label')].find(e => !e.classList.contains('stop'));
+    return { stop: stop && g(stop), sib: sib && g(sib) };
+  });
+  ok(`the stop-symptom label is typeset like its siblings (${(type.stop || '').split(' | ')[0]})`,
+     !!type.stop && type.stop === type.sib);
+
   // ── Settings dialog: the #67 closed→open→close→reopen cycle ───────────────
   const dlg = page.locator('#settingsDialog');
   const btn = page.locator('#settingsBtn');
@@ -609,6 +639,24 @@ async function runFull() {
   ok('"Add a race" CTA focuses the objective form',
      await page.evaluate(() => document.activeElement && document.activeElement.id === 'ao_label'));
   await page.screenshot({ path: `${SHOTS}/03-firstrun-addrace.png`, fullPage: true });
+
+  // ── §RB — the explorer wears the dashboard's footer, painted ────────────────
+  // One document serves both pages, so the markup was never in doubt (det/footer-chrome pins that).
+  // What was: /runs boots only its own loaders, so its footer sat on the shell's "not synced yet"
+  // placeholder for as long as the page has existed. Compare the rendered text, both pages.
+  // innerText reflects the footer's uppercase text-transform → match case-insensitively
+  await page.waitForFunction(() => /synced/i.test(document.querySelector('#foot').innerText),
+                             { timeout: 15000 });
+  const dashFoot = await page.locator('footer').innerText();
+  await page.goto(`${BASE}/runs`, { waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#runscal', { timeout: 15000 });
+  await page.waitForFunction(() => /synced/i.test(document.querySelector('#foot').innerText),
+                             { timeout: 15000 }).catch(() => {});
+  const runsFoot = await page.locator('footer').innerText();
+  ok(`the explorer states the sync time too, not the placeholder (${runsFoot.split('\n')[0].slice(0, 46)}…)`,
+     /synced \d/i.test(runsFoot));
+  ok("the explorer's footer is the dashboard's footer, word for word", runsFoot === dashFoot);
+  await page.screenshot({ path: `${SHOTS}/11-runs.png`, fullPage: true });
 }
 
 async function runSettled() {

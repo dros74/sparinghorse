@@ -288,7 +288,10 @@ Notable features and fixes are tracked in [`CHANGELOG.md`](CHANGELOG.md)
 ([Keep a Changelog](https://keepachangelog.com) + Semantic Versioning).
 
 ## Layout
-    SparingHorse.py     the app (Flask + waitress backend + embedded SPA)
+    SparingHorse.py     the app — Flask routes, sync, storage, scheduler, the LLM layer
+    sh_engine.py        the plan engine: the deterministic core, importable on its own
+    sh_selftest.py      the deterministic self-test battery
+    static/             the front end (shell + stylesheet + script)
     CHANGELOG.md        versioned record of features and fixes
     Dockerfile          container build
     docker-compose.yml  optional two-service public/private deployment

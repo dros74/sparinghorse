@@ -44,6 +44,37 @@ if "SparingHorse" in sys.modules:
 else:
     import SparingHorse as S
 
+# TECH-12 — the plan engine is its own module now, and the app merely RE-IMPORTS its names. That
+# makes the app module the wrong place to patch an engine constant: `vars(S)["LONG_RUN_EASY_FRAC"]`
+# rebinds a copy the engine never reads, so the lever does not move and a det that neutralises it
+# proves nothing. Everything below that pokes a global goes through `_patch_globals`, and everything
+# that scans the app's own source walks `APP_SOURCES` — one list per axis, so the NEXT module split
+# is one line here instead of a silent loss of coverage.
+import sh_engine as E
+
+APP_MODULES = (S, E)                                  # every module the app's own code lives in
+APP_SOURCES = ("SparingHorse.py", "sh_engine.py")     # …and the files they live in
+
+
+def _patch_globals(**kw):
+    """Rebind module-level names EVERYWHERE the app can see them; returns the undo.
+
+    A re-exported name exists in BOTH namespaces (the engine's, where its readers resolve it, and
+    the app's, where `S.<name>` and the routes read it), and the two must never disagree mid-test.
+    Raises on an unknown name rather than silently patching nothing — a typo'd lever is a det that
+    tests the unmodified engine and passes."""
+    saved = [(m, k, vars(m)[k]) for k in kw for m in APP_MODULES if k in vars(m)]
+    unknown = [k for k in kw if not any(k in vars(m) for m in APP_MODULES)]
+    if unknown:
+        raise KeyError(f"no such module-level name: {unknown}")
+    for m, k, _ in saved:
+        vars(m)[k] = kw[k]
+
+    def undo():
+        for m, k, v in saved:
+            vars(m)[k] = v
+    return undo
+
 
 import time as _time
 
@@ -376,6 +407,215 @@ def _stc_readiness_contrast():
                "readiness status card: verdict text ≥3:1 on the gradient top, footer ≥4.5:1 on the bottom stop, all 3 themes × states (WCAG relative luminance)",
                passed=not fail, expect="every theme×state ≥3.0 verdict / ≥4.5 footer",
                got={"violations": fail or "none", "ratios": report})
+
+
+def _stcss_all_decls(doc, selector):
+    """Every rule with exactly this selector, merged in source order (later wins) — so a media-query
+    override is seen too, not just the first rule the file happens to carry."""
+    out = {}
+    for m in S.re.finditer(r"(?:^|\n)\s*" + S.re.escape(selector) + r"\s*\{([^{}]*)\}", doc):
+        out.update(_stcss_decls(m.group(1)))
+    return out
+
+
+def _stc_module_split():
+    """TECH-12 — the split holds only if four things stay true, and none of them is self-evident.
+
+    (a) THE ARROW IS ONE-WAY. `sh_engine.py` must not import the app module. The moment it does, the
+        "deterministic core" is a core that depends on Flask, and the reason to have split it is
+        gone. Checked on the source, not on behaviour: an import inside a function would not show up
+        in a passing test until the day it matters.
+    (b) ONE OBJECT, TWO NAMES. Everything the app re-imports must BE the engine's object, not a copy
+        that has drifted. A stale re-export is invisible — the app reads a plausible value, the
+        engine reads another, and nothing raises.
+    (c) A PATCH REACHES THE ENGINE. `_patch_globals` is what the battery drives levers with; if it
+        rebound only the app's copy, every det that neutralises a lever would test the unmodified
+        engine and pass. It also has to REFUSE an unknown name, because a typo'd lever fails the
+        same silent way. (Both of these actually happened the day the engine moved: the anti-vacuity
+        limbs of det/long-run-identity and det/easy-ladder were what caught it.)
+    (d) THE REGISTERS ARE COMPLETE. Every module the app imports from this directory must appear in
+        APP_MODULES and APP_SOURCES — the lists the clock pin, the constant inventory, the shadow
+        check and the token scans all walk. A new module missing from them does not fail anything;
+        it just quietly stops being covered, which is the failure this project has been bitten by
+        before (a public-surface diff run against a fixture thinner than production)."""
+    import ast as _ast
+    fails, root = [], S.Path(S.__file__).resolve().parent
+    # (a)
+    eng_src = (root / "sh_engine.py").read_text(encoding="utf-8")
+    for node in _ast.walk(_ast.parse(eng_src)):
+        if isinstance(node, _ast.Import) and any(a.name == "SparingHorse" for a in node.names):
+            fails.append(f"sh_engine imports the app module (line {node.lineno}) — the arrow reversed")
+        elif isinstance(node, _ast.ImportFrom) and node.module == "SparingHorse":
+            fails.append(f"sh_engine imports from the app module (line {node.lineno})")
+    # (b)
+    shared = [k for k in vars(E) if not k.startswith("__") and k in vars(S)]
+    drifted = [k for k in shared if vars(S)[k] is not vars(E)[k]]
+    if drifted:
+        fails.append(f"re-exported names that are no longer the engine's object: {sorted(drifted)[:6]}")
+    if len(shared) < 100:
+        fails.append(f"only {len(shared)} names re-exported — the app is not importing the engine")
+    # (c)
+    probe = "LONG_RUN_MIN_RATIO"
+    before = vars(E)[probe]
+    undo = _patch_globals(**{probe: -1.0})
+    try:
+        if vars(E)[probe] != -1.0:
+            fails.append("a patch did not reach the engine's own namespace — levers are inert")
+        if vars(S)[probe] != -1.0:
+            fails.append("a patch did not reach the app's namespace — S.<name> reads would disagree")
+    finally:
+        undo()
+    if vars(E)[probe] != before or vars(S)[probe] != before:
+        fails.append("the undo did not restore both namespaces")
+    try:
+        _patch_globals(NO_SUCH_LEVER_AT_ALL=1)
+        fails.append("_patch_globals accepted an unknown name — a typo'd lever would patch nothing")
+    except KeyError:
+        pass
+    # (d)
+    local = {p.stem for p in root.glob("*.py")} - {"sh_selftest"}
+    imported = set()
+    for node in _ast.walk(_ast.parse((root / "SparingHorse.py").read_text(encoding="utf-8"))):
+        if isinstance(node, _ast.Import):
+            imported |= {a.name for a in node.names if a.name in local}
+        elif isinstance(node, _ast.ImportFrom) and node.module in local:
+            imported.add(node.module)
+    mod_names = {m.__name__ for m in APP_MODULES}
+    for mod in sorted(imported):
+        if mod not in mod_names:
+            fails.append(f"{mod} is imported by the app but missing from APP_MODULES — the clock pin "
+                         f"and every lever patch skip it")
+        if mod + ".py" not in APP_SOURCES:
+            fails.append(f"{mod}.py is imported by the app but missing from APP_SOURCES — the "
+                         f"constant inventory and the token scans skip it")
+    return _st("det", "module-split",
+               "TECH-12 the engine module is a one-way dependency (it never imports the app), its "
+               "names are re-exported as the same objects, a lever patch reaches BOTH namespaces "
+               "and refuses a typo, and every app module is registered in APP_MODULES/APP_SOURCES",
+               passed=not fails, expect="one-way arrow · no drifted re-export · patches land · registers complete",
+               got={"re_exported": len(shared), "app_modules": sorted(mod_names),
+                    "app_sources": list(APP_SOURCES), "failures": fails or "none"})
+
+
+def _stc_image_completeness():
+    """The image must carry every file the app imports, or the container boots into an ImportError.
+
+    Written the day the plan engine moved out (TECH-12). `COPY SparingHorse.py .` used to be the
+    whole story; it is now one of four, and each split adds another. The failure mode is nasty
+    precisely because nothing local catches it: the suite is green on a checkout, the mirror is
+    green, and the container is the only place that is missing a file — which is the one place the
+    owner cannot easily read a traceback from. So the recipe is checked against the imports rather
+    than trusted: every module the app (or the battery it spawns) imports from this directory must
+    be COPYed, and so must `static/`, which is read at import time.
+
+    Skipped where the Dockerfile is not shipped — it is not COPYed into the image, so this runs on a
+    checkout and in CI, never inside the container."""
+    import ast as _ast
+    root = S.Path(S.__file__).resolve().parent
+    df = root / "Dockerfile"
+    if not df.exists():
+        return _st("det", "image-completeness",
+                   "every module the app imports is COPYed into the image (skipped: no Dockerfile "
+                   "in this image)", passed=None, expect="run on a checkout", got={"dockerfile": "absent"})
+    copied = set()
+    for ln in df.read_text(encoding="utf-8").splitlines():
+        ln = ln.strip()
+        if not ln.upper().startswith("COPY "):
+            continue
+        for src in ln.split()[1:-1]:              # the last token is the destination
+            copied.add(src.strip("./"))
+    local = {p.stem for p in root.glob("*.py")}
+    needed = {"SparingHorse.py", "static",
+              "sh_selftest.py"}                   # imported lazily by /api/selftest/run
+    for fname in APP_SOURCES + ("sh_selftest.py",):
+        for node in _ast.walk(_ast.parse((root / fname).read_text(encoding="utf-8"))):
+            if isinstance(node, _ast.Import):
+                for a in node.names:
+                    if a.name in local:
+                        needed.add(a.name + ".py")
+            elif isinstance(node, _ast.ImportFrom) and node.module in local:
+                needed.add(node.module + ".py")
+    missing = sorted(n for n in needed if n not in copied)
+    # …and the reverse: a COPY of a module that no longer exists builds an image around a ghost.
+    ghosts = sorted(c for c in copied if c.endswith(".py") and not (root / c).exists())
+    fails = ([f"imported but never COPYed: {missing}"] if missing else []) + \
+            ([f"COPYed but not in the tree: {ghosts}"] if ghosts else [])
+    return _st("det", "image-completeness",
+               "every local module the app imports — and the static/ tree it reads at import — is "
+               "COPYed into the image, and every COPYed module still exists",
+               passed=not fails, expect="no imported module missing from the Dockerfile",
+               got={"required": sorted(needed), "copied": sorted(copied), "failures": fails or "none"})
+
+
+def _stc_footer_chrome():
+    """The footer, and the fact that both pages carry the SAME one.
+    (a) The version tag is the release that served the page — the same string the CSS/JS cache-buster
+    rides on, so a screenshot can never name a version the browser did not load, and a hand-typed
+    literal fails the next time the engine version moves. (b) It sits between the sync line and the
+    Runalyze attribution — the order is the design. (c) The dashboard's footer and the /runs
+    explorer's are byte-identical. They are one document, so that is nearly free — but the two pages
+    boot different loaders, and the explorer's footer sat unpainted ("not synced yet") for as long as
+    /runs existed. This pins the markup; `det`-free runtime parity is the browser suite's job."""
+    fails, seen = [], {}
+    saved = S.READONLY
+    try:
+        S.READONLY = False                      # /runs is private-only; the redirect is _stc_runs_browser's
+        c = S.app.test_client()
+        docs = {path: c.get(path).get_data(as_text=True) for path in ("/", "/runs")}
+    finally:
+        S.READONLY = saved
+    for path, doc in docs.items():
+        m = S.re.search(r"<footer\b.*?</footer>", doc, S.re.S)
+        if not m:
+            fails.append(f"{path}: the document has no <footer>")
+            continue
+        block = seen[path] = m.group(0)
+        if "__SH_VER__" in doc:
+            fails.append(f"{path}: the version placeholder was served unsubstituted")
+        bust = S.re.search(r"app\.js\?v=([^\"'\s]+)", doc)
+        if not bust:
+            fails.append(f"{path}: no cache-busted app.js to agree with")
+        elif bust.group(1) != S.ENGINE_VERSION:
+            fails.append(f"{path}: cache-buster {bust.group(1)} != ENGINE_VERSION {S.ENGINE_VERSION}")
+        if f">v{S.ENGINE_VERSION}<" not in block:
+            fails.append(f"{path}: footer does not carry v{S.ENGINE_VERSION}")
+        order = [block.find(needle) for needle in ('id="foot"', 'id="footver"', 'class="ralink"')]
+        if -1 in order:
+            fails.append(f"{path}: footer is missing one of sync line / version / attribution {order}")
+        elif order != sorted(order):
+            fails.append(f"{path}: footer parts out of order (sync, version, attribution) {order}")
+    if len(seen) == 2 and seen["/"] != seen["/runs"]:
+        fails.append("the /runs footer is not the dashboard's footer")
+    return _st("det", "footer-chrome",
+               "the footer carries the running version between the sync line and the Runalyze "
+               "attribution, agreeing with the asset cache-buster — and /runs serves the same footer",
+               passed=not fails, expect="version == ENGINE_VERSION == cache-buster; order held; both pages identical",
+               got={"violations": fails or "none", "version": S.ENGINE_VERSION})
+
+
+def _stc_checkin_type_scale():
+    """The check-in row is typeset as one row. Its stop-the-run control is the only sentence among
+    the labels, and it used to be set 13px against its 10px ENERGY/SLEEP siblings — same uppercase
+    mono, bigger size, which reads as a second font rather than as emphasis. It takes the sibling
+    label's type now. Emphasis for that control lives in COLOUR when it is ticked (the rule below
+    it), never in size: a medical checkbox that shouts every day nothing is wrong is noise."""
+    fails = {}
+    label = _stcss_all_decls(S.APP_CSS, ".checkin label")
+    stop = _stcss_all_decls(S.APP_CSS, ".checkin .stop")
+    if not label.get("font-size"):
+        fails["sibling"] = ".checkin label declares no font-size to be measured against"
+    for prop in ("font-size", "font-family", "text-transform", "letter-spacing"):
+        want = label.get(prop)
+        got = stop.get(prop, want)          # .checkin .stop outranks .checkin label ⇒ an override wins
+        if got != want:
+            fails[prop] = f"stop label {prop}={got!r}, its siblings {want!r}"
+    if not S.re.search(r"\.checkin \.stop:has\(:checked\)\s*\{[^{}]*color:", S.APP_CSS):
+        fails["ticked"] = "the ticked state no longer changes colour — the only emphasis it has left"
+    return _st("det", "checkin-type-scale",
+               "the readiness check-in's stop-the-run label is typeset like its ENERGY/SLEEP "
+               "siblings (size, family, case, tracking); its emphasis is the ticked colour",
+               passed=not fails, expect="no type override on .checkin .stop; :has(:checked) still recolours",
+               got={"violations": fails or "none", "label_size": label.get("font-size")})
 
 
 def _stc_runs_browser():
@@ -1025,7 +1265,8 @@ def _stc_public_allowlist():
         pass
     if S.public_view("plan", None) is not None:
         fails.append("public_view(None) invented a payload")
-    src = S.Path(S.__file__).read_text(encoding="utf-8")
+    _dir = S.Path(S.__file__).resolve().parent
+    src = "\n".join((_dir / f).read_text(encoding="utf-8") for f in APP_SOURCES)
     unused = [r for r in S.PUBLIC_VIEWS
               if f'public_view("{r}"' not in src and not (r == "plan" and "plan_public_view" in src)]
     if unused:
@@ -3368,7 +3609,7 @@ def _stc_no_shadowed_defs():
     `_fmt_hms` alone would pass forever while a new pair goes unnoticed."""
     import ast as _ast, collections as _c
     fails, counts = [], {}
-    for fname in ("SparingHorse.py", "sh_selftest.py"):
+    for fname in APP_SOURCES + ("sh_selftest.py",):
         path = S.Path(S.__file__).resolve().parent / fname
         try:
             tree = _ast.parse(path.read_text(encoding="utf-8"))
@@ -3637,8 +3878,10 @@ def _stc_calibration_inventory():
             return bool(v.values) and all(num(e) for e in v.values)
         return False
 
-    names, tree = [], _ast.parse((path / "SparingHorse.py").read_text(encoding="utf-8"))
-    for node in tree.body:
+    names, body_nodes = [], []
+    for _src in APP_SOURCES:      # TECH-12 — the engine's constants live in sh_engine.py now
+        body_nodes += _ast.parse((path / _src).read_text(encoding="utf-8")).body
+    for node in body_nodes:
         if not isinstance(node, _ast.Assign):
             continue
         tgts, vals = [], []
@@ -3950,7 +4193,7 @@ def _stc_wrong_axis_signals():
     ok_str = lambda t: (t.strip('\'"').startswith("shape.latest.")          # the withheld register
                         or "CREATE TABLE IF NOT EXISTS shape_snapshots" in t)   # the schema DDL
     readers = []                                           # (4) nothing reads them
-    for fname in ("SparingHorse.py", "static/app.js"):
+    for fname in APP_SOURCES + ("static/app.js",):
         path = S.Path(S.__file__).resolve().parent / fname
         try:
             text = path.read_text(encoding="utf-8")
@@ -5648,13 +5891,11 @@ def _stc_long_run_identity():
     on = survey()
     # (b) neutralise BOTH levers + the honesty check, and re-survey. A huge EASY_FRAC drives the raise
     # target to ~0 (no raise) and the easy clamp to +inf (never binds); RATIO 0 silences the relabel.
-    _keep = (S.LONG_RUN_EASY_FRAC, S.LONG_RUN_MIN_RATIO)
+    undo = _patch_globals(LONG_RUN_EASY_FRAC=1e9, LONG_RUN_MIN_RATIO=0.0)
     try:
-        vars(S)["LONG_RUN_EASY_FRAC"] = 1e9
-        vars(S)["LONG_RUN_MIN_RATIO"] = 0.0
         off = survey()
     finally:
-        vars(S)["LONG_RUN_EASY_FRAC"], vars(S)["LONG_RUN_MIN_RATIO"] = _keep
+        undo()
 
     bad = lambda rows: [lbl for lbl, lg, ez, _, rl in rows
                         if rl or (lg and ez and lg < S.LONG_RUN_MIN_RATIO * ez)]
@@ -5949,12 +6190,11 @@ def _stc_easy_ladder():
 
     def lay(step, on):
         """Return (short easies as {weekday: km}, long km, total km) for one lay."""
-        keep = vars(S)["EASY_LADDER_STEP"]
-        vars(S)["EASY_LADDER_STEP"] = step
+        undo = _patch_globals(EASY_LADDER_STEP=step)
         try:
             ss, _ = S._distribute_week(WK, bs, 480.0, 420.0, None, long_km_cap=15.0, ladder=on)
         finally:
-            vars(S)["EASY_LADDER_STEP"] = keep
+            undo()
         shorts = {(S._date(s["date"]) - bs).days: (s.get("km") or 0.0) for s in ss if not LONGISH(s)}
         lk = max([(s.get("km") or 0.0) for s in ss if LONGISH(s)] or [0.0])
         return shorts, lk, round(sum(s.get("km") or 0.0 for s in ss), 1)
@@ -9994,7 +10234,7 @@ def _golden_build(seed_kw, extra, regime, wall=None):
     and `get_db` for the duration (the same global-swap the rest of the battery uses; the self-test
     gate keeps live traffic off meanwhile) and always restores them."""
     pass   # the rebinds below land on the app module (S.<name> = …), TECH-1
-    real_dt, real_getdb = S.datetime, S.get_db
+    real_dt = S.datetime
     y, m, d = (int(x) for x in GOLDEN_TODAY.split("-"))
     pinned = wall or real_dt(y, m, d, 12, 0, 0)
 
@@ -10014,8 +10254,13 @@ def _golden_build(seed_kw, extra, regime, wall=None):
     mem = S.sqlite3.connect(":memory:")
     mem.row_factory = S.sqlite3.Row
     mem.executescript(S.SCHEMA)
+    # ⏱ The pin has to land on EVERY module the app's code lives in. Since TECH-12 the engine reads
+    # `datetime` out of sh_engine's own namespace, so pinning the app module alone would leave the
+    # engine on the real wall clock — and det/clock-purity, which builds the same scenario under two
+    # wall clocks eight months apart, would then compare two builds that both read "now" and agree.
+    # That is the failure mode a clock test cannot report: it would go quiet, not red.
+    undo_clock = _patch_globals(datetime=_PinnedClock, get_db=(lambda: mem))
     try:
-        S.datetime, S.get_db = _PinnedClock, (lambda: mem)
         S.seed_synthetic_db(mem, end=GOLDEN_END, **seed_kw)
         # De-poison the generator's own trailing regenerate() (wall-clock anchor, saved plan,
         # wall-clock race resolution), then re-resolve on the pinned clock — the §69 card-truth pattern.
@@ -10030,7 +10275,7 @@ def _golden_build(seed_kw, extra, regime, wall=None):
         mem.commit()
         plan = S.generate_plan(mem, force_regime=regime, today=today)
     finally:
-        S.datetime, S.get_db = real_dt, real_getdb
+        undo_clock()
         mem.close()
     plan = {k: v for k, v in plan.items() if k not in GOLDEN_VOLATILE}
     return S.json.dumps(plan, sort_keys=True, indent=2, default=str) + "\n"
@@ -10667,7 +10912,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),

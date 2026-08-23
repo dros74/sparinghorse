@@ -27,9 +27,9 @@ jobs:
           cache: pip
       - run: pip install --no-cache-dir -r requirements.txt
 
-      - name: Both modules compile
+      - name: Every module compiles
         run: |
-          python -m py_compile SparingHorse.py sh_selftest.py
+          python -m py_compile SparingHorse.py sh_engine.py sh_selftest.py
 
       - name: The front end parses
         run: |

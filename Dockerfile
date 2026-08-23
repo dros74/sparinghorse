@@ -3,6 +3,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY SparingHorse.py .
+# The plan engine (TECH-12): the deterministic core — everything a plan is computed from. The app
+# imports it at start, so unlike the battery below this is NOT optional: without it the container
+# does not boot at all. det/image-completeness fails the suite if a module the app imports is
+# missing from this list.
+COPY sh_engine.py .
 # The self-test battery (TECH-1): a separate module the app imports LAZILY, so a typo in a det
 # cannot take the web app and the nightly scheduler down at import time. It is also the entry
 # point the /api/selftest/run route spawns as its own process.

@@ -10,6 +10,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.39.0] - 2026-08-23
+
+### Changed
+
+- **The plan engine is its own file.** Everything a training plan is computed from — the engine, the
+  feasibility model, the fitness/fatigue projector, the pace maths — has left the application file
+  and lives in `sh_engine.py`. It imports nothing from the app: the arrow points one way, so the
+  engine can be read and tested on its own, and a change to the web layer cannot alter a plan. The
+  application file drops from 12,815 lines to 8,244 and is what its name says — routes, syncing,
+  storage, the scheduler. Nothing about the app behaves differently, and the proof that it doesn't
+  was part of the move: the ten golden plans regenerate byte-identical.
+- **The self-test knows which file it is looking at.** The battery's clock pin, its constant
+  inventory and its source scans all walk a list of the app's modules rather than assuming one file,
+  so the next time something moves out, the checks move with it instead of quietly covering less.
+  Two new checks hold the split itself: one fails if the engine ever imports the app back, if a
+  re-exported name drifts, or if a module is missing from those lists; the other fails if a module
+  the app imports is missing from the container image — a mistake that shows up nowhere except in
+  the container.
+
+## [0.38.0] - 2026-08-23
+
+### Added
+
+- **The footer says which version you are looking at.** Between the sync line and the Runalyze
+  attribution, the page now names the release that served it — the same string the stylesheet and
+  script are cache-busted with, so a screenshot can never claim a version the browser did not
+  actually load. It is served by the page, not typed by hand: it cannot be forgotten at release time.
+
+### Fixed
+
+- **The stop-the-run control no longer out-sizes the row it sits in.** "I had to stop / chest
+  symptom" was set two-and-a-bit points larger than the ENERGY and SLEEP labels beside it, in the
+  same uppercase mono — big enough to read as a different typeface rather than as emphasis. It takes
+  the sibling labels' type now. The emphasis that control needs is the one it already had: it turns
+  red when it is ticked.
+- **The run browser's footer had never learned the sync time.** The explorer and the dashboard are
+  one document and have always shared a footer, but only the dashboard's loaders ever painted it, so
+  `/runs` sat on the shell's placeholder — "not synced yet" — however recently you had synced. Both
+  pages now paint that line through one writer, and the two footers are compared, word for word, by
+  the browser suite.
+
 ## [0.37.1] - 2026-08-23
 
 ### Fixed

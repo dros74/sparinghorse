@@ -20,6 +20,11 @@ let LAST_SYNC = null;
 // still says how old its data is. tileFail falls back to the stamp; the freshness chip seeds from it.
 const storedSync = () => { if(SH_READONLY) return null; try{ return localStorage.getItem("sh-last-sync"); }catch(e){ return null; } };
 const noteSync = ts => { if(ts && !SH_READONLY){ try{ localStorage.setItem("sh-last-sync", ts); }catch(e){} } };
+// §RB — one footer, one writer. The dashboard learns the sync time from /api/shape and the runs
+// explorer from /healthz (the same `meta.last_sync` either way), but both paint the line through
+// here, so the two pages cannot word their footer differently.
+const footSync = ts => { const el = $("#foot"); if(el && ts)
+  el.textContent = `Spares the horse by being the horse · synced ${new Date(ts).toLocaleString()}`; };
 function tileFail(host, name, retry, err){
   if(!host) return;
   const off = (err instanceof TypeError) || (typeof navigator !== "undefined" && navigator.onLine === false);
@@ -148,8 +153,7 @@ async function loadShape(){
     $("#gyou").style.setProperty("--gx", L+"%");   // CSS clamps the pill inside the gauge's ends
     $("#gyou").innerHTML = `<span class="${cls}">you: ${acwr.toFixed(2)}</span>`;
   }
-  if(d.last_sync){ const dt=new Date(d.last_sync);
-    $("#foot").textContent = `Spares the horse by being the horse · synced ${dt.toLocaleString()}`; }
+  footSync(d.last_sync);
   // data-quality: flag likely-duplicate activities (inflate Runalyze's fitness/fatigue too)
   const dq=$("#dqbanner");
   let dqhtml="";
@@ -2841,6 +2845,10 @@ async function saveSecret(key, clear){
 // dashboard's status loaders (plan, drift, shape, health…) stay dashboard-only.
 if(SH_PAGE==="runs"){
   loadRunsCal(); loadRecent();
+  // the explorer shows the same footer as the dashboard, so it needs the same sync time; /healthz
+  // is the one read it already has a reason to make (private-only page, so `last_sync` is served).
+  fetch("/healthz").then(r=>r.json()).then(d=>{ SYNC_LAST=d.last_sync||null; noteSync(d.last_sync);
+    footSync(d.last_sync); }).catch(()=>{});
 }else{
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; SYNC_LAST=d.last_sync||null; noteSync(d.last_sync); paintFreshness(); _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
 loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones(); loadTrack();

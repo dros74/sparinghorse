@@ -438,8 +438,11 @@
     background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:7px 10px}
   /* Quiet at rest, loud only when it is actually saying something: an inactive medical control that
      renders in the danger colour shouts every day nothing is wrong. Muted matches its ENERGY/SLEEP
-     siblings; the box itself still paints danger when ticked (accent-color inherits). */
-  .checkin .stop{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);
+     siblings; the box itself still paints danger when ticked (accent-color inherits). It takes their
+     TYPE too — no font-size of its own, so the row is one scale. It carried 13px against their 10px,
+     same uppercase mono, which reads as a second font rather than as emphasis; emphasis is the
+     ticked colour on the line below. det/checkin-type-scale holds both. */
+  .checkin .stop{display:flex;align-items:center;gap:6px;color:var(--muted);
     accent-color:var(--danger)}
   .checkin .stop:has(:checked){color:var(--danger)}
 
@@ -963,6 +966,10 @@
     opacity:.65;transition:opacity .15s}
   .ralink:hover{opacity:1}
   .ralink svg{height:15px;width:auto;display:block}
+  /* The release that served this page, carrying the same string as the CSS/JS cache-buster — so a
+     screenshot and the code the browser actually loaded can never disagree about which version is
+     on screen. Quieter than the sync line above it: this is provenance, not news. */
+  #footver{opacity:.6}
   /* ── Mobile app shell (≤760px): a fixed bottom tab bar + one section-group per tab, so the phone
      reads as an app (thumb navigation) instead of an endless-scroll page. Purely additive — above the
      breakpoint .mobnav stays hidden and the full single-page desktop stack is untouched. Each content
