@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.32.1] - 2026-08-23
+
+### Fixed
+
+- **The readiness row breathes again.** Three cards abreast made the durability tracker's debut row
+  cramped. The verdict card now takes the full width of the section — it is the one thing that
+  matters today — and the acute:chronic and durability trackers share the row below, half each.
+  On the public box, where durability stays private, the acute:chronic card takes the whole second
+  row instead of sitting beside an absence.
+
 ## [0.32.0] - 2026-08-23
 
 ### Added

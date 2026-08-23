@@ -361,12 +361,13 @@
   .statuscard .sc-wx{display:inline-flex;gap:12px;margin-left:auto}
   .statuscard .sc-wx .wxc{display:inline-flex;align-items:center;gap:4px;color:color-mix(in oklab,var(--onready),transparent 8%)}
   .statuscard .sc-wx .wxk{opacity:.6;font-size:9px;letter-spacing:.06em}
-  /* readiness ⨉ chronic-load, side by side (mockup Almanac) */
-  .rgrid{display:grid;grid-template-columns:1.45fr 1fr;gap:16px;align-items:stretch}
-  /* the durability card exists on the private box only (app.js removes it for READONLY), so the
-     grid widens to three columns exactly while the card is in the DOM — no JS class toggling */
-  .rgrid:has(.durcard){grid-template-columns:1.3fr 1fr 1fr}
-  @media(max-width:760px){.rgrid,.rgrid:has(.durcard){grid-template-columns:1fr}}
+  /* readiness ⨉ chronic-load ⨉ durability: the verdict card takes the whole row; the two trackers
+     share the row below, half each (0.32.1 — three-across read crowded) */
+  .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch}
+  .rgrid>#readiness{grid-column:1 / -1}
+  /* the public box removes the durability card, so the ACWR card takes the whole second row there */
+  .rgrid:not(:has(.durcard))>.acwrcard{grid-column:1 / -1}
+  @media(max-width:760px){.rgrid{grid-template-columns:1fr}}
   /* readiness + today's session share one surface tile (same bg as the load tile); the green
      status card bleeds to the tile's top edges — top corners curved, bottom corners squared so
      it reads as the tile's header, with the session in the body below. */

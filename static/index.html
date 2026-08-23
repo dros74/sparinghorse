@@ -66,8 +66,8 @@ document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.we
           <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
         </div>
         <!-- §3.3 / 0.32.0 — the durability tracker. PRIVATE-only (decoupling is HR-adjacent): app.js
-             removes this card on the public box, and the .rgrid:has(.durcard) rule collapses back to
-             two columns. Populated by loadDurability from /api/durability. -->
+             removes this card on the public box, where the ACWR card then takes the whole second
+             row (.rgrid:not(:has(.durcard))). Populated by loadDurability from /api/durability. -->
         <div class="panel acwrcard durcard" id="durcard">
           <div class="acwr-title">Durability <span class="muted mono" style="font-size:10px;font-weight:400">— how your running economy holds up over long runs</span></div>
           <div id="durbody"><div class="empty">Loading…</div></div>
