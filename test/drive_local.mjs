@@ -399,6 +399,42 @@ async function runFull() {
   ok(`a snapshot whose field ≠ its ratio paints the RATIO (${pillTxt.trim()})`, /you: 0\.87/.test(pillTxt));
   await page.evaluate(() => loadShape());   // put the real snapshot back for the rest of the run
 
+  // ── 0.32.0 — the durability tracker (§3.3, private-only) ──────────────────
+  // On the seed no long run carries decoupling, so the card must reach its HONEST empty state —
+  // then drive the REAL renderer with a synthetic populated payload (the gauge-ratio test's
+  // pattern) to watch the gauge, the verdict and the per-run bars actually render.
+  await page.waitForFunction(
+    () => { const b = document.querySelector('#durbody'); return b && !/Loading/.test(b.innerText); },
+    { timeout: 15000 });
+  ok('durability card renders its honest empty state on the seed',
+     /No long runs with decoupling yet/.test(await page.locator('#durbody').innerText()));
+  const durPayload = {
+    ok: true, min_km: 16, n_long: 12,
+    recent_median_raw: 300, recent_median_pct: 3.0, recent_median_km: 20,
+    prior_median_raw: 600, trend: 'improving', verdict: 'durable',
+    good_below_raw: 500, high_above_raw: 1000,
+    series: Array.from({ length: 12 }, (_, i) => ({
+      date: new Date(Date.now() - (i * 7 + 1) * 86400000).toISOString().slice(0, 10),
+      km: 20 + (i % 3), decoupling_raw: 300 + i * 25, decoupling_pct: 3 + i * 0.25, hr: 146, feel: null })),
+  };
+  await page.route('**/api/durability', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify(durPayload) }));
+  const dur = await page.evaluate(async () => { await loadDurability();
+    const pillEl = document.querySelector('#durbody .gyou span');
+    return { txt: document.querySelector('#durbody').innerText,
+             pill: pillEl ? pillEl.textContent : '',
+             pillCls: pillEl ? pillEl.className : '',
+             bars: document.querySelectorAll('#durbody .durchart rect').length,
+             dashes: document.querySelectorAll('#durbody .durchart .thresh').length,
+             title: (document.querySelector('#durbody .durchart rect title') || {}).textContent || '' }; });
+  await page.unroute('**/api/durability');
+  ok(`durability gauge paints the 6-run median (${dur.pill.trim()} · ${dur.pillCls})`,
+     /you: 3\.0%/.test(dur.pill) && dur.pillCls === 'inb');
+  ok('durability verdict + trend render', /durable/.test(dur.txt) && /improving/.test(dur.txt));
+  ok(`durability tracker draws one bar per long run (${dur.bars}) + both threshold dashes (${dur.dashes})`,
+     dur.bars === 12 && dur.dashes === 2);
+  ok(`a bar's tooltip carries its distance (${dur.title})`, /km/.test(dur.title));
+  await page.evaluate(() => loadDurability());   // put the real (empty) state back
+
   // the health form's date is prefilled to today (local, not UTC)
   const hd = await page.evaluate(() => {
     const n = new Date();
@@ -538,7 +574,7 @@ async function runBlocked() {
   // counting .tf-retry against .tilefail can never fail (tileFail writes the pair as one unit), and an
   // innerText sweep can't see a tile whose section was hidden on the way down — both read green while a
   // tile quietly offers the runner no way back. These two assertions are what actually hold UX-3 up.
-  const HOSTS = ['#tiles', '#recent', '#chart', '#ffchart', '#readiness', '#drift', '#effort', '#zones', '#health'];
+  const HOSTS = ['#tiles', '#recent', '#chart', '#ffchart', '#readiness', '#drift', '#effort', '#zones', '#health', '#durbody'];
   const stranded = await page.evaluate(hs => hs.filter(h => {
     const el = document.querySelector(h); return el && /Loading…/.test(el.innerHTML);
   }), HOSTS);
@@ -588,6 +624,10 @@ async function runPublic() {
   ok('public plan empty state renders honest copy',
      /No plan published yet/.test(await page.locator('#plan .empty').innerText()));
   ok('no health form on the public box', await page.locator('#hform').count() === 0);
+  ok('no durability card on the public box (decoupling is HR-adjacent)',
+     await page.locator('#durcard').count() === 0);
+  ok('the durability endpoint itself is closed to the public box', await page.evaluate(
+    () => fetch('/api/durability').then(r => r.status)) === 403);
   const chip = await page.evaluate(() => {
     const e = document.querySelector('#scFresh'); return e ? e.textContent.trim() : ''; });
   ok('public readiness card carries no sync age (the household routine stays private)', chip === '');

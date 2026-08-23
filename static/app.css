@@ -289,6 +289,8 @@
     background:var(--surface-2);margin-top:26px}
   .gauge .band{position:absolute;top:0;bottom:0;background:color-mix(in oklab,var(--ok),transparent 72%);
     border-radius:8px}
+  /* the durability gauge's second zone: where long-run fade is high (a caution tint, not the safe band) */
+  .gauge .band.danger{background:color-mix(in oklab,var(--danger),transparent 82%);border-radius:0 8px 8px 0}
   .gauge .mark{position:absolute;top:-4px;bottom:-4px;width:3px;background:var(--accent);border-radius:2px;
     box-shadow:0 0 0 2px var(--bg)}
   /* the "you:" pill follows the mark via --gx, clamped so it can never overhang the gauge's ends
@@ -298,6 +300,7 @@
   .gyou span{font-family:var(--mono);font-size:11px;font-weight:500;padding:2px 7px;border-radius:6px}
   .gyou .inb{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 55%)}
   .gyou .out{color:var(--danger);border:1px solid color-mix(in oklab,var(--danger),transparent 50%)}
+  .gyou .mid{color:var(--warn);border:1px solid color-mix(in oklab,var(--warn),transparent 50%)}
   .gyou .low{color:var(--muted);border:1px solid color-mix(in oklab,var(--muted),transparent 50%)}
   .gauge-scale{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10px;
     color:var(--muted);margin-top:6px}
@@ -360,7 +363,10 @@
   .statuscard .sc-wx .wxk{opacity:.6;font-size:9px;letter-spacing:.06em}
   /* readiness ⨉ chronic-load, side by side (mockup Almanac) */
   .rgrid{display:grid;grid-template-columns:1.45fr 1fr;gap:16px;align-items:stretch}
-  @media(max-width:760px){.rgrid{grid-template-columns:1fr}}
+  /* the durability card exists on the private box only (app.js removes it for READONLY), so the
+     grid widens to three columns exactly while the card is in the DOM — no JS class toggling */
+  .rgrid:has(.durcard){grid-template-columns:1.3fr 1fr 1fr}
+  @media(max-width:760px){.rgrid,.rgrid:has(.durcard){grid-template-columns:1fr}}
   /* readiness + today's session share one surface tile (same bg as the load tile); the green
      status card bleeds to the tile's top edges — top corners curved, bottom corners squared so
      it reads as the tile's header, with the session in the body below. */
@@ -379,6 +385,25 @@
   .acwrcard .acwr-foot .v{display:block;font-family:var(--serif);font-weight:600;font-size:22px;line-height:1;margin-top:5px}
   .acwrcard .acwr-foot .v small{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--muted)}
   .acwrcard .acwr-foot .cap{display:block;font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px}
+  /* §3.3 durability tracker (0.32.0) — the verdict line under the gauge, and the footer chart:
+     one bar per long run, height = aerobic decoupling, coloured by its fade band. Strokes keep
+     their width under the stretched viewBox (the house non-scaling-stroke rule). */
+  .durverdict{font-size:12.5px;margin:12px 0 0;line-height:1.5}
+  .durverdict b{font-weight:600}
+  .durverdict b.ok{color:var(--ok)} .durverdict b.warn{color:var(--warn)} .durverdict b.danger{color:var(--danger)}
+  /* two zones share one track — the ok zone squares its right edge, the high-fade zone its left
+     (a single-band gauge keeps the full radius from the base rule above) */
+  .durcard .gauge .band{border-radius:8px 0 0 8px}
+  .durcard .gauge .band.danger{border-radius:0 8px 8px 0}
+  .durchart{margin:10px 0 2px}
+  .durchart svg{display:block;width:100%;height:96px}
+  .durchart .thresh{stroke-width:1;stroke-dasharray:4 4;vector-effect:non-scaling-stroke}
+  .durchart .thresh.ok{stroke:var(--ok)} .durchart .thresh.danger{stroke:var(--danger)}
+  .durchart rect{transition:opacity .15s}
+  .durchart rect.ok{fill:color-mix(in oklab,var(--ok),transparent 30%)}
+  .durchart rect.warn{fill:color-mix(in oklab,var(--warn),transparent 30%)}
+  .durchart rect.danger{fill:color-mix(in oklab,var(--danger),transparent 30%)}
+  .durchart rect:hover{opacity:.75}
   /* A-race pill bar */
   .objbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line);
     border-radius:12px;padding:12px 16px;margin-bottom:22px;background:var(--surface)}

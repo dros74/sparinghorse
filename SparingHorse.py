@@ -302,7 +302,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.31.2"
+ENGINE_VERSION = "0.32.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -3891,6 +3891,10 @@ def durability_signal(db, recent_n=6):
         "prior_median_raw": med_prior, "trend": trend, "verdict": verdict,
         "good_below_raw": DURABILITY_GOOD_RAW, "high_above_raw": DURABILITY_HIGH_RAW,
         "recent": recent,
+        # the readiness-section tracker chart's points (0.32.0): newest-first long runs with km on
+        # every point, so duration is never hidden behind the decoupling trace (the §55d caveat —
+        # on his corpus longer runs decouple LESS; a chart that hides distance lies). Capped for the wire.
+        "series": series[:18],
         "caveats": [
             "MEASURE-FIRST: surfaced + accumulating, NOT feeding the plan (durability governs nothing until "
             "the corpus shows it predicts race fade — the heat-coefficient discipline).",
@@ -9960,6 +9964,17 @@ def api_run_metrics():
         # the worked example anchors on the latest run (or ?example=<id>), independent of the row filters
         out["worked_example"] = worked_example(db, activity_id=example)
     return jsonify(out)
+
+
+@app.get("/api/durability")
+def api_durability():
+    """§3.3 durability read (long-run aerobic decoupling — Davis resilience) for the readiness-section
+    tracker tile. Decoupling is HR-adjacent → PRIVATE-ONLY, the /api/run-metrics discipline. It stays
+    MEASURE-FIRST: the tile displays the signal + its trend and accumulates cases; durability still
+    governs nothing."""
+    if READONLY:
+        return jsonify(ok=False, error="durability is private"), 403
+    return jsonify(durability_signal(get_db()))
 
 
 @app.get("/api/projector")

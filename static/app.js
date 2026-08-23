@@ -876,6 +876,75 @@ async function loadReadiness(){
   try{ renderReadiness(await getJSON("/api/readiness")); }
   catch(e){ tileFail($("#readiness"), "Readiness", loadReadiness, e); }
 }
+// ── Durability tracker (§3.3, 0.32.0) ───────────────────────────────────────
+// Long-run aerobic decoupling (the pace:HR drift, first→second half) as the resilience proxy,
+// displayed MEASURE-FIRST: tracked + trended, never governing. PRIVATE-only (HR-adjacent) — the
+// public shell removes the card. The §55d caveats shape the chart: every bar carries its distance
+// in the tooltip (on his corpus longer runs decouple LESS — duration must stay visible), and the
+// engine itself voids the trend when the recent-vs-prior distance mix shifts.
+async function loadDurability(){
+  const body=$("#durbody"); if(!body) return;              // the card is removed on the public box
+  try{ renderDurability(await getJSON("/api/durability")); }
+  catch(e){ tileFail(body, "Durability", loadDurability, e); }
+}
+// one bar per long run, height = decoupling %, coloured by its fade band; the dashed lines are the
+// engine's own thresholds. preserveAspectRatio="none" stretches the chart to the tile — fine for
+// bars, and the threshold dashes carry vector-effect:non-scaling-stroke so they stay hairlines.
+function durChartSvg(series, goodPct, highPct){
+  const pts=[...series].reverse();                 // chronological, oldest → newest
+  if(!pts.length) return "";
+  const W=1000,H=96,pad=4;
+  const vmax=Math.max(15, ...pts.map(p=>p.decoupling_pct))*1.08;
+  const y=v=>H-pad-(H-2*pad)*Math.min(v,vmax)/vmax;
+  const slot=(W-2*pad)/pts.length, bw=Math.max(2,slot*0.52);
+  const band=v=>v<goodPct?"ok":v<highPct?"warn":"danger";
+  const bars=pts.map((p,i)=>{
+    const x=pad+slot*i+(slot-bw)/2, top=y(p.decoupling_pct);
+    return `<rect class="${band(p.decoupling_pct)}" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${(H-pad-top).toFixed(1)}">`+
+      `<title>${esc(p.date)} · ${p.km} km · ${p.decoupling_pct}%</title></rect>`;
+  }).join("");
+  const dash=(v,cls)=>vmax>v?`<line class="thresh ${cls}" x1="${pad}" x2="${W-pad}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`:"";
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${dash(goodPct,"ok")}${dash(highPct,"danger")}${bars}</svg>`;
+}
+function renderDurability(d){
+  const host=$("#durbody"); if(!host) return;
+  if(!d || d.ok===false){
+    host.innerHTML=`<div class="empty">No long runs with decoupling yet — the tracker starts once a run of ${d&&d.min_km?Math.round(d.min_km):16}&nbsp;km or more lands with HR data.</div>`;
+    return;
+  }
+  const SCALE=15;                                    // % full-scale — gauge, scale and chart agree (the one-definition rule)
+  const good=d.good_below_raw/100, high=d.high_above_raw/100, med=d.recent_median_pct;
+  const pct=x=>Math.max(0,Math.min(100, x/SCALE*100));
+  const pillCls=d.verdict==="durable"?"inb":d.verdict==="high fade"?"out":"mid";
+  const wordCls=d.verdict==="durable"?"ok":d.verdict==="high fade"?"danger":"warn";
+  const pts=d.series||[];
+  const vTrend=d.trend==null?"collecting":d.trend.startsWith("distance mix")?"mix shifted":d.trend;
+  const trendCap={improving:"economy decay shrinking across your recent long runs — getting more durable",
+    steady:"holding steady across your recent long runs",
+    declining:"economy decay growing across your recent long runs — watch the fade",
+    collecting:"the trend reads once about twelve long runs are banked (recent six vs prior six)",
+    "mix shifted":"your recent long-run distances changed, so the trend is unreliable — compare like distances"}[vTrend]||"";
+  const datesTxt=pts.length>1?` · ${monYr(pts[pts.length-1].date)}–${monYr(pts[0].date)}`:"";
+  const priorTxt=d.prior_median_raw==null?"":`; prior 6-run median ${(d.prior_median_raw/100).toFixed(1)}%`;
+  host.innerHTML=`
+    <div class="gauge"><div class="band" style="left:0;width:${pct(good)}%"></div>
+      <div class="band danger" style="left:${pct(high)}%;width:${100-pct(high)}%"></div>
+      <div class="mark" style="left:${pct(med)}%"></div>
+      <div class="gyou" style="--gx:${pct(med)}%"><span class="${pillCls}">you: ${med.toFixed(1)}%</span></div></div>
+    <div class="gauge-scale"><span>0%</span><span><b>${good}%</b></span><span><b>${high}%</b></span><span>${SCALE}%</span></div>
+    <p class="durverdict"><b class="${wordCls}">${esc(d.verdict)}</b> — median of your last 6 long runs
+      (≥${Math.round(d.min_km)} km)${esc(priorTxt)} · ${d.n_long} tracked</p>
+    <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Aerobic decoupling — how much your
+      pace:HR drifts from the first half of a long run to the second. Low means your running economy holds up over
+      the distance; high or rising means it decays. Measure-first: tracked and trended, governing nothing. Compare
+      like distances — decoupling drifts with distance, so the trend voids itself when the long-run mix changes.</p>
+    <div class="acwr-foot">
+      <span class="k">Long-run tracker · ${pts.length} runs ≥${Math.round(d.min_km)} km${datesTxt}</span>
+      <div class="durchart">${durChartSvg(pts,good,high)}</div>
+      <span class="v">${esc(vTrend)}</span>
+      <span class="cap">${esc(trendCap)} · dashes at ${good}% / ${high}% · hover a bar for its distance</span>
+    </div>`;
+}
 // Opportunistic page-load sync (private only): pull any activities synced to Runalyze since the
 // last sync — throttled server-side — so a run finished earlier today lands without the manual
 // button, and the readiness tile flips to "done ✓". Silent + non-blocking. A real (non-skipped)
@@ -889,7 +958,7 @@ async function touchSync(){
     if(!d || !d.ok || d.skipped) return;
     loadReadiness();
     if(d.activities && d.activities.added>0){
-      loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones();
+      loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones(); loadDurability();
     }
   }catch(e){ /* offline / token issue — the tile just keeps its last-known state */ }
 }
@@ -2761,7 +2830,7 @@ if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
   // §RB — the run browser (route geo + HR calendar) is private-only: drop its section + links too.
-  ["sec-health","sec-zones","settingsDialog","firstrun","sec-runs","runsLink"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["sec-health","sec-zones","settingsDialog","firstrun","sec-runs","runsLink","durcard"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
@@ -2776,7 +2845,7 @@ if(SH_READONLY){
   const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
   const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
 }else{
-  loadReadiness(); loadHealth(); loadSettings(); loadSecrets();
+  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadDurability();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 

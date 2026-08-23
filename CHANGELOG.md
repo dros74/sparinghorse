@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.32.0] - 2026-08-23
+
+### Added
+
+- **The durability tracker.** Long-run aerobic decoupling — how much your pace:HR drifts from the
+  first half of a long run to the second, the proxy for how well your running economy holds up over
+  distance — has been measured and banked since July, but only reachable as an API payload. It now
+  has a home: a third card in *Today's readiness*, beside the verdict card and the acute:chronic
+  tracker. A gauge shows your median decoupling over the last six long runs (durable under 5%, high
+  fade past 10%), a verdict line names the state and the prior median it moved from, and a tracker
+  chart draws one bar per long run, coloured by its fade band, with each bar's distance in its
+  tooltip — because decoupling drifts with distance, a chart that hid duration would lie. The trend
+  word (improving / steady / declining) voids itself when your recent long-run distances change mix,
+  exactly as the engine has always read it. This is **measure-first**: the card tracks and trends
+  the signal and governs nothing — it earns a governing role only if the corpus shows it predicts
+  race fade. It is also **private-only** (decoupling is HR-adjacent): the card and its new
+  `GET /api/durability` endpoint are absent from the public box.
+
 ## [0.31.2] - 2026-08-22
 
 ### Fixed

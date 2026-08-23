@@ -4579,6 +4579,85 @@ def _stc_durability():
                     "shift_trend": shift.get("trend"), "failures": fail or "none"})
 
 
+def _stc_durability_api():
+    """0.32.0 — GET /api/durability serves the §3.3 read to the readiness-section durability tracker.
+    Locks: (a) PRIVATE-ONLY — READONLY answers a JSON 403 (decoupling is HR-adjacent; the
+    /api/run-metrics discipline, never the sanitized one); (b) the payload is durability_signal's
+    contract — verdict/trend/medians — plus the tracker chart's `series`: long-run points, newest
+    first, EACH carrying km + decoupling_pct (the §55d caveat: duration must stay visible — on his
+    corpus longer runs decouple LESS, so a chart that hides distance lies); (c) a corpus with no
+    qualifying long runs answers 200 ok:False, not an error. Driven through the real route on
+    in-memory DBs via a rebound get_db (the plandrift no-plan probe's pattern) — nothing persists."""
+    import sqlite3 as _sq, json as _j
+    def mkdb(runs):                          # runs = list of (date, km, decoupling|None)
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(
+            "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+            "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, training_effect REAL, raw TEXT);"
+            "CREATE TABLE shape_snapshots(snapshot_date TEXT PRIMARY KEY, captured_at TEXT, effective_vo2max REAL, "
+            "effective_vo2max_progress REAL, fitness REAL, fatigue REAL, performance REAL, fitness_pct REAL, "
+            "acwr REAL, marathon_shape REAL, hrv_baseline REAL, monotony REAL, training_strain REAL, raw TEXT);"
+            "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
+            "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
+        for i, (d, km, dec) in enumerate(runs, start=1):
+            raw = {} if dec is None else {"aerobic_decoupling_pace": dec}
+            mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,duration,hr_avg,raw) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (i, d + "T18:00", d, S.RUNNING_SPORT, km, int(km * 360), 150, _j.dumps(raw)))
+        mem.executescript(S.RUN_METRICS_VIEW)
+        mem.commit(); return mem
+    fails = []
+    recent = [(f"2026-06-{12-2*i:02d}", 20.0, 300.0) for i in range(6)]   # newest, med 300 (~3.0%)
+    prior = [(f"2026-05-{31-2*i:02d}", 20.0, 600.0) for i in range(6)]    # older,  med 600
+    pop = mkdb(recent + prior)
+    empty = mkdb([("2026-06-10", 8.0, 300.0)])
+    real_getdb, saved_ro = S.get_db, S.READONLY
+    c = S.app.test_client()
+    try:
+        S.get_db = lambda: pop
+        r = c.get("/api/durability")
+        j = r.get_json() or {}
+        if r.status_code != 200 or not j.get("ok"):
+            fails.append(f"(a) populated corpus answered {r.status_code} ok={j.get('ok')} — the tile's route must serve")
+        else:
+            if j.get("verdict") != "durable" or j.get("trend") != "improving":
+                fails.append(f"(b) verdict/trend off: {j.get('verdict')}/{j.get('trend')} — want durable/improving")
+            if j.get("recent_median_pct") != 3.0:
+                fails.append(f"(b) recent median pct off: {j.get('recent_median_pct')} — want 3.0")
+            s = j.get("series")
+            if not isinstance(s, list) or len(s) < 12:
+                fails.append(f"(b) the tracker chart needs the long-run series — got "
+                             f"{0 if not isinstance(s, list) else len(s)} points")
+            else:
+                if s[0].get("date") != "2026-06-12":
+                    fails.append(f"(b) series must be newest-first — first point {s[0].get('date')}")
+                if not all(p.get("km") and p.get("decoupling_pct") is not None for p in s):
+                    fails.append("(b) every series point must carry km + decoupling_pct — "
+                                 "a chart that hides distance lies")
+        S.READONLY = True
+        r2 = c.get("/api/durability")
+        if r2.status_code != 403 or (r2.get_json() or {}).get("ok") is not False:
+            fails.append(f"(a) READONLY answered {r2.status_code} — want JSON 403 (decoupling is HR-adjacent)")
+        S.READONLY = saved_ro
+        S.get_db = lambda: empty
+        r3 = c.get("/api/durability")
+        j3 = r3.get_json() or {}
+        if r3.status_code != 200 or j3.get("ok") is not False:
+            fails.append(f"(c) no-long-runs corpus answered {r3.status_code} ok={j3.get('ok')} — want 200 ok:False")
+    finally:
+        S.get_db = real_getdb
+        S.READONLY = saved_ro
+        pop.close(); empty.close()
+    return _st("det", "durability-api",
+               "GET /api/durability serves the §3.3 durability read to the readiness-section tracker: "
+               "private-only (READONLY ⇒ JSON 403), the signal's verdict/trend/medians plus the chart "
+               "series (newest-first, km + decoupling_pct on every point — duration stays visible), "
+               "and 200 ok:False (not an error) when no long runs qualify",
+               passed=not fails,
+               expect="200 + durable/improving + series carrying km; READONLY 403; empty ok:False",
+               got={"failures": fails or "none"})
+
+
 def _stc_worked_example():
     """The auto-generated controlled worked example: same-route deltas vs the nearest peer + the FACT of
     feel/objective divergence — and crucially NO per-case verdict (the n=1 trap this session disproved).
@@ -9416,6 +9495,9 @@ def _stc_axis_legibility():
           watched the original defect walk back in. Every chart in this app stretches, so the honest
           rule is the flat one: no `<text>` anywhere in app.js. A future chart that does NOT stretch
           may letter itself in SVG — and this det is where that decision gets recorded.
+          (0.32.0: the count pin moved 5 → 6 for the §3.3 durability tracker — label-free BY
+          CONSTRUCTION: bars + dashed thresholds + native `<title>` tooltips, nothing lettered, so
+          the stretch has no glyphs to squeeze. The two `<text>` checks below still guard it.)
       (b) the replacement is real and both charts use it: an `axisLayer()` that builds the
           absolutely-positioned `.axlbl`, a `thinAxis()` that drops ticks which would now collide
           (real type overlaps where 3px-wide type merely looked like dust), and a `mountAxis()` per
@@ -9441,8 +9523,8 @@ def _stc_axis_legibility():
         if S.re.search(r"<text[\s>]", body):          # <textarea> is not a label
             fails.append(f"(a) the SVG at app.js line {js.count(chr(10), 0, m.start()) + 1} stretches "
                          f"AND letters itself in <text> — those glyphs are squeezed with the trace")
-    if stretched != 5:
-        fails.append(f"(a) expected the 5 stretched charts, found {stretched}")
+    if stretched != 6:   # the 5 UX-8 trend charts + the durability tracker (label-free — see (a) above)
+        fails.append(f"(a) expected the 6 stretched charts, found {stretched}")
     # …and the flat rule, which is what actually closes the accumulator hole
     for m in S.re.finditer(r"<text[\s>]", live_js):
         fails.append(f"(a) app.js line {live_js.count(chr(10), 0, m.start()) + 1} builds an SVG <text>: "
@@ -9989,7 +10071,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_peak_acwr_floor(), lambda: _stc_building_load_integrity(),
                  lambda: _stc_plan_seed(), lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
-                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_worked_example(),
+                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
                  lambda: _stc_cross_phase_freeze_integration(),
                  lambda: _stc_feasibility_floor(),

@@ -366,6 +366,15 @@ A daily **green / amber / red** verdict. It flags stop-the-run / cardiac-type sy
 AI needed to catch them) and, on red, halts the plan and tells you to see a doctor. The public view shows the
 *verdict only* — the inputs are redacted.
 
+Beside the verdict card, the **acute : chronic** tracker gauges this week's load against your base, and the
+**durability** tracker watches a slower trait: **long-run aerobic decoupling** — how much your pace:HR drifts
+from the first half of a long run to the second, the proxy for how well your running economy holds up over
+distance. The gauge shows your median over the last six long runs (durable under 5%, high fade past 10%), and
+the bar chart tracks every recent long run (≥16 km) with its distance in the tooltip — decoupling drifts with
+distance, so compare like distances, and the trend word voids itself when your long-run mix changes. Durability
+is **measure-first**: displayed and trended, never feeding the plan. It is HR-derived, so the card is
+**private-only** and never appears on the public box.
+
 ### Latest running activity + route map
 The most recent **running** activity (trail and treadmill count), with a per-point trace (pace / HR / cadence
 / elevation) and a route map. The **map is private-only** (location privacy). If the most recent activity is
