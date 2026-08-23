@@ -1270,7 +1270,7 @@ function adjustmentUI(p){
   const a=p.adjustment;
   const banner = a ? `<div class="${(a.medical||a.medical_flag)?'adjmed':'adjbox'}">
       <div class="adjh">${(a.medical||a.medical_flag)?'⚠ Medical flag':'Active adjustment'} — ${adjEffect(a)}</div>
-      <div class="adjmeta">“${esc(a.note)}” · ${a.applies_from}→${a.applies_until}${a.summary?` · ${esc(a.summary)}`:''}</div>
+      <div class="adjmeta">“${esc(a.note)}” · ${esc(a.applies_from)}→${esc(a.applies_until)}${a.summary?` · ${esc(a.summary)}`:''}</div>
       ${a.clamp?`<div class="adjclamp">engine clamp: ${esc(a.clamp)}</div>`:''}
       ${(a.medical||a.medical_flag)?`<div class="adjclamp">Sparing Horse tracks &amp; flags — it never diagnoses. Clear this once your doctor signs off.</div>`:''}
       <button id="adj_clear" style="font-size:11px;padding:4px 9px;margin-top:8px">Clear adjustment</button>
@@ -1303,9 +1303,9 @@ async function renderAdjPreview(d){
   host.dataset.note=d.note||""; host.dataset.directive=JSON.stringify(a);
   host.innerHTML=`<div class="adjprop">
     ${d.reply?`<div class="adjreply">${esc(d.reply)}</div>`:''}
-    <div>${(a.medical_flag)?'⚠ ':''}${adjEffect(a)} · ${a.applies_from}→${a.applies_until}</div>
+    <div>${(a.medical_flag)?'⚠ ':''}${adjEffect(a)} · ${esc(a.applies_from)}→${esc(a.applies_until)}</div>
     ${a.summary?`<div class="adjmeta">${esc(a.summary)}</div>`:''}
-    ${d.clamp?`<div class="adjclamp">engine clamp: ${d.clamp}</div>`:''}
+    ${d.clamp?`<div class="adjclamp">engine clamp: ${esc(d.clamp)}</div>`:''}
     <div style="margin-top:6px">
       <button id="adj_apply" class="primary" style="font-size:11px;padding:4px 10px">Apply</button>
       <button id="adj_dismiss" style="font-size:11px;padding:4px 10px">Dismiss</button></div>
@@ -1457,12 +1457,19 @@ function sessSummary(s){
 }
 // One plan week (used for every phase but the re-base, which carries the journal/actuals overlay).
 // Tags down weeks (3:1 mesocycle), frozen weeks (§6f Step E — completed, carried verbatim), and the
+// The Sunday a Monday-anchored week ends. ALL-UTC on purpose: the obvious `new Date(iso)` +
+// `setDate(getDate()+6)` + `toISOString()` mixes a UTC instant with LOCAL date arithmetic, and in a
+// zone whose DST starts on a Sunday at 02:00 — Auckland, Sydney, Chatham — that returns the end one
+// day EARLY, once a year (verified: week 2026-09-21 ends 09-26 instead of 09-27 in Pacific/Auckland).
+// The plan then stops treating the current week as current on its own final Sunday. Northern zones
+// never see it, because their switch falls outside the window this arithmetic walks.
+const weekEndIso = mon => { const d=new Date(mon+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()+6);
+  return d.toISOString().slice(0,10); };
 // week containing today. Quality sessions are accented; the ACWR badge rides the right rail.
 function weekHtml(w,p,today){
   const down=/down/i.test(w.intent||'');
   let cur=false;
-  if(w.start){ const we=new Date(w.start); we.setDate(we.getDate()+6);
-    cur=!w.frozen && w.start<=today && today<=we.toISOString().slice(0,10); }
+  if(w.start) cur = !w.frozen && w.start<=today && today<=weekEndIso(w.start);
   // LOG-enriched sessions (merged in by renderPlan for elapsed/current weeks) get the journal line
   // (done/missed mark, actual, reflection, doubles); plain future weeks keep the compact summary.
   const sess=w.sessions.map(s=>{
@@ -1512,8 +1519,7 @@ function phaseKey(name){
 // True when `today` falls inside the week starting at w.start (Mon–Sun).
 function weekHoldsToday(w,today){
   if(!w||!w.start) return false;
-  const we=new Date(w.start); we.setDate(we.getDate()+6);
-  return w.start<=today && today<=we.toISOString().slice(0,10);
+  return w.start<=today && today<=weekEndIso(w.start);
 }
 // Which week is open by default in a phase's strip: the one holding `today`, else the first.
 function defaultWeek(weeks,today){ return ((weeks.find(w=>weekHoldsToday(w,today))||weeks[0]||{}).wk); }
@@ -2213,6 +2219,37 @@ async function loadEffort(){
     </div>
     <div class="efftbl-wrap"><table class="efftbl"><thead><tr>${headCols}</tr></thead><tbody>${rows}</tbody></table></div>${d.public?"":'<div class="efftbl-rot">↻ Rotate to landscape for pace, training effect &amp; feel</div>'}`;
 }
+// §TR — the scorecard the engine keeps on ITSELF. Deliberately the same on both boxes, minus the
+// finish TIMES: the public payload carries whether a band contained the race, never what was run
+// (a race result is withheld — publishing the prediction beside its error hands it back).
+async function loadTrack(){
+  const host=$("#track"); if(!host) return;
+  let d; try{ d = await getJSON("/api/track-record"); }
+  catch(e){ tileFail(host, "Track record", loadTrack, e); return; }
+  const c=d.ctl||{}, races=d.races||[], sm=d.summary||{};
+  if(!c.n && !races.length){
+    host.innerHTML=`<div class="empty">Nothing has settled yet. A weekly fitness forecast is scored
+      once it is ${sm.lead_days||28} days old — old enough that scoring it isn't hindsight — and a race
+      band is scored when the race is run.</div>`;
+    return;
+  }
+  const sign=v=> (v>0?"+":"")+v;
+  const ctlLine = c.n ? `<div class="trrow"><b>${c.n}</b> weekly fitness checkpoint${c.n===1?"":"s"} ·
+      average miss <b>${c.mae}</b> CTL point${c.mae===1?"":"s"} ·
+      bias <b>${sign(c.bias)}</b> <span class="muted">(${c.bias>0?"came out fitter than projected":c.bias<0?"came out short of projection":"even"})</span>
+      ${c.close_rate!=null?` · <b>${Math.round(c.close_rate*100)}%</b> landed within ${c.close_within}`:""}</div>` : "";
+  const bandLine = sm.banded ? `<div class="trrow"><b>${sm.in_band}</b> of <b>${sm.banded}</b> finish
+      band${sm.banded===1?"":"s"} contained the race</div>` : "";
+  const rows = races.map(r=>`<tr><td>${esc(r.label||r.type||"race")}</td><td class="mono">${esc(r.date||"")}</td>
+      <td>${r.kind==="race_t8"?`T−${Math.round((r.horizon_days||0)/7)} weeks`:"final call"}</td>
+      <td class="${r.in_band?"ok":"bad"}">${r.in_band==null?"—":r.in_band?"inside the band":"outside"}</td>
+      ${r.err_pct!=null?`<td class="mono">${sign(r.err_pct)}%</td>`:"<td></td>"}</tr>`).join("");
+  host.innerHTML = ctlLine + bandLine + (rows?`<table class="trtbl"><thead><tr><th>Race</th><th>Date</th>
+      <th>Scored at</th><th>Band</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table>`:"")
+    + `<div class="help">Every row was written when the outcome settled and is never rewritten — a
+       forecast that can be re-scored after the fact is not a forecast.</div>`;
+}
+
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
   let d; try{ d=await getJSON("/api/plandrift"); }catch(e){ tileFail(host, "Plan drift", loadDrift, e); return; }
@@ -2352,6 +2389,9 @@ async function loadDrift(){
 // ── Health markers ──────────────────────────────────────────────────────────
 let MARKERS = {};
 let HSERIES = {};   // marker -> full ascending series, kept so range toggles re-render locally
+// §HS — per-marker freshness from the server. A chart whose feed died does not LOOK dead: it just
+// stops, and the last point reads like today's. This is what says otherwise.
+let HSTALE = {markers:{}, summary:null};
 // per-marker window choice, remembered across visits. "all" | "365" | "180" (days)
 const HRANGE = (()=>{ try{ return JSON.parse(localStorage.getItem("hrange"))||{}; }catch(e){ return {}; } })();
 const HRANGES = [["180","6m"],["365","1y"],["all","All"]];
@@ -2396,6 +2436,18 @@ function hslice(pts, r){
   const out = pts.filter(p=>p.date>=iso);
   return out.length>=2 ? out : pts;   // window nearly empty → fall back to everything
 }
+// §HS — one banner above the cards when a nightly feed has gone quiet. Named feeds and a date, not
+// a vague "some data is old": the 2026-08-15 stall was invisible for eight days precisely because
+// every chart still drew a full line. It says nothing at all when everything is current.
+function staleBannerHTML(){
+  const st = HSTALE.summary;
+  if(!st) return "";
+  const names = st.markers.map(k=>(MARKERS[k]||{}).label||k).join(", ");
+  const d = st.days;
+  return `<div class="dqwarn" role="status">⚠ <b>Nightly data has stopped.</b> Nothing since
+    ${esc(st.last)} — ${d} day${d===1?"":"s"} ago — for: ${esc(names)}. The lab markers below are
+    unaffected. Check that the watch has synced and that wellness sharing is still on in its app.</div>`;
+}
 function hcardHTML(k){
   const m = MARKERS[k]||{label:k,unit:"",ref:[null,null],good:"band"};
   const full = HSERIES[k];
@@ -2414,13 +2466,15 @@ function hcardHTML(k){
     : "";
   const counts = pts.length===full.length ? `${full.length} readings`
                : `${pts.length} of ${full.length} readings`;
+  const fresh = HSTALE.markers[k]||{};      // §HS — age on the card that owns the dead feed
+  const age = fresh.stale ? ` · <span class="stalen">last reading ${fresh.days} days ago</span>` : "";
   return `<div class="hcard" data-k="${esc(k)}">
     <div class="hhead"><div class="hk">${m.label}</div>${range}</div>
     <div class="hv">${fmt(last.value, last.value%1?1:0)}<small> ${m.unit}</small>
       ${refTxt?`<span class="flag ${ok?"ok":"bad"}">${ok?"ok":"watch"} ${refTxt}</span>`:""}</div>
     <div class="hchart">${sparkline(pts, m.ref).svg}<div class="htip"></div></div>
     <div class="hk" style="margin-top:6px;text-transform:none;letter-spacing:0">
-      ${counts} · ${pts[0].date} → ${last.date}</div>
+      ${counts} · ${pts[0].date} → ${last.date}${age}</div>
   </div>`;
 }
 function wireHCard(card){
@@ -2464,6 +2518,7 @@ async function loadHealth(){
   catch(e){ tileFail($("#health"), "Health markers", loadHealth, e); return; }
   MARKERS = d.markers;
   HSERIES = d.series||{};
+  HSTALE = d.staleness||{markers:{}, summary:null};
   // populate the add-form marker dropdown once
   const sel = $("#hmarker");
   if(!sel.options.length){
@@ -2475,7 +2530,7 @@ async function loadHealth(){
   const host = $("#health");
   const present = Object.keys(HSERIES);
   if(!present.length){ host.innerHTML = `<div class="empty">No markers yet — add one below.</div>`; return; }
-  host.innerHTML = present.map(hcardHTML).join("");
+  host.innerHTML = staleBannerHTML() + present.map(hcardHTML).join("");
   host.querySelectorAll(".hcard").forEach(wireHCard);
 }
 
@@ -2665,8 +2720,12 @@ async function saveSettings(e){
 // Keys block — the two secrets (Runalyze token / Claude key). WRITE-ONLY: the value is never sent back,
 // so the field is always empty and shows status only. Private console only (#secretsBox is removed on
 // the public view). Saving applies live — no .env edit, no restart.
-async function loadSecrets(probe){
+// §SG — `justSaved` is the key whose field should come back EMPTY; every other field keeps whatever
+// the owner had typed into it. Re-rendering the whole block used to wipe unsaved siblings, which with
+// five keys means pasting three Suunto credentials and losing two of them to the first Save.
+async function loadSecrets(probe, justSaved){
   const host=$("#secretsBox"); if(!host) return;
+  const drafts={}; host.querySelectorAll("input[id^='sec_']").forEach(i=>{ if(i.value) drafts[i.id]=i.value; });
   let d; try{ d=await getJSON("/api/secrets"); }catch(e){ host.innerHTML=""; return; }
   if(!d.ok){ host.innerHTML=""; return; }
   // Initial badge = configured-or-not + where it came from. When `probe` is set we then live-check
@@ -2675,8 +2734,14 @@ async function loadSecrets(probe){
   const badge=s=> s.configured
         ? `<span class="src ok" id="secbadge_${s.key}">✓ ${srcWord(s)}${probe?" · checking…":""}</span>`
         : `<span class="src warn" id="secbadge_${s.key}">not set</span>`;
+  // §SG — WHICH value is in the box. "configured" reads the same before and after a rotation, so a
+  // save that silently failed looks exactly like one that worked; eight hex of sha256 tells them
+  // apart without describing the key. Sits OUTSIDE the badge span, which validateSecrets rewrites.
+  const fp=s=> s.fingerprint
+        ? ` <code class="fp" title="First 8 hex of sha256 of the stored value — one-way. Check it yourself: printf %s &quot;$KEY&quot; | sha256sum | cut -c1-8">fp ${esc(s.fingerprint)}</code>`
+        : "";
   const row=s=>`<div class="setrow">
-      <label for="sec_${s.key}">${esc(s.label)} ${badge(s)}</label>
+      <label for="sec_${s.key}">${esc(s.label)} ${badge(s)}${fp(s)}</label>
       <div class="secinput">
         <input id="sec_${s.key}" type="password" autocomplete="new-password"
                placeholder="${s.configured?"•••• — paste a new value to replace":"Paste your key to enable"}">
@@ -2687,7 +2752,13 @@ async function loadSecrets(probe){
       <div class="err" id="secerr_${s.key}"></div>
     </div>`;
   host.innerHTML=`<div class="secblock"><div class="sectitle">Connections &amp; keys</div>
-    ${d.secrets.map(row).join("")}<div id="suuntoBox"></div></div>`;
+    ${d.secrets.map(row).join("")}<div id="suuntoBox"></div>
+    <div class="help" style="margin-top:2px">Keys are write-only — the value never comes back to this
+      page. <code>fp</code> is the first 8 hex of its sha256, so you can confirm which value is stored:
+      <code>printf %s "$KEY" | sha256sum | cut -c1-8</code>.</div></div>`;
+  // put back what was being typed (minus the field just saved) BEFORE anything can steal focus
+  Object.entries(drafts).forEach(([id,v])=>{ if(id==="sec_"+justSaved) return;
+    const el=document.getElementById(id); if(el) el.value=v; });
   host.querySelectorAll("button[data-sec]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.sec,false)));
   host.querySelectorAll("button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
   loadSuunto();
@@ -2760,7 +2831,7 @@ async function saveSecret(key, clear){
   }catch(e){ if(errEl) errEl.textContent="⚠ could not save"; return; }
   if(!d.ok){ if(errEl) errEl.textContent="⚠ "+(d.error||"could not save"); return; }
   if(inp) inp.value="";
-  loadSecrets(true);   // refresh the status badges + re-validate the key that was just set
+  loadSecrets(true, key);   // refresh badges + re-validate; siblings keep their unsaved drafts
   // a freshly-set token/key changes what the app can do — refresh the affected surfaces live
   fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; TOKEN_OK=!!h.token_configured; SYNC_LAST=h.last_sync||null; paintFreshness(); refreshFirstRun(); }).catch(()=>{});
 }
@@ -2772,7 +2843,7 @@ if(SH_PAGE==="runs"){
   loadRunsCal(); loadRecent();
 }else{
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; SYNC_LAST=d.last_sync||null; noteSync(d.last_sync); paintFreshness(); _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
-loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones();
+loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones(); loadTrack();
 }
 // §HR — the 'Current zones' card: training-intent rows, pace (VDOT, prescription anchor) + HR
 // (unified hr_zones grid, monitoring cross-check), both fitness-tracking. Private-only (section is

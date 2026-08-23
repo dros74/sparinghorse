@@ -932,7 +932,8 @@ def _stc_public_allowlist():
 
     PATHS = {"/api/plan": "plan", "/api/log": "log", "/api/shape": "shape",
              "/api/readiness": "readiness", "/api/objectives": "objectives",
-             "/api/activity/latest": "activity", "/api/weekly": "weekly", "/healthz": "healthz"}
+             "/api/activity/latest": "activity", "/api/weekly": "weekly", "/healthz": "healthz",
+             "/api/track-record": "track_record"}
 
     def _violations(spec, value, where, out):
         """Every key in a PUBLIC payload that its spec does not name. This is the tooth that catches
@@ -963,7 +964,10 @@ def _stc_public_allowlist():
               "/api/shape": ["raw", "hrv_baseline", "last_sync", "monotony", "training_strain"],
               "/api/objectives": ["outcome", "resolved_at"],
               "/api/activity/latest": ["hr_avg", "hr_max"],
-              "/healthz": ["last_sync", "last_ok"]}
+              "/healthz": ["last_sync", "last_ok"],
+              # §TR — the calibration is public, the RESULT is not: p50 beside err_pct hands back
+              # the finish time that `objectives[].outcome` deliberately withholds
+              "/api/track-record": ["p50_hms", "err_pct", "log_score", "lo_hms", "hi_hms", "plan_id"]}
     saved_ro, saved_get, saved_pv = S.READONLY, S.get_db, S._pv_project
 
     def _marked(payload):
@@ -2475,7 +2479,11 @@ def _stc_secrets():
     feature exists for: (a) status NEVER returns the value — only configured+source; (b) a window-set
     value wins over env, and clearing reverts to env; (c) setting the Claude key resets the cached LLM
     client (live-apply); (d) in READONLY the store is never read AND a save is refused — secrets can't
-    reach the internet-facing public box; (e) /api/secrets is gated private. Uses a temp store + a
+    reach the internet-facing public box; (e) /api/secrets is gated private; (f) §SG — the status
+    carries a FINGERPRINT that identifies WHICH value is stored without describing it: eight hex of
+    sha256, present only when configured, MOVING when the value is rotated (the whole point — before
+    it, a save that silently failed and one that worked were the same screen), stable for the same
+    value, matching a digest the owner can compute themselves, and never a prefix of the value. Uses a temp store + a
     synthetic env; restores ALL module/env globals in a finally (incl. SH_SCHEDULE so no thread spawns)."""
     import sqlite3 as _sq, os as _os, tempfile, json as _json
     pass   # the rebinds below land on the app module (S.<name> = …), TECH-1
@@ -2498,11 +2506,32 @@ def _stc_secrets():
             fails.append("env secret should read configured/env")
         if leaked("ENVTOKEN"):
             fails.append("status LEAKED the env secret value")
+        import hashlib as _hl                                  # §SG — the fingerprint
+        fp = lambda k: next((s.get("fingerprint") or "") for s in S.secret_status() if s["key"] == k)
+        if any("fingerprint" not in s for s in S.secret_status()):
+            fails.append("the status payload carries no `fingerprint` at all — the UI cannot say "
+                         "WHICH value is stored, which is the whole of this follow-up")
+        want = _hl.sha256(b"ENVTOKEN").hexdigest()[:8]
+        if fp("runalyze_token") != want:
+            fails.append(f"fingerprint {fp('runalyze_token')!r} is not sha256(value)[:8] ({want}) — "
+                         f"the owner cannot check it against their own machine")
+        if fp("anthropic_api_key"):
+            fails.append("an UNSET secret reported a fingerprint — nothing is stored to identify")
+        if "ENVTOKEN".startswith(fp("runalyze_token")) or fp("runalyze_token") in "ENVTOKEN":
+            fails.append("the fingerprint is a piece of the value, not a digest of it")
         ok, _ = S.save_secret("runalyze_token", "WINDOWTOKEN")
         if not (ok and src("runalyze_token") == "saved"):
             fails.append("a window-set value should win over env")
         if leaked("WINDOWTOKEN"):
             fails.append("status LEAKED the saved secret value")
+        rotated = fp("runalyze_token")
+        if rotated == want:
+            fails.append("the fingerprint did NOT move when the value was rotated — it cannot "
+                         "distinguish a save that worked from one that silently did nothing")
+        if rotated != _hl.sha256(b"WINDOWTOKEN").hexdigest()[:8]:
+            fails.append(f"the rotated fingerprint {rotated!r} does not digest the new value")
+        if fp("runalyze_token") != rotated:
+            fails.append("the fingerprint is not stable across two reads of the same value")
         if S.config().runalyze_token != "WINDOWTOKEN":
             fails.append("save didn't apply to the live config snapshot")
         if S._http().headers.get("token") != "WINDOWTOKEN":
@@ -3361,6 +3390,504 @@ def _stc_no_shadowed_defs():
                "§FT one unreachable, until a 2026-08-22 review found it)",
                passed=not fails, expect="every top-level name defined exactly once",
                got={"top_level_names": counts, "failures": fails or "none"})
+
+
+def _stc_track_record():
+    """§TR / DIR-2 — the app forecasts every night and, until now, kept none of it. The drift view
+    compares the CURRENT plan with reality, and the current plan is replaced nightly, so each
+    forecast was overwritten by its successor before anyone could check it. A model that
+    continuously re-forecasts and never scores itself cannot be wrong.
+
+    The teeth, in the order the honesty depends on them:
+      (a) the two scorers, on known answers — including that the finish score is PROPER: a band
+          tightened around a miss must score WORSE, or a band could earn calibration by shrinking;
+      (b) the LEAD rule — a forecast made a week before the outcome is not scorable at all, because
+          grading the plan regenerated the night before a week ends is grading hindsight;
+      (c) WRITE-ONCE — re-scanning after the underlying plan (or the result) has changed must leave
+          the row exactly as it was. This is the whole mechanism: a score you can revise after
+          seeing the outcome is not a score;
+      (d) the T-8 horizon picks the plan nearest eight weeks out, and refuses when the nearest plan
+          is not near enough;
+      (e) the public projection publishes the CALIBRATION and never the RESULT — `p50 + err_pct`
+          would hand back a race time the §PV allowlist deliberately withholds — and every field the
+          payload actually produces is classified as published or withheld (the
+          fixture-thinner-than-production lesson, applied to the new resource)."""
+    import sqlite3 as _sq, math as _m
+    fails = []
+
+    # (a) the scorers, known answers
+    sc = S.score_ctl_week(40.0, 45.0)
+    if not (sc and sc["err"] == 5.0 and sc["err_pct"] == 12.5 and sc["close"] is False):
+        fails.append(f"score_ctl_week(40,45) = {sc}")
+    if not (S.score_ctl_week(40.0, 38.5) or {}).get("close"):
+        fails.append("a 1.5-point miss should read as landed (TR_CTL_CLOSE = 2.0)")
+    if S.score_ctl_week(None, 40.0) is not None or S.score_ctl_week(40.0, None) is not None:
+        fails.append("a missing side must score None, not zero")
+    ft = {"seconds": 14400, "hms": "4:00:00",
+          "band": {"lo_seconds": 13800, "hi_seconds": 15000, "sigma_log": 0.05,
+                   "lo_hms": "3:50:00", "hi_hms": "4:10:00"}}
+    exact = S.score_finish(ft, 14400)
+    if not (exact and exact["err_pct"] == 0.0 and exact["in_band"] is True and exact["log_score"] == -2.077):
+        fails.append(f"score_finish on an exact hit = {exact}")
+    slow = S.score_finish(ft, 15000)
+    if not (slow and slow["err_pct"] == 4.2 and slow["in_band"] is True and slow["log_score"] == -1.744):
+        fails.append(f"score_finish 10 min slow = {slow}")
+    if S.score_finish(ft, 15001)["in_band"] is not False:
+        fails.append("a second past the band's top edge is not in the band")
+    if S.score_finish({"seconds": 14400}, 15000)["in_band"] is not None:
+        fails.append("an unbanded prediction must report in_band None, not False")
+    if S.score_finish(ft, None) is not None or S.score_finish({}, 14400) is not None:
+        fails.append("nothing to score must be None")
+    tight = dict(ft, band=dict(ft["band"], sigma_log=0.01))       # PROPER-score check
+    wide = dict(ft, band=dict(ft["band"], sigma_log=0.30))
+    if not (S.score_finish(tight, 15000)["log_score"] > S.score_finish(ft, 15000)["log_score"]):
+        fails.append("a band TIGHTENED around a miss scored better — the band could earn calibration "
+                     "by shrinking, which is exactly what a proper score must prevent")
+    if not (S.score_finish(wide, 14400)["log_score"] > S.score_finish(ft, 14400)["log_score"]):
+        fails.append("an over-WIDE band scored better on a hit — a proper score punishes both sides")
+
+    # a fixture with real history: daily runs, and plans that projected the weeks ahead of them
+    from datetime import date as _d, timedelta as _td
+    today = _d(2026, 6, 1)
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    for i in range(200):                                  # one steady run a day ⇒ a settled CTL
+        day = (today - _td(days=200 - i)).isoformat()
+        mem.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw) "
+                    "VALUES(?,?,?,?,?,?,?,'{}')", (i + 1, day, day + "T18:00", S.RUNNING_SPORT, 10.0, 3600, 60.0))
+    mem.commit()
+    week = S._monday(today) - _td(weeks=2)                # a completed week
+    end = week + _td(days=6)
+    measured = {p["date"]: p["ctl"] for p in S.reconstruct_history(mem, end=end.isoformat())}[end.isoformat()]
+
+    def add_plan(for_date, proj, pid=None):
+        plan = {"objective": {}, "rebase": {"weeks": [{"wk": 1, "start": week.isoformat(),
+                                                       "proj_ctl": proj}]}}
+        mem.execute("INSERT INTO plans(id,created_at,for_date,inputs,plan) VALUES(?,?,?,'{}',?)",
+                    (pid, "now", for_date, S.json.dumps(plan)))
+        mem.commit()
+
+    # (b) the lead rule — a plan a week old is hindsight, not a forecast
+    add_plan((end - _td(days=7)).isoformat(), 99.0, pid=1)
+    S.track_record_scan(mem, today=today.isoformat())
+    if mem.execute("SELECT COUNT(*) FROM track_record WHERE kind='ctl_week'").fetchone()[0]:
+        fails.append("a forecast made 7 days before the week ended was scored — that is hindsight, "
+                     "and it would flatter every number in the record")
+    add_plan((end - _td(days=40)).isoformat(), 55.0, pid=2)
+    S.track_record_scan(mem, today=today.isoformat())
+    row = mem.execute("SELECT * FROM track_record WHERE kind='ctl_week'").fetchone()
+    if not row:
+        fails.append("a forecast made 40 days before the week ended was NOT scored")
+    else:
+        if abs(row["predicted"] - 55.0) > 1e-9 or abs(row["actual"] - round(measured, 1)) > 0.05:
+            fails.append(f"the checkpoint scored the wrong pair: {dict(row)} (measured {measured:.1f})")
+        if row["lead_days"] != 40:
+            fails.append(f"lead_days = {row['lead_days']}, expected 40")
+
+    # (c) write-once: change the world, re-scan, the row must not move
+    mem.execute("DELETE FROM plans WHERE id=2")
+    add_plan((end - _td(days=60)).isoformat(), 12.0, pid=3)
+    S.track_record_scan(mem, today=today.isoformat())
+    after = mem.execute("SELECT * FROM track_record WHERE kind='ctl_week'").fetchone()
+    if after and abs(after["predicted"] - 55.0) > 1e-9:
+        fails.append(f"a re-scan REWROTE a settled score ({after['predicted']}) — a prediction that "
+                     f"can be revised after the fact is not a prediction")
+    if mem.execute("SELECT COUNT(*) FROM track_record WHERE kind='ctl_week'").fetchone()[0] != 1:
+        fails.append("a re-scan duplicated the week's row")
+    # …and the guarantee is tested at the WRITE, not only through the scan: the scan skips keys it
+    # already holds, so a scan-level check alone passes even if the SQL is INSERT OR REPLACE. (Found
+    # by mutating: OR IGNORE → OR REPLACE left this det green until the write was probed directly.)
+    S._tr_write(mem, "ctl_week", week.isoformat(), 1, 999.0, 999.0, 999.0, None, {"forged": True}, "now")
+    forced = mem.execute("SELECT * FROM track_record WHERE kind='ctl_week'").fetchone()
+    if abs(forced["predicted"] - 55.0) > 1e-9 or "forged" in (forced["payload"] or ""):
+        fails.append("a direct re-write REPLACED a settled score — the write-once guarantee is the "
+                     "whole honesty of the record, and it must live in the SQL, not in the caller")
+
+    # (d) races: the final word and the eight-week word, from a separate fixture
+    race = _d(2026, 5, 1)
+    mem2 = _sq.connect(":memory:"); mem2.row_factory = _sq.Row
+    mem2.executescript(S.SCHEMA)
+    mem2.execute("INSERT INTO objectives(id,type,label,date,target,priority,status,created_at,outcome) "
+                 "VALUES(1,'marathon','Test Marathon',?,'4:00','A','done','now',?)",
+                 (race.isoformat(), S.json.dumps({"status": "finished", "actual_seconds": 15000})))
+    for pid, back, secs, half in ((1, 120, 15600, 600), (2, 56, 14400, 300), (3, 3, 14700, 600)):
+        # the T-8 band is deliberately TIGHT (±5 min): the record has to be able to hold a miss, and
+        # a scorecard that only ever records hits is the failure this whole feature exists to avoid
+        p = {"objective": {"date": race.isoformat(), "type": "marathon"},
+             "feasibility": {"finish_time": {"seconds": secs, "hms": S._fmt_hms(secs),
+                                             "band": {"lo_seconds": secs - half, "hi_seconds": secs + half,
+                                                      "sigma_log": 0.05, "lo_hms": "x", "hi_hms": "y"}}}}
+        mem2.execute("INSERT INTO plans(id,created_at,for_date,inputs,plan) VALUES(?,?,?,'{}',?)",
+                     (pid, "now", (race - _td(days=back)).isoformat(), S.json.dumps(p)))
+    mem2.commit()
+    S.track_record_scan(mem2, today=(race + _td(days=1)).isoformat())
+    fin = mem2.execute("SELECT * FROM track_record WHERE kind='race_final'").fetchone()
+    t8 = mem2.execute("SELECT * FROM track_record WHERE kind='race_t8'").fetchone()
+    if not fin or fin["lead_days"] != 3 or abs(fin["predicted"] - 14700) > 1e-9:
+        fails.append(f"the FINAL word should be the last pre-race plan (T-3, 4:05): {dict(fin) if fin else None}")
+    if not t8 or t8["lead_days"] != 56 or abs(t8["predicted"] - 14400) > 1e-9:
+        fails.append(f"the T-8 score should be the plan 56 days out (4:00): {dict(t8) if t8 else None}")
+    if fin and fin["in_band"] != 1:
+        fails.append("15000 s sits inside 14700 ± 600 — in_band should be true")
+    if t8 and t8["in_band"] != 0:
+        fails.append("15000 s sits OUTSIDE 14400 ± 600 — the T-8 band missed and must say so")
+    mem2.execute("DELETE FROM plans WHERE id=2")           # no plan near T-8 any more
+    mem2.execute("DELETE FROM track_record WHERE kind='race_t8'")
+    mem2.commit()
+    S.track_record_scan(mem2, today=(race + _td(days=1)).isoformat())
+    if mem2.execute("SELECT COUNT(*) FROM track_record WHERE kind='race_t8'").fetchone()[0]:
+        fails.append("with the nearest plan 120 days out, a T-8 score was invented anyway")
+
+    # (e) the public projection: calibration yes, the RESULT no
+    payload = S.track_record(mem2)
+    pub = S.public_view("track_record", payload)
+    flat, walk = [], None
+    def walk(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, f"{path}[]")
+        else:
+            flat.append(path)
+    walk(payload, "track")
+    spec_paths = set()
+    def spec_walk(spec, path):
+        for k, v in spec.items():
+            spec_walk(v, f"{path}.{k}") if isinstance(v, dict) else spec_paths.add(f"{path}.{k}")
+    spec_walk(S._PV_TRACK, "track")
+    unclassified = sorted({f.replace("[]", "[]") for f in flat}
+                          - {p.replace(".races.", ".races[].").replace(".points.", ".points[].")
+                             for p in spec_paths} - set(S._PV_WITHHELD))
+    if unclassified:
+        fails.append(f"track-record fields classified as neither published nor withheld: {unclassified}")
+    leaked = S.json.dumps(pub)
+    for banned in ("p50_hms", "err_pct", "log_score", "lo_hms", "hi_hms", "plan_id"):
+        if banned in leaked:
+            fails.append(f"the public track record leaks `{banned}` — with the prediction beside its "
+                         f"error the RESULT is one multiplication away, and a race result is withheld")
+    if not pub.get("races") or pub["races"][0].get("in_band") is None:
+        fails.append("the public view dropped the calibration it exists to publish (in_band)")
+    ctl_pub = S.public_view("track_record", S.track_record(mem))     # the fixture that HAS weeks
+    pt = (ctl_pub.get("ctl") or {}).get("points") or []
+    if not pt or "actual" not in pt[0] or "predicted" not in pt[0]:
+        fails.append(f"the weekly CTL checkpoints must publish BOTH sides — each is already public "
+                     f"(shape.history carries measured fitness, the plan carries proj_ctl): {pt[:1]}")
+    ctl_rows = mem.execute("SELECT COUNT(*) FROM track_record WHERE kind='ctl_week'").fetchone()[0]
+    mem.close(); mem2.close()
+
+    return _st("det", "track-record",
+               "§TR — every settled forecast is scored once and never rewritten: the weekly CTL "
+               "checkpoint honours a 28-day lead rule, the race band is scored at the last word and "
+               "at T-8, the finish score is proper (a tightened band scores worse on a miss), and "
+               "the public view publishes the calibration without handing back the race result",
+               passed=not fails, expect="scored once, honestly, and published without the result",
+               got={"ctl_rows": ctl_rows, "race_final_lead": fin["lead_days"] if fin else None,
+                    "race_t8_lead": t8["lead_days"] if t8 else None, "failures": fails or "none"})
+
+
+def _stc_calibration_inventory():
+    """DIR-1 — ENGINE_SCIENCE §10 tables where every engine number CAME FROM: literature, fitted to
+    this one athlete, or structural. An inventory's whole value is being complete, and a document is
+    exactly the artefact that rots silently — the next constant gets added beside its neighbours,
+    nobody remembers the table, and the inventory quietly becomes a list of what was true in August.
+
+    So the coverage is a TOOTH, not a promise: every module-level numeric constant in the engine must
+    either appear by name in §10 or be a member of a named EXCLUDED family (§10.6 — the §RD decoder's
+    signal processing, and plumbing). A new constant that is neither fails this det, which is the
+    only moment anyone will be thinking about the inventory at all. The excluded plumbing list lives
+    HERE as well as in the doc on purpose: adding a name to it is then a deliberate, reviewable act.
+
+    Skips (not fails) where the doc is not shipped — ENGINE_SCIENCE.md is mirror-excluded and not
+    COPYed into the image, so this runs on a checkout (and in CI), not inside the container."""
+    import ast as _ast, re as _re
+    path = S.Path(S.__file__).resolve().parent
+    doc = path / "ENGINE_SCIENCE.md"
+    if not doc.exists():
+        return _st("det", "calibration-inventory",
+                   "DIR-1 — every engine constant is classified in ENGINE_SCIENCE §10 (skipped: the "
+                   "doc is not shipped in this image)", passed=None,
+                   expect="run on a checkout", got={"engine_science": "absent"})
+    # Plumbing: rate limits, cache lifetimes, schema versions, HTTP headers. Nothing here shapes a
+    # prescription or a projection, so nothing here is calibration.
+    PLUMBING = {"PAGE_DELAY", "AUTO_SYNC_THROTTLE", "PROFILE_VERSION", "STRUCT_VERSION",
+                "MAX_WEATHER_CITIES", "SUUNTO_ACTIVITY_RUNNING", "WEATHER_TTL", "EXPORT_FORMAT",
+                "_EXPLAIN_CACHE_MAX"}
+    text = doc.read_text(encoding="utf-8")
+    body = text.split("## 10. The calibration inventory", 1)
+    if len(body) != 2:
+        return _st("det", "calibration-inventory", "DIR-1 — the inventory section is missing",
+                   passed=False, expect="ENGINE_SCIENCE §10 exists",
+                   got={"headings": _re.findall(r"^## .*", text, _re.M)[-3:]})
+    section = body[1]
+
+    num = lambda e: (isinstance(e, _ast.Constant) and isinstance(e.value, (int, float))
+                     and not isinstance(e.value, bool))     # a bool is a FLAG, never a magnitude
+
+    def numeric(v):
+        if num(v):
+            return True
+        if isinstance(v, _ast.UnaryOp) and isinstance(v.operand, _ast.Constant) \
+                and isinstance(v.operand.value, (int, float)):
+            return True
+        if isinstance(v, (_ast.Tuple, _ast.List)):      # a numeric tuple IS a calibration row
+            return bool(v.elts) and all(num(e) for e in v.elts)
+        if isinstance(v, _ast.Dict):                    # …and so is a numeric grid (EQ_KM_FACTOR &c)
+            return bool(v.values) and all(num(e) for e in v.values)
+        return False
+
+    names, tree = [], _ast.parse((path / "SparingHorse.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, _ast.Assign):
+            continue
+        tgts, vals = [], []
+        for t in node.targets:
+            if isinstance(t, _ast.Name):
+                tgts.append(t.id); vals.append(node.value)
+            elif isinstance(t, (_ast.Tuple, _ast.List)) and isinstance(node.value, (_ast.Tuple, _ast.List)):
+                for e, v in zip(t.elts, node.value.elts):
+                    if isinstance(e, _ast.Name):
+                        tgts.append(e.id); vals.append(v)
+        for name, v in zip(tgts, vals):
+            if (name.isupper() or (name.startswith("_") and name[1:].isupper())) and numeric(v):
+                names.append(name)
+
+    # A TABLE ROW, not a mention: §10.7 names the athlete-tuned constants again in prose, and a
+    # deleted row must not be excused by the paragraph that discusses it. (Found by mutating: cutting
+    # the `FT2_R` row left this det green until the match was narrowed to rows.)
+    rows = "\n".join(l for l in section.splitlines() if l.startswith("| `"))
+    missing = sorted({n for n in names
+                      if not n.startswith("RD_") and n not in PLUMBING and f"`{n}`" not in rows})
+    stale = sorted(n for n in PLUMBING if n not in names)
+    fails = []
+    if missing:
+        fails.append(f"engine constants with no row in ENGINE_SCIENCE §10: {missing} — classify each "
+                     f"as literature / athlete-tuned / structural, or add it to this det's PLUMBING set")
+    if stale:
+        fails.append(f"this det excuses names that no longer exist: {stale}")
+    for marker in ("**L — literature", "**A — athlete-tuned", "**S — structural"):
+        if marker not in section:
+            fails.append(f"the provenance legend lost {marker!r} — the table's middle column means nothing")
+    # The doc STATES the arithmetic; the det owns it. A stated count that has drifted is worse than
+    # no count, because a reader checks a number and stops checking the thing.
+    counts_line = _re.search(r"<!-- inventory-counts: (.*?)-->", section)
+    stated = dict(_re.findall(r"(\w+)=(\d+)", counts_line.group(1))) if counts_line else {}
+    real = {"total": len(names), "rd": sum(1 for n in names if n.startswith("RD_")),
+            "plumbing": sum(1 for n in names if n in PLUMBING)}
+    real["tabled"] = real["total"] - real["rd"] - real["plumbing"]
+    if not stated:
+        fails.append("§10 carries no `<!-- inventory-counts: … -->` line — its stated arithmetic is unowned")
+    for k, v in real.items():
+        if stated and int(stated.get(k, -1)) != v:
+            fails.append(f"§10 states {k}={stated.get(k)}, the source says {v}")
+        if f"**{v}**" not in section:
+            fails.append(f"§10's prose never states {k} = {v} — the counts it quotes have drifted")
+    return _st("det", "calibration-inventory",
+               "DIR-1 — every module-level numeric constant in the engine is either classified in "
+               "ENGINE_SCIENCE §10 or a member of a named excluded family (§RD decoder, plumbing): a "
+               "new number cannot slip in without someone saying where it came from",
+               passed=not fails, expect="no unclassified engine constants",
+               got={"constants_seen": len(names), "excluded_rd": sum(1 for n in names if n.startswith("RD_")),
+                    "excluded_plumbing": len(PLUMBING), "unclassified": missing or "none",
+                    "failures": fails or "none"})
+
+
+def _stc_explain_cache():
+    """TECH-7 — `api_plan_explain` was an LLM call PER CLICK on a button whose answer cannot change
+    until the plan does. The narration is cached by (plan id, diff, athlete context), and the teeth
+    are mostly about the INVALIDATION, because a cache that never misses is just a stale answer:
+      · same plan + same diff ⇒ one call, and the second answer is byte-identical, flagged `cached`;
+      · a different diff ⇒ a new call (the diff is half the question);
+      · a NEW PLAN ROW ⇒ a new call. This is the one that matters: a regeneration INSERTs a row, so
+        a plan that has moved can never be narrated by the answer written for the plan before it;
+      · a changed ATHLETE CONTEXT ⇒ a new call. It is interpolated into the system prompt, so it is
+        the one setting that changes the answer without the plan moving;
+      · `fresh=True` re-rolls and re-seeds the entry — a generative answer the owner may want again;
+      · a FAILED call is NEVER cached: an API hiccup must not be pinned to the plan for its lifetime;
+      · and the cache is bounded, so a long-lived process cannot grow one.
+    Drives the real `explain_plan` with `llm_json` stubbed by a counter — no key, no network."""
+    import sqlite3 as _sq
+    fails = []
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    plan = {"weeks": [], "phase_blocks": [], "regime": {"mode": "assertive", "reason": ""},
+            "generated_at": "2026-08-23", "engine_version": S.ENGINE_VERSION}
+    def add_plan():
+        mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now','2026-08-23','{}',?)",
+                    (S.json.dumps(plan),))
+        mem.commit()
+    add_plan()
+
+    calls = {"n": 0}
+    def fake_llm(system, user, schema, effort="low", max_tokens=1024):
+        calls["n"] += 1
+        return {"ok": True, "summary": f"narration #{calls['n']}", "bullets": []}
+    real_llm, real_cache, real_ctx = S.llm_json, dict(S._EXPLAIN_CACHE), S.config().athlete_context
+    try:
+        S.llm_json = fake_llm
+        S._EXPLAIN_CACHE.clear()
+        a = S.explain_plan(mem)
+        b = S.explain_plan(mem)
+        if calls["n"] != 1:
+            fails.append(f"the same plan asked twice cost {calls['n']} LLM calls — the click is uncached")
+        if a.get("summary") != b.get("summary"):
+            fails.append("the cached answer differs from the one it caches")
+        if a.get("cached") is not False or b.get("cached") is not True:
+            fails.append(f"the payload does not say whether it was cached: {a.get('cached')}/{b.get('cached')}")
+        b["summary"] = "MUTATED BY A CALLER"           # the cache must hand out copies
+        if S.explain_plan(mem).get("summary") == "MUTATED BY A CALLER":
+            fails.append("a caller mutated the CACHED answer — every later click inherits it")
+
+        S.explain_plan(mem, diff={"weeks": 1})
+        if calls["n"] != 2:
+            fails.append("a different diff reused the answer written for another question")
+        add_plan()                                      # a regeneration
+        S.explain_plan(mem)
+        if calls["n"] != 3:
+            fails.append("a NEW PLAN was narrated by the answer written for the previous one — the "
+                         "cache outlived the thing it describes")
+        S._config_swap(athlete_context="a 52-year-old returning from injury")
+        S.explain_plan(mem)
+        if calls["n"] != 4:
+            fails.append("the athlete context changed the system prompt but not the cache key")
+        S.explain_plan(mem, fresh=True)
+        if calls["n"] != 5:
+            fails.append("fresh=True did not re-roll the narration")
+        if S.explain_plan(mem).get("summary") != "narration #5":
+            fails.append("a fresh re-roll did not replace the cached answer")
+
+        calls["n"] = 0
+        S.llm_json = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1),
+                                      {"ok": False, "error": "provider down"})[1]
+        S._EXPLAIN_CACHE.clear()
+        S.explain_plan(mem); S.explain_plan(mem)
+        if calls["n"] != 2:
+            fails.append("a FAILED call was cached — one API hiccup would pin 'provider down' to "
+                         "this plan until it is regenerated")
+
+        S.llm_json = fake_llm                            # bounded
+        S._EXPLAIN_CACHE.clear()
+        for i in range(S._EXPLAIN_CACHE_MAX + 5):
+            S.explain_plan(mem, diff={"n": i})
+        if len(S._EXPLAIN_CACHE) > S._EXPLAIN_CACHE_MAX:
+            fails.append(f"the cache grew to {len(S._EXPLAIN_CACHE)} entries, past its own bound")
+    finally:
+        S.llm_json = real_llm
+        S._config_swap(athlete_context=real_ctx)
+        S._EXPLAIN_CACHE.clear(); S._EXPLAIN_CACHE.update(real_cache)
+        mem.close()
+
+    return _st("det", "explain-cache",
+               "TECH-7 — the plan narration is cached by (plan id, diff, athlete context): one LLM "
+               "call per question, a new plan or a changed context misses, fresh=True re-rolls, a "
+               "failed call is never cached, and the cache is bounded",
+               passed=not fails, expect="cached where nothing changed, missed where anything did",
+               got={"llm_calls": calls["n"], "cache_bound": S._EXPLAIN_CACHE_MAX,
+                    "failures": fails or "none"})
+
+
+def _stc_health_staleness():
+    """§HS — the health view had no way to say a feed had DIED. On 2026-08-15 the watch stopped
+    sending nights; the sleep and HRV charts kept drawing their full lines with the last point
+    sitting there reading like today's, and the owner found the eight-day hole by eye a week later.
+    Nothing on the page had said a word. `health_staleness` is the sentence the page was missing.
+
+    The teeth are mostly about NOT crying wolf, because a cue that fires on ordinary data is a cue
+    that gets ignored — which is the failure mode that hid the real outage:
+      · a dead nightly feed (HRV + sleep, last 2026-08-15, read on 08-23) ⇒ stale, and the summary
+        names both feeds with the NEWEST reading among them (the date that dates the outage);
+      · a lab marker 300 days old ⇒ NOT stale, not even watched. Ferritin is drawn when blood is
+        drawn; calling it stale would be a lie about a fault that does not exist;
+      · a HAND-ENTERED weight 30 days old ⇒ NOT stale, even though `weight` IS a synced feed — the
+        newest reading came from the athlete, not the pipe, so there is no pipe to complain about;
+      · the boundary is pinned on both sides: exactly HEALTH_STALE_DAYS old is fine, one day more is
+        not (a night or two off the wrist is not a broken sync);
+      · the watched set is DERIVED from the sync registries, and every member must exist in MARKERS
+        — the banner names feeds by label, so a marker the registry does not know would print a raw
+        key at the athlete;
+      · and the route actually SERVES it: /api/health carries `staleness`, driven through the real
+        route on an in-memory DB via a rebound get_db. A perfect helper nobody serves is nothing."""
+    import sqlite3 as _sq
+    fails = []
+    def series(*rows):                        # (marker, date, source) → the ASC series /api/health serves
+        out = {}
+        for marker, d, src in rows:
+            out.setdefault(marker, []).append({"date": d, "value": 1.0, "source": src, "note": ""})
+        return out
+
+    today = "2026-08-23"
+    st = S.health_staleness(series(
+        ("hrv", "2026-08-10", "runalyze"), ("hrv", "2026-08-15", "runalyze"),
+        ("sleep_duration", "2026-08-14", "runalyze"),          # died a day earlier than HRV
+        ("night_hr", "2026-08-22", "runalyze"),                # yesterday — this feed is alive
+        ("triglycerides", "2025-10-27", "manual"),             # ~300 days, a lab draw
+        ("weight", "2026-07-24", "manual"),                    # synced feed, but hand-entered last
+    ), today=today)
+    m, summ = st["markers"], st["summary"]
+    if not m.get("hrv", {}).get("stale") or m["hrv"]["days"] != 8:
+        fails.append(f"the dead HRV feed was not flagged: {m.get('hrv')}")
+    if not m.get("sleep_duration", {}).get("stale"):
+        fails.append(f"the dead sleep feed was not flagged: {m.get('sleep_duration')}")
+    if m.get("night_hr", {}).get("stale"):
+        fails.append(f"a feed that reported yesterday was called stale: {m.get('night_hr')}")
+    if m.get("triglycerides", {}).get("stale") or m.get("triglycerides", {}).get("watched"):
+        fails.append(f"a 300-day-old LAB marker was treated as a dead feed: {m.get('triglycerides')}")
+    if m.get("weight", {}).get("stale"):
+        fails.append(f"a hand-entered weight was called a dead feed: {m.get('weight')} — the reading "
+                     f"came from the athlete, not the pipe")
+    if not summ or summ.get("markers") != ["hrv", "sleep_duration"]:
+        fails.append(f"the summary must name exactly the dead feeds: {summ}")
+    elif summ.get("last") != "2026-08-15" or summ.get("days") != 8:
+        fails.append(f"the summary must date the outage by the NEWEST stale reading: {summ}")
+
+    edge_ok = S.health_staleness(series(("hrv", "2026-08-19", "runalyze")), today=today)   # exactly 4
+    edge_bad = S.health_staleness(series(("hrv", "2026-08-18", "runalyze")), today=today)  # 5
+    if S.HEALTH_STALE_DAYS != 4:
+        fails.append(f"this det's boundary dates assume HEALTH_STALE_DAYS=4, got {S.HEALTH_STALE_DAYS}")
+    if edge_ok["markers"]["hrv"]["stale"]:
+        fails.append("a gap of exactly HEALTH_STALE_DAYS was called stale — nights off the wrist happen")
+    if not edge_bad["markers"]["hrv"]["stale"]:
+        fails.append("a gap of HEALTH_STALE_DAYS+1 was NOT called stale — the cue never fires")
+    if not S.health_staleness({})["markers"] == {} or S.health_staleness({})["summary"] is not None:
+        fails.append("an empty health view must produce no cue at all")
+
+    unknown = sorted(set(S.HEALTH_SYNCED_MARKERS) - set(S.MARKERS))
+    if unknown:
+        fails.append(f"synced feeds missing from the MARKERS registry (the banner would print raw "
+                     f"keys): {unknown}")
+    if len(S.HEALTH_SYNCED_MARKERS) < 8:
+        fails.append(f"the watched set collapsed to {len(S.HEALTH_SYNCED_MARKERS)} feeds — it is "
+                     f"derived from HEALTH_SYNC + SLEEP_MARKERS and should cover all of them")
+
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row      # the route must serve it
+    mem.executescript("CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, "
+                      "note TEXT, PRIMARY KEY(marker,date));")
+    for d in ("2026-08-14", "2026-08-15"):
+        mem.execute("INSERT INTO health_markers VALUES('hrv',?,42.0,'runalyze','')", (d,))
+    mem.commit()
+    real_getdb = S.get_db
+    try:
+        S.get_db = lambda: mem
+        r = S.app.test_client().get("/api/health")
+        j = r.get_json() or {}
+        if r.status_code != 200 or "staleness" not in j:
+            fails.append(f"/api/health answered {r.status_code} without a `staleness` block — the "
+                         f"helper is unreachable from the page")
+        elif "hrv" not in (j["staleness"].get("markers") or {}):
+            fails.append(f"the route's staleness block does not cover the served series: {j['staleness']}")
+    finally:
+        S.get_db = real_getdb
+        mem.close()
+
+    return _st("det", "health-staleness",
+               "§HS — a nightly feed that stops is named with its date and age (the 2026-08-15 stall "
+               "was invisible for 8 days), while lab markers and hand-entered readings are never "
+               "called stale; the watched set is derived from the sync registries and the route serves it",
+               passed=not fails, expect="dead feeds named, everything else left alone",
+               got={"stale": (summ or {}).get("markers", []), "summary": summ,
+                    "watched_feeds": len(S.HEALTH_SYNCED_MARKERS), "threshold_days": S.HEALTH_STALE_DAYS,
+                    "failures": fails or "none"})
 
 
 def _stc_wrong_axis_signals():
@@ -10159,6 +10686,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
+                 lambda: _stc_health_staleness(), lambda: _stc_explain_cache(), lambda: _stc_calibration_inventory(), lambda: _stc_track_record(),
                  lambda: _stc_lt1(),
                  lambda: _stc_health_sync(), lambda: _stc_sleep_sync(),
                  lambda: _stc_rebase_anchor_derive(),

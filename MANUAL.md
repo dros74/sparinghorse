@@ -57,6 +57,18 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
 You operate it by keeping your data synced and your objectives current. The engine does the rest; the AI
 layer (optional) only narrates and parses — it never overrides the deterministic safety logic.
 
+> **What you inherit if you are not the author.** Most of the numbers in the engine are the sport's
+> published consensus (Daniels' pace zones, the acute:chronic band, the 10 % long-run rule, the 80/20
+> polarized floor, the 3:1 mesocycle) and they travel to any runner. About twenty of them do not: they
+> were fitted to the author's own corpus — a 52-year-old late starter rebuilding from detrained, 4.7
+> years of data and four marathons — and they are, in rough order of how much they matter to you, the
+> biomechanical damage weights, the low-load ACWR floor, the easy-day ladder, the phase ramps, and the
+> whole finish-time model. The governors among them **fail safe**: each is a ceiling that only ever
+> *reduces* load, so being wrong for you makes your plan too cautious, visibly, on the page. The
+> finish-time projection does not fail safe in that sense — it is a claim about *your* race day fitted
+> to someone else's races, which is why it always ships with an uncertainty band that widens honestly
+> when it has little to go on. Treat the band, not the time, as the output.
+
 ---
 
 ## 2. Setup
@@ -291,6 +303,24 @@ projection**.
   with vs. what the founding road promised, and your finish vs. your goal (DNF detected). This reckoning is
   **private-only** (your finish time is more than the public "shape + plan" line shows).
 
+### Track record
+*How the engine's own forecasts have scored.* The plan drift view above compares the **current** plan
+with reality — but the current plan is replaced every night, so each forecast used to be overwritten
+by its successor before anyone could check it. This panel keeps them: every prediction is scored the
+first time its outcome is knowable, written down, and **never rewritten**.
+
+- **Weekly fitness checkpoints.** For each completed week, the CTL the plan projected for it against
+  the CTL you actually carried, with the *bias* called out separately from the *scatter* — a
+  persistent sign (always fitter, always short) is a model error; noise around zero is just weather.
+  Only forecasts made at least **28 days** before the week ended are scored: grading the plan that
+  was regenerated the night before would be grading hindsight.
+- **Race bands.** Each finished race is scored twice — the **final** pre-race prediction, and the one
+  standing **eight weeks out**, which is the horizon at which a marathon forecast is still useful and
+  still hard. In the band or not, and by how much.
+- It appears on the **public** box too, with one deliberate difference: the public view publishes
+  whether a band contained the race, never what you ran. (Publishing the prediction beside its error
+  would hand the finish time back, and your results are private.)
+
 ### Effort discipline
 *Are your easy days actually easy?* Graded against a *moving*, fitness-tracking easy bar — HR-led on a
 derived lactate-threshold HR where that's trustworthy, otherwise your grade-adjusted pace vs an
@@ -461,6 +491,13 @@ readable by the public container.** Sparing Horse is built around that constrain
 - **Read-only is enforced at the connection.** The public container uses a query-only DB connection and 403s
   every mutation; it cannot sync, write, delete, or call the AI.
 
+- **The public payloads are allowlists, not subtractions.** Each public resource has a named list of
+  the fields it serves, plus a register of the ones deliberately withheld — so a new field is absent
+  from the public box until someone classifies it, rather than present until someone notices. The
+  track record is the sharpest case: the public box publishes whether a finish landed inside the band
+  it was given, but never the finish time, because the prediction beside its error would hand the
+  result straight back.
+
 The decision line: *training shape + plan* can be public; *medical / location / HR detail* stays private.
 
 ---
@@ -472,7 +509,12 @@ The **Settings** window (private container only) is where you configure the app 
 - **Connections & keys** — set your **Runalyze token** and (optional) **Claude API key** here. They are
   written to the private-only secrets store, applied live (no restart), and **write-only**: the UI shows
   whether a key is configured and whether it currently **validates** ("✓ in use · valid" / "✗ key rejected"),
-  but never echoes the secret back. The Claude key check uses a zero-token metadata call.
+  but never echoes the secret back. The Claude key check uses a zero-token metadata call. Each stored
+  key also shows a short **fingerprint** (`fp a1b2c3d4`) — the first eight hex characters of its
+  SHA-256. It is one-way, so it says *which* value is in the box without describing it, which is how
+  you confirm a rotation actually landed ("configured" looks identical before and after). Check it
+  against your own copy with `printf %s "$KEY" | sha256sum | cut -c1-8`. Typing into several key
+  fields and saving one leaves the others' text alone.
 - **Personalization** — athlete context (one line injected into AI prompts), weather cities for the header
   widget, an optional house back-link, and the timezone. These are non-secret and stored in the DB.
 - **Manual LTHR (bpm)** — your lactate-threshold heart rate from a field test. When set, it overrides the

@@ -153,6 +153,15 @@
   .dqwarn{border:1px solid var(--warn);background:color-mix(in oklab,var(--warn),transparent 90%);
     border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:var(--text);line-height:1.5}
   .dqwarn b{color:var(--warn)}
+  /* §TR — the track record: two summary lines and a small table, in the drift family's plain voice */
+  .trrow{font-size:13px;line-height:1.7;color:var(--text)}
+  .trtbl{width:100%;border-collapse:collapse;margin-top:10px;font-size:12.5px}
+  .trtbl th{text-align:left;font-weight:600;color:var(--muted);border-bottom:1px solid var(--line);padding:4px 8px 6px 0}
+  .trtbl td{padding:5px 8px 5px 0;border-bottom:1px solid color-mix(in oklab,var(--line),transparent 50%)}
+  .trtbl td.ok{color:var(--ok)} .trtbl td.bad{color:var(--warn)}
+  .secblock .fp{font-family:var(--mono);font-size:9.5px;letter-spacing:.03em;color:var(--muted);
+    opacity:.85;cursor:help}   /* §SG — which value is in the box, without saying what it is */
+  .hcard .stalen{color:var(--warn)}   /* §HS — the age of a feed that stopped, on its own card */
   .dqnote{border:1px solid var(--line);border-radius:10px;padding:8px 14px;margin-bottom:16px;
     font-size:12px;color:var(--muted);line-height:1.5}
   .dqnote a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}

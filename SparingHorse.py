@@ -15,6 +15,7 @@ Production:    waitress-serve --listen=0.0.0.0:8770 SparingHorse:app
 """
 import base64
 import functools
+import hashlib
 import html
 import io
 import json
@@ -302,7 +303,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.33.0"
+ENGINE_VERSION = "0.37.1"
 
 
 def activity_profile(activity_id, n=120):
@@ -1147,6 +1148,24 @@ CREATE TABLE IF NOT EXISTS plans (
     plan       TEXT                  -- JSON: phases + weeks + sessions + pace zones
 );
 
+-- §TR — the track record (DIR-2). One row per SETTLED prediction, written by the nightly the first
+-- time the outcome is knowable and NEVER rewritten (INSERT OR IGNORE): a prediction you can re-score
+-- after seeing the result is not a prediction. The live drift view already compares the CURRENT plan
+-- against reality, but a re-plan replaces the prediction — so without this table the model's own
+-- history is erased every night by the next forecast.
+CREATE TABLE IF NOT EXISTS track_record (
+    kind      TEXT NOT NULL,      -- 'ctl_week' | 'race_final' | 'race_t8'
+    key       TEXT NOT NULL,      -- the week's Monday, or '<race date>|<type>'
+    scored_at TEXT NOT NULL,
+    lead_days INTEGER,            -- how far BEFORE the outcome the prediction was made
+    predicted REAL,
+    actual    REAL,
+    err       REAL,               -- signed: CTL points, or log(actual/predicted) for a finish time
+    in_band   INTEGER,            -- 1/0 for a banded finish prediction, NULL otherwise
+    payload   TEXT,               -- the full scoring detail as JSON
+    PRIMARY KEY (kind, key)
+);
+
 -- Daily readiness check-ins (§6d gate). The subjective inputs are the safety net — esp.
 -- `stop_symptom` (a stop-the-run exertional symptom), which halts the plan and flags "see a doctor".
 CREATE TABLE IF NOT EXISTS readiness (
@@ -1762,13 +1781,33 @@ def _resolve_secret(spec):
     return "", "none"
 
 
+def secret_fingerprint(value):
+    """§SG — eight hex characters of sha256(value), or "" for an unset secret.
+
+    The write-only field is the right posture (a key is never sent back to the browser), but it left
+    the owner unable to answer the one question a key box has to answer: *which* value is in there.
+    After rotating a token, "configured" looks identical before and after — a save that silently
+    failed and a save that worked are the same screen. A fingerprint is the smallest thing that
+    distinguishes them, and it is not a leak: sha256 is one-way, eight hex characters of a
+    high-entropy credential identify without describing, and the owner can compute the same digest
+    on their own machine to confirm the box holds the value they think it does:
+
+        printf %s "$TOKEN" | sha256sum | cut -c1-8
+
+    Unsalted on purpose — a salt would make it uncheckable, which is the whole point of having it."""
+    if not value:
+        return ""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+
+
 def secret_status():
-    """GET payload: per-secret configured flag + provenance ONLY — never the value itself."""
+    """GET payload: per-secret configured flag, provenance and FINGERPRINT — never the value."""
     out = []
     for s in SECRET_SPEC:
         value, source = _resolve_secret(s)
         out.append({"key": s["key"], "label": s["label"], "help": s["help"],
-                    "configured": bool(value), "source": source})
+                    "configured": bool(value), "source": source,
+                    "fingerprint": secret_fingerprint(value)})
     return out
 
 
@@ -2403,6 +2442,51 @@ SLEEP_MARKERS = {
     "rem_duration":        ("sleep_rem", float),
     "hr_lowest":           ("night_hr", float),
 }
+
+
+# §HS — the health view's staleness cue. The nightly feeds (HRV, sleep, resting/overnight HR, weight)
+# arrive from the watch via Runalyze, and when that pipe breaks THE CHARTS DO NOT LOOK BROKEN: they
+# simply stop, and the last point sits there reading like today's. That is exactly how the 2026-08-15
+# wellness stall went eight days unnoticed (§78) — the owner found it by eye, not from the page.
+# The watched set is DERIVED from the sync registries above, never hand-listed, so a feed added to
+# the sync is covered the day it lands. Locked by `det/health-staleness`.
+HEALTH_SYNCED_MARKERS = frozenset(HEALTH_SYNC) | {m for m, _ in SLEEP_MARKERS.values()}
+HEALTH_STALE_DAYS = 4     # four missed nights is a broken pipe; one or two is a night off the wrist
+
+
+def health_staleness(series, today=None):
+    """Freshness of each marker series for /api/health.
+
+    A marker is WATCHED only if it is one of the synced feeds AND its newest reading actually came
+    from the sync: a hand-entered weight is the athlete telling us something today, not a pipe to
+    monitor, and nagging about it would train them to ignore the cue that matters. Everything else
+    (lab values, entered whenever blood is drawn) reports its age without ever being called stale —
+    a six-month-old ferritin is not a fault.
+
+    Returns {"markers": {marker: {last, days, watched, stale}}, "summary": … or None}, where the
+    summary names the stale feeds and the NEWEST reading among them — "nothing since the 15th" is
+    the sentence the owner needed, and the newest is the one that dates the outage."""
+    td = _date(today) if today else datetime.now().date()
+    out, stale = {}, []
+    for marker, pts in (series or {}).items():
+        if not pts:
+            continue
+        last = pts[-1]                                   # /api/health serves each series date-ASC
+        try:
+            days = (td - _date(last["date"])).days
+        except (KeyError, TypeError, ValueError):
+            continue                                     # unparseable date: no cue, not a broken page
+        watched = marker in HEALTH_SYNCED_MARKERS and last.get("source") == "runalyze"
+        out[marker] = {"last": last["date"], "days": days, "watched": watched,
+                       "stale": bool(watched and days > HEALTH_STALE_DAYS)}
+        if out[marker]["stale"]:
+            stale.append(marker)
+    summary = None
+    if stale:
+        summary = {"markers": sorted(stale),
+                   "last": max(out[m]["last"] for m in stale),
+                   "days": min(out[m]["days"] for m in stale)}
+    return {"markers": out, "summary": summary}
 
 
 def _sleep_main_by_date(items):
@@ -7344,22 +7428,241 @@ def _ft_prediction_score(db, race_date_iso, race_type, actual_s):
         if (o.get("date") != race_date_iso or (o.get("type") or "").lower() != (race_type or "").lower()
                 or not ft.get("seconds")):
             continue
-        band = ft.get("band") or {}
-        err_log = math.log(actual_s / ft["seconds"])
-        out = {"plan_id": r["id"], "for_date": r["for_date"],
-               "p50_seconds": ft["seconds"], "p50_hms": ft.get("hms"),
-               "actual_seconds": actual_s,
-               "err_pct": round((math.exp(err_log) - 1) * 100, 1),
-               "lo_hms": band.get("lo_hms"), "hi_hms": band.get("hi_hms"),
-               "in_band": (band["lo_seconds"] <= actual_s <= band["hi_seconds"]
-                           if band.get("lo_seconds") else None),
-               "log_score": None}
-        sig = band.get("sigma_log")
-        if sig:
-            out["log_score"] = round(0.5 * math.log(2 * math.pi * sig * sig)
-                                     + err_log ** 2 / (2 * sig * sig), 3)
+        out = score_finish(ft, actual_s)      # §TR owns the maths — one scorer, two callers
+        if out:
+            out.update(plan_id=r["id"], for_date=r["for_date"])
         return out
     return None
+
+
+# ── §TR — the track record (DIR-2) ──────────────────────────────────────────
+# The app makes two kinds of forecast every night: a weekly fitness trajectory (each planned week's
+# `proj_ctl`) and a finish time with a band. Both were VISIBLE and neither was KEPT: the drift view
+# compares the current plan with reality, and the current plan is replaced every night, so each
+# forecast is quietly overwritten by its successor before anyone can check it. A model that
+# continuously re-forecasts and never scores itself cannot be wrong, which is the same as saying it
+# cannot be trusted.
+#
+# So: score every prediction the FIRST time its outcome is knowable, write the row, and never touch
+# it again (`INSERT OR IGNORE`). Two rules make the record honest rather than flattering:
+#   · a prediction only counts if it was made TR_LEAD_DAYS before the outcome — scoring the plan
+#     regenerated the night before a week ends would grade the engine on hindsight;
+#   · nothing is ever re-scored. A row is the model's statement at the time, kept whether it aged
+#     well or badly.
+TR_LEAD_DAYS = 28        # a forecast must predate its outcome by this much to be scorable at all
+TR_T8_DAYS = 56          # the second horizon a race band is scored at: eight weeks out
+TR_T8_TOL_DAYS = 14      # …and how near that horizon the scored plan must actually sit
+TR_SCAN_WEEKS = 52       # how far back a scan reaches for unscored weekly checkpoints
+TR_CTL_CLOSE = 2.0       # CTL points: within this, the weekly forecast "landed" (≈ 4% at CTL 50)
+
+
+def score_ctl_week(predicted, actual):
+    """One weekly fitness checkpoint. Signed error, POSITIVE meaning the athlete came out fitter
+    than the plan projected — the direction matters more than the magnitude here, because a
+    persistent sign is a biased model while scatter is just a noisy one."""
+    if predicted is None or actual is None:
+        return None
+    err = round(actual - predicted, 2)
+    return {"predicted": round(predicted, 1), "actual": round(actual, 1), "err": err,
+            "err_pct": round(100 * err / predicted, 1) if predicted else None,
+            "close": abs(err) <= TR_CTL_CLOSE}
+
+
+def score_finish(ft, actual_s):
+    """Score one saved finish-time prediction against the clock. P50 log error always; when the
+    prediction carried a §FT3 band, also in_band and the Gaussian log score — a PROPER score, so an
+    over-tight band is punished exactly as an over-wide one and a band cannot cheat its way to
+    looking calibrated. Returns None if the prediction has no P50 to score."""
+    if not (ft and ft.get("seconds") and actual_s):
+        return None
+    band = ft.get("band") or {}
+    err_log = math.log(actual_s / ft["seconds"])
+    out = {"p50_seconds": ft["seconds"], "p50_hms": ft.get("hms"), "actual_seconds": actual_s,
+           "err_log": round(err_log, 4), "err_pct": round((math.exp(err_log) - 1) * 100, 1),
+           "lo_hms": band.get("lo_hms"), "hi_hms": band.get("hi_hms"),
+           "in_band": (band["lo_seconds"] <= actual_s <= band["hi_seconds"]
+                       if band.get("lo_seconds") else None),
+           "log_score": None}
+    sig = band.get("sigma_log")
+    if sig:
+        out["log_score"] = round(0.5 * math.log(2 * math.pi * sig * sig)
+                                 + err_log ** 2 / (2 * sig * sig), 3)
+    return out
+
+
+def _tr_plan_weeks(plan):
+    """{Monday ISO: proj_ctl} for every week a saved plan projected."""
+    return {w["start"]: w["proj_ctl"] for w in _plan_all_weeks(plan)
+            if w.get("start") and w.get("proj_ctl") is not None}
+
+
+def _tr_race_plans(db, race_date_iso, race_type):
+    """Every saved plan generated before this race whose ANCHOR is this race and which carried a
+    finish time, newest first: (plan_id, for_date, finish_time dict). The founding-road matching
+    rule — same date AND same type — is the one `_ft_prediction_score` already uses."""
+    out = []
+    for r in db.execute("SELECT id, for_date, plan FROM plans WHERE for_date < ? ORDER BY id DESC",
+                        (race_date_iso,)).fetchall():
+        try:
+            p = json.loads(r["plan"])
+        except (ValueError, TypeError):
+            continue
+        o = p.get("objective") or {}
+        ft = (p.get("feasibility") or {}).get("finish_time") or {}
+        if (o.get("date") == race_date_iso
+                and (o.get("type") or "").lower() == (race_type or "").lower() and ft.get("seconds")):
+            out.append((r["id"], r["for_date"], ft))
+    return out
+
+
+def _tr_write(db, kind, key, lead_days, predicted, actual, err, in_band, payload, scored_at):
+    """Write one settled score, ONCE. `INSERT OR IGNORE` is the whole honesty mechanism: a re-run
+    (and the nightly re-runs every night) can add rows that have newly become scorable but can never
+    revise one that already exists."""
+    db.execute("INSERT OR IGNORE INTO track_record "
+               "(kind,key,scored_at,lead_days,predicted,actual,err,in_band,payload) "
+               "VALUES (?,?,?,?,?,?,?,?,?)",
+               (kind, key, scored_at, lead_days, predicted, actual, err,
+                None if in_band is None else int(bool(in_band)),
+                json.dumps(payload, separators=(",", ":"))))
+    return db.total_changes
+
+
+def track_record_scan(db, today=None):
+    """Score everything that has become scorable and is not scored yet. Idempotent, cheap, and safe
+    to call from the nightly on every pass; returns what it added.
+
+    Weekly checkpoints: for each COMPLETED week, the newest plan that both predates the week's end
+    by TR_LEAD_DAYS and projected a `proj_ctl` for it, against the CTL actually reconstructed at
+    that week's end. Races: the last pre-race prediction (the model's final word) and, separately,
+    the prediction standing eight weeks out — the horizon at which a marathon forecast is still
+    useful and still hard."""
+    td = _date(today) if today else datetime.now().date()
+    now = _now_iso()
+    added = {"ctl_week": 0, "race_final": 0, "race_t8": 0}
+    have = {(r["kind"], r["key"]) for r in db.execute("SELECT kind, key FROM track_record").fetchall()}
+
+    # ── weekly fitness checkpoints ────────────────────────────────────────
+    this_monday = _monday(td)
+    weeks = [this_monday - timedelta(weeks=n) for n in range(1, TR_SCAN_WEEKS + 1)]
+    todo = [m for m in weeks if ("ctl_week", m.isoformat()) not in have]
+    if todo:
+        curve = {p["date"]: p["ctl"] for p in reconstruct_history(db, end=(this_monday - timedelta(days=1)).isoformat())}
+        plans = db.execute("SELECT id, for_date, plan FROM plans ORDER BY id DESC").fetchall()
+        parsed = []
+        for r in plans:
+            try:
+                parsed.append((r["id"], r["for_date"], _tr_plan_weeks(json.loads(r["plan"]))))
+            except (ValueError, TypeError):
+                continue
+        for m in todo:
+            end = m + timedelta(days=6)
+            actual = curve.get(end.isoformat())
+            if actual is None:
+                continue                              # the week is not covered by the history yet
+            cutoff = end - timedelta(days=TR_LEAD_DAYS)
+            for pid, for_date, byweek in parsed:      # newest first ⇒ the newest plan old ENOUGH
+                if not for_date or _date(for_date) > cutoff:
+                    continue
+                pred = byweek.get(m.isoformat())
+                if pred is None:
+                    continue
+                sc = score_ctl_week(pred, actual)
+                sc.update({"plan_id": pid, "for_date": for_date, "week": m.isoformat()})
+                lead = (end - _date(for_date)).days
+                before = db.total_changes
+                _tr_write(db, "ctl_week", m.isoformat(), lead, sc["predicted"], sc["actual"],
+                          sc["err"], None, sc, now)
+                added["ctl_week"] += (db.total_changes > before)
+                break
+
+    # ── races: the final word, and the word eight weeks out ───────────────
+    for o in db.execute("SELECT id, type, label, date, outcome FROM objectives "
+                        "WHERE status='done' AND outcome IS NOT NULL").fetchall():
+        if not o["date"] or _date(o["date"]) > td:
+            continue
+        try:
+            oc = json.loads(o["outcome"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        actual_s = oc.get("actual_seconds") if oc.get("status") == "finished" else None
+        if not actual_s:
+            continue
+        key = f"{o['date']}|{(o['type'] or '').lower()}"
+        cands = _tr_race_plans(db, o["date"], o["type"])
+        if not cands:
+            continue
+        base = {"label": o["label"], "date": o["date"], "type": o["type"]}
+        if ("race_final", key) not in have:
+            pid, for_date, ft = cands[0]
+            sc = score_finish(ft, actual_s)
+            if sc:
+                sc.update(base, plan_id=pid, for_date=for_date)
+                lead = (_date(o["date"]) - _date(for_date)).days
+                before = db.total_changes
+                _tr_write(db, "race_final", key, lead, sc["p50_seconds"], actual_s,
+                          sc["err_log"], sc["in_band"], sc, now)
+                added["race_final"] += (db.total_changes > before)
+        if ("race_t8", key) not in have:
+            want = _date(o["date"]) - timedelta(days=TR_T8_DAYS)
+            near = min(cands, key=lambda c: abs((_date(c[1]) - want).days))
+            if abs((_date(near[1]) - want).days) <= TR_T8_TOL_DAYS:
+                sc = score_finish(near[2], actual_s)
+                if sc:
+                    sc.update(base, plan_id=near[0], for_date=near[1])
+                    lead = (_date(o["date"]) - _date(near[1])).days
+                    before = db.total_changes
+                    _tr_write(db, "race_t8", key, lead, sc["p50_seconds"], actual_s,
+                              sc["err_log"], sc["in_band"], sc, now)
+                    added["race_t8"] += (db.total_changes > before)
+    db.commit()
+    return added
+
+
+def track_record(db):
+    """The scored history, shaped for display. Aggregates first, because the individual rows are
+    anecdotes and the aggregate is the claim: how close the weekly fitness forecast runs, whether it
+    is BIASED (a persistent sign, which is a model error) or merely noisy, and how often a finish
+    band actually contained the finish."""
+    try:
+        rows = [dict(r) for r in db.execute(
+            "SELECT * FROM track_record ORDER BY kind, key").fetchall()]
+    except sqlite3.OperationalError:
+        rows = []      # the public box reads a copy; the table arrives with the private box's boot
+                       # migration, and an empty scorecard is the honest answer until it does
+    for r in rows:
+        try:
+            r["payload"] = json.loads(r["payload"] or "{}")
+        except ValueError:
+            r["payload"] = {}
+    ctl = [r for r in rows if r["kind"] == "ctl_week"]
+    races = [r for r in rows if r["kind"] in ("race_final", "race_t8")]
+    errs = [r["err"] for r in ctl if r["err"] is not None]
+    banded = [r for r in races if r["in_band"] is not None]
+    out = {"ok": True,
+           "ctl": {"n": len(ctl),
+                   "mae": round(sum(abs(e) for e in errs) / len(errs), 2) if errs else None,
+                   "bias": round(sum(errs) / len(errs), 2) if errs else None,
+                   "close_rate": (round(sum(1 for e in errs if abs(e) <= TR_CTL_CLOSE) / len(errs), 3)
+                                  if errs else None),
+                   "close_within": TR_CTL_CLOSE,
+                   "points": [{"week": r["key"], "predicted": r["predicted"], "actual": r["actual"],
+                               "err": r["err"], "lead_days": r["lead_days"]} for r in ctl]},
+           "races": [{"key": r["key"], "kind": r["kind"], "label": r["payload"].get("label"),
+                      "date": r["payload"].get("date"), "type": r["payload"].get("type"),
+                      "horizon_days": r["lead_days"], "in_band": (None if r["in_band"] is None
+                                                                  else bool(r["in_band"])),
+                      "p50_hms": r["payload"].get("p50_hms"), "err_pct": r["payload"].get("err_pct"),
+                      "log_score": r["payload"].get("log_score"),
+                      "lo_hms": r["payload"].get("lo_hms"), "hi_hms": r["payload"].get("hi_hms"),
+                      "plan_id": r["payload"].get("plan_id"), "scored_at": r["scored_at"]}
+                     for r in races],
+           "summary": {"races_scored": len(races), "banded": len(banded),
+                       "in_band": sum(1 for r in banded if r["in_band"]),
+                       "in_band_rate": (round(sum(1 for r in banded if r["in_band"]) / len(banded), 3)
+                                        if banded else None),
+                       "lead_days": TR_LEAD_DAYS, "t8_days": TR_T8_DAYS}}
+    return out
 
 
 REBASE_GAP_WEEKS = 2   # consecutive run-free weeks that count as a real break between training blocks
@@ -8764,11 +9067,41 @@ def _plan_summary_for_llm(plan, diff):
     }
 
 
-def explain_plan(db, diff=None):
-    """§6c — plain-language 'why' for the latest plan (and the most recent change)."""
-    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+# TECH-7 — one narration per (plan, diff, athlete context). `api_plan_explain` was an LLM call PER
+# CLICK on a button whose answer cannot change until the plan does: same plan id, same diff, same
+# prompt, same tokens, same seconds of waiting. The cache key is exactly what the answer depends on —
+# the plan row's id (a regeneration INSERTs a new row, so a new plan is a new key by construction),
+# a digest of the diff argument, and the athlete context, which is interpolated into the system
+# prompt and is the one setting that can change the answer without the plan moving. A FAILED call is
+# never cached: an API hiccup must not be pinned to the plan for the rest of its life. Bounded and
+# in-process — a restart simply re-earns it, which is the right trade for a cache with no correctness
+# duty. Locked by `det/explain-cache`.
+_EXPLAIN_CACHE = {}
+_EXPLAIN_CACHE_MAX = 8
+_explain_lock = threading.Lock()
+
+
+def _explain_key(plan_id, diff, context):
+    payload = json.dumps({"d": diff, "c": context}, sort_keys=True, default=str)
+    return (plan_id, hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16])
+
+
+def explain_plan(db, diff=None, fresh=False):
+    """§6c — plain-language 'why' for the latest plan (and the most recent change).
+
+    Cached by (plan id, diff, athlete context) — see TECH-7 above. `fresh=True` re-rolls: the
+    narration is a generative answer, and the owner is entitled to ask for another one."""
+    row = db.execute("SELECT id, plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return {"ok": False, "error": "no plan yet — generate one first"}
+    key = _explain_key(row["id"], diff, config().athlete_context)
+    if not fresh:
+        with _explain_lock:
+            hit = _EXPLAIN_CACHE.get(key)
+        if hit is not None:
+            out = json.loads(hit)          # a copy per caller: nobody mutates the cached answer
+            out["cached"] = True
+            return out
     try:
         plan = json.loads(row["plan"])
     except (ValueError, TypeError):
@@ -8802,8 +9135,15 @@ def explain_plan(db, diff=None):
         "active_adjustment is set, explain what changed and why in change_note (else empty string). "
         "Encouraging, specific, never medical advice. Keep bullets short."
     )
-    return llm_json(system, json.dumps(_plan_summary_for_llm(plan, diff)),
-                    EXPLAIN_SCHEMA, effort="low", max_tokens=1200)
+    out = llm_json(system, json.dumps(_plan_summary_for_llm(plan, diff)),
+                   EXPLAIN_SCHEMA, effort="low", max_tokens=1200)
+    if out.get("ok"):                      # only a real answer is worth keeping
+        with _explain_lock:
+            _EXPLAIN_CACHE[key] = json.dumps(out)
+            while len(_EXPLAIN_CACHE) > _EXPLAIN_CACHE_MAX:
+                _EXPLAIN_CACHE.pop(next(iter(_EXPLAIN_CACHE)))      # oldest out first
+    out["cached"] = False
+    return out
 
 
 # Multi-objective conflict adjudication (§6c) — when ≥2 upcoming A-races compete, the LLM advises
@@ -9721,7 +10061,29 @@ _PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True
 # (`long_step_capped`, `fatigue_capped`, `long_capped`, `long_flat`), the rest day's `optional`
 # marker and `shape_response.ratio` were dropped from the public box on 0.31.0 — the tightening
 # direction, visible rather than dangerous, but a regression all the same.
+# §TR — the track record is the one place the app grades ITSELF, so the public box carries it: a
+# model that publishes its misses is making a different claim from one that publishes its forecasts.
+# What it must NOT carry is the RESULT. `objectives[].outcome` is withheld (a race result is
+# personal, TECH-3), and publishing `p50 + err_pct` would hand it straight back — actual = p50 ×
+# (1 + err). So the public race rows publish CALIBRATION and nothing else: was the finish inside the
+# band we gave, at what horizon, for a race whose name and date were already public. The weekly CTL
+# checkpoints publish in full — both sides of that comparison are already public (`shape.history`
+# carries measured fitness, the plan carries `proj_ctl`).
+_PV_TRACK = {"ok": True,
+             "ctl": {"n": True, "mae": True, "bias": True, "close_rate": True, "close_within": True,
+                     "points": {"week": True, "predicted": True, "actual": True, "err": True,
+                                "lead_days": True}},
+             "races": {"key": True, "kind": True, "label": True, "date": True, "type": True,
+                       "horizon_days": True, "in_band": True, "scored_at": True},
+             "summary": {"races_scored": True, "banded": True, "in_band": True, "in_band_rate": True,
+                         "lead_days": True, "t8_days": True}}
+
 _PV_WITHHELD = {
+    "track.races[].p50_hms",                 # §TR — publishing the prediction beside its error
+    "track.races[].err_pct",                 #   hands back the RESULT: actual = p50 × (1 + err)
+    "track.races[].log_score",               # ditto, invertible given sigma
+    "track.races[].lo_hms", "track.races[].hi_hms",   # the band brackets the result too
+    "track.races[].plan_id",                 # internal
     "plan.adjustment",                       # free-text / medical context
     "plan.cold_start",                       # §33f-5 — AGE + an HRmax prior, H7-class
     "plan.<phase>.weeks[].av_dates",         # §AV — away days are an empty-house broadcast
@@ -9743,6 +10105,7 @@ _PV_WITHHELD = {
 }
 
 PUBLIC_VIEWS = {"activity": _PV_ACTIVITY, "drift": _PV_DRIFT, "healthz": _PV_HEALTHZ,
+                "track_record": _PV_TRACK,
                 "log": _PV_LOG, "objectives": _PV_OBJECTIVES, "plan": _PV_PLAN,
                 "profile": _PV_PROFILE, "readiness": _PV_READINESS, "shape": _PV_SHAPE,
                 "weekly": _PV_WEEKLY}
@@ -10470,6 +10833,16 @@ def api_plandrift():
     return jsonify(public_view("drift", out) if READONLY else out)
 
 
+@app.get("/api/track-record")
+def api_track_record():
+    """§TR (DIR-2) — the model's own scorecard: weekly fitness forecasts and race bands scored
+    against what happened, from rows written when each prediction settled and never rewritten.
+    Served on BOTH boxes; the public one goes through the §PV allowlist, which publishes the
+    calibration and withholds the race RESULT (see `_PV_TRACK`)."""
+    out = track_record(get_db())
+    return jsonify(public_view("track_record", out) if READONLY else out)
+
+
 @app.get("/api/objectives")
 def api_objectives():
     db = get_db()
@@ -10681,7 +11054,7 @@ def api_plan_generate():
 def api_plan_explain():
     """§6c — plain-language explanation of the latest plan + the most recent change (advisory)."""
     d = body()
-    out = explain_plan(get_db(), d.get("diff"))
+    out = explain_plan(get_db(), d.get("diff"), fresh=bool(d.get("fresh")))
     return jsonify(out), (200 if out.get("ok") else 502)
 
 
@@ -11360,7 +11733,7 @@ def api_health():
         series.setdefault(r["marker"], []).append(
             {"date": r["date"], "value": r["value"], "source": r["source"], "note": r["note"]}
         )
-    return jsonify(markers=MARKERS, series=series)
+    return jsonify(markers=MARKERS, series=series, staleness=health_staleness(series))
 
 
 @app.post("/api/health")
@@ -11784,6 +12157,19 @@ def _nightly_job(kind="nightly"):
         _daily_replan()
     except Exception as e:
         print(f"[scheduler] daily re-plan failed: {e}")
+    # §TR — the re-plan has just replaced last night's forecast, so score what became settled
+    # BEFORE the new road buries it. Idempotent and write-once; a failure here must never cost the
+    # guides push or the backup.
+    try:
+        db = connect_db()
+        try:
+            added = track_record_scan(db)
+        finally:
+            db.close()
+        if any(added.values()):
+            print(f"[scheduler] track record: {added}")
+    except Exception as e:
+        print(f"[scheduler] track record scan failed: {e}")
     # §SG — after the re-plan, keep the watch current: push the refreshed next-days sessions
     # as SuuntoPlus Guides. No-ops (skipped=True) when Suunto isn't connected; push_guides
     # never raises, but the belt-and-braces try keeps a converter surprise from killing the loop.

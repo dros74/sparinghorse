@@ -68,6 +68,41 @@ async function runFull() {
 
   await btn.click(); await page.waitForTimeout(200);
   ok('dialog visible after REOPEN', await dlg.isVisible());
+  // §SG — saving ONE key must not wipe the keys being typed beside it. Five credentials live in this
+  // block; before this, pasting three Suunto values and hitting the first Save lost the other two.
+  // The POST is intercepted so the throwaway instance never actually stores a credential.
+  await page.route('**/api/secrets', r => r.request().method() === 'POST'
+    ? r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, secrets: [] }) })
+    : r.continue());
+  await page.evaluate(() => {
+    document.getElementById('sec_suunto_client_id').value = 'CLIENT-ID-DRAFT';
+    document.getElementById('sec_suunto_client_secret').value = 'CLIENT-SECRET-DRAFT';
+    document.getElementById('sec_suunto_subscription_key').value = 'SUBKEY-DRAFT';
+  });
+  await page.evaluate(() => saveSecret('suunto_client_id', false));
+  await page.waitForTimeout(400);
+  const kept = await page.evaluate(() => ({
+    saved: document.getElementById('sec_suunto_client_id').value,
+    sib1: document.getElementById('sec_suunto_client_secret').value,
+    sib2: document.getElementById('sec_suunto_subscription_key').value }));
+  await page.unroute('**/api/secrets');
+  ok('saving one key clears ONLY that field', kept.saved === '');
+  // §SG — the fingerprint: WHICH value is stored, shown without ever showing the value.
+  await page.route('**/api/secrets', r => r.request().method() === 'GET'
+    ? r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, secrets: [
+        { key: 'runalyze_token', label: 'Runalyze API token', help: 'h', configured: true,
+          source: 'saved', fingerprint: 'a1b2c3d4' }] }) })
+    : r.continue());
+  const fpTxt = await page.evaluate(async () => { await loadSecrets(false);
+    const el = document.querySelector('#secretsBox .fp');
+    return { fp: el ? el.textContent.trim() : '', box: document.getElementById('secretsBox').innerText }; });
+  await page.unroute('**/api/secrets');
+  ok(`a configured key shows its fingerprint (${fpTxt.fp})`, fpTxt.fp === 'fp a1b2c3d4');
+  ok('the fingerprint block explains how to check it yourself', /sha256sum/.test(fpTxt.box));
+  await page.evaluate(() => loadSecrets(false));   // back to the real (tokenless) state
+  ok(`the sibling keys keep their unsaved drafts (${kept.sib1}, ${kept.sib2})`,
+     kept.sib1 === 'CLIENT-SECRET-DRAFT' && kept.sib2 === 'SUBKEY-DRAFT');
+
   await page.locator('#settingsClose').click(); await page.waitForTimeout(150);
   ok('tiles intact after dialog cycle', await page.locator('#tiles .tile').count() >= 4);
 
@@ -443,6 +478,74 @@ async function runFull() {
   });
   ok(`health-form date prefilled to today (${hd.val})`, hd.val === hd.iso);
 
+  // A week's Sunday, computed in a zone whose DST starts on a Sunday at 02:00. The old arithmetic
+  // (UTC instant + LOCAL setDate + toISOString) lands one day early there once a year, so the plan
+  // stops treating the current week as current on its own final Sunday. Northern zones never see it,
+  // which is exactly why it survived: nobody who runs this app was ever in one of those zones.
+  const nzCtx = await browser.newContext({ timezoneId: 'Pacific/Auckland' });
+  const nzPage = await nzCtx.newPage();
+  await nzPage.goto(page.url(), { waitUntil: 'domcontentloaded' });
+  const nz = await nzPage.evaluate(() => ({
+    end: weekEndIso('2026-09-21'),
+    holds: weekHoldsToday({ start: '2026-09-21' }, '2026-09-27'),
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone }));
+  await nzCtx.close();
+  ok(`a week's end survives a southern DST switch (${nz.tz}: 2026-09-21 → ${nz.end})`,
+     nz.end === '2026-09-27' && nz.holds === true);
+
+  // §TR — the track record. The seed has one plan generated today, so NOTHING is scorable: the
+  // honest empty state is the check, and it must explain the lead rule rather than just say "none".
+  await page.waitForFunction(() => { const e = document.querySelector('#track'); return e && !/Loading/.test(e.innerText); }, { timeout: 15000 });
+  const trEmpty = await page.locator('#track').innerText();
+  ok(`track record's empty state explains the lead rule (${trEmpty.slice(0, 40).replace(/\s+/g, ' ')}…)`,
+     /Nothing has settled yet/.test(trEmpty) && /28 days old/.test(trEmpty));
+  await page.route('**/api/track-record', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify({
+    ok: true,
+    ctl: { n: 9, mae: 2.4, bias: 1.8, close_rate: 0.556, close_within: 2,
+           points: [{ week: '2026-06-01', predicted: 40, actual: 43, err: 3, lead_days: 35 }] },
+    races: [{ key: 'r1', kind: 'race_t8', label: 'Test Marathon', date: '2026-05-01',
+              type: 'marathon', horizon_days: 56, in_band: false, err_pct: 4.2 },
+            { key: 'r2', kind: 'race_final', label: 'Test Marathon', date: '2026-05-01',
+              type: 'marathon', horizon_days: 3, in_band: true, err_pct: 2.0 }],
+    summary: { races_scored: 2, banded: 2, in_band: 1, in_band_rate: 0.5, lead_days: 28, t8_days: 56 } }) }));
+  const tr = await page.evaluate(async () => { await loadTrack();
+    return { txt: document.querySelector('#track').innerText,
+             rows: document.querySelectorAll('#track .trtbl tbody tr').length,
+             miss: document.querySelectorAll('#track .trtbl td.bad').length }; });
+  await page.unroute('**/api/track-record');
+  ok(`track record states the weekly forecast's miss and bias (${tr.txt.split('\n')[0].slice(0, 52)}…)`,
+     /9 weekly fitness checkpoints/.test(tr.txt) && /2\.4/.test(tr.txt) && /came out fitter/.test(tr.txt));
+  ok('track record states how many bands contained the race', /1 of 2 finish bands contained/.test(tr.txt));
+  ok(`track record draws a row per scored prediction and marks the miss (${tr.rows} rows, ${tr.miss} missed)`,
+     tr.rows === 2 && tr.miss === 1);
+  await page.evaluate(() => loadTrack());   // back to the real (empty) state
+
+  // §HS — the staleness cue. First the quiet state: the seed's markers are all hand-entered, so a
+  // banner here would be the cry-wolf failure. Then a routed payload with a DEAD nightly feed.
+  ok('no staleness banner when nothing has died (the seed is all manual readings)',
+     await page.locator('#health .dqwarn').count() === 0);
+  const hPayload = await page.evaluate(async () => {
+    const live = await (await fetch('/api/health')).json();
+    const day = n => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    live.series.hrv = [{ date: day(20), value: 44, source: 'runalyze', note: '' },
+                       { date: day(8), value: 41, source: 'runalyze', note: '' }];
+    live.staleness = { markers: { hrv: { last: day(8), days: 8, watched: true, stale: true } },
+                       summary: { markers: ['hrv'], last: day(8), days: 8 } };
+    return live;
+  });
+  await page.route('**/api/health', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify(hPayload) }));
+  const hs = await page.evaluate(async () => { await loadHealth();
+    const card = [...document.querySelectorAll('#health .hcard')].find(c => c.dataset.k === 'hrv');
+    return { banner: (document.querySelector('#health .dqwarn') || {}).innerText || '',
+             cards: document.querySelectorAll('#health .hcard').length,
+             age: (card && card.querySelector('.stalen')) ? card.querySelector('.stalen').textContent : '' }; });
+  await page.unroute('**/api/health');
+  ok(`a dead nightly feed raises a banner that NAMES it (${hs.banner.slice(0, 48).replace(/\s+/g, ' ')}…)`,
+     /Nightly data has stopped/.test(hs.banner) && /HRV/.test(hs.banner) && /8 days ago/.test(hs.banner));
+  ok(`the card that owns the dead feed carries its age (${hs.age})`, /last reading 8 days ago/.test(hs.age));
+  ok(`the banner does not replace the cards (${hs.cards} still drawn)`, hs.cards > 1);
+  await page.evaluate(() => loadHealth());   // put the real (fresh) state back
+
   // the OSM tiles take a theme filter. The seed records no GPS, so no real map renders — this
   // measures the cascade on a real element carrying the real class inside the real map host.
   const tileCss = await page.evaluate(() => {
@@ -574,7 +677,7 @@ async function runBlocked() {
   // counting .tf-retry against .tilefail can never fail (tileFail writes the pair as one unit), and an
   // innerText sweep can't see a tile whose section was hidden on the way down — both read green while a
   // tile quietly offers the runner no way back. These two assertions are what actually hold UX-3 up.
-  const HOSTS = ['#tiles', '#recent', '#chart', '#ffchart', '#readiness', '#drift', '#effort', '#zones', '#health', '#durbody'];
+  const HOSTS = ['#tiles', '#recent', '#chart', '#ffchart', '#readiness', '#drift', '#effort', '#zones', '#health', '#durbody', '#track'];
   const stranded = await page.evaluate(hs => hs.filter(h => {
     const el = document.querySelector(h); return el && /Loading…/.test(el.innerHTML);
   }), HOSTS);
@@ -626,6 +729,9 @@ async function runPublic() {
   ok('no health form on the public box', await page.locator('#hform').count() === 0);
   ok('no durability card on the public box (decoupling is HR-adjacent)',
      await page.locator('#durcard').count() === 0);
+  ok('the public box carries the track record (the engine publishes its own scoring)',
+     await page.locator('#sec-track').count() === 1
+     && await page.evaluate(() => fetch('/api/track-record').then(r => r.status)) === 200);
   ok('the durability endpoint itself is closed to the public box', await page.evaluate(
     () => fetch('/api/durability').then(r => r.status)) === 403);
   const chip = await page.evaluate(() => {

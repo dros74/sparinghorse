@@ -10,6 +10,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.37.1] - 2026-08-23
+
+### Fixed
+
+- **A week stopped being "this week" a day early — in the southern hemisphere, once a year.** The
+  code that works out which Sunday a training week ends on mixed a UTC timestamp with local-time
+  date arithmetic. In New Zealand and eastern Australia, where daylight saving begins on a Sunday
+  at 2 a.m., that lands the end one day early for the week containing the switch — so on that
+  week's final Sunday the plan no longer recognised it as the current week. It has never affected
+  anyone in Europe or the Americas, which is exactly why it survived: the arithmetic is only wrong
+  in timezones nobody has run this app from. Now computed entirely in UTC, and checked by a browser
+  test that loads the page in Auckland.
+
+## [0.37.0] - 2026-08-23
+
+### Added
+
+- **A track record: the engine now keeps score on itself.** Every night the app forecasts a weekly
+  fitness trajectory and a finish time with a band — and every night the new plan replaced the old
+  one, so those forecasts were overwritten before anyone could check them. A model that
+  continuously re-forecasts and never scores itself cannot be wrong, which is another way of saying
+  it cannot be trusted. Each prediction is now scored the first time its outcome is knowable,
+  written down, and **never rewritten**: weekly fitness checkpoints (with the *bias* reported apart
+  from the scatter, because a persistent sign is a model error while noise is just weather) and
+  race bands, scored both at the final call and at eight weeks out. Only forecasts made at least
+  four weeks before the outcome are scored at all — grading the plan regenerated the night before
+  would be grading hindsight. A new *Track record* panel shows it, and the public box carries it
+  too, with one deliberate difference: it publishes whether a band contained the race, never the
+  finish time. Publishing a prediction beside its error would hand the result back, and results
+  stay private.
+
+## [0.36.1] - 2026-08-23
+
+### Documentation
+
+- **Every number in the engine now says where it came from.** The manual gains a short note on what
+  a self-hoster who is not the author inherits: most of the engine's numbers are the sport's
+  published consensus and travel to any runner, but about twenty were fitted to one athlete's own
+  history. The governors among those fail safe — they are ceilings that only ever reduce load, so
+  being wrong for you makes a plan too cautious rather than too aggressive — while the finish-time
+  projection does not, which is why it always ships with an uncertainty band. Treat the band, not
+  the time, as the output. The full constant-by-constant inventory lives in the engine-science notes
+  and is now checked by the test suite: a new constant that nobody has classified fails the build.
+
+## [0.36.0] - 2026-08-23
+
+### Changed
+
+- **The plan explanation is computed once per plan, not once per click.** Asking "why this plan?"
+  twice about the same plan used to mean two AI calls, two waits and two bills for an answer that
+  could not have changed. It is now remembered against the plan it describes, so the second look is
+  instant, and it is forgotten the moment the plan is regenerated, the change being explained is
+  different, or the athlete context that shapes the wording is edited. A failed call is never
+  remembered — one provider hiccup must not become the plan's permanent explanation.
+
+### Added
+
+- **The AI boundary is now written down.** ENGINE_SCIENCE gains an architecture decision record
+  stating, and then evidencing, that the language model parses, narrates and listens but never
+  prescribes and never clamps: a table of all five places it is used and what each is allowed to
+  return, the deterministic tests that hold each safety limit, and the plainest evidence of all —
+  the engine plans, governs and projects identically with no API key at all. It also records what
+  would have to be true before a model-generated number could ever become part of a plan.
+
+## [0.35.0] - 2026-08-23
+
+### Added
+
+- **Keys now show a fingerprint.** A key box that never shows you the key cannot tell you *which*
+  key it is holding — "configured" reads exactly the same before and after you rotate a token, so a
+  save that silently failed and a save that worked look identical. Each stored credential now
+  displays eight hex characters of its SHA-256 beside the status badge. It is one-way, so nothing
+  about the key is revealed, and you can compute the same digest yourself (the MANUAL gives the
+  one-liner) to confirm the box holds what you think it does.
+
+### Fixed
+
+- **Saving one key no longer wipes the ones you were typing.** The keys block re-renders itself
+  after a save, and the re-render used to blank every field — so pasting the three Suunto
+  credentials and pressing the first Save lost the other two, with nothing to say why. Unsaved text
+  in the other fields is now preserved; only the field you just saved is cleared.
+
+## [0.34.0] - 2026-08-23
+
+### Added
+
+- **The health page now tells you when a feed has died.** Sleep, HRV and overnight heart rate arrive
+  from the watch every night — and when that stopped on 15 August, nothing on the page said so. The
+  charts did not look broken; they simply ended, with the last point sitting there reading like
+  today's, and the gap was found by eye more than a week later. A banner above the markers now names
+  the feeds that have gone quiet and the date they stopped, and the card that owns a dead feed
+  carries its age. It stays silent for anything that is not actually a broken pipe: a blood marker
+  from last winter is not stale, and a weight you typed in yourself last month is you telling us
+  something, not a sync to worry about. A cue that fires on ordinary data is a cue you learn to
+  ignore, which is how the real outage stayed invisible.
+
 ## [0.33.0] - 2026-08-23
 
 ### Changed
