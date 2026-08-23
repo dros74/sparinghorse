@@ -3363,6 +3363,101 @@ def _stc_no_shadowed_defs():
                got={"top_level_names": counts, "failures": fails or "none"})
 
 
+def _stc_wrong_axis_signals():
+    """§DIR-3, the unused-signal reckoning, as a tooth. `monotony` and `training_strain` were pulled
+    from Runalyze into `shape_snapshots` on every sync from the first week of the project and read by
+    NOTHING — recorded as such in PROJECT_LOG §57 and never acted on. They are TRIMP-derived, i.e.
+    computed on the axis ENGINE_SCIENCE §1–2 calls the wrong one for injury (Davis: injuries are
+    biomechanical; Impellizzeri: no evidence for the ACWR family at all), so the reckoning's answer is
+    not "wire them up" but "stop carrying them": a stored number that nothing reads is a standing
+    invitation for a future governor to reach for it precisely because it is already there.
+
+    Four teeth, because "we stopped" is three different claims:
+      · the write CONTRACT (`SHAPE_COLUMNS`) no longer names them, and the only writer takes no
+        keyword for either — a caller cannot pass one even by accident;
+      · BEHAVIOURAL: a real `upsert_shape_snapshot` through the real schema lands its other fields and
+        leaves these two NULL (so the NULL is the contract, not a write that quietly failed);
+      · the TOMBSTONE survives — the columns are still in the schema, because ~14 months of rows hold
+        real values and dropping the columns would delete them. Withheld publicly, not erased;
+      · nothing READS them. A token scan (comments and the SCHEMA/withheld string literals excused)
+        over the engine and the SPA: any other mention — a SELECT, a kwarg, a `s.get("monotonyValue")`
+        — fails. This is the tooth that survives the decision: it does not re-assert the removal, it
+        blocks the re-introduction."""
+    import inspect as _i, io as _io, tokenize as _tk, sqlite3 as _sq
+    fails, names = [], ("monotony", "training_strain")
+
+    for n in names:                                        # (1) the write contract
+        if n in S.SHAPE_COLUMNS:
+            fails.append(f"SHAPE_COLUMNS still writes `{n}`")
+    params = _i.signature(S.upsert_shape_snapshot).parameters
+    for n in names:
+        if n in params:
+            fails.append(f"upsert_shape_snapshot still accepts `{n}=`")
+
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row   # (2) behavioural — the REAL sync path, with
+    m.executescript(S.SCHEMA)                              #     an upstream payload that offers both
+    upstream = {"effectiveVO2max": 50.0, "fitness": 45.0, "fatigue": 42.0, "performance": 3.0,
+                "acuteChronicWorkloadRatio": 0.93, "hrvBaseline": 38.5,
+                "monotonyValue": 1.2, "trainingStrain": 300.0}
+    _real_fetch = S.fetch_statistics_current
+    S.fetch_statistics_current = lambda: upstream           # no network; the ingestion is the subject
+    try:
+        S.snapshot_shape(m)
+    finally:
+        S.fetch_statistics_current = _real_fetch
+    row = dict(m.execute("SELECT * FROM shape_snapshots").fetchone())
+    if row.get("fitness") != 45.0 or row.get("hrv_baseline") != 38.5:
+        fails.append(f"the sync did not land its own fields — NULL below would prove nothing: {row}")
+    for n in names:
+        if row.get(n) is not None:
+            fails.append(f"a live sync wrote {n}={row[n]!r} from the upstream payload — it must stay NULL")
+    if "monotonyValue" not in (row.get("raw") or ""):      # the audit copy is still verbatim
+        fails.append("`raw` no longer carries the upstream payload verbatim — that is a different change")
+    cols = {r["name"] for r in m.execute("PRAGMA table_info(shape_snapshots)").fetchall()}
+    for n in names:                                        # (3) the tombstone
+        if n not in cols:
+            fails.append(f"column `{n}` was DROPPED from the schema — the banked rows go with it; "
+                         f"stop writing it, keep the history")
+    m.close()
+
+    ok_str = lambda t: (t.strip('\'"').startswith("shape.latest.")          # the withheld register
+                        or "CREATE TABLE IF NOT EXISTS shape_snapshots" in t)   # the schema DDL
+    readers = []                                           # (4) nothing reads them
+    for fname in ("SparingHorse.py", "static/app.js"):
+        path = S.Path(S.__file__).resolve().parent / fname
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as e:
+            fails.append(f"{fname}: unreadable ({e})")
+            continue
+        if fname.endswith(".js"):                          # no tokenizer needed: it must be absent
+            for i, line in enumerate(text.splitlines(), 1):
+                low = line.lower()
+                if any(k in low for k in ("monotony", "training_strain", "trainingstrain")):
+                    readers.append(f"{fname}:{i}: {line.strip()[:70]}")
+            continue
+        for tok in _tk.generate_tokens(_io.StringIO(text).readline):
+            if tok.type == _tk.COMMENT:
+                continue                                   # naming the decision is not using it
+            low = tok.string.lower()
+            if not any(k in low for k in ("monotony", "training_strain", "trainingstrain")):
+                continue
+            if tok.type == _tk.STRING and ok_str(tok.string):
+                continue
+            readers.append(f"{fname}:{tok.start[0]}: {tok.string.strip()[:70]}")
+    if readers:
+        fails.append("the wrong-axis signals are referenced in live code again: " + "; ".join(readers))
+
+    return _st("det", "wrong-axis-signals",
+               "§DIR-3 — `monotony`/`training_strain` are TRIMP-derived (the wrong axis for injury per "
+               "ENGINE_SCIENCE §1–2) and were read by nothing: the engine no longer ingests them, the "
+               "legacy columns survive as a tombstone, and no code may reach for them again",
+               passed=not fails, expect="not written, not read, columns kept",
+               got={"shape_columns": len(S.SHAPE_COLUMNS), "fresh_row_nulls":
+                    {n: row.get(n) for n in names}, "legacy_columns_kept": sorted(n for n in names if n in cols),
+                    "live_references": readers or "none", "failures": fails or "none"})
+
+
 def _stc_guide_cleanup():
     """§SG — the watch MIRRORS the plan. `push_guides` bakes the session kind into the idempotency
     key (`sh-{date}-{kind}`), and kind is not stable across regenerations: an easy-only check-in
@@ -10063,7 +10158,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
-                 lambda: _stc_no_shadowed_defs(),
+                 lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
                  lambda: _stc_lt1(),
                  lambda: _stc_health_sync(), lambda: _stc_sleep_sync(),
                  lambda: _stc_rebase_anchor_derive(),

@@ -302,7 +302,7 @@ PROFILE_VERSION = 3
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.32.1"
+ENGINE_VERSION = "0.33.0"
 
 
 def activity_profile(activity_id, n=120):
@@ -1107,8 +1107,8 @@ CREATE TABLE IF NOT EXISTS shape_snapshots (
     acwr              REAL,   -- RATIO (e.g. 0.95). Optimum band 0.8–1.3. (API mixes units!)
     marathon_shape    REAL,
     hrv_baseline      REAL,
-    monotony          REAL,
-    training_strain   REAL,
+    monotony          REAL,   -- §DIR-3 LEGACY: no longer written (wrong axis; see SHAPE_COLUMNS).
+    training_strain   REAL,   --   Kept so the rows banked before 0.33.0 survive; readers = none.
     raw               TEXT
 );
 
@@ -2345,23 +2345,29 @@ def sync_activities(db, max_pages=60, backfill=False):
 
 # Single source of the shape_snapshots column contract — shared by the live API capture
 # (snapshot_shape) and the synthetic seeder, so the column list never drifts between them.
+# §DIR-3: `monotony` / `training_strain` are NOT here. Both are TRIMP-derived, i.e. on the axis
+# ENGINE_SCIENCE §1–2 calls the wrong one for injury, and nothing in the engine has ever read
+# them; ingesting a wrong-axis number keeps inviting a future governor to use it. The columns
+# survive in the schema (a tombstone holding the rows already banked) but are never written
+# again. The verbatim upstream payload still lands in `raw` — that is the audit copy, and it is
+# private-only. Locked by `det/wrong-axis-signals`.
 SHAPE_COLUMNS = ("snapshot_date", "captured_at", "effective_vo2max", "effective_vo2max_progress",
                  "fitness", "fatigue", "performance", "fitness_pct", "acwr", "marathon_shape",
-                 "hrv_baseline", "monotony", "training_strain", "raw")
+                 "hrv_baseline", "raw")
 
 
 def upsert_shape_snapshot(db, snapshot_date, *, effective_vo2max=None, effective_vo2max_progress=None,
                           fitness=None, fatigue=None, performance=None, fitness_pct=None, acwr=None,
-                          marathon_shape=None, hrv_baseline=None, monotony=None, training_strain=None,
+                          marathon_shape=None, hrv_baseline=None,
                           raw="{}", captured_at=None):
     """Write/replace one daily shape snapshot (one row per day). Keyword-only so callers can't
-    misorder the 14 columns; missing fields default to NULL."""
+    misorder the 12 columns; missing fields default to NULL."""
     db.execute(
         f"INSERT OR REPLACE INTO shape_snapshots ({', '.join(SHAPE_COLUMNS)}) "
         f"VALUES ({', '.join('?' * len(SHAPE_COLUMNS))})",
         (snapshot_date, captured_at or _now_iso(), effective_vo2max, effective_vo2max_progress,
          fitness, fatigue, performance, fitness_pct, acwr, marathon_shape,
-         hrv_baseline, monotony, training_strain, raw))
+         hrv_baseline, raw))
 
 
 def snapshot_shape(db):
@@ -2374,8 +2380,7 @@ def snapshot_shape(db):
         fitness=s.get("fitness"), fatigue=s.get("fatigue"), performance=s.get("performance"),
         fitness_pct=s.get("fitnessInPercent"), acwr=s.get("acuteChronicWorkloadRatio"),
         marathon_shape=s.get("marathonShape"), hrv_baseline=s.get("hrvBaseline"),
-        monotony=s.get("monotonyValue"), training_strain=s.get("trainingStrain"),
-        raw=json.dumps(s, separators=(",", ":")))
+        raw=json.dumps(s, separators=(",", ":")))   # §DIR-3: monotonyValue / trainingStrain not lifted
     return s
 
 
@@ -9619,7 +9624,8 @@ _PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ct
 # NOT `last_sync` (the household's routine — /healthz gives booleans, so must this) and NOT
 # `latest.raw` (the entire upstream snapshot payload, HRV band included), nor the snapshot's own
 # `hrv_baseline` / `monotony` / `training_strain`: physiological, H7-class, and the front end reads
-# none of them on either box.
+# none of them on either box. The last two are §DIR-3 legacy columns — no longer ingested, but the
+# rows banked before 0.33.0 still carry values, so they stay named here rather than assumed gone.
 _PV_SHAPE = {"duplicate_count": True, "duplicates": True, "ignored": True,
              "history": {"acwr": True, "effective_vo2max": True, "fatigue": True, "fitness": True,
                          "performance": True, "snapshot_date": True},
@@ -9726,7 +9732,7 @@ _PV_WITHHELD = {
     "shape.last_sync",                       # the household routine — /healthz gives booleans (TECH-8)
     "shape.latest.raw",                      # the whole upstream snapshot payload
     "shape.latest.hrv_baseline",             # physiological, H7-class, read by nothing
-    "shape.latest.monotony", "shape.latest.training_strain",
+    "shape.latest.monotony", "shape.latest.training_strain",   # §DIR-3 legacy: no longer ingested
     "objectives[].created_at",               # when the athlete planned their season
     "objectives[].outcome", "objectives[].resolved_at",      # §RL — a race RESULT is personal
     "activity.hr_avg", "activity.hr_max", "activity.cross_training",

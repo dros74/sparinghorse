@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.33.0] - 2026-08-23
+
+### Changed
+
+- **Two numbers the app collected but never used are no longer collected.** Every sync wrote
+  Runalyze's *monotony* and *training strain* into the daily shape snapshot, and nothing in the
+  engine — no governor, no view, no page — had ever read either one. Both are computed from TRIMP,
+  the training-load axis this project's own science notes identify as the wrong one for predicting
+  injury (running injuries are biomechanical; the evidence for the acute:chronic family is thin),
+  so the honest answer was to stop carrying them rather than to find them a job: a number already
+  sitting in the database is the one a future change reaches for precisely because it is there.
+  The columns stay in the database so the readings already banked are not deleted, and the verbatim
+  upstream response is still kept, as it always was, privately. A new check fails the build if any
+  code writes, reads or names either field again — the point is not the removal, it is that the
+  re-introduction now has to be a decision.
+- **The signals that were built but not wired now have written answers.** ENGINE_SCIENCE gains a
+  reckoning section covering all three: long-run decoupling stays *display-only* (the durability
+  tracker measures and shows, and the bar it would have to clear before it governs anything is
+  written down in advance), monotony/strain are dropped as above, and the psychological axis —
+  feel, readiness notes, free-text status — is confirmed as a one-way gate. It can ease a week or
+  halt it; it can never add load. That asymmetry is deliberate, and the reasons are on the record.
+
 ## [0.32.1] - 2026-08-23
 
 ### Fixed
