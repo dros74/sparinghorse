@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.40.0] - 2026-08-25
+
+### Added
+
+- **The long run can finally become a marathon long run.** The plan's ceiling on how much of a week
+  may sit in one run is no longer a single number for the whole road. Base keeps the published
+  doctrine (a long run is a quarter to a third of the week) — that is the right ceiling while
+  weekly volume is still being built. The marathon-specific block is allowed more, so the road now
+  arrives at the start line by way of a 30 km and a 32 km run instead of topping out at 24 km. The
+  block's total distance does not change; the same training is redistributed. **The two big runs are
+  delivered by the existing +10 %-per-week ladder, not by the new ceiling** — a share ceiling only
+  ever permits, and the check that holds this says so: with the ladder in force, the lifted ceiling
+  may not add a single metre. Every other brake is untouched.
+  ⚠ The cost is time on feet, and it is deliberate: 32 km at an easy pace is about 3h36, past the
+  2:30–3:00 duration cross-check the doctrine also carries, and the injury evidence behind the
+  ladder is specifically about the longest run. Recorded as the owner's call, with the simulated
+  ladder in front of him, in the calibration inventory.
+- **The scorecard says which half was wrong.** The engine has been grading its own four-week fitness
+  forecasts since 0.37.0, and every settled forecast so far came in low. That single number fused
+  two very different failures: a model whose physics is wrong, and a plan the runner did not run.
+  Each scored week now also recovers what its plan asked for that week and what was actually run, so
+  the two can be told apart — and on the first four weeks they separate cleanly, which is a finding
+  about the prescription, not about the projector. Derived when the scorecard is read, so the ledger
+  of scored forecasts is still written once and never revised. The public showcase gets the ratio;
+  the raw weekly distances stay on the private box.
+
+### Changed
+
+- **A week's role is a field, not a sentence.** Whether a week is a down week, a taper week or a
+  race week used to be decided by reading the first word of the sentence written for the athlete —
+  seven separate governors re-parsed that copy, so rewording a caption could silently move the
+  recovery anchor, the taper's starting point and the progression gates all at once. Each week now
+  carries its role and its phase as real fields, published in the plan, with the sentence rendered
+  for humans alongside. Nothing about any plan changes; a check now fails if a pure copy edit ever
+  moves a training decision again.
+- **A week's stated target is the target it was actually set.** The number the plan published as
+  "what this week asked for" was the fixed template the block started from, not the volume the week
+  was really governed to. While the engine is riding its ceiling — which it does whenever the
+  evidence allows — those two diverged badly: through the base phase the stated bar read between a
+  half and a third of the sheet the athlete was actually handed, and then snapped back into
+  agreement at the next phase boundary. It now publishes the bar the week was governed to, so
+  adherence is measured against what was really asked. The cautious path is unchanged.
+
 ## [0.39.0] - 2026-08-23
 
 ### Changed

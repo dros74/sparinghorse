@@ -66,7 +66,8 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     FT5_SEED_TRAIL_DAYS, FT_ANCHOR_TRAIL_DAYS, FT_DUR_GAIN, FT_DUR_TAU, FT_LADDER_L,
     FT_LADDER_REF, FT_LADDER_RHO, FT_LADDER_TRAIL_DAYS, FT_MARA_TOL, FT_MIN_CTL, FT_SHRINK_K,
     FT_TILT_REF_VDOT, FT_VO2_MIN_KM, FULL_PEAK_ROLES, H1_RESCUE_ACWR, HARD_ZONES,
-    LONG_RUN_EASY_FRAC, LONG_RUN_MAX_FRAC, LONG_RUN_MIN_KM, LONG_RUN_MIN_RATIO,
+    LONG_RUN_EASY_FRAC, LONG_RUN_MAX_FRAC, LONG_RUN_MAX_FRAC_BY_PHASE, LONG_RUN_MIN_KM,
+    LONG_RUN_MIN_RATIO, _long_share_cap,
     LONG_RUN_STEP_CAP, LONG_RUN_STEP_WINDOW, LT1_5K_FRAC, MARATHON_PACE_FRAC, MESO_MAX_HARD,
     NEAR_CEILING_ACWR, PEAK_INTERVAL_FRAC, PEAK_LONG_FRAC, PEAK_MP_FRAC, PEAK_WEEKLY_RAMP,
     PHASE_HARD_CAP, POLARIZED_EASY_MIN, PROG_RAMP, QUALITY_CD_MIN, QUALITY_WU_MIN, RACE_KM,
@@ -82,7 +83,7 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     _ft_plan_race_long, _ft_plan_weekly_trimps, _ft_prediction_score, _ft_project_evo2,
     _ft_race_corpus, _ft_reading_noise, _ft_scale_tilt, _ft_shrunk_correction, _ft_shrunk_slope,
     _ft_speed_state, _ft_state_at, _ft_transfer_correction, _ft_vo2_from_race, _ft_vo2_series,
-    _ft_weekly_response_pairs, _ft_weekly_series, _full_peak, _hard_share, _is_down, _is_taper,
+    _ft_weekly_response_pairs, _ft_weekly_series, _full_peak, _hard_share, _is_down, _is_taper, _week_role, _week_phase,
     _laid_sessions, _mark_load_integrity, _max_streak, _max_week_trimp, _monday, _mp_prog,
     _now_iso, _phase_builds, _plan_all_weeks, _plan_span, _prior_weeks_all,
     _prior_weeks_by_start, _project_finish_time, _project_week, _qblock, _race_seconds,
@@ -3917,6 +3918,47 @@ def track_record_scan(db, today=None):
     return added
 
 
+def _tr_prescription(db, plan_id, week_start):
+    """§TR-A — what the scored plan ASKED of that week, and what was actually run in it.
+
+    The forecast error alone fuses two different failures that need opposite fixes: the model's
+    physics being wrong, and the athlete not running the plan. Measured on his own four scored weeks,
+    the whole 32–57% CTL under-prediction resolves to the second — the plans laid 24.5–38.4 km and he
+    ran 30.1–53.4 km, so given the volume it prescribed, the projector was roughly right. Publishing
+    only "under-predicted by a median 45%" would invite a correction to the projector, which is the
+    fixed-point trap already on the record. So the split is derived and published beside the error.
+
+    Derived at READ time, on purpose: §TR's ledger is written once and never revised, and back-filling
+    new keys into old payloads would either rewrite history or leave two row shapes. `plan_id` is
+    already in the payload, so the laid week is recoverable from the plan JSON it was scored against.
+    Returns (laid_km, ran_km) with either side None when it cannot be recovered."""
+    laid = ran = None
+    if plan_id and week_start:
+        try:
+            row = db.execute("SELECT plan FROM plans WHERE id=?", (plan_id,)).fetchone()
+            if row:
+                pl = json.loads(row["plan"] or "{}")
+                for blk in ("rebase", "base", "build", "peak", "taper"):
+                    for w in ((pl.get(blk) or {}).get("weeks") or []):
+                        if w.get("start") == week_start:
+                            laid = w.get("km")
+                            break
+                    if laid is not None:
+                        break
+        except (sqlite3.OperationalError, ValueError, TypeError):
+            laid = None
+    if week_start:
+        try:
+            r = db.execute(
+                "SELECT COALESCE(SUM(distance), 0) AS km FROM activities "
+                "WHERE sport=? AND date >= ? AND date < date(?, '+7 day')",
+                (RUNNING_SPORT, week_start, week_start)).fetchone()
+            ran = round(r["km"], 1) if r else None
+        except sqlite3.OperationalError:
+            ran = None
+    return laid, ran
+
+
 def track_record(db):
     """The scored history, shaped for display. Aggregates first, because the individual rows are
     anecdotes and the aggregate is the claim: how close the weekly fitness forecast runs, whether it
@@ -3935,6 +3977,12 @@ def track_record(db):
             r["payload"] = {}
     ctl = [r for r in rows if r["kind"] == "ctl_week"]
     races = [r for r in rows if r["kind"] in ("race_final", "race_t8")]
+    # §TR-A — the prescription half of every scored week, derived beside the projection half.
+    for r in ctl:
+        laid, ran = _tr_prescription(db, r["payload"].get("plan_id"), r["key"])
+        r["laid_km"], r["ran_km"] = laid, ran
+        r["ran_ratio"] = (round(ran / laid, 3) if (laid and ran is not None and laid > 0) else None)
+    ratios = [r["ran_ratio"] for r in ctl if r["ran_ratio"] is not None]
     errs = [r["err"] for r in ctl if r["err"] is not None]
     banded = [r for r in races if r["in_band"] is not None]
     out = {"ok": True,
@@ -3944,8 +3992,18 @@ def track_record(db):
                    "close_rate": (round(sum(1 for e in errs if abs(e) <= TR_CTL_CLOSE) / len(errs), 3)
                                   if errs else None),
                    "close_within": TR_CTL_CLOSE,
+                   # §TR-A — the split. `bias` above is the fused number; these two say WHICH half
+                   # moved. A median ran_ratio well over 1.0 means the plans were small and the
+                   # projector was reading them correctly — a prescription finding, not a physics one.
+                   "prescription": {"n": len(ratios),
+                                    "median_ran_ratio": (round(sorted(ratios)[len(ratios) // 2], 3)
+                                                         if ratios else None),
+                                    "over_run": sum(1 for x in ratios if x > 1.05),
+                                    "under_run": sum(1 for x in ratios if x < 0.95)},
                    "points": [{"week": r["key"], "predicted": r["predicted"], "actual": r["actual"],
-                               "err": r["err"], "lead_days": r["lead_days"]} for r in ctl]},
+                               "err": r["err"], "lead_days": r["lead_days"],
+                               "laid_km": r["laid_km"], "ran_km": r["ran_km"],
+                               "ran_ratio": r["ran_ratio"]} for r in ctl]},
            "races": [{"key": r["key"], "kind": r["kind"], "label": r["payload"].get("label"),
                       "date": r["payload"].get("date"), "type": r["payload"].get("type"),
                       "horizon_days": r["lead_days"], "in_band": (None if r["in_band"] is None
@@ -5347,6 +5405,9 @@ _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "compo
 _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pulled": True,
             "elapsed": True, "eq_km": True, "freq_actual": True, "frequency_met": True,
             "frozen": True, "intent": True, "intent_km": True, "intent_runs": True, "km": True,
+            # §P1 — the structured role/phase behind the `intent` sentence already published
+            # above. Strictly less revealing than the sentence they are derived from.
+            "phase": True, "role": True,
             "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
             "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
             "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,
@@ -5513,8 +5574,12 @@ _PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True
 # carries measured fitness, the plan carries `proj_ctl`).
 _PV_TRACK = {"ok": True,
              "ctl": {"n": True, "mae": True, "bias": True, "close_rate": True, "close_within": True,
+                     # §TR-A — the ratio is what carries the calibration claim; the raw laid/ran km
+                     # for a named past week are training volume, and stay on the private box.
+                     "prescription": {"n": True, "median_ran_ratio": True, "over_run": True,
+                                      "under_run": True},
                      "points": {"week": True, "predicted": True, "actual": True, "err": True,
-                                "lead_days": True}},
+                                "lead_days": True, "ran_ratio": True}},
              "races": {"key": True, "kind": True, "label": True, "date": True, "type": True,
                        "horizon_days": True, "in_band": True, "scored_at": True},
              "summary": {"races_scored": True, "banded": True, "in_band": True, "in_band_rate": True,
@@ -5526,6 +5591,8 @@ _PV_WITHHELD = {
     "track.races[].log_score",               # ditto, invertible given sigma
     "track.races[].lo_hms", "track.races[].hi_hms",   # the band brackets the result too
     "track.races[].plan_id",                 # internal
+    "track.ctl.points[].laid_km",            # §TR-A — the week's prescribed volume …
+    "track.ctl.points[].ran_km",             #   … and what was run in it: private, the ratio is public
     "plan.adjustment",                       # free-text / medical context
     "plan.cold_start",                       # §33f-5 — AGE + an HRmax prior, H7-class
     "plan.<phase>.weeks[].av_dates",         # §AV — away days are an empty-house broadcast

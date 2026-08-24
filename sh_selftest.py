@@ -2171,6 +2171,322 @@ def _gov_ok(tag, w, assertive, out):
         out.append(f"{tag} breached EOW ACWR cap: {w.get('proj_acwr')}")
 
 
+def _stc_forecast_decomposition():
+    """§TR-A — the scorecard separates PRESCRIPTION error from PROJECTION error.
+
+    `bias` alone fuses two failures that need opposite fixes: the model's physics being wrong, and
+    the athlete not running the plan. On his own four scored weeks the entire 32–57% CTL
+    under-prediction resolves to the second — the plans laid 24.5–38.4 km and he ran 30.1–53.4 km —
+    so the fused headline would have invited a correction to the projector, which is the fixed-point
+    trap already on the record (a governor fed by a variable derived from what it governs).
+
+    Limb (b) is the claim: two weeks with the SAME forecast error, one caused by an under-laid plan
+    and one by a genuinely wrong projection, must come out of this function DISTINGUISHABLE. If they
+    ever read the same, the split has stopped carrying information and the headline is fused again.
+
+    Limb (c) is §TR's own guarantee: the ledger is written once and never revised, so the split is
+    DERIVED at read time — reading the scorecard must not mutate a stored payload."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    fails = []
+    # two plans, each laying one week; the athlete over-runs the first and matches the second
+    for pid, wk, laid in ((1, "2026-03-02", 20.0), (2, "2026-03-09", 50.0)):
+        plan = {"base": {"weeks": [{"start": wk, "km": laid}]}}
+        m.execute("INSERT INTO plans(id, created_at, for_date, inputs, plan) VALUES(?,?,?,?,?)",
+                  (pid, wk, wk, "{}", S.json.dumps(plan)))
+    for wk, kms in (("2026-03-02", [10.0, 10.0, 12.0]),      # 32 km against a 20 km bar → 1.6×
+                    ("2026-03-09", [17.0, 16.0, 17.0])):     # 50 km against a 50 km bar → 1.0×
+        for j, km in enumerate(kms):
+            d = (_d.fromisoformat(wk) + _td(days=j)).isoformat()
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration) VALUES(?,?,?,?,?)",
+                      (d, d + "T18:00", S.RUNNING_SPORT, km, int(km * 360)))
+    # IDENTICAL forecast error on both weeks — only the cause differs
+    for wk, pid in (("2026-03-02", 1), ("2026-03-09", 2)):
+        m.execute("INSERT INTO track_record(kind,key,scored_at,lead_days,predicted,actual,err,payload) "
+                  "VALUES('ctl_week',?,?,?,?,?,?,?)",
+                  (wk, wk + "T20:00", 28, 40.0, 55.0, 15.0,
+                   S.json.dumps({"predicted": 40.0, "actual": 55.0, "err": 15.0, "plan_id": pid})))
+    before = {r["key"]: r["payload"] for r in m.execute("SELECT key, payload FROM track_record")}
+    out = S.track_record(m)
+    pts = {p["week"]: p for p in out["ctl"]["points"]}
+
+    # (a) the split is derived and present
+    for wk, want_laid, want_ran in (("2026-03-02", 20.0, 32.0), ("2026-03-09", 50.0, 50.0)):
+        p = pts.get(wk) or {}
+        if p.get("laid_km") != want_laid or p.get("ran_km") != want_ran:
+            fails.append(f"{wk}: split not recovered — laid {p.get('laid_km')} (want {want_laid}), "
+                         f"ran {p.get('ran_km')} (want {want_ran})")
+
+    # (b) ⭐ SAME err, DIFFERENT cause — the two must be distinguishable
+    a, b = pts.get("2026-03-02", {}), pts.get("2026-03-09", {})
+    if a.get("err") != b.get("err"):
+        fails.append("fixture broken — the two weeks must carry the SAME forecast error")
+    ra, rb = a.get("ran_ratio"), b.get("ran_ratio")
+    if ra is None or rb is None:
+        fails.append("a scored week published no ran_ratio — the headline is fused again")
+    elif not (ra > 1.4 and 0.95 <= rb <= 1.05):
+        fails.append(f"the causes are not separated: over-run week reads {ra}× and plan-followed week "
+                     f"reads {rb}× — identical errors must not read identically")
+
+    # (c) §TR's ledger is untouched — the split is DERIVED, never written back
+    after = {r["key"]: r["payload"] for r in m.execute("SELECT key, payload FROM track_record")}
+    if after != before:
+        fails.append("reading the scorecard REWROTE the ledger — §TR rows are written once, never revised")
+
+    # (d) the public box gets the ratio, never the raw weekly volumes
+    pub = S.public_view("track_record", out)
+    for p in (pub.get("ctl") or {}).get("points") or []:
+        if "laid_km" in p or "ran_km" in p:
+            fails.append(f"public view leaked raw weekly volume: {sorted(p)}")
+            break
+    else:
+        if not any(p.get("ran_ratio") is not None for p in (pub.get("ctl") or {}).get("points") or []):
+            fails.append("public view dropped ran_ratio — the calibration claim it exists to carry")
+    presc = out["ctl"].get("prescription") or {}
+    if presc.get("over_run") != 1 or presc.get("under_run") != 0 or presc.get("n") != 2:
+        fails.append(f"aggregate miscounts the prescription half: {presc}")
+    return _st("det", "forecast-decomposition",
+               "§TR-A the scorecard splits PRESCRIPTION error from PROJECTION error: each scored week "
+               "recovers what its plan asked and what was run, two weeks with the SAME forecast error "
+               "but different causes read differently, the split is derived (§TR's ledger is never "
+               "rewritten), and the public box gets the ratio without the raw weekly volumes",
+               passed=not fails,
+               expect="split recovered; same err ⇒ different ratio; ledger unchanged; public ratio-only",
+               got={"violations": fails or "none", "over_run_week": ra, "plan_followed_week": rb,
+                    "prescription": presc})
+
+
+def _stc_long_run_phase_cap():
+    """§PRO26 — the long run's SHARE ceiling is per-phase, and lifting it does not loosen any brake.
+
+    §PRO18 put one Daniels/Hansons number (0.30) across the whole block. That is right where chronic
+    volume is being built and wrong for the marathon-specific block: at 0.30 the road tops out at a
+    24.4 km longest run, and the athlete reaches the start line never having been on his feet past
+    2h42. The owner's call of 2026-08-25 lifts it for build/peak only.
+
+    The safety argument is limb (d), and it is the whole reason this is a small change: the two big
+    long runs are delivered by §PRO9's +10%-over-trailing-4wk LADDER, not by this number. A share
+    ceiling can only ever PERMIT; it never lays a metre the step cap has not already walked up to. So
+    a lifted share with the step cap in force must still be bounded by the step cap — if that ever
+    stops holding, this constant became a lever instead of a ceiling."""
+    from datetime import date
+    easy, fails = 425, []
+    zones = {"easy": easy, "interval": 300, "marathon": 360, "threshold": 335, "lt1": 390}
+    mon = date(2026, 8, 3)
+    base_wk = {"wk": 1, "km": 70, "runs": 5, "long": 30, "strides": 0, "quality": [],
+               "phase": "base", "role": "build", "intent": "Easy aerobic base"}
+    peak_wk = {**base_wk, "phase": "peak", "intent": "Peak — race specificity"}
+    trimp = 70.0 * (easy / 60.0) * S.EASY_TRIMP_PER_MIN
+    b_s, _ = S._distribute_week(base_wk, mon, trimp, easy, zones)
+    p_s, _ = S._distribute_week(peak_wk, mon, trimp, easy, zones)
+    b_long, p_long = max(x["km"] for x in b_s), max(x["km"] for x in p_s)
+    b_km = sum(x["km"] for x in b_s) or 1.0
+    p_km = sum(x["km"] for x in p_s) or 1.0
+
+    # (a) the phases genuinely differ, and (b) BASE still obeys the §PRO18 doctrine number
+    if not (p_long > b_long + 0.5):
+        fails.append(f"peak long {p_long}km is not above base long {b_long}km — the cap is not phase-scoped")
+    if b_long / b_km > S.LONG_RUN_MAX_FRAC + 0.01:
+        fails.append(f"BASE breached the §PRO18 doctrine cap: {round(b_long / b_km, 3)} > {S.LONG_RUN_MAX_FRAC}")
+    # (c) …and peak stays inside its OWN ceiling — a lifted cap is still a cap
+    pk_cap = S.LONG_RUN_MAX_FRAC_BY_PHASE["peak"]
+    if p_long / p_km > pk_cap + 0.01:
+        fails.append(f"PEAK breached its own ceiling: {round(p_long / p_km, 3)} > {pk_cap}")
+
+    # (d) ⭐ THE SAFETY LIMB — with §PRO9's ladder in force, the lifted share may not add one metre
+    # past the +10% step. The share ceiling PERMITS; the ladder is what walks the long run up.
+    step_cap = 12.0
+    c_s, _ = S._distribute_week(peak_wk, mon, trimp, easy, zones, long_km_cap=step_cap)
+    worst = max(x["km"] for x in c_s)
+    if worst > step_cap + 0.15:                  # 0.15 = integer-minute rounding on one session
+        fails.append(f"§PRO26 let a session ({worst}km) past the §PRO9 step cap ({step_cap}km) — the "
+                     f"share ceiling became a lever instead of a ceiling")
+    if abs(sum(x["km"] for x in c_s) - p_km) > 1.5:
+        fails.append("the step-capped peak week shed volume instead of redistributing it")
+
+    # (e) an unknown/absent phase falls back to the block-wide doctrine number (never to the lift)
+    for tag, wk in (("no phase", {k: v for k, v in base_wk.items() if k != "phase"}),
+                    ("unknown phase", {**base_wk, "phase": "sabbatical"})):
+        f_s, _ = S._distribute_week(wk, mon, trimp, easy, zones)
+        f_long = max(x["km"] for x in f_s); f_km = sum(x["km"] for x in f_s) or 1.0
+        if f_long / f_km > S.LONG_RUN_MAX_FRAC + 0.01:
+            fails.append(f"{tag} fell back to a LIFTED cap ({round(f_long / f_km, 3)}) — an unclassified "
+                         f"week must inherit the conservative doctrine number")
+
+    # (f) the re-base (pure easy, zones=None) is untouched — its own conservative cap, byte-identical
+    r_s, _ = S._distribute_week({**base_wk, "phase": "rebase"}, mon, trimp, easy, None)
+    r_long = max(x["km"] for x in r_s); r_km = sum(x["km"] for x in r_s) or 1.0
+    if r_long / r_km > S.REBASE_LONG_CAP + 0.01:
+        fails.append(f"the re-base breached REBASE_LONG_CAP: {round(r_long / r_km, 3)}")
+    return _st("det", "long-run-phase-cap",
+               "§PRO26 the long-run share ceiling is per-phase: base keeps the §PRO18 doctrine number, "
+               "build/peak are lifted so the marathon block can reach 30–32 km, an unclassified week "
+               "falls back to the conservative cap, the re-base is untouched — and the lift NEVER adds "
+               "a metre past §PRO9's +10% ladder (a ceiling that permits, never a lever that lays)",
+               passed=not fails,
+               expect="peak long > base long; each inside its own cap; step cap still binds; fallback conservative",
+               got={"violations": fails or "none",
+                    "base_long_km": round(b_long, 1), "base_share": round(b_long / b_km, 3),
+                    "peak_long_km": round(p_long, 1), "peak_share": round(p_long / p_km, 3),
+                    "step_capped_worst": round(worst, 1), "caps": S.LONG_RUN_MAX_FRAC_BY_PHASE})
+
+
+def _stc_week_role():
+    """§P1 — a week's periodization ROLE and PHASE are fields, not the prefix of a display sentence.
+
+    Before this, `_is_down` parsed `intent` (`startswith("down")`) and the §PRO6 deload exemption
+    sniffed `startswith("peak")`. Seven governors read those parses — the §PRO2 trough anchor, the
+    taper's non-down chain, the load-integrity honesty pass and the banking gates among them — so a
+    week's periodization role lived in copy written for humans, and rewording a sentence silently
+    moved all of them at once. Limb (e) IS that defect: reword the sentence, and the role must not
+    move. The legacy sentence parse survives only as a fallback for plan JSON saved before §P1, and
+    limb (b) is what keeps that fallback honest by holding field and sentence in agreement on every
+    shape the engine actually lays."""
+    fails = []
+    shapes = {"base": S.base_shape(8, 40), "build": S.build_shape(7, 60),
+              "peak": S.peak_shape(2, 70), "taper": S.taper_shape(3, 70),
+              "rebase": [dict(w) for w in S.REBASE_SHAPE]}
+    legal_roles, seen = {"build", "down", "taper", "race"}, {}
+    for ph, wks in shapes.items():
+        for w in wks:
+            tag = f"{ph}/wk{w.get('wk')}"
+            # (a) stamped at all, and with a legal value
+            if w.get("phase") != ph:
+                fails.append(f"{tag}: phase field is {w.get('phase')!r}, expected {ph!r}")
+            if w.get("role") not in legal_roles:
+                fails.append(f"{tag}: role field is {w.get('role')!r}, not one of {sorted(legal_roles)}")
+            # (b) the field and the sentence AGREE — this is what makes the legacy fallback safe
+            by_field, by_sentence = S._week_role(w), S._week_role(w.get("intent"))
+            if by_field != by_sentence:
+                fails.append(f"{tag}: role field {by_field!r} disagrees with its own sentence "
+                             f"({by_sentence!r} from {w.get('intent')!r}) — the pre-§P1 fallback would lie")
+            seen[by_field] = seen.get(by_field, 0) + 1
+    # the fixture has to actually EXERCISE the roles, or (b) proves nothing
+    for need in ("down", "taper", "race", "build"):
+        if not seen.get(need):
+            fails.append(f"fixture never produced a {need!r} week — the agreement limb is vacuous")
+
+    # (c) the predicates read the FIELD
+    if not S._is_down({"role": "down", "intent": "Anything at all"}):
+        fails.append("_is_down ignored an explicit role=down")
+    if S._is_down({"role": "build", "intent": "Down week — absorb the block"}):
+        fails.append("_is_down preferred the sentence over an explicit role=build")
+    if not S._is_taper({"role": "race", "intent": "whatever"}):
+        fails.append("_is_taper ignored an explicit role=race")
+
+    # (d) …and they still fall back for a week that predates the field (old stored plan JSON)
+    if not S._is_down({"intent": "Down week — absorb the block"}):
+        fails.append("a pre-§P1 week (no role field) lost its down-ness — old plans would re-grade wrong")
+    if S._week_phase({"intent": "Peak — race specificity"}) != "peak":
+        fails.append("a pre-§P1 peak week lost its §PRO6 deload exemption")
+
+    # (e) THE REGRESSION — rewording display copy must not move a governor.
+    reworded = [{**w, "intent": "Recovery block: take it very gently this week"}
+                for w in S.base_shape(8, 40)]
+    if [S._is_down(w) for w in reworded] != [S._is_down(w) for w in S.base_shape(8, 40)]:
+        fails.append("rewording the intent sentence moved the down-week decision — the role is still "
+                     "encoded in display copy")
+    # and the down cadence itself is unchanged by the rewrite
+    if sum(1 for w in reworded if S._is_down(w)) != 8 // S.BASE_DOWN_EVERY:
+        fails.append("down-week cadence changed under a pure copy edit")
+
+    # (f) the fields reach the PUBLISHED week (they ride the {**wk} spread)
+    from datetime import date
+    blk, _ = S.generate_block(S.base_shape(4, 40), date(2026, 8, 3), 50.0, 45.0, 425,
+                              regime="assertive", last_nondown=400.0)
+    for w in blk:
+        if not w.get("role") or not w.get("phase"):
+            fails.append(f"published week {w.get('start')} carries no role/phase — readers must still guess")
+            break
+    return _st("det", "week-role",
+               "§P1 the week's periodization role + phase are published FIELDS: every shaper stamps "
+               "them, they agree with the human sentence they replaced (so the pre-§P1 fallback stays "
+               "honest), the predicates prefer the field, a week without one still falls back, and "
+               "rewording display copy no longer moves the down-week decision",
+               passed=not fails,
+               expect="every shape week stamped + agreeing; predicates read the field; legacy falls back; copy edit is inert",
+               got={"violations": fails or "none", "roles_seen": seen,
+                    "weeks_checked": sum(len(v) for v in shapes.values())})
+
+
+def _stc_intent_bar():
+    """§PRO25 — the week PUBLISHES the bar it was governed to, not the shape skeleton.
+
+    §PRO13 made the straddling week DECIDE on the ridden intent and §6e3 made the sentence QUOTE it;
+    the published `intent_km` field was the one place still carrying the template. That matters
+    because `intent_km` is the only "what was asked of this week" number in the payload, so every
+    reader downstream — adherence, the §H5 load fingerprint, and any future absorbed-fraction test —
+    was dividing by a number that is right in caution and 1.8–3.3× too small in an assertive base
+    week. Measured on his 2026-08-24 plan: base weeks published 16–24 against a 42–65 km sheet and
+    then snapped to ~1.00× at the base→build boundary, a phase-dependent discontinuity in the bar
+    itself. The regression this pins: revert §PRO25 and the assertive limbs below read the skeleton.
+
+    Caution is byte-identical BY CONSTRUCTION (there the skeleton IS the intent and `clipped` carries
+    the governor's cut), and limb (c) is what holds that promise. Pure — no DB, no clock."""
+    from datetime import date, timedelta
+    easy = 425
+    # skeleton deliberately far below what assertive rides, so bar-from-skeleton and bar-from-governor
+    # are separable by more than any rounding.
+    shape = {"wk": 1, "km": 20, "runs": 5, "long": 6, "strides": 0, "intent": "General — aerobic"}
+    mon = date(2026, 8, 3)
+    today = mon + timedelta(days=1)              # Tuesday — Monday elapsed
+    ctl0, atl0 = 50.0, 45.0
+    fails = []
+    a_full, _ = S.generate_block([dict(shape)], mon, ctl0, atl0, easy, regime="assertive",
+                                 last_nondown=400.0)
+    c_full, _ = S.generate_block([dict(shape)], mon, ctl0, atl0, easy, regime="caution")
+    a_strd, _ = S.generate_block([dict(shape)], mon, ctl0, atl0, easy, today=today,
+                                 week_actuals=(1, 5.0), regime="assertive", last_nondown=400.0)
+    c_strd, _ = S.generate_block([dict(shape)], mon, ctl0, atl0, easy, today=today,
+                                 week_actuals=(1, 5.0), regime="caution")
+    aw, cw, asw, csw = a_full[0], c_full[0], a_strd[0], c_strd[0]
+
+    # (a) ASSERTIVE FULL WEEK — the bar is the governed intent, not the skeleton.
+    if aw.get("intent_km") is None:
+        fails.append("assertive full week published no intent_km at all")
+    elif abs(aw["intent_km"] - shape["km"]) < 1.0:
+        fails.append(f"assertive full week published the SKELETON as its bar "
+                     f"({aw['intent_km']} ≈ {shape['km']}) while laying {aw['km']}km")
+
+    # (b) ASSERTIVE STRADDLE — same rule on the mid-week path (§PRO13 already computes this number).
+    if asw.get("intent_km") is None:
+        fails.append("assertive straddling week published no intent_km at all")
+    elif abs(asw["intent_km"] - shape["km"]) < 1.0:
+        fails.append(f"assertive straddle published the SKELETON as its bar ({asw['intent_km']})")
+
+    # (c) CAUTION CONTRACT — byte-identical: the skeleton IS the ask, on BOTH paths.
+    for tag, w in (("caution full", cw), ("caution straddle", csw)):
+        if w.get("intent_km") != shape["km"]:
+            fails.append(f"{tag} moved its bar off the skeleton: "
+                         f"{w.get('intent_km')} != {shape['km']} (caution must stay byte-identical)")
+
+    # (d) THE CONSEQUENCE THE FIELD EXISTS FOR — a runner who runs exactly the laid sheet must score
+    # ~1.0 against the bar, in EVERY regime. Against the skeleton an assertive week scored ~2.3.
+    for tag, w in (("assertive full", aw), ("caution full", cw)):
+        bar = w.get("intent_km") or 0.0
+        if bar <= 0:
+            fails.append(f"{tag}: bar is {bar} — nothing to divide by")
+            continue
+        frac = w["km"] / bar
+        if not (0.85 <= frac <= 1.15):
+            fails.append(f"{tag}: running the laid sheet exactly scores {round(frac, 2)}× against its "
+                         f"own bar ({w['km']}km vs {bar}km) — the denominator is not the prescription")
+    return _st("det", "intent-bar",
+               "§PRO25 the published intent_km IS the bar the week was governed to: assertive "
+               "publishes the ridden intent on the full-week AND straddle paths (never the skeleton), "
+               "caution stays byte-identical on the skeleton, and running the laid sheet exactly "
+               "scores ~1.0× against the bar in both regimes (the absorbed-fraction denominator)",
+               passed=not fails,
+               expect="assertive bar ≠ skeleton on both paths; caution bar == skeleton; laid/bar ≈ 1.0",
+               got={"violations": fails or "none",
+                    "assertive_full": {"km": aw["km"], "intent_km": aw.get("intent_km")},
+                    "assertive_straddle": {"km": asw["km"], "intent_km": asw.get("intent_km")},
+                    "caution_full": {"km": cw["km"], "intent_km": cw.get("intent_km")},
+                    "skeleton_km": shape["km"]})
+
+
 def _stc_straddle_intent():
     """§PRO13 — the week straddling `today` must lay the intent ITS REGIME holds, not the skeleton.
     §6o/§6o-B were written against the caution model (`chosen = min(intent, allowed)`), where the
@@ -10956,7 +11272,7 @@ def run_server_selftest(db, categories=None):
 def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
-                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(),
+                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),

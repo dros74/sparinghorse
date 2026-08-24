@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.39.0"
+ENGINE_VERSION = "0.40.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -696,16 +696,43 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # the evidence axis instead: Aarhus is specifically about the LONGEST RUN, and 23 km is less
 # single-bout damage than 32 km while the block carries 116 km MORE total training.
 LONG_RUN_MAX_FRAC = 0.30
+# §PRO26 — the share ceiling BY PHASE. §PRO18 set one number for the whole block on published
+# doctrine (Daniels/Hansons: the long run ≤ 25–30% of the week, cross-checked by a 2:30–3:00 duration
+# ceiling), and that is the right ceiling for BASE, where chronic volume is being built and the
+# long-run share is competing with frequency for the same biomechanical budget. It is the wrong
+# ceiling for the marathon-specific block: at 0.30 the whole 20-week road tops out at a 24.4 km
+# longest run on a 72.5 km peak week, and the athlete arrives at a marathon never having been on his
+# feet past 2h42. His OWN history (calibrated 2026-06-20) ran median 0.33 · p75 0.40 · p90 0.50, so
+# the peak number below sits inside his p90 rather than past it.
+# ⚠ THE COST IS DURATION, AND IT IS REAL AND OWNED: 32 km at his easy pace is ~3h36, past Daniels'
+# 3:00 cross-check by 36 minutes, and Aarhus is specifically about single-bout damage from the
+# LONGEST run. This is the owner's call of 2026-08-25, taken with the simulated ladder in front of
+# him: he judged that arriving at a goal marathon never having run 30 km was the larger risk of the
+# two. Measured on his live DB, the whole block total does not move — the same training, redistributed.
+# ⚠ The two big runs are DELIVERED BY THE STEP CAP, not by this number: §PRO9's +10%-over-trailing-4wk
+# ladder is what actually walks the long run up, so the peak value alone cannot produce them (peak is
+# 2 weeks; from a 23.1 km build ceiling the ladder reaches only ~28 km by race week). The build entry
+# exists to start the ramp early enough for the ladder to arrive, NOT to make build weeks long-heavy —
+# it binds on the last build weeks only. Both caps still only ever REDUCE; every ACWR, eq_km and
+# §PRO9 governor above is untouched and still binds first.
+LONG_RUN_MAX_FRAC_BY_PHASE = {"build": 0.38, "peak": 0.45}
 REBASE_LONG_CAP = 0.35     # pure-easy blocks (re-base) keep the original cap — leave the cautious restart untouched
 LONG_RUN_MIN_KM = 4.0      # a "long run" the ACWR governor clips below this isn't functioning as a long run —
                            # relabel it a shakeout (never force load past the safety ceiling). See _mark_load_integrity.
+# §P1 — every shape week carries its PERIODIZATION ROLE and its PHASE as real fields. Before this the
+# only carrier was the human `intent` sentence, which seven governors then re-parsed (`_is_down`), so a
+# week's role was encoded in display copy: rewording a sentence silently moved the §PRO2 trough anchor,
+# the taper's non-down chain, the load-integrity pass and the banking gates at once. The house rule is
+# that a governor publishes its decision variable rather than making its readers reconstruct it.
+# `intent` stays the sentence it always was; `role`/`phase` are what the engine reads. They ride the
+# `{**wk}` spread into the published week, so the plan payload now carries them too.
 REBASE_SHAPE = [
-    {"wk": 1, "km": 13, "runs": 3, "long": 5, "strides": 0, "intent": "Re-establish frequency — pure easy feel, HR controlled, no urge to stop"},
-    {"wk": 2, "km": 15, "runs": 4, "long": 6, "strides": 0, "intent": "Add the 4th run if week 1 felt easy"},
-    {"wk": 3, "km": 17, "runs": 4, "long": 6, "strides": 2, "intent": "First gentle neuromuscular touch — strides ×2"},
-    {"wk": 4, "km": 13, "runs": 3, "long": 5, "strides": 0, "intent": "Down week — consolidate (masters + post-illness conservative)"},
-    {"wk": 5, "km": 18, "runs": 4, "long": 7, "strides": 2, "intent": "Extend easy aerobic volume"},
-    {"wk": 6, "km": 19, "runs": 5, "long": 7, "strides": 2, "intent": "End-of-block check → optional relaxed 5k probe, ready for base-build"},
+    {"wk": 1, "km": 13, "runs": 3, "long": 5, "strides": 0, "phase": "rebase", "role": "build", "intent": "Re-establish frequency — pure easy feel, HR controlled, no urge to stop"},
+    {"wk": 2, "km": 15, "runs": 4, "long": 6, "strides": 0, "phase": "rebase", "role": "build", "intent": "Add the 4th run if week 1 felt easy"},
+    {"wk": 3, "km": 17, "runs": 4, "long": 6, "strides": 2, "phase": "rebase", "role": "build", "intent": "First gentle neuromuscular touch — strides ×2"},
+    {"wk": 4, "km": 13, "runs": 3, "long": 5, "strides": 0, "phase": "rebase", "role": "down", "intent": "Down week — consolidate (masters + post-illness conservative)"},
+    {"wk": 5, "km": 18, "runs": 4, "long": 7, "strides": 2, "phase": "rebase", "role": "build", "intent": "Extend easy aerobic volume"},
+    {"wk": 6, "km": 19, "runs": 5, "long": 7, "strides": 2, "phase": "rebase", "role": "build", "intent": "End-of-block check → optional relaxed 5k probe, ready for base-build"},
 ]
 # Run-day layouts per weekly frequency (0=Mon … 6=Sun). The block is Monday-anchored
 # (_rebase_start), so these are REAL weekdays. Every layout ENDS on Sunday (offset 6): the long run
@@ -1065,6 +1092,7 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * BASE_LONG_FRAC), "strides": 0 if down else 2,
                       "quality": quality,
+                      "phase": "base", "role": "down" if down else "build",   # §P1
                       "intent": "Down week — absorb the block" if down
                       else ("General — aerobic volume + early VO₂ (build it now, hold it cheap)"
                             if davis else "Easy aerobic base — build durable volume")})
@@ -1153,6 +1181,7 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                  "attach": "long", "label": "marathon-pace long run", "component": "resilience"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * BUILD_LONG_FRAC), "strides": 0, "quality": quality,
+                      "phase": "build", "role": "down" if down else "build",   # §P1
                       "intent": "Down week — absorb the block" if down
                       else ("Supportive — growing MP work + VO₂ maintenance" if davis
                             else "Build — specific: VO₂ intervals + marathon-pace long run")})
@@ -1192,8 +1221,10 @@ def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                  "attach": "long", "label": "race-pace long run", "component": "resilience"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * PEAK_LONG_FRAC), "strides": 0, "quality": quality,
-                      # the "Peak" prefix is LOAD-BEARING: generate_block's §PRO6 deload exemption
-                      # sniffs it (is_peak) — the peak rides into the taper, its recovery
+                      # §P1 — the §PRO6 deload exemption used to sniff the "Peak" PREFIX of the
+                      # sentence below (the peak rides into the taper; the taper IS its recovery).
+                      # `phase` carries that now, so the sentence is free to be reworded.
+                      "phase": "peak", "role": "build",
                       "intent": ("Peak — marathon-specific: long-fast resilience + VO₂ maintenance" if davis
                                  else "Peak — race specificity: race-pace long run + sharpening")})
     return shape
@@ -1224,6 +1255,7 @@ def taper_shape(n_weeks, start_km, runs=BASE_RUNS, race_zone="threshold"):
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * TAPER_LONG_FRAC), "strides": 0 if race_week else 2,
                       "quality": quality,
+                      "phase": "taper", "role": "race" if race_week else "taper",   # §P1
                       "intent": "Race week — freshen up, stay loose" if race_week
                       else "Taper — drop volume, keep sharpness"})
     return shape
@@ -1366,7 +1398,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     long_idx = n - 1
     # re-base is the pure-easy (zones=None) block — keep its original conservative long-run cap so the
     # post-illness restart stays byte-identical; the recalibrated cap applies to the marathon-prep phases.
-    long_cap = LONG_RUN_MAX_FRAC if zones else REBASE_LONG_CAP
+    long_cap = _long_share_cap(wk, zones)      # §PRO26
     long_w = min(wk["long"] / wk["km"], long_cap) if wk["km"] else 0.0
     n_short = len(easy_slots) - 1                        # the long slot is always present
     # Both §PRO15's aim and §PRO9's cap are TOTAL long-run distances, and the MP finish rides on top
@@ -1506,7 +1538,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # five stubs). Normal weeks never trip it; the quality slots are untouched.
     # taper is EXEMPT: race-week leg-looseners are deliberately tiny — a 2km shakeout before a race
     # is a real prescription, not a junk run (same reasoning as _mark_load_integrity's exemption)
-    min_tr = 0.0 if _is_taper(wk.get("intent")) else \
+    min_tr = 0.0 if _is_taper(wk) else \
         RUN_MIN_KM * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
     if 0 < easy_budget * long_w < min_tr and long_idx in easy_slots:
         easy_slots = [long_idx]                              # even the LONG's share is a stub —
@@ -1915,17 +1947,55 @@ def _apply_adjustment(sessions, dt, adj):
     return {"sessions": out_s, "dt": out_dt, "touched": touched}
 
 
-def _is_down(intent):
-    """A week is a deliberate down/recovery week iff its intent text says so — uniform across every
-    shape (re-base wk4, base/build 3:1). The single test the banking gates + the earned lift share."""
-    return str(intent or "").lower().startswith("down")
+def _week_role(w):
+    """§P1 — a week's periodization ROLE, read from the field the shapers stamp. Falls back to parsing
+    the human `intent` sentence ONLY for a week that predates the field (a plan JSON saved before §P1,
+    or a hand-built fixture), so old stored plans keep grading correctly. Accepts a week dict or a bare
+    intent string; `det/week-role` holds field and sentence in agreement on every shape the engine lays."""
+    if isinstance(w, dict):
+        r = w.get("role")
+        if r:
+            return r
+        w = w.get("intent")
+    t = str(w or "").lower()
+    return ("down" if t.startswith("down") else
+            "race" if t.startswith("race week") else
+            "taper" if t.startswith("taper") else "build")
 
 
-def _is_taper(intent):
+def _week_phase(w):
+    """§P1 — a week's PHASE (rebase/base/build/peak/taper), read from the field the shapers stamp.
+    Falls back to the "Peak"-prefix sniff the §PRO6 deload exemption used before the field existed,
+    so a plan JSON saved before §P1 still exempts its peak weeks."""
+    if isinstance(w, dict):
+        ph = w.get("phase")
+        if ph:
+            return ph
+        w = w.get("intent")
+    t = str(w or "").lower()
+    return ("peak" if t.startswith("peak") else
+            "taper" if (t.startswith("taper") or t.startswith("race week")) else None)
+
+
+def _long_share_cap(wk, zones):
+    """§PRO26 — the long run's share ceiling for THIS week. The re-base (pure-easy, zones=None) keeps
+    its own conservative cap so the post-illness restart stays byte-identical; every other phase takes
+    its own entry, falling back to the block-wide §PRO18 doctrine number."""
+    if not zones:
+        return REBASE_LONG_CAP
+    return LONG_RUN_MAX_FRAC_BY_PHASE.get(_week_phase(wk), LONG_RUN_MAX_FRAC)
+
+
+def _is_down(w):
+    """A week is a deliberate down/recovery week iff its ROLE says so — uniform across every shape
+    (re-base wk4, base/build 3:1). The single test the banking gates + the earned lift share."""
+    return _week_role(w) == "down"
+
+
+def _is_taper(w):
     """A taper or race week — deliberately low-volume by design. Its short long run is the plan
     working, not a fatigue cap, so the load-integrity honesty pass must NOT relabel/flag it."""
-    t = str(intent or "").lower()
-    return t.startswith("taper") or t.startswith("race week")
+    return _week_role(w) in ("taper", "race")
 
 
 def _current_week_actuals(db, today):
@@ -2308,7 +2378,7 @@ def _mark_load_integrity(w, zones):
     attribution here, the very failure this function exists to avoid: nothing was clipped, the week
     simply has no long run to offer yet."""
     intent = w.get("intent")
-    if _is_down(intent) or _is_taper(intent):
+    if _is_down(w) or _is_taper(w):      # §P1 — the week's role field, not its sentence
         return w
     # §JR (0.26.1) — the governor crushed this week below even ONE honest run and the junk floor
     # shed everything rather than publish 0.0-km stubs (the old path laid a "0.0 km · long easy
@@ -2467,9 +2537,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # mutate `shape`, and the straddling week is already underway.
             # Caution keeps `intent_trimp`/`wk["km"]` verbatim ⇒ byte-identical.
             wk_intent_trimp, wk_intent_km = intent_trimp, (wk.get("km") or 0)
-            if assertive and not _is_taper(wk.get("intent")):
-                _sd, _sp = _is_down(wk.get("intent")), \
-                    str(wk.get("intent") or "").lower().startswith("peak")
+            if assertive and not _is_taper(wk):
+                _sd, _sp = _is_down(wk), _week_phase(wk) == "peak"      # §P1
                 _prog = ((1 + PROG_RAMP) * last_nondown
                          if (last_nondown and eff_cap >= ACWR_SOFT - 1e-9
                              and not _sd and not _sp) else None)
@@ -2500,7 +2569,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             long_km_aim = None
             if assertive:
                 _lw = min((wk["long"] / wk["km"]) if wk["km"] else 0.0,
-                          LONG_RUN_MAX_FRAC if zones else REBASE_LONG_CAP)
+                          _long_share_cap(wk, zones))      # §PRO26
                 long_km_aim = _lw * wk_intent_km
             full, _ = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec, zones,
                                        days_override=av_days, av_blocked=av_off,
@@ -2519,7 +2588,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # covered" at the skeleton's km, or the remainder would fall to optional rest while
                 # the plan still intended a third of the week's volume.
                 left_tr = max(0.0, wk_intent_km - a_km) * TRIMP_PER_KM
-                min_left = 0.0 if _is_taper(wk.get("intent")) else \
+                min_left = 0.0 if _is_taper(wk) else \
                     RUN_MIN_KM * (easy_pace_sec / 60.0) * EASY_TRIMP_PER_MIN
                 freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= wk_intent_km
                 vol_met = wk_intent_km > 0 and left_tr <= min_left
@@ -2612,7 +2681,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "trimp_total": round(sum(s.get("trimp", 0.0) for s in sessions), 1),
                      "proj_acwr": eow, "peak_acwr": peak, "proj_ctl": round(ctl, 1),
                      "proj_acwr_flat": eow_flat,
-                     "intent_km": wk["km"], "adjusted": adjusted["touched"],
+                     # §PRO25 — the straddling week's bar, same rule as the full-week path above.
+                     # `wk_intent_km` is the number §PRO13 already computed and §6e3 already prints.
+                     "intent_km": (round(wk_intent_km, 1) if assertive else wk["km"]),
+                     "adjusted": adjusted["touched"],
                      "clipped": False, "partial": True,
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
@@ -2665,7 +2737,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # into the build phase. Which DAY of the week the plan is regenerated on must not
             # re-phase the road — this is the fold's judgment applied at lay time.
             if assertive:
-                if _is_down(wk.get("intent")) or _is_taper(wk.get("intent")):
+                if _is_down(wk) or _is_taper(wk):
                     consec_hard = 0
                 else:
                     consec_hard = consec_hard + 1 if (eow and eow >= NEAR_CEILING_ACWR) else 0
@@ -2676,9 +2748,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             blk_eqs.append(round((week_actual_eq or 0.0) + _week_eq_km(rem_s), 2))
             blk_seq.append(max((_session_eq_km(x) for x in rem_s), default=0.0))   # §PRO17
             continue
-        is_down = _is_down(wk.get("intent"))
-        is_taper = _is_taper(wk.get("intent"))
-        is_peak = str(wk.get("intent") or "").lower().startswith("peak")
+        is_down = _is_down(wk)
+        is_taper = _is_taper(wk)
+        is_peak = _week_phase(wk) == "peak"      # §P1 — the field, not the sentence's prefix
         # §PRO6 — force a deload when too many near-ceiling building weeks have stacked up without one.
         # EXCLUDE the PEAK/sharpen phase: it always flows straight into the taper, which IS the recovery,
         # so an extra forced deload there is redundant and would shed race fitness right before race day
@@ -2694,7 +2766,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         deload_pulled = False
         if forced_deload:
             nxt = next((j for j in range(wi + 1, len(shape))
-                        if _is_down(shape[j].get("intent"))), None)
+                        if _is_down(shape[j])), None)
             if nxt is not None:
                 a, b, _MISS = wk, shape[nxt], object()
                 for k in (set(a) | set(b)) - {"wk"}:
@@ -2871,7 +2943,22 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                    round(_eow_soft(eow, eow_flat, m_ctl_n, ctl_n, atl_n,
                                                    assertive, soft_ctl_floor) or 0.0, 4)),
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
-                "intent_km": wk["km"], "adjusted": adjusted["touched"], "clipped": clipped}
+                # §PRO25 — publish the intent the week was actually GOVERNED to, not the skeleton's
+                # template km. In CAUTION `chosen = min(intent_trimp, allowed)`, so the skeleton IS the
+                # ask and `clipped` carries the governor's cut — `wk["km"]` stays, byte-identical. In
+                # ASSERTIVE the week rides the ceiling (`chosen = allowed`) and the template is not the
+                # ask at all: measured on his 2026-08-24 plan the published intent ran 1.76–3.34× BELOW
+                # the laid sheet across the whole base phase and then snapped to ~1.00× at the
+                # base→build boundary — a phase-dependent discontinuity in the one field whose job is to
+                # be the honest bar. §PRO13 and §6e3 already recompute this same intent for the straddle
+                # path's decisions and for the sentence it prints; it was simply never PUBLISHED, so
+                # every reader downstream still had to guess from the skeleton (the house rule: a
+                # governor publishes its decision variable rather than making its readers reconstruct
+                # it). §AV's shed is inside `chosen` deliberately — a travel week's intent IS lighter.
+                # ⚠ This is the denominator any "was the block absorbed?" test must use: against the
+                # skeleton, absorbed_frac read ~2.4 in base and ~1.0 in build for identical adherence.
+                "intent_km": (round(chosen / TRIMP_PER_KM, 1) if assertive else wk["km"]),
+                "adjusted": adjusted["touched"], "clipped": clipped}
         # §CARD3 — the as-laid prescription count. At lay time it equals the header's honest count;
         # once the week is lived, §CARD3's elapsed true-up rewrites `runs` to actuals and THIS field
         # keeps the bar the athlete was actually set (what §6e banking judges adherence against).
@@ -3995,7 +4082,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
     # trough anchor, in calendar order, so the limiter & trough see a continuous history across the
     # frozen→future seam, not just a per-call reset.
     for w in sorted(frozen, key=lambda w: w["start"]):
-        if _is_down(w.get("intent")) or _is_taper(w.get("intent")):
+        if _is_down(w) or _is_taper(w):
             consec_hard = 0
         else:
             a = w.get("proj_acwr")
@@ -4401,7 +4488,7 @@ def generate_plan(db, force_regime=None, today=None):
             # CTL into the race. Realised chaining makes the taper a true cut-back from the real peak.
             if block["weeks"]:
                 if regime == "assertive":
-                    nd = [w["km"] for w in block["weeks"] if not _is_down(w.get("intent"))]
+                    nd = [w["km"] for w in block["weeks"] if not _is_down(w)]
                     cur_km = max(nd) if nd else cur_km
                 else:
                     cur_km = block["weeks"][-1]["intent_km"]

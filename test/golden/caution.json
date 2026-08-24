@@ -22,11 +22,13 @@
         "km": 19.4,
         "long": 5,
         "peak_acwr": 0.998,
+        "phase": "base",
         "proj_acwr": 0.96,
         "proj_acwr_flat": 0.867,
         "proj_acwr_soft": 0.96,
         "proj_ctl": 21.0,
         "quality": [],
+        "role": "build",
         "runs": 5,
         "sessions": [
           {
@@ -94,11 +96,13 @@
         "km": 20.2,
         "long": 5,
         "peak_acwr": 1.034,
+        "phase": "base",
         "proj_acwr": 1.009,
         "proj_acwr_flat": 0.904,
         "proj_acwr_soft": 1.009,
         "proj_ctl": 20.4,
         "quality": [],
+        "role": "build",
         "runs": 5,
         "sessions": [
           {
@@ -166,6 +170,7 @@
         "km": 20.2,
         "long": 5,
         "peak_acwr": 1.203,
+        "phase": "base",
         "proj_acwr": 0.99,
         "proj_acwr_flat": 0.979,
         "proj_acwr_soft": 0.99,
@@ -180,6 +185,7 @@
             "zone": "threshold"
           }
         ],
+        "role": "build",
         "runs": 5,
         "sessions": [
           {
@@ -278,11 +284,13 @@
         "km": 16.0,
         "long": 4,
         "peak_acwr": 0.987,
+        "phase": "base",
         "proj_acwr": 0.907,
         "proj_acwr_flat": 0.847,
         "proj_acwr_soft": 0.907,
         "proj_ctl": 18.7,
         "quality": [],
+        "role": "down",
         "runs": 5,
         "sessions": [
           {
@@ -361,6 +369,7 @@
         "km": 15.1,
         "long": 4,
         "peak_acwr": 1.152,
+        "phase": "build",
         "proj_acwr": 0.785,
         "proj_acwr_flat": 0.884,
         "proj_acwr_soft": 0.785,
@@ -385,6 +394,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -494,6 +504,7 @@
         "km": 15.9,
         "long": 5,
         "peak_acwr": 1.133,
+        "phase": "build",
         "proj_acwr": 0.841,
         "proj_acwr_flat": 0.886,
         "proj_acwr_soft": 0.841,
@@ -518,6 +529,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -627,6 +639,7 @@
         "km": 15.9,
         "long": 5,
         "peak_acwr": 1.183,
+        "phase": "build",
         "proj_acwr": 0.868,
         "proj_acwr_flat": 0.923,
         "proj_acwr_soft": 0.868,
@@ -651,6 +664,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -861,6 +875,7 @@
         "km": 16.3,
         "long": 5,
         "peak_acwr": 1.207,
+        "phase": "peak",
         "proj_acwr": 0.928,
         "proj_acwr_flat": 0.943,
         "proj_acwr_soft": 0.928,
@@ -885,6 +900,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -1052,9 +1068,11 @@
         "long_capped": true,
         "partial": true,
         "peak_acwr": 0.643,
+        "phase": "rebase",
         "proj_acwr": 0.414,
         "proj_acwr_flat": 0.52,
         "proj_ctl": 46.3,
+        "role": "build",
         "runs": 2,
         "runs_ahead": 2,
         "runs_done": 0,
@@ -1105,10 +1123,12 @@
         "km": 14.8,
         "long": 6,
         "peak_acwr": 0.499,
+        "phase": "rebase",
         "proj_acwr": 0.499,
         "proj_acwr_flat": 0.354,
         "proj_acwr_soft": 0.499,
         "proj_ctl": 37.4,
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -1165,10 +1185,12 @@
         "km": 17.4,
         "long": 6,
         "peak_acwr": 0.657,
+        "phase": "rebase",
         "proj_acwr": 0.657,
         "proj_acwr_flat": 0.454,
         "proj_acwr_soft": 0.657,
         "proj_ctl": 31.5,
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -1226,10 +1248,12 @@
         "km": 13.0,
         "long": 5,
         "peak_acwr": 0.62,
+        "phase": "rebase",
         "proj_acwr": 0.566,
         "proj_acwr_flat": 0.524,
         "proj_acwr_soft": 0.566,
         "proj_ctl": 26.1,
+        "role": "down",
         "runs": 3,
         "sessions": [
           {
@@ -1277,10 +1301,12 @@
         "km": 18.4,
         "long": 7,
         "peak_acwr": 0.897,
+        "phase": "rebase",
         "proj_acwr": 0.897,
         "proj_acwr_flat": 0.589,
         "proj_acwr_soft": 0.897,
         "proj_ctl": 23.7,
+        "role": "build",
         "runs": 4,
         "sessions": [
           {
@@ -1338,10 +1364,12 @@
         "km": 19.4,
         "long": 7,
         "peak_acwr": 0.98,
+        "phase": "rebase",
         "proj_acwr": 0.98,
         "proj_acwr_flat": 0.788,
         "proj_acwr_soft": 0.98,
         "proj_ctl": 22.2,
+        "role": "build",
         "runs": 5,
         "sessions": [
           {
@@ -1441,6 +1469,7 @@
         "km": 12.8,
         "long": 4,
         "peak_acwr": 1.156,
+        "phase": "taper",
         "proj_acwr": 0.781,
         "proj_acwr_flat": 0.863,
         "proj_acwr_soft": 0.781,
@@ -1457,6 +1486,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "taper",
         "runs": 5,
         "sessions": [
           {
@@ -1573,6 +1603,7 @@
         "km": 9.6,
         "long": 3,
         "peak_acwr": 1.013,
+        "phase": "taper",
         "proj_acwr": 0.664,
         "proj_acwr_flat": 0.745,
         "proj_acwr_soft": 0.664,
@@ -1589,6 +1620,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "taper",
         "runs": 5,
         "sessions": [
           {
@@ -1687,11 +1719,13 @@
         "km": 2.4,
         "long": 2,
         "peak_acwr": 0.674,
+        "phase": "taper",
         "proj_acwr": 0.674,
         "proj_acwr_flat": 0.583,
         "proj_acwr_soft": 0.674,
         "proj_ctl": 11.4,
         "quality": [],
+        "role": "race",
         "runs": 2,
         "sessions": [
           {

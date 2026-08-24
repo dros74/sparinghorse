@@ -5,7 +5,7 @@
       "date": "2026-07-13",
       "feasibility": "finish",
       "label": "Golden Half",
-      "proj_ctl": 57.0,
+      "proj_ctl": 56.8,
       "role": "goal",
       "type": "half"
     }
@@ -41,13 +41,13 @@
         {
           "ctl": 65,
           "evo2": 54.7,
-          "hms": "1:15:32",
+          "hms": "1:15:33",
           "plus_weeks": 4
         },
         {
           "ctl": 74,
           "evo2": 55.2,
-          "hms": "1:13:51",
+          "hms": "1:13:52",
           "plus_weeks": 8
         }
       ],
@@ -94,8 +94,8 @@
       "vo2max"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 65.6,
-    "end_ctl": 57.0,
+    "end_atl": 65.1,
+    "end_ctl": 56.8,
     "start": "2026-06-29",
     "weeks": [
       {
@@ -106,17 +106,18 @@
         "frequency_met": false,
         "frozen": false,
         "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance",
-        "intent_km": 19,
+        "intent_km": 75.1,
         "intent_runs": 5,
-        "km": 45.5,
-        "km_ahead": 45.5,
+        "km": 45.1,
+        "km_ahead": 45.1,
         "km_done": 0,
         "long": 6,
         "partial": true,
-        "peak_acwr": 1.151,
-        "proj_acwr": 1.151,
-        "proj_acwr_flat": 0.851,
-        "proj_ctl": 57.0,
+        "peak_acwr": 1.145,
+        "phase": "peak",
+        "proj_acwr": 1.145,
+        "proj_acwr_flat": 0.845,
+        "proj_ctl": 56.8,
         "quality": [
           {
             "component": "vo2max",
@@ -137,6 +138,7 @@
             "zone": "marathon"
           }
         ],
+        "role": "build",
         "runs": 3,
         "runs_ahead": 3,
         "runs_done": 0,
@@ -144,11 +146,11 @@
           {
             "date": "2026-06-29",
             "kind": "easy",
-            "km": 14.5,
-            "minutes": 73,
+            "km": 13.9,
+            "minutes": 70,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 95.0
+            "trimp": 91.4
           },
           {
             "component": "vo2max",
@@ -283,20 +285,20 @@
           {
             "date": "2026-07-02",
             "kind": "easy",
-            "km": 14.1,
-            "minutes": 71,
+            "km": 13.9,
+            "minutes": 70,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 92.2
+            "trimp": 90.5
           },
           {
             "date": "2026-07-04",
             "kind": "easy",
-            "km": 14.1,
-            "minutes": 71,
+            "km": 13.9,
+            "minutes": 70,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 92.2
+            "trimp": 90.5
           },
           {
             "date": "2026-07-05",
@@ -310,7 +312,7 @@
         ],
         "start": "2026-06-29",
         "strides": 0,
-        "trimp_total": 489.1,
+        "trimp_total": 482.1,
         "volume_met": false,
         "wk": 1
       }
@@ -375,7 +377,7 @@
     ],
     "clipped_by_acwr": false,
     "end_atl": 21.9,
-    "end_ctl": 40.6,
+    "end_ctl": 40.5,
     "start": "2026-07-06",
     "weeks": [
       {
@@ -385,15 +387,16 @@
         "eq_km": 34.8,
         "frozen": false,
         "intent": "Taper \u2014 drop volume, keep sharpness",
-        "intent_km": 34,
+        "intent_km": 34.0,
         "intent_runs": 5,
         "km": 33.3,
         "long": 10,
-        "peak_acwr": 1.066,
-        "proj_acwr": 0.778,
-        "proj_acwr_flat": 0.824,
-        "proj_acwr_soft": 0.824,
-        "proj_ctl": 49.9,
+        "peak_acwr": 1.063,
+        "phase": "taper",
+        "proj_acwr": 0.779,
+        "proj_acwr_flat": 0.823,
+        "proj_acwr_soft": 0.823,
+        "proj_ctl": 49.8,
         "quality": [
           {
             "component": "ssmax",
@@ -406,6 +409,7 @@
             "zone": "threshold"
           }
         ],
+        "role": "taper",
         "runs": 5,
         "sessions": [
           {
@@ -517,16 +521,18 @@
         "eq_km": 18.2,
         "frozen": false,
         "intent": "Race week \u2014 freshen up, stay loose",
-        "intent_km": 18,
+        "intent_km": 18.0,
         "intent_runs": 1,
         "km": 3.0,
         "long": 5,
-        "peak_acwr": 0.7,
-        "proj_acwr": 0.538,
-        "proj_acwr_flat": 0.547,
-        "proj_acwr_soft": 0.5357,
-        "proj_ctl": 40.6,
+        "peak_acwr": 0.701,
+        "phase": "taper",
+        "proj_acwr": 0.54,
+        "proj_acwr_flat": 0.548,
+        "proj_acwr_soft": 0.5353,
+        "proj_ctl": 40.5,
         "quality": [],
+        "role": "race",
         "runs": 1,
         "sessions": [
           {
