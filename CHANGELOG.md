@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.40.1] - 2026-08-25
+
+### Fixed
+
+- **The readiness card stopped telling you to take a hard session easy.** The daily readiness
+  narrator was given your HRV, your legs, your sleep and your note — and nothing at all about the
+  session it was writing above. So on an interval day it wrote what it assumed: *"run as planned at
+  an easy, conversational effort"*, printed directly over a card reading INTERVAL SESSION. The
+  wording blended two different verdicts, because the instructions it works from used "easy" as the
+  word for *hold back* while telling it green means *run as planned*. It now knows what today's
+  session is and what pace it was prescribed at, and its instructions say plainly that softening a
+  hard session is a change to the plan it is not allowed to make.
+  This mattered more than a clumsy sentence: the rule for the whole AI layer is that it may narrate
+  and may raise caution, never prescribe — and telling a runner to take a prescribed interval
+  session conversationally is prescribing, in prose, past a green light that was itself perfectly
+  correct. The check that guards the verdict never read the sentence. So the fix is not only better
+  instructions: on a green light with a hard session prescribed, a "take it easy" narration is now
+  dropped for the engine's own wording, deterministically. It stays out of the way on easy days,
+  where the word is right, and on amber and red days, where the narrator being cautious is the
+  entire point.
+
 ## [0.40.0] - 2026-08-25
 
 ### Added

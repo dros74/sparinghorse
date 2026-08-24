@@ -4489,19 +4489,45 @@ READINESS_SCHEMA = {
 }
 
 
-def llm_readiness(hrv, energy, sleep, note):
+def _session_brief(session):
+    """§H6 — one line describing today's PRESCRIBED session, for the readiness narrator.
+
+    Without it the narrator was writing the card blind. `llm_readiness` received HRV, legs, sleep and
+    the free-text note and nothing about the day, so on a 4×2min VO₂ day it produced "run as planned
+    at an easy, conversational effort" — green's verb with amber's qualifier, over a session
+    prescribed at interval pace. The runner reads that beside a card that says INTERVAL SESSION."""
+    if not session:
+        return "unknown (no plan for today)"
+    kind = (session.get("kind") or "").replace("_", " ") or "run"
+    if kind == "rest":
+        return "REST — nothing prescribed today"
+    bits = [f"{kind.upper()}"]
+    if session.get("km"):
+        bits.append(f"{session['km']} km")
+    if session.get("pace_zone"):
+        bits.append(f"at {session['pace_zone']}")
+    if session.get("note"):
+        bits.append(f"— {str(session['note'])[:110]}")
+    return " ".join(bits)
+
+
+def llm_readiness(hrv, energy, sleep, note, session=None):
     """Judgment call from today's signals + free text. Returns the LLM's proposed verdict; the
     engine (assess_readiness) clamps it to its safety floor before anything is shown."""
     state = hrv.get("state")
     hrvtxt = (f"baseline {hrv.get('baseline')} vs normal band {hrv.get('band')} → {state}"
               if state else "no HRV data")
     user = (f"HRV: {hrvtxt}\nLegs/energy: {energy}\nSleep: {sleep}\n"
+            f"Today's PRESCRIBED session: {_session_brief(session)}\n"
             f"Their note: {note.strip() if note else '(none)'}")
     system = (
         "You make a daily training-readiness call (green/amber/red) for a runner rebuilding aerobic "
         "fitness. " + (f"Athlete context: {config().athlete_context}. "
                        if config().athlete_context else "") +
-        "green=run as planned, amber=hold (easy, no progression), red=easy walk or rest. Weigh HRV, "
+        "green=run today's prescribed session AT ITS PRESCRIBED INTENSITY (if it is an interval, "
+        "tempo or marathon-pace session, say so — never tell them to run it easy or conversational; "
+        "that is what amber means, and softening a hard session IS a prescription change you may not "
+        "make), amber=hold (easy only, no progression), red=easy walk or rest. Weigh HRV, "
         "legs, sleep, and especially their free-text note — that's where nuance the numbers miss shows "
         "up. You may only ESCALATE caution beyond the obvious; a separate deterministic floor already "
         "enforces the minimums (one poor signal ⇒ at least amber, two ⇒ at least red), so don't be "
@@ -4801,7 +4827,31 @@ def _deterministic_stop_symptom(note):
     return any(p in t for p in _STOP_SYMPTOM_PHRASES)
 
 
-def assess_readiness(db, checkin):
+_SOFTENING_RE = re.compile(r"\b(easy|easily|conversational|gentle|gently|relaxed|comfortable|"
+                           r"comfortably|steady|recovery)\b", re.I)
+_HARD_KINDS = ("interval", "tempo", "threshold", "long_mp", "race", "quality", "fartlek", "hills")
+
+
+def _guard_session_action(text, verdict, session, engine_action):
+    """§H6 — the narration may not soften a hard session that the verdict just cleared.
+
+    ENGINE_SCIENCE §9 lets the LLM narrate and ESCALATE caution, never prescribe. The deterministic
+    clamp above enforces that on the VERDICT; the prose was never checked, so "run as planned at an
+    easy, conversational effort" over a 4×2min VO₂ day passed straight through — a de-facto
+    prescription change wearing a green light. §9's own rule is that a boundary needs a
+    deterministic gate and not a prompt: a prompt is a stress test, not a tooth. So on GREEN with a
+    hard session prescribed, an action that tells the runner to take it easy is dropped for the
+    engine's own wording. Amber and red are untouched — there "easy" is exactly the right word, and
+    the LLM escalating is the behaviour we want."""
+    if verdict != "green" or not text:
+        return text or engine_action
+    kind = ((session or {}).get("kind") or "").lower()
+    if not any(h in kind for h in _HARD_KINDS):
+        return text
+    return engine_action if _SOFTENING_RE.search(text) else text
+
+
+def assess_readiness(db, checkin, session=None):
     """Combine the HRV signal + the day's check-in → a traffic-light verdict + action.
     GREEN proceed · AMBER hold (keep easy, no progression) · RED rest/walk (and, on a
     returning stop-symptom, HALT the plan and advise the doctor)."""
@@ -4848,7 +4898,7 @@ def assess_readiness(db, checkin):
     # §6c judgment layer: the LLM may sharpen/escalate the call (reading the free-text note the
     # numbers can't), but the engine FLOOR above is never softened.
     note = (checkin or {}).get("note", "")
-    llm = llm_readiness(hrv, energy, sleep, note) if llm_available() else None
+    llm = llm_readiness(hrv, energy, sleep, note, session) if llm_available() else None
     if not (llm and llm.get("ok")):
         return base
     if llm.get("stop_symptom_detected"):  # free-text safety catch — the §H2 backstop to the check-in stop control
@@ -4861,7 +4911,7 @@ def assess_readiness(db, checkin):
     ai = llm["verdict"] if llm.get("verdict") in sev else floor
     if sev[ai] >= sev[floor]:   # LLM at least as cautious → adopt its (richer) language
         return {"verdict": ai, "halt": False, "hrv": hrv,
-                "action": llm.get("action") or action,
+                "action": _guard_session_action(llm.get("action") or action, ai, session, action),
                 "reasons": llm.get("reasons") or base["reasons"],
                 "source": "llm", "engine_floor": floor, "ai_verdict": ai}
     # LLM tried to soften below the floor → engine holds, but record the disagreement
@@ -5044,7 +5094,8 @@ def today_readiness(db):
     today = datetime.now().strftime("%Y-%m-%d")
     row = db.execute("SELECT * FROM readiness WHERE date=?", (today,)).fetchone()
     checkin = dict(row) if row else None
-    assessment = assess_readiness(db, checkin)
+    session = todays_session(db, today)      # §H6 — resolved FIRST: the narrator writes about the day
+    assessment = assess_readiness(db, checkin, session)
     # §H3 — a flagged exertional symptom persists as a medical HOLD until explicitly cleared (doctor
     # clearance), not just a one-day red light. Surface it as red+halt on any later day — even with no
     # new check-in, or a green one — so the gate never silently reverts to green tomorrow. Applied
@@ -5055,7 +5106,6 @@ def today_readiness(db):
                                 "still active. Rest and contact your doctor; clear it here once "
                                 "they've cleared you.",
                       "reasons": ["Active medical hold — awaiting doctor clearance"], "source": "engine"}
-    session = todays_session(db, today)
     # A green light on a planned rest day means "follow the plan — which today is rest", not
     # "run your session". Reword so the action matches the day (engine or LLM source alike). And when
     # ACWR is low (clear headroom), surface the §6o BONUS-RUN affordance: an easy run is safe extra

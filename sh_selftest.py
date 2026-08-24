@@ -2171,6 +2171,87 @@ def _gov_ok(tag, w, assertive, out):
         out.append(f"{tag} breached EOW ACWR cap: {w.get('proj_acwr')}")
 
 
+def _stc_readiness_session_aware():
+    """§H6 — the readiness narrator knows what today's session IS, and may not soften it.
+
+    `llm_readiness` received HRV, legs, sleep and the free-text note — and nothing about the day. So
+    on a 4×2min VO₂ day it wrote "run as planned at an easy, conversational effort": green's verb
+    with amber's qualifier, printed directly above a card reading INTERVAL SESSION. The owner caught
+    it on his own card (2026-08-25).
+
+    That is the ENGINE_SCIENCE §9 crossing, not merely clumsy copy — telling a runner to take a
+    prescribed interval session conversationally IS a prescription change, and §9 allows the LLM to
+    narrate and to ESCALATE caution, never to prescribe. The deterministic clamp enforced §9 on the
+    VERDICT and never looked at the prose. Limb (b) is the fix as a TOOTH rather than as a prompt:
+    a prompt is a stress test, not a gate."""
+    fails = []
+    hard = {"kind": "interval", "km": 5.5, "pace_zone": "5:05/km interval",
+            "note": "short VO₂ touch — 10min easy wu + 4×2min @ interval w/ 2min jog"}
+    easy = {"kind": "easy", "km": 10.0, "pace_zone": "6:52/km easy", "note": "easy run"}
+    engine_action = "Good to go — run today's prescribed session as planned."
+    soft = "Run as planned at an easy, conversational effort."
+    kept = "Good to go — hit the 4×2min at interval pace as prescribed."
+
+    # (a) the session actually reaches the narrator's prompt
+    brief = S._session_brief(hard)
+    if "INTERVAL" not in brief.upper() or "5:05" not in brief:
+        fails.append(f"the session brief does not describe the session: {brief!r}")
+    if S._session_brief(None) == S._session_brief(hard):
+        fails.append("a missing plan and a prescribed interval read identically to the narrator")
+    seen = {}
+    real_llm_json = S.llm_json
+    try:
+        S.llm_json = lambda system, user, schema, **kw: (seen.update(system=system, user=user)
+                                                         or {"ok": True, "verdict": "green"})
+        S.llm_readiness({"state": None}, "ok", "ok", "", hard)
+    finally:
+        S.llm_json = real_llm_json
+    if "INTERVAL" not in (seen.get("user") or "").upper():
+        fails.append("llm_readiness never puts the prescribed session in its prompt")
+    sysmsg = (seen.get("system") or "").lower()
+    if "green=run as planned," in sysmsg:
+        fails.append("the system prompt still glosses green with amber's vocabulary")
+
+    # (b) ⭐ THE REGRESSION — green + a HARD session + softening prose ⇒ the prose is dropped
+    got = S._guard_session_action(soft, "green", hard, engine_action)
+    if got != engine_action:
+        fails.append(f"a green light let the narrator soften a prescribed interval session: {got!r}")
+    for kind in ("tempo", "threshold", "long_mp", "race"):
+        if S._guard_session_action(soft, "green", {"kind": kind}, engine_action) != engine_action:
+            fails.append(f"a {kind} session was left softenable")
+
+    # (c) …but a CORRECT green narration is kept — the guard is not a mute button
+    if S._guard_session_action(kept, "green", hard, engine_action) != kept:
+        fails.append("the guard discarded a correct interval narration")
+
+    # (d) …and it must not over-fire: on an EASY day "easy" is the right word, and on AMBER/RED
+    # "easy" is the whole point (the LLM escalating is the behaviour §9 wants).
+    if S._guard_session_action(soft, "green", easy, engine_action) != soft:
+        fails.append("the guard fired on an easy day, where 'easy' is correct")
+    for v in ("amber", "red"):
+        if S._guard_session_action(soft, v, hard, engine_action) != soft:
+            fails.append(f"the guard fired on {v}, suppressing an ESCALATION §9 explicitly allows")
+
+    # (e) the wiring: today_readiness must resolve the session BEFORE it assesses, or the narrator
+    # is blind again no matter how good the prompt is.
+    import inspect
+    src = inspect.getsource(S.today_readiness)
+    if src.index("todays_session(db") > src.index("assess_readiness(db"):
+        fails.append("today_readiness still assesses BEFORE resolving the session — the narrator is blind")
+    if "assess_readiness(db, checkin, session)" not in src:
+        fails.append("today_readiness does not pass the session into assess_readiness")
+    return _st("det", "readiness-session-aware",
+               "§H6 the readiness narrator is told what today's session is and may not soften it: the "
+               "session reaches the prompt, green + a prescribed interval/tempo/MP session drops any "
+               "'take it easy' narration for the engine's wording, a correct narration survives, and "
+               "the guard never fires on an easy day or on amber/red (where escalating is the point)",
+               passed=not fails,
+               expect="session in prompt; green+hard+softening ⇒ engine wording; easy/amber/red untouched",
+               got={"violations": fails or "none", "brief": brief,
+                    "guard_on_hard_green": S._guard_session_action(soft, "green", hard, engine_action),
+                    "guard_on_easy_green": S._guard_session_action(soft, "green", easy, engine_action)})
+
+
 def _stc_forecast_decomposition():
     """§TR-A — the scorecard separates PRESCRIPTION error from PROJECTION error.
 
@@ -11272,7 +11353,7 @@ def run_server_selftest(db, categories=None):
 def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
-                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(),
+                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),
