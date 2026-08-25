@@ -59,7 +59,9 @@ showcase deliberately shows a slice; the real console has the full set.
 - **Backup & export** — one-click consistent database snapshot + a portable JSON export of everything
   that can't be rebuilt from Runalyze, with a fresh-instance restore command. Keys are never included.
 - **Suunto watch push** *(optional)* — upcoming planned sessions land on a Suunto watch as SuuntoPlus
-  Guides (steps with pace + HR bands), via your own Suunto partner-app keys.
+  Guides (steps with pace + HR bands), via your own Suunto partner-app keys. The nightly push updates
+  guides in place; if you delete them on the watch itself, use **Rebuild on watch** in Settings — the
+  watch only fetches guide ids it has never seen, so an update alone will not bring them back.
 
 **AI layer** *(optional — set `ANTHROPIC_API_KEY`; blank = dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), multi-A adjudication advice, plain-language

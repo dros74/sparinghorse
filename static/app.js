@@ -2866,11 +2866,15 @@ async function loadSuunto(){
       <div class="secinput">
         ${d.connected
           ? `<button type="button" class="primary" id="suuntoPush">Push week to watch</button>
+             <button type="button" class="ghost" id="suuntoRepush">Rebuild on watch</button>
              <button type="button" class="ghost" id="suuntoDisc">Disconnect</button>`
           : `<button type="button" class="primary" id="suuntoConn" ${d.configured?"":"disabled"}>Connect Suunto</button>`}
       </div>
       <div class="help">Sends the plan's next days to your watch as SuuntoPlus Guides (steps, pace
         and HR bands on the wrist). Auto-pushes nightly after the re-plan once connected.
+        <b>Rebuild</b> deletes each guide and sends it again under a new id — use it after deleting
+        guides on the watch itself, because an ordinary push only <i>updates</i> them and the watch
+        never re-downloads a guide it already knows.
         Register the redirect URI <code>${esc(d.redirect_uri||"")}</code> on your Suunto OAuth app.</div>
       <div class="err" id="suuntoErr"></div>
     </div>`;
@@ -2880,14 +2884,22 @@ async function loadSuunto(){
     try{ await fetch("/api/suunto/disconnect",{method:"POST"}); }catch(e){}
     loadSuunto();
   });
-  const push=$("#suuntoPush"); if(push) push.addEventListener("click",async()=>{
-    err.textContent=""; push.disabled=true; push.textContent="Pushing…";
-    let r; try{ r=await (await fetch("/api/suunto/push",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json(); }
+  // One handler, two doors. The plain push UPDATES the guides already on the account, which is
+  // right for the nightly re-plan and useless once a guide has been deleted on the wrist — the id
+  // never changes, so the watch has no reason to fetch it again. Rebuild deletes first (§SG2).
+  const runPush=async(btn,label,recreate)=>{
+    err.textContent=""; btn.disabled=true; btn.textContent=recreate?"Rebuilding…":"Pushing…";
+    let r; try{ r=await (await fetch("/api/suunto/push",{method:"POST",headers:{"Content-Type":"application/json"},
+                                                        body:JSON.stringify({recreate:!!recreate})})).json(); }
     catch(e){ r={ok:false,error:"network error"}; }
-    push.disabled=false; push.textContent="Push week to watch";
-    if(r.ok) err.innerHTML=`<span class="src ok">✓ ${r.pushed||0} session${(r.pushed===1)?"":"s"} pushed${r.note?" — "+esc(r.note):""}</span>`;
+    btn.disabled=false; btn.textContent=label;
+    const rebuilt=(r.recreated||[]).length;
+    if(r.ok) err.innerHTML=`<span class="src ok">✓ ${r.pushed||0} session${(r.pushed===1)?"":"s"} pushed`
+      +`${rebuilt?" ("+rebuilt+" rebuilt from scratch)":""}${r.note?" — "+esc(r.note):""}</span>`;
     else err.textContent="⚠ "+(r.error||"push failed");
-  });
+  };
+  const push=$("#suuntoPush"); if(push) push.addEventListener("click",()=>runPush(push,"Push week to watch",false));
+  const repush=$("#suuntoRepush"); if(repush) repush.addEventListener("click",()=>runPush(repush,"Rebuild on watch",true));
 }
 // Live key check — fires when the Settings window opens (or after a save), not on every page load (the
 // Anthropic probe is a network round-trip). A configured key resolves to ✓ in use · valid, ✗ key rejected,

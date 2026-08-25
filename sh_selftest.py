@@ -4194,7 +4194,7 @@ def _stc_guides():
         fails.append("type/usage/localDate wrong")
     if not (1 <= len(g["steps"]) <= 1000) or len(g["steps"]) != len(sess["reps"]):
         fails.append(f"steps != one per rep: {len(g['steps'])} vs {len(sess['reps'])}")
-    bad_chars = set("×—–’·") & set(S.json.dumps(g))
+    bad_chars = set("×—–’·@₂≥✓") & set(S.json.dumps(g))
     if bad_chars:
         fails.append(f"unsupported watch chars leaked: {bad_chars}")
     for st_, rep in zip(g["steps"], sess["reps"]):
@@ -4992,6 +4992,326 @@ def _stc_guide_cleanup():
                expect="deleted: kind-flip + past + no-session · kept: failed-date + future + foreign",
                got={"deleted": sorted(gone), "pushed": out.get("pushed"),
                     "failures": fails or "none"})
+
+
+def _stc_guide_recreate():
+    """§SG2 rebuild — the fix for a guide deleted ON THE WRIST. Suunto hands the watch guides it does
+    not already hold, keyed on the guide ID, and a PUT keeps that id: the update lands on the account
+    and the watch, which believes it already has that guide, never fetches it. The observable symptom
+    is the whole point — the push honestly reports every session sent while exactly one appears on
+    the wrist, the day that just entered the horizon under an id the account had never seen.
+
+    Two runs over ONE fixture, because the property is a DIFFERENCE and either half alone is vacuous:
+      · recreate=False ⇒ both dates go out as PUTs, nothing of theirs is deleted (the nightly push
+        must not churn ids every night — a delete+POST cycle on a wrist that is already correct)
+      · recreate=True  ⇒ both guides are DELETED FIRST and then POSTed under fresh ids (0 PUTs), and
+        the foreign guide is still never touched, in the one mode that deletes on purpose."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    today = _d.today()
+    day = lambda n: (today + _td(days=n)).isoformat()
+
+    existing = {f"sh-{day(0)}-easy": "GID_TODAY",           # both already on the account: the state
+                f"sh-{day(1)}-intervals": "GID_TOMORROW",   # after ANY previous push of this week
+                "my-own-interval-session": "GID_FOREIGN"}   # not ours — untouchable in both modes
+
+    plan = {"phases": [{"key": "base", "kind": "base"}],
+            "base": {"weeks": [{"wk": 1, "start": day(0), "km": 18, "runs": 2, "sessions": [
+                {"date": day(0), "kind": "easy", "km": 8.0, "minutes": 45, "trimp": 50.0,
+                 "pace_zone": "5:30/km easy"},
+                {"date": day(1), "kind": "intervals", "km": 10.0, "minutes": 55, "trimp": 80.0,
+                 "pace_zone": "4:10/km threshold"}]}]}}
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}',?)",
+              (S._now_iso(), day(0), S.json.dumps(plan)))
+    m.commit()
+
+    calls = {"post": 0, "put": [], "deleted": []}
+
+    class _R:
+        def __init__(self, code, text=""):
+            self.status_code, self.text = code, text
+
+    class _FakeRequests:
+        RequestException = Exception
+
+        def post(self, url, data=None, headers=None, timeout=None):
+            calls["post"] += 1
+            return _R(201)
+
+        def put(self, url, data=None, headers=None, timeout=None):
+            calls["put"].append(url.rsplit("/", 1)[-1])
+            return _R(200)
+
+        def delete(self, url, headers=None, timeout=None):
+            calls["deleted"].append(url.rsplit("/", 1)[-1])
+            return _R(204)
+
+        def get(self, url, headers=None, timeout=None):
+            return _R(200, "{}")
+
+    saved = {k: getattr(S, k) for k in ("requests", "suunto_status", "suunto_access_token",
+                                        "_suunto_existing_guides", "READONLY")}
+    runs = {}
+    try:
+        S.requests = _FakeRequests()
+        S.suunto_status = lambda: {"configured": True, "connected": True}
+        S.suunto_access_token = lambda: "TOKEN"
+        S._suunto_existing_guides = lambda headers: dict(existing)
+        S.READONLY = False
+        for mode in (False, True):
+            calls.update(post=0, put=[], deleted=[])
+            out = S.push_guides(m, days=7, recreate=mode)
+            runs[mode] = {"out": out, "post": calls["post"],
+                          "put": list(calls["put"]), "deleted": list(calls["deleted"])}
+    finally:
+        for k, v in saved.items():
+            setattr(S, k, v)
+        m.close()
+
+    plain, rebuilt = runs[False], runs[True]
+    if sorted(plain["put"]) != ["GID_TODAY", "GID_TOMORROW"] or plain["post"]:
+        fails.append(f"plain push should UPDATE both dates in place: "
+                     f"put={plain['put']}, post={plain['post']}")
+    if set(plain["deleted"]) & {"GID_TODAY", "GID_TOMORROW"}:
+        fails.append(f"plain push DELETED a guide it was only meant to update: {plain['deleted']}")
+    if plain["out"].get("recreated") is not None:
+        fails.append("plain push reported a `recreated` list — that key means the ids CHANGED")
+    if rebuilt["put"]:
+        fails.append(f"rebuild still PUT {rebuilt['put']} — an in-place update the watch cannot see")
+    if rebuilt["post"] != 2:
+        fails.append(f"rebuild POSTed {rebuilt['post']} guides, want 2 (both under fresh ids)")
+    if sorted(rebuilt["deleted"])[:2] != ["GID_TODAY", "GID_TOMORROW"]:
+        fails.append(f"rebuild did not delete both guides first: {rebuilt['deleted']}")
+    if "GID_FOREIGN" in rebuilt["deleted"] or "GID_FOREIGN" in plain["deleted"]:
+        fails.append("GID_FOREIGN was DELETED — the athlete's own guide is not ours to rebuild")
+    if sorted(rebuilt["out"].get("recreated") or []) != [day(0), day(1)]:
+        fails.append(f"the report disagrees with what was rebuilt: {rebuilt['out'].get('recreated')}")
+    if rebuilt["out"].get("pushed") != 2:
+        fails.append(f"rebuild pushed={rebuilt['out'].get('pushed')}, want 2")
+    return _st("det", "guide-recreate",
+               "§SG2 a guide deleted on the WRIST needs a new id to come back: `recreate` deletes "
+               "each of the window's guides and POSTs it fresh (0 updates), while the ordinary push "
+               "still updates in place and neither mode ever touches a guide that is not ours",
+               passed=not fails,
+               expect="plain: 2 PUT / 0 POST / 0 own deletes · rebuild: 2 delete → 2 POST / 0 PUT",
+               got={"plain": {k: plain[k] for k in ("post", "put", "deleted")},
+                    "rebuild": {k: rebuilt[k] for k in ("post", "put", "deleted")},
+                    "failures": fails or "none"})
+
+
+def _stc_stream_optin():
+    """§RD2 — the day Runalyze's MCP made per-sample streams OPT-IN. `get_activity_details` grew
+    `include_streams` (default FALSE) because raw streams are too large to return unasked; we kept
+    calling it with an activity id alone, and the response came back honest and empty —
+    `streams_included: false`, `returned_points: 0` — while `streams_meta.available` listed ten
+    recorded channels over 2090 samples. Nothing raised. The route map went blank, the pace/HR
+    profile went blank, and the §RD read-back said 'no usable pace/distance streams'.
+
+    Then the second half, which is the one that would have outlived the outage: BOTH caches wrote
+    that emptiness down as an answer. A profile carrying the current version and a structure
+    carrying a refusal are cache HITS, so the run would have stayed mapless and unread forever on a
+    row nothing revisits — long after the request was fixed. An empty read is only a verdict when
+    the source itself says there is nothing to read.
+
+    Locked here: the request asks for streams (and the summary-only path still does not), an empty
+    read WITH channels available is retried on the next look, an empty read with NO channels
+    available settles once and is never fetched again, and both caches follow the same rule."""
+    import sqlite3 as _sq
+    fails = []
+    # A steady 30-minute run, 1 sample per 15 s at 6:00/km — long enough to clear the §RD floor, so
+    # "the retry healed it" means a real classification and not merely a second network call.
+    STREAMS = {"distance": [round(i * 15 * 1000 / 360.0, 1) for i in range(121)],
+               "time": [i * 15 for i in range(121)],
+               "heart_rate": [140] * 121, "cadence": [172] * 121}
+    AVAIL = {"available": ["distance", "time", "heart_rate"], "sample_count": 2090}
+
+    def _resp(streams, meta):
+        return {"activity": {"id": 1, "source": "Suunto", "average_heart_rate": 140,
+                             "streams": streams, "streams_meta": meta}}
+
+    calls = []
+
+    def _fake(script):
+        """mcp_call stub: records every argument dict, answers from `script` (last entry repeats)."""
+        def call(tool, args):
+            calls.append(args)
+            return script[min(len(calls) - 1, len(script) - 1)]
+        return call
+
+    saved = {k: getattr(S, k) for k in ("mcp_call", "_zones_asof", "READONLY")}
+    try:
+        S.READONLY = False
+        S._zones_asof = lambda db, d=None: S.pace_zones(50.0)
+
+        # (1) the REQUEST — streams asked for by name, and not asked for when only the summary is wanted
+        S.mcp_call = _fake([_resp(STREAMS, dict(AVAIL, streams_included=True))])
+        calls.clear(); S.activity_profile(1)
+        got = calls[0] if calls else {}
+        if not got.get("include_streams"):
+            fails.append(f"the profile read does not ask for streams: {got}")
+        if list(got.get("stream_fields") or []) != list(S.RD_STREAM_FIELDS):
+            fails.append(f"stream_fields != the module's list: {got.get('stream_fields')}")
+        if got.get("max_stream_points") != S.RD_STREAM_POINTS:
+            fails.append(f"max_stream_points not sent: {got}")
+        for need in ("distance", "time", "heart_rate", "latitude", "longitude"):
+            if need not in (got.get("stream_fields") or []):
+                fails.append(f"{need} not requested — the map or the read-back loses its input")
+        calls.clear(); S.activity_details(1, streams=False)
+        if calls and calls[0].get("include_streams"):
+            fails.append("the summary-only read pays for streams it never opens")
+
+        # (2) an empty read while channels ARE available is a NOT-YET: looked at again, and healed
+        for label, kind in (("profile", "p"), ("structure", "s")):
+            m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+            m.executescript(S.SCHEMA)
+            m.execute("INSERT OR REPLACE INTO activities (id,date,sport,distance,duration) "
+                      "VALUES (1,'2026-08-25','Running',5.6,2089)")
+            S.mcp_call = _fake([_resp({}, AVAIL), _resp(STREAMS, dict(AVAIL, streams_included=True))])
+            calls.clear()
+            read = (lambda: S._profile_cached(m, 1)) if kind == "p" else \
+                   (lambda: S._structure_cached(m, 1, "2026-08-25"))
+            read()
+            if len(calls) != 1:
+                fails.append(f"{label}: first read made {len(calls)} calls, want 1")
+            out, _e = read()
+            if len(calls) != 2:
+                fails.append(f"{label}: an EMPTY read was cached as an answer — the second look "
+                             f"made {len(calls) - 1} extra calls, want 1 (it must retry)")
+            healed = bool(out.get("dist")) if kind == "p" else bool(out.get("ok"))
+            if not healed:
+                fails.append(f"{label}: the retry did not pick up the streams that arrived: {out}")
+            read()
+            if len(calls) != 2:
+                fails.append(f"{label}: a GOOD read is being re-fetched ({len(calls)} calls)")
+            m.close()
+
+        # (3) an activity that records nothing settles on the first read — never fetched again
+        for label, kind in (("profile", "p"), ("structure", "s")):
+            m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+            m.executescript(S.SCHEMA)
+            S.mcp_call = _fake([_resp({}, {"available": [], "sample_count": 0})])
+            calls.clear()
+            read = (lambda: S._profile_cached(m, 1)) if kind == "p" else \
+                   (lambda: S._structure_cached(m, 1, "2026-08-25"))
+            read(); read(); read()
+            if len(calls) != 1:
+                fails.append(f"{label}: an activity with NO recorded streams was re-fetched "
+                             f"{len(calls)} times — every view pays for a settled question")
+            m.close()
+    finally:
+        for k, v in saved.items():
+            setattr(S, k, v)
+
+    # (4) the predicate itself, stated once
+    for act, want in (({"streams": {"distance": [1]}, "streams_meta": AVAIL}, True),
+                      ({"streams": {}, "streams_meta": AVAIL}, False),
+                      ({"streams": {}, "streams_meta": {"available": []}}, True),
+                      ({}, True)):
+        if S.streams_are_final(act) is not want:
+            fails.append(f"streams_are_final({act}) != {want}")
+    return _st("det", "stream-optin",
+               "§RD2 streams are OPT-IN upstream: the read asks for them by name (and the "
+               "summary-only read does not), an empty read while the source still lists channels is "
+               "retried rather than cached as a verdict, and an activity that records none settles "
+               "on the first read — the same rule in the profile cache and the §RD structure cache",
+               passed=not fails,
+               expect="ask for streams; retry a not-yet; settle a genuine none exactly once",
+               got={"first_request": (calls[0] if calls else None), "failures": fails or "none"})
+
+
+def _stc_guide_notify():
+    """§SG3 the boundary popup — the fix for a guided workout that guided nothing. Everything a step
+    carries lives on the SuuntoPlus display, a screen of its own that the watch never switches to on
+    its own (on a Race S you press the crown to reach it). So the first live guided interval session
+    ran with every transition firing on time, a beep at each boundary, and not one word about what
+    the athlete was supposed to be doing — the instructions were on a page nobody was looking at.
+    `notification` is the only part of a guide that lands on whatever screen is actually in front of
+    him, and we emitted none.
+
+    Locked here: every step has one, inside the documented 13/54 limits; the popup names the effort
+    AND its targets; segments are dropped WHOLE rather than cut mid-token; a rep does not announce
+    itself twice ('2min - 2min at interval'); and the transliteration that makes the sentence
+    survive the watch charset — `@` used to be deleted outright, turning '2min @ interval' into
+    '2min  interval', an instruction with its preposition removed."""
+    import re
+    from datetime import date as _d
+    fails = []
+    zones = S.pace_zones(50.0)
+    spec = {"zone": "threshold", "structure": "intervals", "rep_min": 5, "rec_min": 2,
+            "kind": "intervals", "label": "cruise intervals"}
+    sess = S._build_quality(spec, 78, _d(2026, 7, 13), 2, zones, zones["easy"])
+    hrz = {"anchor": "lthr", "ref": 166, "cutoffs": [135, 149, 157, 166],
+           "zones": [("Z1", None, 135), ("Z2", 135, 149), ("Z3", 149, 157),
+                     ("Z4", 157, 166), ("Z5", 166, None)], "lthr_confidence": "high"}
+    g, _b = S.session_to_guide(sess, hrz)
+    easy = {"date": "2026-07-14", "kind": "easy", "km": 8.0, "minutes": 48, "trimp": 48,
+            "pace_zone": "6:00/km easy", "note": "easy run + 4×4–6 strides"}
+    g2, _b2 = S.session_to_guide(easy, hrz)
+    # A THIRD fixture whose only job is to OVERFLOW. Nothing above reaches 54 characters, so a
+    # truncating implementation would render every popup identically and the drop-whole rule would
+    # be asserted by a case that never exercises it. This one is 55 with its HR band attached — one
+    # over — so the band must vanish entirely rather than arrive as 'HR 95-14'.
+    longnote = {"date": "2026-07-16", "kind": "easy", "km": 10.2, "minutes": 70, "trimp": 60,
+                "pace_zone": "6:52/km easy", "note": "easy run + 2×4–6 strides"}
+    g3, _b3 = S.session_to_guide(longnote, hrz)
+
+    for guide in (g, g2, g3):
+        for st_ in guide["steps"]:
+            n = st_.get("notification")
+            if not isinstance(n, dict):
+                fails.append(f"step {st_['title']!r} has NO notification — a beep and no instruction")
+                continue
+            if not (1 <= len(n.get("title", "")) <= 13):
+                fails.append(f"notification title violates 1..13: {n.get('title')!r}")
+            if not (1 <= len(n.get("text", "")) <= 54):
+                fails.append(f"notification text violates 1..54: {n.get('text')!r}")
+            if n.get("title") != st_["title"]:
+                fails.append(f"popup title != step title: {n.get('title')!r} vs {st_['title']!r}")
+            # dropped WHOLE, never cut: a target that appears must be complete
+            txt = n.get("text", "")
+            if "HR" in txt and not re.search(r"HR \d+-\d+$", txt):
+                fails.append(f"HR band cut mid-token: {txt!r}")
+            if "/km" in txt and not re.search(r"\d+:\d\d/km", txt):
+                fails.append(f"pace cut mid-token: {txt!r}")
+
+    work = next(st_ for st_, r in zip(g["steps"], sess["reps"]) if r["effort"] == "work")
+    _txt = lambda st_: ((st_.get("notification") or {}).get("text") or "")
+    wt = _txt(work)
+    if "at threshold" not in wt:
+        fails.append(f"work popup does not say what the effort IS: {wt!r}")
+    if not re.search(r"\d+:\d\d/km", wt) or "HR 157-166" not in wt:
+        fails.append(f"work popup carries no pace/HR target: {wt!r}")
+    if re.match(r"(\d+(\.\d+)?min) - \1\b", wt):
+        fails.append(f"the rep announces its duration twice: {wt!r}")
+    warm = _txt(g["steps"][0])
+    if not warm.startswith("10min - "):
+        fails.append(f"a step whose detail omits the duration must lead with it: {warm!r}")
+    if not _txt(g2["steps"][0]).startswith("8km - "):
+        fails.append(f"distance-framed step must lead with its distance: {_txt(g2['steps'][0])!r}")
+    over = _txt(g3["steps"][0])
+    if over != "10.2km - easy run + 2x4-6 strides - 6:52/km" or "HR" in over:
+        fails.append(f"the segment that did not fit was CUT, not dropped: {over!r}")
+
+    # the transliteration table, against the FULL out-of-charset inventory of the plan corpus
+    for raw, want in (("2min @ interval", "2min at interval"), ("4×2min", "4x2min"),
+                      ("VO₂ touch", "VO2 touch"), ("53.4km ≥ 33.9km", "53.4km >= 33.9km"),
+                      ("wu — cd", "wu - cd"), ("wu – cd", "wu - cd"), ("it’s", "it's"),
+                      ("✓ Week's volume", "Week's volume")):
+        got = S._guide_txt(raw, 54)
+        if got != want:
+            fails.append(f"_guide_txt({raw!r}) = {got!r}, want {want!r}")
+    return _st("det", "guide-notify",
+               "§SG3 every guide step fires a boundary popup the athlete actually sees — inside the "
+               "13/54 limits, naming the effort and its pace/HR targets, segments dropped whole "
+               "rather than cut, no duplicated duration — and the charset map transliterates what "
+               "carries meaning (@ - x 2 >=) instead of deleting it",
+               passed=not fails,
+               expect="a notification on every step, complete targets, meaning-preserving charset",
+               got={"work_popup": wt, "warmup_popup": warm, "easy_popup": _txt(g2["steps"][0]),
+                    "overflow_popup": _txt(g3["steps"][0]), "failures": fails or "none"})
 
 
 def _stc_hr_zones():
@@ -11584,6 +11904,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
+                 lambda: _stc_guide_recreate(), lambda: _stc_guide_notify(),
+                 lambda: _stc_stream_optin(),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
                  lambda: _stc_health_staleness(), lambda: _stc_explain_cache(), lambda: _stc_calibration_inventory(), lambda: _stc_track_record(),
                  lambda: _stc_lt1(),

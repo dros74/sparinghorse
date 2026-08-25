@@ -10,6 +10,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.44.1] - 2026-08-25
+
+### Fixed
+
+- **The map and the read-back went blank, because Runalyze stopped sending streams unasked.**
+  `get_activity_details` grew an `include_streams` flag that defaults to **false** — raw per-sample
+  series are too large to return by default — and we were still calling it with an activity id
+  alone. The reply came back perfectly valid and perfectly empty: `streams_included: false`,
+  `returned_points: 0`, every array `[]`, while `streams_meta.available` listed ten recorded
+  channels over 2090 samples. Nothing raised, nothing logged. The route map, the pace/HR profile and
+  the §RD read-back all quietly stopped existing for any run synced after the change. The read now
+  asks for the streams it needs by name (distance, time, HR, cadence, elevation, lat/long); the one
+  caller that only wants the summary — the HR-zone distribution — still doesn't pay for them.
+
+- **And the emptiness was being written down as an answer.** Both caches key on a version: a profile
+  stamped with the current version is a hit, and a stored structure that already refused is a hit.
+  So the blank profile and the "no usable pace/distance streams" verdict would have been served
+  *forever*, on rows nothing ever revisits — the run would have stayed mapless and unread long after
+  the request was fixed, and the same would happen to any run whose upload is still landing when the
+  nightly sync reaches it. An empty read is now only an answer when the source itself says there is
+  nothing to read (`streams_meta.available` empty); otherwise the next look tries again. A run that
+  genuinely records no streams still settles on the first read and is never re-fetched.
+
+  `det/stream-optin` pins the request, both retry rules and both settle rules. Six mutations, six
+  reds — including the two that restore the old cache behaviour, which is the half that would have
+  survived the outage.
+
+## [0.44.0] - 2026-08-25
+
+### Fixed
+
+- **The guides were not guiding.** First live guided interval session: the watch offered the guide,
+  the summary was right, the transitions fired on time — a beep at ten minutes, a beep at every two
+  after — and it never once said what to do. Everything a step carries (the countdown, the pace and
+  heart-rate targets, the detail line) lives on the SuuntoPlus display, which is a *screen of its
+  own*; the watch does not switch to it for you. So the whole prescription sat on a page nobody was
+  looking at, and each step change arrived as an unexplained noise. The Guide format has the answer
+  and we simply never emitted it: **`notification`**, a popup shown for about twenty seconds when a
+  step starts, on whatever screen is actually in front of you. Every step now fires one — the step's
+  name, what the block is, and its targets: `Work 1/4` · `2min at interval - 5:00/km - HR 169-184`.
+  It is capped at 13 and 54 characters, so segments are added whole and dropped whole: a target left
+  out beats `HR 169-1`. A rep whose detail already opens with its duration does not announce itself
+  twice.
+
+- **`@` was being deleted from every instruction sent to the watch.** The watch charset genuinely
+  has no `@`, and the sanitiser dropped unsupported characters rather than translating them — so
+  `2min @ interval` arrived as `2min  interval`, an instruction with its preposition removed, and
+  `short VO₂ touch` as `short VO touch`. Characters that carry meaning are now transliterated:
+  `@`→`at`, `₂`→`2`, `≥`→`>=`, `×`→`x`. The map is the complete out-of-charset inventory of the last
+  sixty saved plans rather than a guess; `✓`, a decoration whose sentence reads the same without it,
+  still goes.
+
+  `det/guide-notify` locks both, over three fixtures — the third exists only to overflow the
+  54-character budget, because nothing else in the battery reached it and a drop-whole rule asserted
+  by cases that always fit is not asserted at all. Six mutations, six reds.
+
+## [0.43.0] - 2026-08-25
+
+### Added
+
+- **"Rebuild on watch" — for guides you deleted from the wrist.** The nightly push is idempotent: a
+  session already on your Suunto account is *updated in place*, keeping its guide id, so a re-plan
+  quietly keeps the watch current without ever stacking duplicates. That is the right behaviour and
+  it has one blind spot, which only shows up when you clear the guides off the watch yourself.
+  Suunto hands the watch the guides it does not already hold, keyed on that same id — and an update
+  does not change it. So the push honestly reports every session sent, and exactly one of them
+  appears on the wrist: the day that has just entered the seven-day horizon, whose id is new to the
+  account and therefore created rather than updated. Six sent, one arrives, and nothing anywhere is
+  in error. The Settings window now carries a second button beside the push. **Rebuild** deletes
+  each guide in the window and sends it again under a fresh id, so the whole week syncs as new. It
+  is deliberately not the default — churning every id nightly would be a delete-and-recreate cycle
+  on a watch that is already correct — and a delete that fails falls back to the ordinary update,
+  because a stale guide beats no guide. `det/guide-recreate` runs both modes over one fixture and
+  pins the difference in both directions, including that neither mode ever touches a guide that
+  isn't ours.
+
 ## [0.42.0] - 2026-08-25
 
 ### Fixed

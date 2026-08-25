@@ -333,6 +333,38 @@ def cadence_is_halved(source):
     return (source or "").lower() == "suunto"
 
 
+# §RD2 — RUNALYZE'S MCP STOPPED SHIPPING STREAMS BY DEFAULT. Observed 2026-08-25 on the day's own
+# run: every array empty, `streams_included: false`, `returned_points: 0` — while `streams_meta`
+# listed ten recorded channels over 2090 samples. Nothing had failed; the tool simply grew an
+# opt-in, because raw streams are too large to return unasked. Everything downstream of a stream
+# (the route map, the pace/HR profile, the §RD read-back) went quietly blank on the next run.
+# Fields not recorded for an activity are IGNORED by the server rather than rejected, so one list
+# serves every device — `elevation_corrected` is absent from a Suunto upload and costs nothing.
+RD_STREAM_FIELDS = ("distance", "time", "heart_rate", "cadence",
+                    "elevation_corrected", "elevation_original", "latitude", "longitude")
+RD_STREAM_POINTS = 1000          # the documented maximum; the server trims to its own budget
+
+
+def activity_details(activity_id, streams=True):
+    """One activity from the MCP, WITH its per-sample streams unless a caller only wants the
+    summary (the HR-zone distribution read, which would pay for streams it never opens)."""
+    args = {"activity_id": int(activity_id)}
+    if streams:
+        args.update(include_streams=True, stream_fields=list(RD_STREAM_FIELDS),
+                    max_stream_points=RD_STREAM_POINTS)
+    det = mcp_call("get_activity_details", args)
+    return det.get("activity", det)
+
+
+def streams_are_final(act):
+    """Did this read settle the question of whether the activity HAS streams? An empty read while
+    `streams_meta.available` still lists channels is a NOT-YET (an upload still landing, an opt-in
+    we forgot to send) — cache that as a verdict and the run stays mapless and unread forever, on a
+    row nothing will ever revisit. An activity that genuinely records none (a manual entry) settles
+    on the first read and must never be re-fetched on every view."""
+    return bool(act.get("streams")) or not ((act.get("streams_meta") or {}).get("available"))
+
+
 # Bump when activity_profile's shape changes (new channel etc.) so cached profiles in trackcache
 # that predate the bump are re-fetched instead of served stale. v2 = elevation; v3 = route path (lat/long).
 PROFILE_VERSION = 3
@@ -342,8 +374,7 @@ def activity_profile(activity_id, n=120):
     """Downsampled pace/HR/cadence/elevation-vs-distance profile for one activity (via MCP streams).
     Returns {dist[], pace[], hr[], cadence[], elevation[], hr_avg, v, has_*} — pace in sec/km,
     dist in km, elevation in metres."""
-    det = mcp_call("get_activity_details", {"activity_id": int(activity_id)})
-    act = det.get("activity", det)
+    act = activity_details(activity_id)
     cad_mult = 2 if cadence_is_halved(act.get("source")) else 1
     s = act.get("streams") or {}
     dist, tim, hr, cad = (s.get("distance") or [], s.get("time") or [],
@@ -356,7 +387,8 @@ def activity_profile(activity_id, n=120):
     lat, lon = s.get("latitude") or [], s.get("longitude") or []   # GPS track for the route map
     if not dist or not tim or len(dist) != len(tim):
         return {"dist": [], "pace": [], "hr": [], "cadence": [], "elevation": [], "path": [],
-                "has_gps": False, "hr_avg": act.get("average_heart_rate"), "v": PROFILE_VERSION}
+                "has_gps": False, "hr_avg": act.get("average_heart_rate"), "v": PROFILE_VERSION,
+                "streams_final": streams_are_final(act)}
     total = dist[-1] or 1
     km = total > 100  # distance likely in metres if it exceeds 100 → normalise to km
     scale = 1000.0 if km else 1.0
@@ -1027,14 +1059,18 @@ def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S):
         return None, None
     cached = json.loads(row["structure"]) if row else None
     if cached and cached.get("v") == STRUCT_VERSION:
-        if cached.get("ok") or min_s >= RD_MIN_RUN_S or not fetch:
+        # A refusal is a verdict only when the streams it refused were actually there to read (§RD2).
+        # 'no usable pace/distance streams' over an EMPTY read is the read failing, not the run being
+        # unreadable — and the read-back line would stay missing on a row nothing revisits.
+        if cached.get("ok") or (min_s >= RD_MIN_RUN_S and cached.get("streams_final")):
             return cached, None
     if not fetch:
         return cached, None
     try:
-        det = mcp_call("get_activity_details", {"activity_id": int(aid)})
-        streams = (det.get("activity", det)).get("streams") or {}
+        act = activity_details(aid)
+        streams = act.get("streams") or {}
         st = classify_structure(streams, _zones_asof(db, date_iso), min_s=min_s)
+        st["streams_final"] = streams_are_final(act)
     except (RunalyzeError, requests.RequestException, KeyError, ValueError) as e:
         return cached, e
     db.execute("INSERT OR REPLACE INTO structcache (activity_id, structure, cached_at) "
@@ -1982,9 +2018,17 @@ _icon_png_cache = None
 
 
 def _guide_txt(s, limit):
-    """Clamp to the watch charset (the docs' minimum supported set) + a length limit. Common
-    typography in our notes (×, —, ’) is transliterated rather than dropped."""
-    s = (s or "").replace("×", "x").replace("—", "-").replace("–", "-").replace("’", "'").replace("·", "-")
+    """Clamp to the watch charset (the docs' minimum supported set) + a length limit. A character the
+    device cannot render is TRANSLITERATED where it carries meaning and dropped where it is
+    decoration. The distinction was learned the hard way: `@` is not in the set, the old code simply
+    deleted it, and `2min @ interval` reached the wrist as `2min  interval` — the instruction with
+    its preposition removed. The map below is the FULL out-of-charset inventory of the plan corpus
+    (60 saved plans: @ — × ₂ – ✓ ≥), not a guess about what might show up; ✓ is the one that stays
+    dropped, being a decoration on a note whose sentence reads the same without it."""
+    s = s or ""
+    for _bad, _good in (("@", "at"), ("×", "x"), ("₂", "2"), ("≥", ">="),
+                        ("—", "-"), ("–", "-"), ("’", "'"), ("·", "-")):
+        s = s.replace(_bad, _good)
     s = "".join(ch for ch in s if ch in
                 " !\"#$%&'()*+,-./0123456789:;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                 "abcdefghijklmnopqrstuvwxyz|°")
@@ -2019,6 +2063,38 @@ def _pace_target(sec_per_km, band=0.05):
             "value": round(v, 3), "min": round(v * (1 - band), 3), "max": round(v * (1 + band), 3)}
 
 
+def _pace_label(sec_per_km):
+    """m:ss/km — the pace vocabulary the athlete reads on the plan. The wire format is m/s
+    (`_pace_target`); nobody wants 3.333 shouted at them mid-rep."""
+    if not sec_per_km:
+        return None
+    m, sec = divmod(int(round(sec_per_km)), 60)
+    return f"{m}:{sec:02d}/km"
+
+
+def _guide_notification(title, text, dur, pace_sec, hr):
+    """The ~20-second popup the watch shows AT A STEP BOUNDARY — §SG3, and the reason the first
+    guided workout guided nothing. Everything else a step carries (countdown, pace and HR targets,
+    detail line) lives on the SuuntoPlus display, which is a SCREEN OF ITS OWN: on a Race S you get
+    there by pressing the crown during the exercise, and the watch never switches to it for you. So
+    the transitions fired on time, the watch beeped at every boundary, and the athlete was told
+    nothing — all the instructions were on a page nobody was looking at. This popup is the only part
+    of a guide that arrives on whatever screen is actually in front of him.
+
+    Segments are appended whole while they fit the documented 54 characters: a target cut in half
+    ('HR 169-1') is worse than a target left out. The duration is dropped when the detail already
+    opens with it, so a rep does not announce itself as '2min - 2min at interval'."""
+    segs = [seg for seg in ((dur if dur and (not text or dur not in text) else None), text,
+                            _pace_label(pace_sec),
+                            (f"HR {hr['min']}-{hr['max']}" if hr else None)) if seg]
+    out = ""
+    for seg in segs:
+        cand = f"{out} - {seg}" if out else seg
+        if len(cand) <= 54:
+            out = cand
+    return {"title": title, **({"text": out} if out else {})}
+
+
 def _hr_target(zone, hrz):
     """targetHeartRate field for a plan zone, from the app's own hr_zones() grid. None when the
     grid is unavailable (no robust anchor) or the zone is unmapped — pace then guides alone."""
@@ -2045,17 +2121,19 @@ def _rep_pace_sec(rep):
 
 
 def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False):
-    """One fields step: countdown + optional pace/HR targets + a detail text line, advancing on
-    its own duration (or distance, for the distance-framed simple runs)."""
-    fields, cond = [], None
+    """One fields step: countdown + optional pace/HR targets + a detail text line + the boundary
+    popup (§SG3), advancing on its own duration (or distance, for the distance-framed simple runs)."""
+    fields, cond, dur = [], None, None
     if minutes:
         fields.append({"type": "stepDurationCountdown", "title": "left",
                        "value": round(minutes * 60.0, 1)})
         cond = {"type": "stepDuration", "value": round(minutes * 60.0, 1)}
+        dur = f"{minutes:g}min"
     elif km:
         fields.append({"type": "stepDistanceCountdown", "title": "left",
                        "value": round(km * 1000.0, 1)})
         cond = {"type": "stepDistance", "value": round(km * 1000.0, 1)}
+        dur = f"{km:g}km"
     pt = _pace_target(pace_sec)
     if pt:
         fields.append(pt)
@@ -2065,6 +2143,7 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
     if txt:
         fields.append({"type": "text", "value": txt})
     step = {"type": "fields", "title": _guide_txt(title, 13) or "Run", "fields": fields}
+    step["notification"] = _guide_notification(step["title"], txt, dur, pace_sec, hr)
     if lap:
         step["createManualLap"] = True
     if cond:
@@ -2164,13 +2243,15 @@ def _suunto_delete_guide(headers, gid):
         return False
 
 
-def push_guides(db, days=None):
+def push_guides(db, days=None, recreate=False):
     """Push the plan's next `days` sessions (today inclusive) to the connected Suunto account as
     Guides. Idempotent via externalId: existing → PUT update, new → POST, so the nightly re-push
     after a re-plan silently keeps the watch current — and a cleanup pass then DELETES our own guides
     the re-plan superseded (a changed kind, a moved run, a day gone past), so the watch shows one
-    guide per planned day and nothing behind today. Returns a per-session summary; never raises
-    (the scheduler must survive a flaky Suunto night the same way it survives Runalyze)."""
+    guide per planned day and nothing behind today. `recreate` REBUILDS the window instead of
+    updating it (§SG2 below) — the only way to get a guide back onto a wrist it was deleted from.
+    Returns a per-session summary; never raises (the scheduler must survive a flaky Suunto night the
+    same way it survives Runalyze)."""
     days = days or SUUNTO_PUSH_DAYS
     if READONLY:
         return {"ok": False, "error": "read-only instance"}
@@ -2200,6 +2281,24 @@ def push_guides(db, days=None):
         existing = _suunto_existing_guides(headers)
     except Exception as e:
         return {"ok": False, "error": f"could not list existing guides: {e}"}
+    # §SG2 — AN UPDATE IS INVISIBLE TO THE WATCH. Suunto's app hands the watch the guides the watch
+    # does not already hold, keyed on the guide id — and a PUT keeps that id, changing only the file
+    # behind it. So after the athlete deletes guides ON THE WRIST, the ordinary push reports every
+    # session sent and only ONE of them appears: the date that just entered the horizon, whose
+    # externalId is new to the account and is therefore POSTed under a fresh id. Nothing about our
+    # side is wrong, which is exactly why it reads as a lie. `recreate` deletes our guide for each
+    # date we are about to push, so every one of them is POSTed anew and the whole week syncs again.
+    # A delete that FAILS keeps its gid and takes the PUT path below — a stale guide beats no guide.
+    # A delete that SUCCEEDS and is then followed by a failed upload leaves that date bare, which is
+    # the one way this mode is worse than the plain push; it self-heals on the next push, because
+    # the id is gone from the account and the retry is a create.
+    recreated = []
+    if recreate:
+        for s in sessions:
+            gid = existing.get(session_guide_external_id(s))
+            if gid and _suunto_delete_guide(headers, gid):
+                existing.pop(session_guide_external_id(s), None)
+                recreated.append(s["date"])
     up_headers = dict(headers, **{"Content-Type": "application/zip"})
     results, pushed = [], 0
     current_ext, failed_dates = set(), set()   # §SG cleanup inputs — see the pass after this loop
@@ -2253,7 +2352,8 @@ def push_guides(db, days=None):
         (removed if _suunto_delete_guide(headers, gid) else rm_failed).append(ext)
     errs = [r for r in results if r.get("error")]
     return {"ok": not errs, "pushed": pushed, "results": results,
-            "removed": removed, **({"remove_failed": rm_failed} if rm_failed else {}),
+            "removed": removed, **({"recreated": recreated} if recreate else {}),
+            **({"remove_failed": rm_failed} if rm_failed else {}),
             **({"error": f"{len(errs)} of {len(results)} failed"} if errs else {})}
 
 
@@ -7093,7 +7193,15 @@ def _profile_cached(db, aid):
     on a hard miss returns (None, err)."""
     row = db.execute("SELECT profile FROM trackcache WHERE activity_id=?", (aid,)).fetchone()
     cached = json.loads(row["profile"]) if row else None
-    if cached and cached.get("v") == PROFILE_VERSION:
+    # §RD2 — a cached profile with NO SAMPLES is only an answer when the source settled the matter.
+    # A row written while the upload was still landing (or, on 2026-08-25, while we were not asking
+    # for streams at all) carries the current version and would otherwise be served forever: the run
+    # keeps its map and its pace curve blank for good, and nothing ever looks again. Entries written
+    # before this marker existed have data, so they still read as hits.
+    # READONLY is in that test on purpose: the public box cannot fetch, so an unresolved cache is
+    # still the best thing it has, and retrying it is the private side's job.
+    if cached and cached.get("v") == PROFILE_VERSION \
+            and (READONLY or cached.get("dist") or cached.get("streams_final")):
         return cached, None
     if READONLY:
         # The public box is tokenless and its DB mount is query_only: never fetch, never write. Serve
@@ -7693,9 +7801,12 @@ def api_suunto_callback():
 
 @app.post("/api/suunto/push")
 def api_suunto_push():
-    """Manual 'push my week to the watch now' — same code path as the nightly push."""
+    """Manual 'push my week to the watch now' — same code path as the nightly push. `recreate`
+    rebuilds the window's guides under fresh ids (§SG2) so a wrist they were deleted from takes
+    them back; the plain push only UPDATES them, which the watch never sees."""
     d = body()
-    res = push_guides(get_db(), days=int(d.get("days") or SUUNTO_PUSH_DAYS))
+    res = push_guides(get_db(), days=int(d.get("days") or SUUNTO_PUSH_DAYS),
+                      recreate=bool(d.get("recreate")))
     return jsonify(**res), (200 if res.get("ok") or res.get("skipped") else 502)
 
 
