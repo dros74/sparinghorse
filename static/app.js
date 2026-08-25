@@ -886,6 +886,85 @@ async function loadReadiness(){
 // public shell removes the card. The §55d caveats shape the chart: every bar carries its distance
 // in the tooltip (on his corpus longer runs decouple LESS — duration must stay visible), and the
 // engine itself voids the trend when the recent-vs-prior distance mix shifts.
+async function loadEfficiency(){
+  const body=$("#effbody"); if(!body) return;              // the card is removed on the public box
+  try{ renderEfficiency(await getJSON("/api/efficiency")); }
+  catch(e){ tileFail(body, "Efficiency", loadEfficiency, e); }
+}
+// §EF — TWO panels, one shared time axis, each with its OWN vertical scale, drawn one above the
+// other and never overlaid. A twin-axis overlay is the classic way to make two unrelated series
+// look like they explain each other, and that is exactly the open question here: heat depresses
+// efficiency, and his cool runs are also his most recent and fittest. Stacked panels let the eye
+// compare them without the chart having asserted an answer. Both SVGs stretch and NEITHER letters
+// itself — every value is HTML around the plot (UX-8, det/axis-legibility).
+function effPlot(pts, key, cls, fit){
+  if(!pts.length) return "";
+  const W=1000,H=cls==="ef"?132:56,padT=6,padB=6;
+  const t=d=>Date.parse(d+"T12:00:00Z");
+  const t0=t(pts[0].date), t1=t(pts[pts.length-1].date), span=Math.max(1,t1-t0);
+  const vals=pts.map(p=>p[key]).filter(v=>v!=null);
+  if(!vals.length) return "";
+  let lo=Math.min(...vals), hi=Math.max(...vals);
+  const padv=(hi-lo)*0.12||1; lo-=padv; hi+=padv;
+  const x=d=>4+(W-8)*(t(d)-t0)/span;
+  const y=v=>padT+(H-padT-padB)*(1-(v-lo)/(hi-lo||1));
+  // ⚠ NOT <circle>: this SVG stretches (preserveAspectRatio="none"), and a circle stretches with it
+  // — on a 390px phone the same markup that looked round at 1280px drew tall ellipses. A ZERO-LENGTH
+  // line with a round cap and a non-scaling stroke draws a true circle whose diameter is the stroke
+  // width in device pixels, so the marks stay round at every width. Same family of defect as UX-8's
+  // squeezed <text>, one layer down: the stretch scales marks as well as glyphs.
+  const r=cls==="ef"?7:5;
+  const dots=pts.filter(p=>p[key]!=null).map(p=>{
+    const tip=cls==="ef"
+      ? `${p.date} · ${p.ef} · ${p.km} km @ ${p.pace}/km · HR ${p.hr}`
+      : `${p.date} · ${p.temp_c}°C`;
+    const cx=x(p.date).toFixed(1), cy=y(p[key]).toFixed(1);
+    return `<line class="dot" x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy}" stroke-width="${r}"><title>${esc(tip)}</title></line>`;
+  }).join("");
+  // the fitted line is drawn ONLY on the efficiency panel: it is the claim the chart makes, and the
+  // temperature panel is deliberately claim-free — it is context, not a trend we are asserting.
+  let line="";
+  if(cls==="ef" && fit && fit.per_30d!=null){
+    const days=(t1-t0)/86400000, mid=vals.reduce((a,b)=>a+b,0)/vals.length;
+    const slope=fit.per_30d/30, y0=mid-slope*days/2, y1=mid+slope*days/2;
+    line=`<line class="fit" x1="${x(pts[0].date).toFixed(1)}" y1="${y(y0).toFixed(1)}" x2="${x(pts[pts.length-1].date).toFixed(1)}" y2="${y(y1).toFixed(1)}"/>`;
+  }
+  const u=cls==="temp"?"°C":"", dp=cls==="ef"?2:0;
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><line class="grid" x1="0" x2="${W}" y1="${(H-1).toFixed(1)}" y2="${(H-1).toFixed(1)}"/>${line}${dots}</svg>`
+       + `<span class="axhi">${hi.toFixed(dp)}${u}</span><span class="axlo">${lo.toFixed(dp)}${u}</span>`;
+}
+function renderEfficiency(d){
+  const host=$("#effbody"); if(!host) return;
+  if(!d || d.ok===false){
+    host.innerHTML=`<div class="empty">${esc((d&&d.reason)||"No efficiency read yet")} — the chart starts once four aerobic runs land with heart-rate data.</div>`;
+    return;
+  }
+  const pts=d.series||[], first=pts[0], last=pts[pts.length-1];
+  const tr=d.trend||{};
+  // the fitted change across the drawn window — NOT last-minus-first, which reports whichever
+  // single run happens to sit at either end (the chart draws this same line, so they agree)
+  const days=(first&&last)?(Date.parse(last.date)-Date.parse(first.date))/86400000:0;
+  const gain=(tr.pct_per_30d!=null&&days>0)?tr.pct_per_30d*days/30:null;
+  const vcls=d.verdict==="improving"?"ok":d.verdict==="declining"?"danger":"warn";
+  const dates=pts.length>1?`${monYr(first.date)}–${monYr(last.date)}`:"";
+  const tempTxt=(d.temp&&d.temp.r_with_ef!=null)
+    ? `r ${d.temp.r_with_ef>0?"+":""}${d.temp.r_with_ef} with efficiency, ${d.temp.lo}–${d.temp.hi}°C`
+    : "temperature not recorded on these runs";
+  host.innerHTML=`
+    <p class="effhero"><b class="${vcls}">${esc(d.verdict)}</b>${gain!=null?`<span class="d">${gain>0?"+":""}${gain.toFixed(1)}% over ${esc(dates)}</span>`:""}</p>
+    <p class="muted" style="font-size:11px;margin:6px 0 0;line-height:1.5">Metres per minute per heartbeat, one point per aerobic run
+      (average HR at or below the top of Z2${d.z2_top?`, ${d.z2_top} bpm`:""}) of ${Math.round(d.min_km)} km or more. Running the same pace at a lower
+      heart rate <em>is</em> the adaptation — no model in between, just the watch. Measure-first: shown and trended, governing nothing.</p>
+    <div class="effrow"><span class="k">Efficiency · ${d.n} runs</span><span class="k">${tr.pct_per_30d!=null?`${tr.pct_per_30d>0?"+":""}${tr.pct_per_30d}%/month${tr.r!=null?` · r ${tr.r}`:""}`:""}</span></div>
+    <div class="effplot ef">${effPlot(pts,"ef","ef",tr)}</div>
+    <div class="effrow"><span class="k">Temperature</span><span class="k">${esc(tempTxt)}</span></div>
+    <div class="effplot temp">${effPlot(pts,"temp_c","temp",null)}</div>
+    <div class="effax" style="margin-top:5px"><span>${esc(first?monYr(first.date):"")}</span><span>${esc(last?monYr(last.date):"")}</span></div>
+    <p class="muted" style="font-size:11px;margin:12px 0 0;line-height:1.5"><b>Read the two together.</b> Heat costs you efficiency, and
+      your cool runs are also your most recent and fittest — so the gain above is flattered by whatever the weather did. The panels are
+      separate and share only their time axis on purpose: nothing here subtracts a temperature correction, because how big that correction
+      should be is not settled on your data yet. Hover any point for its pace, distance and heart rate.</p>`;
+}
 async function loadDurability(){
   const body=$("#durbody"); if(!body) return;              // the card is removed on the public box
   try{ renderDurability(await getJSON("/api/durability")); }
@@ -962,7 +1041,7 @@ async function touchSync(){
     if(!d || !d.ok || d.skipped) return;
     loadReadiness();
     if(d.activities && d.activities.added>0){
-      loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones(); loadDurability();
+      loadPlan(); loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones(); loadDurability(); loadEfficiency();
     }
   }catch(e){ /* offline / token issue — the tile just keeps its last-known state */ }
 }
@@ -2909,7 +2988,7 @@ if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
   // §RB — the run browser (route geo + HR calendar) is private-only: drop its section + links too.
-  ["sec-health","sec-zones","settingsDialog","firstrun","sec-runs","runsLink","durcard"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
+  ["sec-health","sec-zones","settingsDialog","firstrun","sec-runs","runsLink","durcard","effcard"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   loadReadiness();
   const cluster=document.querySelector(".topctl");
@@ -2924,7 +3003,7 @@ if(SH_READONLY){
   const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
   const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
 }else{
-  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadDurability();
+  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadDurability(); loadEfficiency();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 

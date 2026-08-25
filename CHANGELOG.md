@@ -10,6 +10,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.41.0] - 2026-08-25
+
+### Added
+
+- **A chart for the thing that actually moves first: speed per heartbeat.** Running the same pace at
+  a lower heart rate *is* aerobic fitness arriving, and unlike a training-load model it needs nothing
+  but the watch. The readiness section now carries a full-width chart of it — one point per aerobic
+  run, with the fitted trend and a hover carrying that run's pace, distance and heart rate. It sits
+  above the durability tile and is deliberately more prominent: economy decay over a long run only
+  says something once the long runs are long, while efficiency reads on every easy run there is.
+  **Temperature is drawn underneath, in its own panel, on its own scale.** Not overlaid on a second
+  axis — that is the standard way to make two series look like they explain each other, and this is
+  exactly the case where you must not: heat depresses efficiency, and the cool runs are also the
+  recent, fitter ones. The two panels share only their time axis, and **nothing subtracts a
+  temperature correction**, because how large that correction should be is not settled on one
+  runner's data. The card says so in as many words, and carries the correlation as a number.
+  Aerobic runs only — average heart rate at or below the top of Z2, using the app's own
+  LTHR-anchored zones. Mixing an all-out 5k with an easy hour makes the trend read the training mix
+  rather than the athlete: on the owner's corpus that alone moved the fit from r 0.40 to r 0.78.
+  Private-only, like durability — it is heart-rate data. Measure-first: shown and trended, governing
+  nothing.
+
+### Fixed
+
+- **Chart marks stopped turning into ellipses on a phone.** The trend charts here are drawn stretched
+  to whatever width they are given, which is fine for lines and bars and quietly wrong for a circle:
+  the same markup that drew round points on a laptop drew tall ovals at 390px. The new chart's points
+  are drawn so their size is fixed in real pixels and the stretch cannot deform them. This is the
+  same defect as the squeezed axis labels fixed in 0.29.0, one layer down — the stretch scales marks
+  as well as lettering.
+
 ## [0.40.1] - 2026-08-25
 
 ### Fixed

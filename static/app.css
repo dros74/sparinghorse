@@ -414,6 +414,34 @@
   .durchart rect.warn{fill:color-mix(in oklab,var(--warn),transparent 30%)}
   .durchart rect.danger{fill:color-mix(in oklab,var(--danger),transparent 30%)}
   .durchart rect:hover{opacity:.75}
+  /* §EF aerobic-efficiency card — two stacked panels, one shared time axis, no twin scales */
+  .effcard{margin-top:14px}
+  .effplot{position:relative;margin:4px 0 0}
+  .effplot svg{display:block;width:100%}
+  .effplot.ef svg{height:132px}
+  .effplot.temp svg{height:56px}
+  .effplot .grid{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke}
+  .effplot .fit{stroke:var(--accent);stroke-width:2;fill:none;vector-effect:non-scaling-stroke}
+  /* a zero-length round-capped line = a true circle whose size is the stroke, and non-scaling-stroke
+     keeps that size in device px so the stretch cannot squeeze it into an ellipse */
+  .effplot .dot{stroke:color-mix(in oklab,var(--accent),transparent 35%);stroke-linecap:round;
+    vector-effect:non-scaling-stroke;transition:opacity .15s}
+  .effplot .dot:hover{opacity:.6}
+  .effplot.temp .dot{stroke:color-mix(in oklab,var(--z2),transparent 40%)}
+  /* the axis values are HTML, never <text> inside a stretched SVG (UX-8 / det/axis-legibility) */
+  .effax{display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;
+    letter-spacing:.1em;color:var(--muted);margin:3px 0 0}
+  /* the vertical scale reads TOP and BOTTOM of its own panel — side by side underneath, two
+     y-values read as the ends of the time axis, which is a different measure entirely */
+  .effplot .axhi,.effplot .axlo{position:absolute;right:3px;font-family:var(--mono);font-size:9px;
+    letter-spacing:.08em;color:var(--muted);background:color-mix(in oklab,var(--surface),transparent 15%);
+    padding:0 3px;border-radius:3px;pointer-events:none}
+  .effplot .axhi{top:0} .effplot .axlo{bottom:2px}
+  .effrow{display:flex;align-items:baseline;justify-content:space-between;gap:4px 12px;margin:12px 0 0;flex-wrap:wrap}
+  .effrow .k{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .effscale{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--muted);margin:0 0 2px}
+  .effhero{font-family:var(--serif);font-size:21px;font-weight:600}
+  .effhero .d{font-size:13px;font-family:var(--mono);color:var(--accent);margin-left:6px}
   /* A-race pill bar */
   .objbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line);
     border-radius:12px;padding:12px 16px;margin-bottom:22px;background:var(--surface)}

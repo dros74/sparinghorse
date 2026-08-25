@@ -2171,6 +2171,114 @@ def _gov_ok(tag, w, assertive, out):
         out.append(f"{tag} breached EOW ACWR cap: {w.get('proj_acwr')}")
 
 
+def _stc_efficiency():
+    """§EF — aerobic efficiency (speed per heartbeat), and the two design calls the card makes.
+
+    The owner asked for this chart on 2026-08-25, judging that the durability tile only earns its
+    space once his runs get long (his longest is 12.3 km) while efficiency reads on every easy run he
+    does. He asked for "two vertical axes, plot both separately". Limbs (b) and (d) are those words
+    turned into invariants, because both are decisions a future edit could quietly undo:
+
+      (b) EFFICIENCY AND TEMPERATURE ARE SEPARATE PLOTS, never one twin-axis frame. Overlaying two
+          series on two y-scales is the standard way to make them look like they explain each other,
+          and that is precisely the open question here — heat depresses efficiency, and his cool runs
+          are also his most recent and fittest. Stacked panels sharing only a time axis let him see
+          both without the chart having asserted the answer.
+      (d) TEMPERATURE IS RETURNED, NEVER SUBTRACTED. The published trend must be the RAW slope of
+          what is drawn. A temperature-adjusted figure would bake in a coefficient the corpus has not
+          earned — [[feel-context-modelling]]'s n=298 test puts the heat cost at roughly a quarter of
+          what this window's 30 pairs suggest, and that is unsettled. Same discipline that keeps
+          decoupling display-only (§3.3, DIR-3).
+
+    (c) is the confound the owner did NOT raise and that matters more than heat: EF only compares
+    between runs of SIMILAR EFFORT. Unfiltered, his March HR-176 5k efforts sit beside August's
+    HR-133 easy hours and the trend reads the training mix. Measured: r 0.40 unfiltered → 0.78
+    restricted to aerobic runs."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    m.executescript(S.RUN_METRICS_VIEW)
+    # A RISING efficiency, on runs whose temperature rises WITH it — so an implementation that
+    # "corrected for" heat would report a visibly different (smaller) slope than the raw one.
+    base = _d(2026, 3, 2)
+    for i in range(20):
+        d = (base + _td(days=i * 7)).isoformat()
+        m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,hr_avg,raw) "
+                  "VALUES(?,?,?,?,?,?,?)",
+                  (d, d + "T18:00", S.RUNNING_SPORT, 10.0, 4200 - i * 40, 140,
+                   '{"temperature": %d}' % (8 + i)))
+    out = S.efficiency_signal(m, window_days=3650)
+    if not out.get("ok"):
+        fails.append(f"the read failed on a 20-run fixture: {out.get('reason')}")
+        return _st("det", "efficiency", "§EF aerobic-efficiency read + card", passed=False,
+                   expect="a 20-run fixture yields a read", got={"violations": fails})
+    pts = out["series"]
+    # (a) chronological, and every point carries what the tooltip promises
+    if [p["date"] for p in pts] != sorted(p["date"] for p in pts):
+        fails.append("the series is not chronological — the chart would draw time backwards")
+    for k in ("ef", "km", "hr", "pace", "temp_c"):
+        if any(p.get(k) is None for p in pts):
+            fails.append(f"a point is missing {k!r} — the hover tooltip promises it")
+    # …and EF is speed per heartbeat, in the units the card claims (m/min per bpm)
+    p0 = pts[0]
+    want = round((10.0 / (4200 / 3600.0) * 1000.0 / 60.0) / 140, 3)
+    if abs(p0["ef"] - want) > 0.002:
+        fails.append(f"EF is not m/min per bpm: got {p0['ef']}, expected {want}")
+
+    # (d) ⭐ THE PUBLISHED TREND IS THE RAW ONE — recompute it here and require a match. On this
+    # fixture temperature rises with time, so any heat correction would move the slope.
+    xs = [(_d.fromisoformat(p["date"]) - _d.fromisoformat(pts[0]["date"])).days for p in pts]
+    ys = [p["ef"] for p in pts]
+    n = len(xs); mx, my = sum(xs) / n, sum(ys) / n
+    raw_slope = (sum((a - mx) * (b - my) for a, b in zip(xs, ys)) / sum((a - mx) ** 2 for a in xs))
+    if out["trend"]["per_30d"] is None or abs(out["trend"]["per_30d"] - round(raw_slope * 30, 4)) > 5e-5:
+        fails.append(f"the published trend is not the RAW slope of what is drawn: "
+                     f"{out['trend']['per_30d']} vs {round(raw_slope * 30, 4)} — a temperature "
+                     f"correction has been baked into a display the corpus has not earned")
+    if (out.get("temp") or {}).get("r_with_ef") is None:
+        fails.append("the heat confound is not quantified — the caveat needs a number, not an adjective")
+
+    # (c) intensity: whatever the zone anchor says, no point may sit above the aerobic ceiling
+    z2 = out.get("z2_top")
+    if z2 and any(p["hr"] > z2 for p in pts):
+        fails.append(f"a run above the Z2 ceiling ({z2} bpm) is in the series — EF is not comparable "
+                     f"across efforts, so the trend would read the training mix")
+
+    # (b) ⭐ TWO PLOTS, NOT TWIN AXES — and the temperature panel makes no claim of its own
+    js = S.APP_JS
+    if 'class="effplot ef"' not in js or 'class="effplot temp"' not in js:
+        fails.append("(b) the card does not emit two separate plots")
+    if 'effPlot(pts,"temp_c","temp",null)' not in js:
+        fails.append("(b) the temperature panel is passed a fit line — it is context, not a trend "
+                     "we are asserting, and a fitted heat line invites reading causation off it")
+    # the two panels must be built as separate <svg> roots, never one frame carrying both series
+    if js.count("function effPlot(") != 1:
+        fails.append("(b) effPlot is not a single per-panel builder")
+    css = S.APP_CSS
+    for sel in (".effplot.ef svg", ".effplot.temp svg"):
+        if not _stcss_rule(css, sel):
+            fails.append(f"(b) {sel} has no rule — the panels must carry their OWN heights, or one "
+                         f"scale is being shared between two measures")
+
+    # (e) private-only, like durability: EF is HR-derived
+    src = S.inspect.getsource(S.api_efficiency) if hasattr(S, "inspect") else ""
+    if "READONLY" not in (src or S.json.dumps("")) and "READONLY" not in open(
+            "SparingHorse.py", encoding="utf-8").read().split("def api_efficiency")[1][:400]:
+        fails.append("(e) /api/efficiency is not gated on READONLY — HR-derived data on the public box")
+    return _st("det", "efficiency",
+               "§EF speed-per-heartbeat read + card: chronological points carrying pace/km/HR/temp, EF "
+               "in m/min per bpm, the published trend is the RAW slope of what is drawn (temperature "
+               "quantified but NEVER subtracted), no run above the aerobic ceiling (EF is not "
+               "comparable across efforts), efficiency and temperature drawn as two SEPARATE panels "
+               "rather than one twin-axis frame, and the endpoint is private",
+               passed=not fails,
+               expect="raw trend published; aerobic-only; two panels not twin axes; private",
+               got={"violations": fails or "none", "n": out["n"], "z2_top": z2,
+                    "trend": out["trend"], "temp": out.get("temp")})
+
+
 def _stc_readiness_session_aware():
     """§H6 — the readiness narrator knows what today's session IS, and may not soften it.
 
@@ -10829,8 +10937,11 @@ def _stc_axis_legibility():
         if S.re.search(r"<text[\s>]", body):          # <textarea> is not a label
             fails.append(f"(a) the SVG at app.js line {js.count(chr(10), 0, m.start()) + 1} stretches "
                          f"AND letters itself in <text> — those glyphs are squeezed with the trace")
-    if stretched != 6:   # the 5 UX-8 trend charts + the durability tracker (label-free — see (a) above)
-        fails.append(f"(a) expected the 6 stretched charts, found {stretched}")
+    # 0.41.0: 6 → 7 for §EF's `effPlot`. ONE source literal, drawn TWICE (efficiency + temperature),
+    # so this count tracks chart BUILDERS, not rendered panels — label-free by construction like the
+    # durability tracker: dots, a fitted line, native <title> tooltips, every value HTML around it.
+    if stretched != 7:
+        fails.append(f"(a) expected the 7 stretched charts, found {stretched}")
     # …and the flat rule, which is what actually closes the accumulator hole
     for m in S.re.finditer(r"<text[\s>]", live_js):
         fails.append(f"(a) app.js line {live_js.count(chr(10), 0, m.start()) + 1} builds an SVG <text>: "
@@ -11353,7 +11464,7 @@ def run_server_selftest(db, categories=None):
 def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
-                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(),
+                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),

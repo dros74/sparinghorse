@@ -73,6 +73,18 @@ document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.we
           <div id="durbody"><div class="empty">Loading…</div></div>
         </div>
       </div>
+      <!-- §EF — aerobic efficiency (speed per heartbeat). PRIVATE-only, like durability: HR-derived.
+           Full width, BELOW the three-card row, because the owner asked for more prominence than the
+           durability tile has (2026-08-25) — decoupling only says something once runs get long, and
+           his longest is 12 km, while efficiency reads on every easy run he does. Two panels, each
+           with its OWN vertical scale, sharing one time axis: efficiency above, temperature below.
+           They are NOT overlaid on twin axes — heat and fitness are confounded in this window and a
+           shared frame would assert a relationship the corpus has not earned. Populated by
+           loadEfficiency from /api/efficiency. -->
+      <div class="panel effcard" id="effcard">
+        <div class="acwr-title">Aerobic efficiency <span class="muted mono" style="font-size:10px;font-weight:400">— speed per heartbeat, and the weather it was earned in</span></div>
+        <div id="effbody"><div class="empty">Loading…</div></div>
+      </div>
     </div>
 
     <div class="section" id="sec-runs">

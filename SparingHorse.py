@@ -3605,6 +3605,123 @@ DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the d
 DURABILITY_PCT_SCALE = 100.0
 
 
+EFFICIENCY_MIN_KM = 4.0        # below this a run is a shakeout — warm-up drag dominates the average HR
+EFFICIENCY_WINDOW_D = 180      # how much history the chart carries (a rebuild's shape shows over months)
+EFFICIENCY_RECENT_N = 6        # runs per side of the recent-vs-prior median comparison
+
+
+def efficiency_signal(db, window_days=EFFICIENCY_WINDOW_D, recent_n=EFFICIENCY_RECENT_N):
+    """§EF — aerobic efficiency: speed per heartbeat, one point per run, with temperature beside it.
+
+    EF = metres per minute per bpm. It is the cleanest single read of aerobic fitness we hold: the
+    same pace at a lower heart rate IS the adaptation, and unlike CTL it needs no model — just the
+    watch. His rebuild moved it from ~0.90 in mid-June to ~1.09 in late August.
+
+    ⚠ TEMPERATURE IS RETURNED, NEVER APPLIED. Heat depresses EF, and his cool-weather runs are also
+    his most recent and fittest, so the two are confounded in exactly the window that looks most
+    impressive. This read publishes both series and the correlation between them and adjusts for
+    NOTHING: [[feel-context-modelling]]'s far better-powered test (n=298 controlled pairs) put the
+    heat cost at roughly a quarter of what this window's 30 pairs suggest, and the difference is not
+    settled. Baking an unearned coefficient into a display is how a chart starts asserting a finding
+    the corpus has not made — the same discipline that keeps decoupling display-only (§3.3, DIR-3).
+
+    MEASURE-FIRST and HR-derived, so callers keep it PRIVATE, like durability."""
+    import statistics as _st
+    from datetime import date as _d
+    rows = run_metrics(db, days=window_days, with_projection=False)   # newest first
+    # ⚠ INTENSITY IS A BIGGER CONFOUND THAN HEAT, and unlike heat it is fixable here. EF is only
+    # comparable BETWEEN RUNS OF SIMILAR EFFORT: an all-out 5k and an easy hour are different
+    # measurements wearing the same units, and mixing them makes the trend read the training mix
+    # rather than the athlete. Measured on his corpus: over 180 days the unfiltered slope is
+    # +1.4%/30d (r 0.40); restricted to aerobic runs it is far cleaner, because March's HR-176 5k
+    # efforts stop being compared against August's HR-133 easy hours. The ceiling is the app's OWN
+    # LTHR-anchored top of Z2 — not a number invented for this chart.
+    z2_top = None
+    try:
+        cuts = (hr_zones(db) or {}).get("cutoffs") or []
+        z2_top = cuts[1] if len(cuts) > 1 else None
+    except Exception:
+        z2_top = None
+    # `speed_kmh` is Runalyze's own `x_pace` and is not always present; distance ÷ duration is the
+    # same quantity and is always there, so a run is never silently dropped for a missing upstream
+    # field — it would have thinned the series invisibly and biased it toward whatever Runalyze
+    # happened to compute.
+    def _kmh(r):
+        if r.get("speed_kmh"):
+            return r["speed_kmh"]
+        return (r["km"] / (r["dur_s"] / 3600.0)) if (r.get("km") and r.get("dur_s")) else None
+    runs = [(r, _kmh(r)) for r in rows
+            if (r.get("km") or 0) >= EFFICIENCY_MIN_KM and r.get("hr")
+            and (z2_top is None or r["hr"] <= z2_top)]
+    runs = [(r, v) for r, v in runs if v]
+    series = [{"date": r["date"], "km": round(r["km"], 1),
+               # m/min per bpm — km/h → m/min is ×1000/60
+               "ef": round((v * 1000.0 / 60.0) / r["hr"], 3),
+               "temp_c": r.get("temp_c"), "hr": r["hr"],
+               "pace": fmt_pace(3600.0 / v)}
+              for r, v in runs]
+    if len(series) < 4:
+        return {"ok": False, "n": len(series), "min_km": EFFICIENCY_MIN_KM, "z2_top": z2_top,
+                "reason": f"fewer than 4 aerobic runs ≥{EFFICIENCY_MIN_KM:.0f}km with HR in the last "
+                          f"{window_days} days"}
+    series.reverse()                                    # chronological for the chart
+    base = _d.fromisoformat(series[0]["date"])
+    xs = [(_d.fromisoformat(p["date"]) - base).days for p in series]
+    ys = [p["ef"] for p in series]
+
+    def _fit(a, b):
+        """OLS slope + Pearson r; None when a series is constant (no line to draw)."""
+        n = len(a)
+        ma, mb = sum(a) / n, sum(b) / n
+        sab = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+        saa = sum((x - ma) ** 2 for x in a)
+        sbb = sum((y - mb) ** 2 for y in b)
+        if saa <= 0 or sbb <= 0:
+            return None, None
+        return sab / saa, sab / (saa * sbb) ** 0.5
+
+    slope, r = _fit(xs, ys)
+    mean_ef = sum(ys) / len(ys)
+    # the heat confound, QUANTIFIED but not applied — the caveat carries a number, not an adjective
+    temps = [(x, p["temp_c"]) for x, p in zip(xs, series) if p["temp_c"] is not None]
+    _, temp_r = _fit([p["ef"] for p in series if p["temp_c"] is not None],
+                     [t for _, t in temps]) if len(temps) >= 4 else (None, None)
+    recent = [p["ef"] for p in series[-recent_n:]]
+    prior = [p["ef"] for p in series[-recent_n * 2:-recent_n]]
+    med_recent = round(_st.median(recent), 3)
+    med_prior = round(_st.median(prior), 3) if prior else None
+    verdict = "collecting"
+    if med_prior:
+        d = (med_recent - med_prior) / med_prior
+        verdict = "improving" if d > 0.02 else "declining" if d < -0.02 else "steady"
+    return {
+        "ok": True, "n": len(series), "min_km": EFFICIENCY_MIN_KM, "window_days": window_days,
+        "z2_top": z2_top,
+        "series": series,
+        "trend": {"per_30d": round(slope * 30, 4) if slope is not None else None,
+                  "pct_per_30d": (round(slope * 30 / mean_ef * 100, 1)
+                                  if (slope is not None and mean_ef) else None),
+                  "r": round(r, 3) if r is not None else None, "n": len(series)},
+        "recent_median": med_recent, "prior_median": med_prior, "recent_n": recent_n,
+        "verdict": verdict,
+        "temp": {"r_with_ef": round(temp_r, 3) if temp_r is not None else None,
+                 "n": len(temps),
+                 "lo": min((t for _, t in temps), default=None),
+                 "hi": max((t for _, t in temps), default=None)},
+        "caveats": [
+            "EF = metres per minute per heartbeat. Same pace at a lower HR = the adaptation, measured "
+            "straight off the watch with no model in between.",
+            "TEMPERATURE IS PLOTTED, NEVER SUBTRACTED. Heat depresses EF and cool runs cluster in the "
+            "recent, fitter part of the window, so the two are confounded — read the panels together.",
+            "MEASURE-FIRST: displayed and trended, governing nothing.",
+            "AEROBIC RUNS ONLY (average HR at or below the top of Z2, %s bpm today) and ≥%.0fkm — EF "
+            "only compares between runs of similar effort, and a shorter shakeout is dominated by "
+            "warm-up drag. The ceiling is today's LTHR-anchored zone, applied to older runs too."
+            % (z2_top if z2_top else "—", EFFICIENCY_MIN_KM),
+        ],
+    }
+
+
 def durability_signal(db, recent_n=6):
     """§3.3 durability read — MEASURE-FIRST, read-only. Long-run aerobic decoupling as a resilience proxy:
     low = economy held over the distance (durable); high/rising = economy decaying (a durability limit).
@@ -5903,6 +6020,19 @@ def api_durability():
     if READONLY:
         return jsonify(ok=False, error="durability is private"), 403
     return jsonify(durability_signal(get_db()))
+
+
+@app.get("/api/efficiency")
+def api_efficiency():
+    """§EF aerobic-efficiency read (speed per heartbeat + the temperature each run was run in) for the
+    readiness section's full-width chart. HR-derived → PRIVATE-ONLY, the /api/run-metrics discipline.
+    MEASURE-FIRST: the card displays and trends; efficiency governs nothing."""
+    if READONLY:
+        return jsonify(ok=False, error="efficiency is private"), 403
+    days, err = _int_arg("days", EFFICIENCY_WINDOW_D, hi=3650)
+    if err:
+        return err
+    return jsonify(efficiency_signal(get_db(), window_days=days))
 
 
 @app.get("/api/projector")
