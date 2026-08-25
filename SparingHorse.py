@@ -4973,8 +4973,17 @@ def assess_readiness(db, checkin, session=None):
     GREEN proceed · AMBER hold (keep easy, no progression) · RED rest/walk (and, on a
     returning stop-symptom, HALT the plan and advise the doctor)."""
     hrv = hrv_signal(db)
-    energy = (checkin or {}).get("energy", "ok")
-    sleep = (checkin or {}).get("sleep", "ok")
+    # §H7 — ABSENCE IS NOT A DECLARATION. These defaulted to "ok", so a day with no check-in was
+    # scored as though the athlete had reported ok legs and ok sleep, and the card then printed
+    # "All signals normal" over a day on which nothing at all was reported. On 2026-08-25 that was
+    # the live state: no check-in since 2026-07-04 AND no HRV since 2026-08-15, and the card still
+    # read green / "All signals normal" — a confident sentence about zero evidence. The verdict
+    # itself is left alone (green here means "run the plan", and easing a plan on no evidence is the
+    # same error pointing the other way); what changes is that the card may no longer claim a
+    # signal was reported when it was not. Downstream tests are unaffected: the poor-count below
+    # keys off the exact strings "heavy"/"poor", which None never was.
+    energy = (checkin or {}).get("energy") or None
+    sleep = (checkin or {}).get("sleep") or None
     stop = bool((checkin or {}).get("stop_symptom"))
     note = (checkin or {}).get("note", "")
     reasons = []
@@ -5009,13 +5018,35 @@ def assess_readiness(db, checkin, session=None):
                                   "(no strides/longer run). Re-assess tomorrow.")
     else:
         floor, action = "green", "Good to go — run today's prescribed session as planned."
+    # §H7 — publish WHICH signals actually informed this, so no reader has to assume (the house rule
+    # that a decision variable is published rather than reconstructed).
+    signals = {"hrv": "reported" if hrv.get("state") else "missing",
+               "energy": "reported" if energy else "missing",
+               "sleep": "reported" if sleep else "missing"}
+    evidence = sum(1 for v in signals.values() if v == "reported")
+    if reasons:
+        all_clear = None
+    elif evidence == 0:
+        all_clear = ("Nothing flagged — but nothing checked in today either, and no HRV reading, "
+                     "so this is the plan speaking, not a readiness read")
+    elif evidence < len(signals):
+        missing = ", ".join(k for k, v in signals.items() if v == "missing")
+        all_clear = f"Nothing flagged in what was reported (no {missing} today)"
+    else:
+        all_clear = "All signals normal"
+    if floor == "green" and evidence == 0:
+        action += " No check-in today, so nothing has confirmed it."
     base = {"verdict": floor, "halt": False, "hrv": hrv, "action": action,
-            "reasons": reasons or ["All signals normal"], "source": "engine"}
+            "reasons": reasons or [all_clear], "source": "engine",
+            "signals": signals, "evidence": evidence, "unconfirmed": evidence == 0}
 
     # §6c judgment layer: the LLM may sharpen/escalate the call (reading the free-text note the
     # numbers can't), but the engine FLOOR above is never softened.
     note = (checkin or {}).get("note", "")
-    llm = llm_readiness(hrv, energy, sleep, note, session) if llm_available() else None
+    # §H7 — "not reported" rather than a fabricated "ok": handing the narrator an undeclared value
+    # is the §H6 defect again (a narrator told something that is not a fact will state it as one).
+    llm = llm_readiness(hrv, energy or "not reported", sleep or "not reported",
+                        note, session) if llm_available() else None
     if not (llm and llm.get("ok")):
         return base
     if llm.get("stop_symptom_detected"):  # free-text safety catch — the §H2 backstop to the check-in stop control
@@ -5030,7 +5061,8 @@ def assess_readiness(db, checkin, session=None):
         return {"verdict": ai, "halt": False, "hrv": hrv,
                 "action": _guard_session_action(llm.get("action") or action, ai, session, action),
                 "reasons": llm.get("reasons") or base["reasons"],
-                "source": "llm", "engine_floor": floor, "ai_verdict": ai}
+                "source": "llm", "engine_floor": floor, "ai_verdict": ai,
+                "signals": signals, "evidence": evidence, "unconfirmed": evidence == 0}
     # LLM tried to soften below the floor → engine holds, but record the disagreement
     return {**base, "engine_floor": floor, "ai_verdict": ai,
             "source": "engine (floor held over AI's %s)" % ai}
@@ -6876,8 +6908,12 @@ def api_readiness_post():
     and "poor", so an unknown word used to be stored verbatim and read back as "all signals normal"
     (0.26.3; det/api-validation)."""
     d = body()
-    energy, sleep = d.get("energy") or "ok", d.get("sleep") or "ok"
-    if energy not in READINESS_ENERGY or sleep not in READINESS_SLEEP:
+    # §H7 — an unset dropdown stores NOTHING, not "ok". Defaulting here wrote a declaration the
+    # athlete never made, which then read back as a reported signal for the rest of the day: saving
+    # a check-in that is only a note used to also assert fresh legs and decent sleep.
+    energy, sleep = d.get("energy") or None, d.get("sleep") or None
+    if (energy is not None and energy not in READINESS_ENERGY) or \
+       (sleep is not None and sleep not in READINESS_SLEEP):
         return jsonify(ok=False, error=f"energy must be one of {'|'.join(READINESS_ENERGY)} and "
                                        f"sleep one of {'|'.join(READINESS_SLEEP)}"), 400
     db = get_db()

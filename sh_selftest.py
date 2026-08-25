@@ -2171,6 +2171,110 @@ def _gov_ok(tag, w, assertive, out):
         out.append(f"{tag} breached EOW ACWR cap: {w.get('proj_acwr')}")
 
 
+def _stc_readiness_provenance():
+    """§H7 — absence is not a declaration. The card may not report a signal that was never given.
+
+    `energy`/`sleep` defaulted to "ok" on BOTH sides: the read scored a day with no check-in as
+    though fresh legs and decent sleep had been declared, and the write stored an "ok" for any
+    dropdown left alone. On 2026-08-25 the live state was no check-in since 2026-07-04 AND no HRV
+    since 2026-08-15 — and the card read green over "All signals normal". A confident sentence about
+    zero evidence, which is the one thing this project's readiness tile exists not to do.
+
+    The VERDICT is deliberately untouched. Green here means "run the plan", and easing a plan
+    because nobody filled a form is the same error pointing the other way — it would have fired
+    every day for seven weeks. What changes is the claim, the provenance, and the fact that saving a
+    note no longer also asserts two things about the athlete's body."""
+    import sqlite3 as _sq
+    fails = []
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+
+    # (a) ⭐ THE REGRESSION — nothing reported, nothing measured
+    a = S.assess_readiness(m, None)
+    if a.get("evidence") != 0 or not a.get("unconfirmed"):
+        fails.append(f"a day with no check-in and no HRV reports evidence={a.get('evidence')}, "
+                     f"unconfirmed={a.get('unconfirmed')}")
+    blob = " ".join(a.get("reasons") or []) + " " + (a.get("action") or "")
+    if "All signals normal" in blob:
+        fails.append('with ZERO signals the card still says "All signals normal"')
+    if not any(w in blob.lower() for w in ("no check-in", "nothing checked in")):
+        fails.append(f"the card never says the check-in is missing: {blob!r}")
+    if a.get("signals") != {"hrv": "missing", "energy": "missing", "sleep": "missing"}:
+        fails.append(f"provenance wrong with nothing reported: {a.get('signals')}")
+
+    # (b) an explicit report still reads as reported, and (c) the verdict logic is UNCHANGED
+    ok = S.assess_readiness(m, {"energy": "ok", "sleep": "ok"})
+    if ok.get("signals", {}).get("energy") != "reported" or ok.get("evidence") != 2:
+        fails.append(f"an explicit 'ok' is not counted as reported: {ok.get('signals')}")
+    if ok.get("unconfirmed"):
+        fails.append("a real check-in still reads as unconfirmed")
+    for cin, want in (({"energy": "heavy", "sleep": "ok"}, "amber"),
+                      ({"energy": "heavy", "sleep": "poor"}, "red"),
+                      ({"energy": "ok", "sleep": "ok"}, "green"),
+                      (None, "green")):
+        got = S.assess_readiness(m, cin)["verdict"]
+        if got != want:
+            fails.append(f"VERDICT MOVED for {cin}: {got} != {want} — §H7 changes the claim, not the call")
+
+    # (d) a note-only check-in must not assert two things about the body
+    note_only = S.assess_readiness(m, {"note": "just a note"})
+    if note_only.get("evidence") != 0:
+        fails.append("saving only a note still counted as reporting legs and sleep")
+
+    # (e) the narrator is handed "not reported", never a fabricated "ok" (the §H6 lesson: a narrator
+    # told something that is not a fact will state it as one)
+    seen = {}
+    real_av, real_json = S.llm_available, S.llm_json
+    try:
+        S.llm_available = lambda: True
+        S.llm_json = lambda system, user, schema, **kw: (seen.update(user=user)
+                                                         or {"ok": True, "verdict": "green"})
+        S.assess_readiness(m, None)
+    finally:
+        S.llm_available, S.llm_json = real_av, real_json
+    u = (seen.get("user") or "")
+    if "not reported" not in u:
+        fails.append(f"the narrator was handed a fabricated value instead of 'not reported': {u!r}")
+    for line in u.splitlines():
+        if line.startswith(("Legs/energy:", "Sleep:")) and line.strip().endswith("ok"):
+            fails.append(f"the narrator was told {line!r} on a day with no check-in")
+
+    # (f) the WRITE path stores nothing for an unset dropdown — but still rejects a bad value
+    src = open("SparingHorse.py", encoding="utf-8").read().split("def api_readiness_post")[1][:900]
+    if 'or "ok"' in src:
+        fails.append('the POST still defaults an unset dropdown to "ok" — it writes a declaration '
+                     'the athlete never made')
+    if "READINESS_ENERGY" not in src:
+        fails.append("the POST stopped validating the check-in vocabulary")
+
+    # (g) the form must not pre-select a value that was never chosen
+    js = S.APP_JS
+    if 'c.energy||"ok"' in js or 'c.sleep||"ok"' in js:
+        fails.append("the check-in dropdowns still pre-select 'ok', so the form looks answered")
+    if '["","Legs: —"]' not in js:
+        fails.append("the dropdowns carry no unset option")
+
+    # (h) the PUBLIC box is unaffected: its copy is generated fresh and carries no check-in provenance
+    pub = S.public_view("readiness", {"date": "2026-08-25",
+                                      "assessment": {"verdict": "green", "action": "Good to go — "
+                                                     "today's session is on.", "public": True},
+                                      "session": None})
+    pa = (pub.get("assessment") or {})
+    if any(k in pa for k in ("signals", "evidence", "unconfirmed")):
+        fails.append(f"check-in provenance reached the public projection: {sorted(pa)}")
+    return _st("det", "readiness-provenance",
+               "§H7 absence is not a declaration: a day with no check-in and no HRV publishes "
+               "evidence=0/unconfirmed and never claims 'All signals normal', an explicit report "
+               "still counts as reported, the VERDICT logic is unchanged, a note-only check-in "
+               "asserts nothing about the body, the narrator is told 'not reported', the POST stores "
+               "no fabricated 'ok', the form pre-selects nothing, and the public box is unaffected",
+               passed=not fails,
+               expect="zero signals ⇒ honest copy + evidence 0; verdicts unmoved; nothing fabricated",
+               got={"violations": fails or "none", "no_checkin": {"evidence": a.get("evidence"),
+                    "signals": a.get("signals"), "reason": (a.get("reasons") or [None])[0]},
+                    "reported": {"evidence": ok.get("evidence")}})
+
+
 def _stc_efficiency():
     """§EF — aerobic efficiency (speed per heartbeat), and the two design calls the card makes.
 
@@ -11464,7 +11568,7 @@ def run_server_selftest(db, categories=None):
 def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
-                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(),
+                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),

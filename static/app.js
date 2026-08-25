@@ -855,8 +855,11 @@ function renderReadiness(d){
     statusCard(a, foot, wxFootHtml()) +
     plannedSession(d.session) +
     `<div class="checkin">
-      ${sel("energy", c.energy||"ok", [["good","Legs: fresh"],["ok","Legs: ok"],["heavy","Legs: heavy"]])}
-      ${sel("sleep", c.sleep||"ok", [["good","Slept: well"],["ok","Slept: ok"],["poor","Slept: poorly"]])}
+      ${/* §H7 — an unset dropdown reads "—", never a pre-selected "ok". Showing "Legs: ok" on a day
+            with no check-in made the form look answered, and saving it then wrote a declaration the
+            athlete never made. The blank posts as absent, and the card says so. */""}
+      ${sel("energy", c.energy||"", [["","Legs: —"],["good","Legs: fresh"],["ok","Legs: ok"],["heavy","Legs: heavy"]])}
+      ${sel("sleep", c.sleep||"", [["","Slept: —"],["good","Slept: well"],["ok","Slept: ok"],["poor","Slept: poorly"]])}
       <input id="ci_note" class="cinote" placeholder="${notePh}" value="${esc(c.note)}">
       <label class="stop" title="Stop-the-run exertional symptom (chest pain, breathlessness, dizziness, fainting) — halts the plan"><input type="checkbox" id="ci_stop" ${c.stop_symptom?"checked":""}> I had to stop / chest symptom</label>
       <button class="primary" id="ciBtn" style="font-size:13px;padding:7px 12px">Save check-in</button>

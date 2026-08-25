@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.42.0] - 2026-08-25
+
+### Fixed
+
+- **The readiness card stopped reporting things you never told it.** Legs and sleep defaulted to
+  "ok" whenever they were absent, on both sides of the app. So a day with no check-in was scored as
+  though you had declared fresh legs and decent sleep, and the card printed **"All signals normal"**
+  over it. With the HRV feed also dark since mid-August, that was the live state: a green light and
+  a confident sentence resting on nothing at all — no check-in, no heart-rate variability, no
+  evidence of any kind. Saving a check-in that was only a note wrote the same two invented
+  declarations into the database, where they read back as reported signals for the rest of the day.
+  Absence is now absence. The card names which signals actually informed it, says plainly when none
+  did, and the check-in dropdowns start on "—" instead of pre-selecting an answer you did not give.
+  **The verdict itself is unchanged, deliberately.** Green here means "run the plan", and easing
+  training because nobody filled in a form is the same mistake pointing the other way — it would
+  have fired every day for seven weeks. What changed is the claim, not the call: the light can still
+  be green, but it no longer pretends to know why.
+
+### Changed
+
+- **A check-in can now say less than everything.** Leaving legs or sleep unset records nothing for
+  them rather than storing "ok", so a note-only check-in is exactly that. Any value you do pick is
+  still validated against the same vocabulary.
+
 ## [0.41.0] - 2026-08-25
 
 ### Added
