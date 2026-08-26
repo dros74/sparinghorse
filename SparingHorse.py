@@ -427,7 +427,7 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. His 4×2min VO₂ session read back as "3×
+STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. My 4×2min VO₂ session read back as "3×
 #                      reps + 4× strides" — the same 2 minutes counted on both axes, and one rep
 #                      lost entirely. Two independent causes, one symptom:
 #                      (1) A REP IS CONTIGUOUS WORK, NOT ONE BLOCK. Segmentation cuts on contrast,
@@ -436,7 +436,7 @@ STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. His 4×2min VO₂ sess
 #                      Adjacent fast blocks carry no recovery between them, so they are one effort:
 #                      fuse first, apply the length floor after. The lost rep was the SLOWEST, so
 #                      the effort monitor's work pace read 4:53 instead of 4:58 and called an
-#                      on-target session too_hard — by 0.04 s/km (§6m, the owner's 2026-08-26 report).
+#                      on-target session too_hard — by 0.04 s/km (§6m, my 2026-08-26 report).
 #                      (2) THE PEAK INSIDE A REP IS NOT A STRIDE. The stride pass ran before the
 #                      block grammar and counted peaks anywhere; a rep's summit clears every stride
 #                      gate (short, prominent, cadence up). It now runs after work detection and
@@ -455,7 +455,7 @@ STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. His 4×2min VO₂ sess
 #                      the strides check now precedes the wall-to-wall-hard return (which also
 #                      carries the stride fields now) — the first live 1+1 part (6 strides, jog
 #                      recovery, 6min) had read "tempo, no easy bracket" with stride_reps dropped.
-#                      ALSO v7 (owner's ground truth: 10 run, 6 counted; his hint "look at
+#                      ALSO v7 (my ground truth: 10 run, 6 counted; my hint "look at
 #                      cadence"): the cadence-burst pass — sub-frame rests alias strides into pace
 #                      blends, the raw ~1Hz cadence stream doesn't; bursts ≥10% over the local
 #                      cadence floor, 5–60s wide, pace-corroborated at half the stride bar,
@@ -469,14 +469,14 @@ STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. His 4×2min VO₂ sess
 #                      the anchor block's own — a 2-min float anchored the baseline on the first live
 #                      §RD read and promoted a marathon-pace run-home to work rep 3 (n_work 3, want 2).
 #                      v4 (2026-07-05): fused stride clusters counted by INTERNAL peaks (a wide
-#                      episode was discarded whole — 6 of his real 11 counted at full streams),
+#                      episode was discarded whole — 6 of my real 11 counted at full streams),
 #                      dedicated "Strides" kind + set grouping "(5+6)" + strides-only pace, per the
-#                      owner's spec. v3: cadence corroboration (GPS spikes). v2: honest pace.
+#                      my spec. v3: cadence corroboration (GPS spikes). v2: honest pace.
 RD_FRAME_S = 15            # analysis frame: one pace sample per 15s slab
 RD_CONTRAST = 0.08         # relative sustained pace shift that opens a new block
 RD_SUSTAIN_FRAMES = 3      # the shift must hold ~45s — GPS jitter and a 10s surge don't cut
 RD_MIN_BLOCK_S = 45        # shorter blocks are absorbed into the nearer-pace neighbour
-# Strides are counted the way the owner reads the chart (his 2026-07-05 framing): a GLOBAL peak
+# Strides are counted the way I read the chart (my 2026-07-05 framing): a GLOBAL peak
 # pass — short, prominent speed peaks over the local valley floor, width judged on the time axis,
 # cadence countersigning. (The earlier incremental burst state leaked half a real session's
 # strides through merges/voids/resets, then pace-only bars counted GPS spikes.)
@@ -488,16 +488,16 @@ RD_STRIDE_FLOOR_WIN = 10   # ± frames (≈ ±2.5min) for the rolling-median val
 #                            short, so the local median sits on the easy/recovery floor around them
 RD_STRIDE_CAD = 0.06       # cadence must corroborate: a stride is legs turning over faster
 #                            (typically +10–20% spm), a GPS speed spike leaves cadence flat — pace
-#                            alone counted 4 spikes on his no-strides 2026-07-04 run even at the
+#                            alone counted 4 spikes on my no-strides 2026-07-04 run even at the
 #                            22% bar. Applied only when the cadence stream is present; ratio-based,
 #                            so one-leg (halved) cadence sources compare cleanly.
 RD_STRIDE_DIP = 0.10       # inside a FUSED fast episode (strides bridged by a quick recovery),
 #                            consecutive speed maxima separated by a ≥10% dip count individually —
 #                            you can't run two strides without slowing between; a wide episode was
-#                            previously discarded whole (6 of his real 11 counted, 2026-07-05)
+#                            previously discarded whole (6 of my real 11 counted, 2026-07-05)
 RD_STRIDES_SESSION_MIN = 4 # ≥ this many strides over a NON-easy base (slower than the easy zone's
 #                            slow edge = walking/standing recovery, not an easy run) ⇒ the run IS
-#                            a strides session — his spec: "Strides — 18min @7:53/km · 11× strides
+#                            a strides session — my spec: "Strides — 18min @7:53/km · 11× strides
 #                            (5+6) @4:20/km". Strides sprinkled on a genuine easy run stay "Easy
 #                            run · N× strides".
 RD_STRIDES_SHORT_S = 720   # ≤ this long AND ≥ SESSION_MIN counted strides ⇒ Strides REGARDLESS of
@@ -509,7 +509,7 @@ RD_STRIDES_SHORT_S = 720   # ≤ this long AND ≥ SESSION_MIN counted strides �
 #                            the counted-strides discriminator is decisive on its own.
 RD_STRIDE_SET_GAP = 1.4    # a gap between strides > 1.4× the median gap (and >90s) starts a new
 #                            SET — the "(5+6)" grouping; uniform gaps read as one set
-# §RD v7 cadence-burst counting (the owner's hint, 2026-07-20: he ran 10, frames counted 6 — rests
+# §RD v7 cadence-burst counting (my hint, 2026-07-20: I ran 10, frames counted 6 — rests
 # shorter than the 15s grid alias every other stride into a blend; the RAW ~1Hz cadence stream
 # still shows one distinct high-cadence run per stride). Pace stays PRIMARY; a cadence burst only
 # counts with pace corroboration (half the stride bar), so a flat-pace cadence flutter never does.
@@ -526,7 +526,7 @@ RD_PAUSE_PACE = 1200       # slower than 20:00/km = standing/pause frame (breaks
 RD_GOOD_VALID = 0.9        # ≥ this share of readable frames ⇒ "good" read; ≥0.7 ⇒ "rough"
 RD_WORK_ZONES = ("marathon", "threshold", "interval")   # the zones a work block can be named
 RD_WORK_CONTRAST = 0.10    # a WORK block must be ≥10% faster than the run's own easy baseline —
-#                            a zone label alone is NOT work: at low fitness his ordinary easy-pace
+#                            a zone label alone is NOT work: at low fitness your ordinary easy-pace
 #                            drift crosses easy_top (the easy-days-run-hard pattern the effort
 #                            monitor owns), and calling that "intervals" misreads a plain easy run.
 #                            Structure is what you SEE in the pace chart: contrast. Zones only name it.
@@ -628,7 +628,7 @@ def _rd_frames(streams, min_s=RD_MIN_RUN_S):
 
 
 def _rd_strides(frames, cad_pts=None, exclude=None):
-    """Strides counted the way the owner reads the chart (his 2026-07-05 framing: 'count the
+    """Strides counted the way I read the chart (my 2026-07-05 framing: 'count the
     peaks, look at the time axis'): a GLOBAL peak pass over the RAW grade-adjusted speed, not
     incremental burst state (which leaked half a real session's strides through merges and
     resets). Per frame the valley FLOOR is the rolling ±RD_STRIDE_FLOOR_WIN median — strides are
@@ -636,16 +636,16 @@ def _rd_strides(frames, cad_pts=None, exclude=None):
     ≥ RD_STRIDE_PEAK over the floor, no wider than RD_STRIDE_MAX_S (wider = a rep, the block
     grammar owns it), countersigned by a cadence rise over the surrounding frames (GPS spikes
     leave cadence flat), counts as ONE stride — and a WIDER episode is a fused cluster whose
-    internal dip-separated peaks each count (his real 5+6 session fused at full resolution).
+    internal dip-separated peaks each count (my real 5+6 session fused at full resolution).
     v7: `cad_pts` (raw (t, cadence) samples) adds the CADENCE-BURST pass — rests shorter than
-    the 15s frame grid alias strides into pace blends (his real 10 counted 6), but the ~1Hz
+    the 15s frame grid alias strides into pace blends (my real 10 counted 6), but the ~1Hz
     cadence stream keeps one distinct high-cadence run per stride; bursts are pace-corroborated
     (half the stride bar) and deduped against pace-counted centers, so pace stays primary and a
     flat-pace cadence flutter never counts. Returns {"n", "sets", "pace", "reps"}.
     v9: `exclude` — frame ranges [i0, i1) the BLOCK grammar has already claimed as work reps. The
     peak inside a rep is that rep's own summit, not a stride: it is short, it rides far over the
     local floor, and its cadence rises, so every gate here passes and the same 2 minutes got
-    counted twice — once as a rep, once as a stride (his 4×2min VO₂ read back "3× reps + 4×
+    counted twice — once as a rep, once as a stride (my 4×2min VO₂ read back "3× reps + 4×
     strides", 2026-08-25)."""
     spd = [(1000.0 / f["raw"]) if f.get("raw") else None for f in frames]
     cads = [f.get("cad") for f in frames]
@@ -954,9 +954,9 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
                if s["zone"] in RD_WORK_ZONES
                and math.log(baseline / s["pace"]) >= math.log1p(RD_WORK_CONTRAST)]
     # v9 — A REP IS A CONTIGUOUS STRETCH OF WORK RUNNING, NOT A SINGLE BLOCK. The segmenter cuts on
-    # CONTRAST, so a rep he did not hold perfectly flat splits in two, and each fragment is then
+    # CONTRAST, so a rep not held perfectly flat splits in two, and each fragment is then
     # measured against RD_MIN_WORK_S alone — so a real rep can vanish while its neighbours survive.
-    # Live 2026-08-25, his 4×2min VO₂: rep 1 came out as 45s @4:51 + 90s @5:21 (he went out hard and
+    # Live 2026-08-25, my 4×2min VO₂: rep 1 came out as 45s @4:51 + 90s @5:21 (I went out hard and
     # settled — a 10% shift, one frame over the sustain bar), both fragments under the 100s floor,
     # both re-labelled `warmup`. The session read "3× reps", and because the lost rep was the SLOWEST
     # one, the effort monitor's work pace came out 4:53 instead of 4:58 and graded the session
@@ -1023,7 +1023,7 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
 
     def stride_note():
         # "11× strides (5+6) @4:20/km" — count, the set grouping when the gaps show one, and the
-        # strides-only pace (the overall pace already covers the rest of the run — his spec)
+        # strides-only pace (the overall pace already covers the rest of the run — my spec)
         note = f"{strides}× strides"
         if len(sinfo["sets"]) > 1:
             note += f" ({'+'.join(str(x) for x in sinfo['sets'])})"
@@ -1136,7 +1136,7 @@ def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S, st
     §RD9b — `stale_ok=False` refuses a row from a SUPERSEDED `STRUCT_VERSION` in the cached-only
     path, where the mismatch would otherwise be served verbatim (there is no fetch to heal it). The
     version exists to say the decoder's semantics MOVED, so a caller that turns the structure into a
-    JUDGEMENT must not read one written under the old ones: after the v8→v9 fix the owner's 4×2min
+    JUDGEMENT must not read one written under the old ones: after the v8→v9 fix my 4×2min
     session had been re-read correctly on its own tile, while the effort panel — cached-only, and
     still holding the v8 row — went on grading it `too_hard` off the three reps v8 had found
     (2026-08-26, "is it dynamic?"). DISPLAY keeps the default: a slightly-old decode is descriptive,
@@ -1328,14 +1328,14 @@ CREATE TABLE IF NOT EXISTS structcache (
     cached_at   TEXT
 );
 
--- Qualitative adjustments (§6c). The owner's free-text input ("knee's sore", "travelling")
+-- Qualitative adjustments (§6c). Your free-text input ("knee's sore", "travelling")
 -- is parsed by the LLM into a bounded directive, CLAMPED by the engine, and applied as a
 -- forward window. Stored so the plan stays a pure function of (today, shape, objectives,
 -- adjustments) and each change is versioned/diff-able.
 CREATE TABLE IF NOT EXISTS adjustments (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at   TEXT,
-    note         TEXT,              -- the owner's raw words
+    note         TEXT,              -- your raw words
     directive    TEXT,              -- JSON: the engine-clamped directive that was applied
     applies_from TEXT,              -- YYYY-MM-DD inclusive
     applies_until TEXT,             -- YYYY-MM-DD inclusive
@@ -1354,7 +1354,7 @@ CREATE TABLE IF NOT EXISTS session_log (
     created_at TEXT
 );
 
--- Manual data-quality ignore-list: activities the owner flags as duplicates or mis-tagged
+-- Manual data-quality ignore-list: activities you flag as duplicates or mis-tagged
 -- that the exact-match heuristic (find_duplicates) can't catch — e.g. a re-upload whose
 -- timestamp drifted a few seconds. Honored everywhere the reconstruction de-dups
 -- (dropped_ids), persisted across syncs. One-click from the latest-activity tile.
@@ -1375,7 +1375,7 @@ CREATE TABLE IF NOT EXISTS availability (
     created_at TEXT,
     date_from  TEXT,               -- YYYY-MM-DD inclusive
     date_to    TEXT,               -- YYYY-MM-DD inclusive
-    note       TEXT,               -- optional, owner's words ("flight", "family week")
+    note       TEXT,               -- optional, your words ("flight", "family week")
     active     INTEGER DEFAULT 1   -- 0 once deleted
 );
 
@@ -1438,7 +1438,7 @@ SELECT
   ROUND(a.hr_avg * 1.0 / NULLIF(json_extract(a.raw,'$.gap'),0), 2) AS hr_cost_gap,
   -- daily shape snapshot, joined on date. Named *_snapshot (not *_start): the snapshot is the day's
   -- capture and leads the activity frontier by a day (the documented seam), so it's not a guaranteed
-  -- pre-run reading — especially for his evening runs.
+  -- pre-run reading — especially for your evening runs.
   s.fitness            AS ctl_snapshot,
   s.fatigue            AS atl_snapshot,
   s.acwr               AS acwr_snapshot,
@@ -1569,7 +1569,7 @@ def _seconds_since(iso):
 # `datetime.now()` / `date.today()` sites, from `today` in the plan generator down to the key
 # `snapshot_shape` writes rows under — and the containers run UTC. So between 00:00 and 02:00
 # Luxembourg time the whole engine believes it is YESTERDAY, while activity rows carry Runalyze's
-# LOCAL date. Two clocks in one database: the §PRO20 defect class. MEASURED on his DB: 22 of 53
+# LOCAL date. Two clocks in one database: the §PRO20 defect class. MEASURED on my DB: 22 of 53
 # shape snapshots (42%) were captured at 22:00–24:00Z — i.e. after local midnight — and filed under
 # the previous day, and 3 of 79 plans were built for the wrong day outright.
 #
@@ -1593,7 +1593,7 @@ def _glibc_tzdir(system_has_db=None):
     own database is the only thing tzset() can read, and without this the whole timezone fix is inert
     there. `system_has_db` is injectable so the CONTAINER's case can be constructed on a host that has
     the system database and would otherwise mask this limb entirely (it did: the first revert test
-    passed here and would have failed on his NAS)."""
+    passed here and would have failed on my NAS)."""
     if system_has_db is None:
         system_has_db = os.path.isdir("/usr/share/zoneinfo")
     if os.environ.get("TZDIR") or system_has_db:
@@ -1855,11 +1855,11 @@ def secret_fingerprint(value):
     """§SG — eight hex characters of sha256(value), or "" for an unset secret.
 
     The write-only field is the right posture (a key is never sent back to the browser), but it left
-    the owner unable to answer the one question a key box has to answer: *which* value is in there.
+    you unable to answer the one question a key box has to answer: *which* value is in there.
     After rotating a token, "configured" looks identical before and after — a save that silently
     failed and a save that worked are the same screen. A fingerprint is the smallest thing that
     distinguishes them, and it is not a leak: sha256 is one-way, eight hex characters of a
-    high-entropy credential identify without describing, and the owner can compute the same digest
+    high-entropy credential identify without describing, and you can compute the same digest
     on their own machine to confirm the box holds the value they think it does:
 
         printf %s "$TOKEN" | sha256sum | cut -c1-8
@@ -1974,7 +1974,7 @@ def validate_secret(key):
 
 # ── Suunto Cloud API — SuuntoPlus Guides push (§SG) ─────────────────────────
 # Partner-program integration (approved 2026-07-10): the plan's next few days are converted to
-# SuuntoPlus Guides and pushed to the owner's watch, so each prescribed session shows its steps,
+# SuuntoPlus Guides and pushed to your watch, so each prescribed session shows its steps,
 # pace band, and HR band ON the wrist during the run. Three layers, cleanly separable:
 #   1. OAuth2 (authorization-code + refresh) — one-time "Connect Suunto" in Settings; the user
 #      token pair lives in the PRIVATE secrets store under an internal key (never in the UI spec).
@@ -2171,7 +2171,7 @@ def _guide_notification(title, text, dur, pace_sec, hr):
     there by pressing the crown during the exercise, and the watch never switches to it for you. So
     the transitions fired on time, the watch beeped at every boundary, and the athlete was told
     nothing — all the instructions were on a page nobody was looking at. This popup is the only part
-    of a guide that arrives on whatever screen is actually in front of him.
+    of a guide that arrives on whatever screen is actually in front of you.
 
     Segments are appended whole while they fit the documented 54 characters: a target cut in half
     ('HR 169-1') is worse than a target left out. The duration is dropped when the detail already
@@ -2501,7 +2501,7 @@ def sync_activities(db, max_pages=60, backfill=False):
                 new_here += 1
             elif json.dumps(a, separators=(",", ":")) != existing.get(aid):
                 # §DB1 MED-1 — an already-synced activity changed upstream (e.g. Runalyze recomputed
-                # TRIMP, or the owner cropped an over-long run → load edited DOWN). The old code SKIPPED
+                # TRIMP, or you cropped an over-long run → load edited DOWN). The old code SKIPPED
                 # every known id, so a stale-high load lingered forever. Refresh it so the local copy
                 # converges. NOT counted as new (new_here untouched), so the incremental stop-condition
                 # below is preserved: recent edits (page 1, always fetched) converge on the next sync;
@@ -2581,7 +2581,7 @@ SLEEP_MARKERS = {
 # §HS — the health view's staleness cue. The nightly feeds (HRV, sleep, resting/overnight HR, weight)
 # arrive from the watch via Runalyze, and when that pipe breaks THE CHARTS DO NOT LOOK BROKEN: they
 # simply stop, and the last point sits there reading like today's. That is exactly how the 2026-08-15
-# wellness stall went eight days unnoticed (§78) — the owner found it by eye, not from the page.
+# wellness stall went eight days unnoticed (§78) — I found it by eye, not from the page.
 # The watched set is DERIVED from the sync registries above, never hand-listed, so a feed added to
 # the sync is covered the day it lands. Locked by `det/health-staleness`.
 HEALTH_SYNCED_MARKERS = frozenset(HEALTH_SYNC) | {m for m, _ in SLEEP_MARKERS.values()}
@@ -2599,7 +2599,7 @@ def health_staleness(series, today=None):
 
     Returns {"markers": {marker: {last, days, watched, stale}}, "summary": … or None}, where the
     summary names the stale feeds and the NEWEST reading among them — "nothing since the 15th" is
-    the sentence the owner needed, and the newest is the one that dates the outage."""
+    the sentence you needed, and the newest is the one that dates the outage."""
     td = _date(today) if today else datetime.now().date()
     out, stale = {}, []
     for marker, pts in (series or {}).items():
@@ -2743,20 +2743,20 @@ def current_model(db):
 
 
 # ── Effort-discipline monitor (§6m) — did each run land in its prescribed effort band? ───────────
-# The plan is polarized (easy ≥80%) and the engine KNOWS his easy days run too hard — but it only
+# The plan is polarized (easy ≥80%) and the engine KNOWS your easy days run too hard — but it only
 # said so once, at plan-gen. This measures it, every run. Core design choice: judge INTENSITY by
 # HEART RATE, not pace. Pace is confounded by vertical / heat / wind; HR is the effort response that
 # already internalizes them — and Runalyze's GAP / Training-Effect / decoupling are all built from
 # HR. So we READ Runalyze's effort outputs, we don't re-model the confounders. HR-LED, TE only
 # CORROBORATES (never gates): Firstbeat TE is intensity×DURATION, so a long easy run banks high TE
-# from duration alone — gating on TE would false-flag his cleanest easy run (Apr-18, 9.6 km @ HR 138
+# from duration alone — gating on TE would false-flag my cleanest easy run (Apr-18, 9.6 km @ HR 138
 # / TE 3.0; HR-led correctly returns ON at 73% HRmax). GAP gives a terrain-fair pace for display.
 EFFORT_WINDOW_DAYS = 21
 EASY_HR_FRAC = 0.78         # %HRmax ceiling for a genuinely easy run (top of Z2)
 HARD_HR_FRAC = 0.85         # %HRmax above which an 'easy' run was actually threshold+ effort
 TE_HARD_CORROBORATE = 3.5   # Training Effect backing a too-hard HR read → 'high' confidence
 EASY_PACE_GRACE = 0.03      # public PACE read: allow GAP up to 3% quicker than the easy ceiling = 'on'
-AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (his documented failure mode)
+AEROBIC_KINDS = {"easy", "long"}    # the well-calibrated direction (my documented failure mode)
 EFFORT_MATCH_DAYS = 2       # a session shuffled within ±2 days reads as a reschedule, not a new run
 NON_SESSION_KINDS = ("rest",)   # plan entries that prescribe NO run — never matchable as executed work
 
@@ -2782,12 +2782,12 @@ LTHR_ZONE_FRACS = (0.85, 0.90, 0.95, 1.00)
 # unifying the model). det/hr-zones locks the equality so a future un-derive is caught.
 LTHR_EASY_FRAC = LTHR_ZONE_FRACS[0]   # Z1/Z2 boundary (Friel easy/recovery ceiling): above this an 'easy'
 #                                       run drifted hot. =0.85 → ≤ the old %HRmax ceiling, so the LTHR switch
-#                                       never LOOSENS his easy bar (the streamless LTHR is biased low).
+#                                       never LOOSENS your easy bar (the streamless LTHR is biased low).
 LTHR_HARD_FRAC = LTHR_ZONE_FRACS[2]   # Z3/Z4 boundary: at/above threshold ⇒ an 'easy' run was threshold+
 LTHR_MIN_CONFIDENCE = {"moderate", "high"}   # only ANCHOR on a derived LTHR this trustworthy (else %HRmax)
 HRMAX_ZONE_FRACS = (0.60, 0.70, 0.80, 0.90)  # %HRmax fallback grid — the values the reconstruction confirmed
 LTHR_TRUSTED = ("derived", "manual")         # sources the zone/monitor anchor may trust (gate ∧ confidence)
-# Manual LTHR (slice #2): a field-tested number the owner typed in. It goes STALE as fitness moves
+# Manual LTHR (slice #2): a field-tested number you typed in. It goes STALE as fitness moves
 # (guardrail #2 — LTHR drifts UP through a rebuild, so an old manual value can mis-anchor either way):
 # confidence decays with the age of the entry, and the derived estimate takes back over once it out-ranks
 # the decayed manual one. An UNDATED manual value (env-provided) is capped at moderate.
@@ -2799,7 +2799,7 @@ _CONF_RANK = {"high": 3, "moderate": 2, "low": 1, "none": 0}
 
 def _robust_hrmax(db):
     """A spike-resistant HRmax: the 95th percentile of per-run hr_max (one bad strap reading hits 210
-    where his real max is ~189). HR is the gate, so this anchors the zones. None if too little data."""
+    where my real max is ~189). HR is the gate, so this anchors the zones. None if too little data."""
     hrs = sorted(r["hr_max"] for r in db.execute(
         "SELECT hr_max FROM activities WHERE " + RUN_FAMILY_SQL + " AND hr_max IS NOT NULL"
         ).fetchall() if r["hr_max"])
@@ -2821,7 +2821,7 @@ def _pctile(xs, q):
 
 
 def _manual_lthr(db, today):
-    """The owner's manual LTHR entry (Settings → 'Manual LTHR'), age-decayed per guardrail #2.
+    """Your manual LTHR entry (Settings → 'Manual LTHR'), age-decayed per guardrail #2.
     Returns (bpm, confidence, set_on, age_days) or (None, None, None, None) when unset/invalid.
     Tolerates a DB without the meta table (det fixtures) — absent means unset. The set-date is
     stamped by save_settings; an undated value (env-provided) is capped at moderate."""
@@ -2860,7 +2860,7 @@ def derive_lthr(db, today=None):
     STRUCTURED tempos (warmup/cooldown dilute the whole-run avg) — fine for a confidence-flagged v1.
 
     Returns {lthr, source, confidence, n, n_recent, hrmax, pct_hrmax, provisional}:
-      • source: 'manual' (owner's field-tested entry, age-decayed) | 'derived' (from efforts) |
+      • source: 'manual' (your field-tested entry, age-decayed) | 'derived' (from efforts) |
         'hrmax_proxy' (fallback) | None (no HRmax at all)
       • confidence: 'high' | 'moderate' | 'low' | 'none'
       • a MANUAL entry (slice #2) wins while its age-decayed confidence out-ranks (or ties) the
@@ -2914,7 +2914,7 @@ def hr_zones(db, today=None):
     """The app's OWN 5-zone HR model in bpm — the bridge until Runalyze exposes real boundaries. Anchors
     on a DATA-DERIVED LTHR (Friel %LTHR grid) when that LTHR is trustworthy (source='derived' and
     confidence ≥ moderate — see derive_lthr), else falls back to a fixed %HRmax grid (60/70/80/90, the
-    values the Runalyze reconstruction already confirmed for him, so the fallback is continuous with the
+    values the Runalyze reconstruction already confirmed for you, so the fallback is continuous with the
     chart today). PURE + token-free (derive_lthr is streamless), so it's seed-testable and det-lockable.
     Distinct from derive_hr_zones, which stays the (token-gated, slow) corroboration against Runalyze's
     own zones — this is what the app should USE, that is what checks our work.
@@ -3055,7 +3055,7 @@ EFFORT_SEG_TOL = 3          # bpm tolerance around the prescribed HR band
 EFFORT_SEG_PACE_TOL = 0.04  # ±4% (log) around the zone pace target when reps carry no HR
 EFFORT_SEG_HR_MIN_S = 180   # reps SHORTER than this are judged on PACE even when HR exists: a
 #                             short rep starts rested, HR climbs through it and PEAKS INTO the
-#                             recovery (the owner's 2026-07-05 observation — pace and HR peaks are
+#                             recovery (my 2026-07-05 observation — pace and HR peaks are
 #                             out of phase), so a within-rep average systematically under-reads
 #                             and would call every 2-min VO₂ rep 'sandbagged'. The zones card's
 #                             own caveat ('Z5 — HR lags short reps'), applied to the verdict.
@@ -3078,7 +3078,7 @@ def _effort_verdict(kind, hrf, te, easy_frac=EASY_HR_FRAC, hard_frac=HARD_HR_FRA
     turnpoint. For an aerobic (easy/long) session: on / hot / too_hard by fraction, confidence rising to
     'high' when a too-hard read is backed by a high Training Effect. For a quality session: 'did you hit
     it' — too_easy if HR never reached the aerobic ceiling (sandbagged), else on — always LOW confidence
-    (little compliant-quality data yet, and his problem is the too-hard direction). hrf None ⇒
+    (little compliant-quality data yet, and your problem is the too-hard direction). hrf None ⇒
     ('unknown','none')."""
     if hrf is None:
         return "unknown", "none"
@@ -3276,7 +3276,7 @@ def _match_prescriptions(run_dates, prescribed, match_days=EFFORT_MATCH_DAYS):
 def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     """Per-run effort vs prescription over the recent window (§6m). Each run's prescribed kind comes
     from the saved plan (frozen past weeks included); an unplanned run defaults to 'easy' (the
-    polarized expectation), and the easy-discipline SCORE is the headline (his easy days run hard).
+    polarized expectation), and the easy-discipline SCORE is the headline (your easy days run hard).
 
     PRIVATE (default): the HR-led read — HR fraction gates, Training Effect corroborates, GAP is a
     terrain-fair pace, subjective_feeling + decoupling as context.
@@ -3324,7 +3324,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
         else:
             # §SJ multi-part: the easy-discipline verdict judges the session's aerobic BODY —
             # duration-weighted HR/GAP over the parts whose cached read is easy/long. The strides/
-            # quality part's numbers stay out of the easy read (the entire point of the owner's
+            # quality part's numbers stay out of the easy read (the entire point of your
             # split-recording workflow); its reps are graded by the per-rep read below. Preference
             # order read-aerobic → unread → all: a still-unclassified addendum must not tilt the
             # verdict while a read body exists (it converges to exclusion once read anyway).
@@ -3360,7 +3360,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             # §3.4 verdict switch — the PACE-vs-LT1 cross-check on the MOVING, fitness-tracking LT1 bar
             # (the §6.3 anchor), computed for every run so the monitor visibly reads against LT1, not a
             # fixed %HRmax. HR stays the PRIMARY easiness truth WHERE a trustworthy (moving) LTHR exists —
-            # his own data shows HR is the honest read of easiness (low HR = easy whatever the pace) and a
+            # your own data shows HR is the honest read of easiness (low HR = easy whatever the pace) and a
             # naive flip to pace-primary would over-police a detrained rebuild (the reconciled §3.4 finding).
             pace_verdict = _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="lt1")
             if use_lthr:                                  # HR-led on the MOVING LTHR (Friel %LTHR ceilings)
@@ -3372,7 +3372,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                 # Mild cardiac decoupling (easy pace, HR merely elevated 78–85%) is deliberately NOT policed
                 # — the reconciled finding, and why HR isn't primary here. But an easy-PACED run whose HR sat
                 # at THRESHOLD+ effort (≥ the hard bar) was hard on the honest axis (TRIMP already scores it
-                # so), so it can't read easy/hot — else the monitor tells a detrained returner his redline was
+                # so), so it can't read easy/hot — else the monitor tells a detrained returner your redline was
                 # fine. Retiring the fixed %HRmax bar dropped this catch; restore it as a one-way escalation.
                 if hrmax and verdict in ("too_easy", "on", "hot") and hr_avg / hrmax >= HARD_HR_FRAC:
                     verdict, conf = "too_hard", "moderate"
@@ -3464,7 +3464,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
 
 
 PACE_HR_OVER_FRAC = 0.5     # ≥ this share of easy-PACED runs landing over the easy HR ceiling ⇒ the
-#                             two models disagree (his easy pace is ahead of his aerobic fitness)
+#                             two models disagree (your easy pace is ahead of your aerobic fitness)
 PACE_HR_MIN_RUNS = 3        # need at least this many easy-paced runs with HR to judge coherence
 
 
@@ -3540,7 +3540,7 @@ def lt1(db, today=None):
       • PACE (primary): LT1 velocity = LT1_5K_FRAC × (V5K_VVO2MAX_FRAC × vVO2max), off the CURRENT effective
         VO2max — so the bar MOVES with fitness (a detrained rebuild gets a SLOWER LT1, never a stale fast one).
       • HR (cross-check): the derived-LTHR easy ceiling (LTHR_EASY_FRAC × LTHR) when LTHR is trustworthy.
-    Also flags DETRAINED (pace ahead of HR — cardiac decoupling): on a rebuild his easy runs sit a touch above
+    Also flags DETRAINED (pace ahead of HR — cardiac decoupling): on a rebuild your easy runs sit a touch above
     LT1, which is NORMAL and self-corrects, so we DON'T over-police it (the reconciled §3.4 finding — trust
     HR/effort on easy days then). Read-only; carries HR ⇒ PRIVATE. Does NOT change any prescription or the
     effort verdict — it's the surfaced, moving easy-bar reference the monitor reads against."""
@@ -3787,11 +3787,11 @@ def run_metrics_analysis(db):
 # §3.3 (Davis durability / resilience — ENGINE_SCIENCE.md §3.3). Durability = how little running economy
 # decays over a long run; the proxy is Runalyze's aerobic decoupling (the pace:HR drift, first half →
 # second half). MEASURE-FIRST (🔵): we SURFACE the signal + a trend and accumulate cases — it governs NO
-# prescription until his corpus shows it predicts his race fade (the heat-coefficient discipline, §0).
+# prescription until my corpus shows it predicts my race fade (the heat-coefficient discipline, §0).
 DURABILITY_MIN_KM = 16.0       # a run long enough for economy decay to manifest (durability is a long-run trait)
 DURABILITY_GOOD_RAW = 500.0    # decoupling below this on a long run ≈ durable (economy held); Runalyze raw units
 DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the distance
-# Runalyze stores aerobic_decoupling_pace in raw units ≈ percentage ×100 (his median long-run ≈540 ≈5.4%; his
+# Runalyze stores aerobic_decoupling_pace in raw units ≈ percentage ×100 (your median long-run ≈540 ≈5.4%; your
 # last marathon ≈1740 ≈17.4% w/ feel=1) — the ×100→% is INFERRED (units officially TBD upstream), so the RAW
 # value is the source of truth and % is only a reading aid.
 DURABILITY_PCT_SCALE = 100.0
@@ -3807,10 +3807,10 @@ def efficiency_signal(db, window_days=EFFICIENCY_WINDOW_D, recent_n=EFFICIENCY_R
 
     EF = metres per minute per bpm. It is the cleanest single read of aerobic fitness we hold: the
     same pace at a lower heart rate IS the adaptation, and unlike CTL it needs no model — just the
-    watch. His rebuild moved it from ~0.90 in mid-June to ~1.09 in late August.
+    watch. Your rebuild moved it from ~0.90 in mid-June to ~1.09 in late August.
 
-    ⚠ TEMPERATURE IS RETURNED, NEVER APPLIED. Heat depresses EF, and his cool-weather runs are also
-    his most recent and fittest, so the two are confounded in exactly the window that looks most
+    ⚠ TEMPERATURE IS RETURNED, NEVER APPLIED. Heat depresses EF, and your cool-weather runs are also
+    your most recent and fittest, so the two are confounded in exactly the window that looks most
     impressive. This read publishes both series and the correlation between them and adjusts for
     NOTHING: [[feel-context-modelling]]'s far better-powered test (n=298 controlled pairs) put the
     heat cost at roughly a quarter of what this window's 30 pairs suggest, and the difference is not
@@ -3824,7 +3824,7 @@ def efficiency_signal(db, window_days=EFFICIENCY_WINDOW_D, recent_n=EFFICIENCY_R
     # ⚠ INTENSITY IS A BIGGER CONFOUND THAN HEAT, and unlike heat it is fixable here. EF is only
     # comparable BETWEEN RUNS OF SIMILAR EFFORT: an all-out 5k and an easy hour are different
     # measurements wearing the same units, and mixing them makes the trend read the training mix
-    # rather than the athlete. Measured on his corpus: over 180 days the unfiltered slope is
+    # rather than the athlete. Measured on my corpus: over 180 days the unfiltered slope is
     # +1.4%/30d (r 0.40); restricted to aerobic runs it is far cleaner, because March's HR-176 5k
     # efforts stop being compared against August's HR-133 easy hours. The ceiling is the app's OWN
     # LTHR-anchored top of Z2 — not a number invented for this chart.
@@ -3917,7 +3917,7 @@ def efficiency_signal(db, window_days=EFFICIENCY_WINDOW_D, recent_n=EFFICIENCY_R
 def durability_signal(db, recent_n=6):
     """§3.3 durability read — MEASURE-FIRST, read-only. Long-run aerobic decoupling as a resilience proxy:
     low = economy held over the distance (durable); high/rising = economy decaying (a durability limit).
-    It SURFACES + trends + accumulates cases; it does NOT feed any prescription (earn it from his corpus
+    It SURFACES + trends + accumulates cases; it does NOT feed any prescription (earn it from my corpus
     first, like the heat coefficient). Decoupling rises with distance, so the read carries distance and is
     flagged exploratory. Decoupling/HR-derived → callers must keep it PRIVATE (rides /api/run-metrics)."""
     import statistics as _st
@@ -3955,7 +3955,7 @@ def durability_signal(db, recent_n=6):
         "recent": recent,
         # the readiness-section tracker chart's points (0.32.0): newest-first long runs with km on
         # every point, so duration is never hidden behind the decoupling trace (the §55d caveat —
-        # on his corpus longer runs decouple LESS; a chart that hides distance lies). Capped for the wire.
+        # on my corpus longer runs decouple LESS; a chart that hides distance lies). Capped for the wire.
         "series": series[:18],
         "caveats": [
             "MEASURE-FIRST: surfaced + accumulating, NOT feeding the plan (durability governs nothing until "
@@ -4047,7 +4047,7 @@ def worked_example(db, activity_id=None):
 #                    template's run count sheds DAYS instead. Mild by design — it fires only on
 #                    sub-floor stubs, never grows a normal week's runs (the min-dose consolidation
 #                    experiment stays REVERTED), and the ACWR/peak governors still project whatever
-#                    layout results. Sits at his historical junk bar (~2.6km).
+#                    layout results. Sits at your historical junk bar (~2.6km).
 
 # ── Seed objective (fresh-install convenience) ───────────────────────────────
 # Optionally seed a first objective on a fresh DB, so you don't start at a blank screen:
@@ -4231,8 +4231,8 @@ def _tr_prescription(db, plan_id, week_start):
     """§TR-A — what the scored plan ASKED of that week, and what was actually run in it.
 
     The forecast error alone fuses two different failures that need opposite fixes: the model's
-    physics being wrong, and the athlete not running the plan. Measured on his own four scored weeks,
-    the whole 32–57% CTL under-prediction resolves to the second — the plans laid 24.5–38.4 km and he
+    physics being wrong, and the athlete not running the plan. Measured on my own four scored weeks,
+    the whole 32–57% CTL under-prediction resolves to the second — the plans laid 24.5–38.4 km and you
     ran 30.1–53.4 km, so given the volume it prescribed, the projector was roughly right. Publishing
     only "under-predicted by a median 45%" would invite a correction to the projector, which is the
     fixed-point trap already on the record. So the split is derived and published beside the error.
@@ -4608,7 +4608,7 @@ OBJECTIVE_SCHEMA = {
 
 def parse_objective_nl(text, today=None):
     """Turn 'sub-45 10k in October' / 'spring marathon, want to BQ' into a structured objective
-    (§6c). Returns the parsed fields for the owner to review — it does NOT save; the existing
+    (§6c). Returns the parsed fields for you to review — it does NOT save; the existing
     deterministic add path (which periodizes + validates) stays the single writer."""
     today = today or datetime.now().date().isoformat()
     system = (
@@ -4723,7 +4723,7 @@ def propose_adjustment(text, today=None, easy_pace=None):
         change, just a warm reply that affirms it with the plan's own logic. Routed to the
         session journal, never saved as an adjustment.
       • a real *adjustment* ('knee's sore', 'travelling Mon–Fri') → kind='adjust': a bounded,
-        engine-clamped directive the owner confirms via apply.
+        engine-clamped directive you confirm via apply.
     Proposal only — nothing is saved here."""
     today = today or datetime.now().date().isoformat()
     pace_line = (
@@ -4949,7 +4949,7 @@ def explain_plan(db, diff=None, fresh=False):
     """§6c — plain-language 'why' for the latest plan (and the most recent change).
 
     Cached by (plan id, diff, athlete context) — see TECH-7 above. `fresh=True` re-rolls: the
-    narration is a generative answer, and the owner is entitled to ask for another one."""
+    narration is a generative answer, and you are entitled to ask for another one."""
     row = db.execute("SELECT id, plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return {"ok": False, "error": "no plan yet — generate one first"}
@@ -5007,7 +5007,7 @@ def explain_plan(db, diff=None, fresh=False):
 
 # Multi-objective conflict adjudication (§6c) — when ≥2 upcoming A-races compete, the LLM advises
 # which should be the true peak and which to demote to a tune-up. ADVISORY: it recommends priority
-# changes; the owner applies them, then the deterministic engine periodizes from the result.
+# changes; you apply them, then the deterministic engine periodizes from the result.
 ADJUDICATE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -5080,7 +5080,7 @@ def adjudicate_objectives(db, today=None):
 # objective HRV signal (hrvBaseline vs its normal band, from statistics/current — the only
 # readiness metric the personal REST API exposes; RHR/sleep trends are MCP-only) with a
 # subjective daily check-in. The check-in is the safety-critical input: a returning
-# "had-to-stop" exertional symptom RED-flags the day and halts the plan (calibrated on the owner's 2025
+# "had-to-stop" exertional symptom RED-flags the day and halts the plan (calibrated on my 2025
 # history; the halt WORDING is generic since 0.27.0 — the product ships to other runners, log §70).
 READINESS_ENERGY = ("good", "ok", "heavy")   # the check-in vocabulary — the UI's three legs options;
 READINESS_SLEEP = ("good", "ok", "poor")     # the engine tests "heavy" / "poor", the API rejects the rest
@@ -5409,7 +5409,7 @@ def block_log(db):
                     "reflection": notes.get(d), "runs": _breakdown(a), "activity_id": a["id"]})
         sessions.sort(key=lambda s: s["date"])              # unplanned runs slot into calendar order
         out_weeks.append({**w, "sessions": sessions})
-    # What he actually ran across the block window (dups already excluded) — real recorded
+    # What you actually ran across the block window (dups already excluded) — real recorded
     # distance + duration, so "ran so far" is owned data, not km×pace.
     ran = {"km": round(sum(a["km"] for a in acts.values()), 1),
            "min": round(sum(a["sec"] for a in acts.values()) / 60),
@@ -5613,7 +5613,7 @@ def _close_db(exc):
 def _private_only_path(p):
     """Paths the public read-only container must never serve — location/medical/personal privacy.
     Centralised so the map-privacy self-test can assert this invariant can't silently regress:
-    `/api/health` (blood markers), the workout `/map` (route geo reveals where the owner lives),
+    `/api/health` (blood markers), the workout `/map` (route geo reveals where you live),
     `/api/settings` + `/api/secrets` (athlete context + keys are personal, owner-only control surfaces),
     and `/api/geocode` (the city-picker proxy). NOTE `/api/effort-discipline` is NOT here: it self-
     sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
@@ -5621,7 +5621,7 @@ def _private_only_path(p):
     return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
                   "/api/secrets/validate", "/api/runs")   # §RB — calendar carries HR-zone grades
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
-            or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the owner's data
+            or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — your data
             or p.startswith("/api/availability")          # §AV — away days = empty-house broadcast
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
@@ -6056,7 +6056,7 @@ def plan_public_view(plan):
 @app.get("/healthz")
 def healthz():
     """Liveness + scheduler telemetry (TECH-8). The private box gets the raw timestamps; the PUBLIC box
-    gets booleans only — an unauthenticated probe must not learn when the owner's nightly runs (their
+    gets booleans only — an unauthenticated probe must not learn when your nightly runs (their
     routine is private), but an uptime check can still see that syncing works and is fresh."""
     db = get_db()
     last_sync = get_meta(db, "last_sync")
@@ -6652,7 +6652,7 @@ def api_plandrift():
     elif settled:                                        # race passed, reckoning withheld (public view)
         headline = f"{obj.get('label') or 'The race'} is complete."
     elif is_current:
-        # The "settle the score" wager voice is a private in-joke (owner's bet); the public site gets
+        # The "settle the score" wager voice is a private in-joke (my bet); the public site gets
         # neutral copy. READONLY = the public read-only container.
         headline = ("Baseline just sealed — the score isn't open yet; week one is the only live signal."
                     if not READONLY else
@@ -6787,8 +6787,8 @@ def api_objectives_add():
 
 @app.post("/api/objectives/parse")
 def api_objectives_parse():
-    """§6c — parse a natural-language goal into structured fields for the owner to review.
-    Advisory only: returns the proposal; the owner confirms via the normal add path."""
+    """§6c — parse a natural-language goal into structured fields for you to review.
+    Advisory only: returns the proposal; you confirm via the normal add path."""
     d = body()
     text = (d.get("text") or "").strip()
     if not text:
@@ -6827,7 +6827,7 @@ def api_objectives_remove(oid):
 
 @app.get("/api/availability")
 def api_availability():
-    """§AV — the owner's away-day windows still in play (this week's Monday onward, so a window
+    """§AV — your away-day windows still in play (this week's Monday onward, so a window
     covering days already lived stays listed until its week closes). PRIVATE-ONLY: the whole
     /api/availability surface is blocked on the public box (_private_only_path) — away dates are
     an empty-house broadcast."""
@@ -6977,14 +6977,14 @@ def _seed_now(db, plan, today=None):
 
     ⛔ WHAT THIS DELIBERATELY DOES NOT CLAIM. It compares the SEED — the input — and says only that
     the input has moved. It does NOT claim the sessions would change, because knowing that costs a
-    full counterfactual `generate_plan` (measured on the owner's DB at 1.6–2.0 s) and this runs on
+    full counterfactual `generate_plan` (measured on my DB at 1.6–2.0 s) and this runs on
     every dashboard load, behind a 4-thread server already seen queuing to depth 9. `plan_seed` is
     0.1 ms. A cheap true statement beats an expensive one served slowly, and beats a cheap false one
     absolutely — §6e2's hardcoded sentence is the standing lesson here.
 
     TRIGGERED ON VALUES, NOT PROVENANCE, and that distinction is the whole honesty of it: if the seed
     is drawn from a different DAY but reads the same to the displayed precision, NOTHING has moved and
-    firing would be crying wolf — the exact failure §PRO14's docstring warns trains the owner to
+    firing would be crying wolf — the exact failure §PRO14's docstring warns trains you to
     ignore the marker. So a new day alone does not fire it; a new day whose numbers differ does.
 
     Returns None — and the banner is then OMITTED, never guessed — when the plan predates §PRO20 (no
@@ -7010,7 +7010,7 @@ def _seed_now(db, plan, today=None):
     # eVO₂max rides along because it IS part of the seed tuple (§PRO20 keeps it on the newest row) and
     # it moves the pace zones — a changed fitness read is as much a reason to re-read today as a
     # changed load state. Compared at the precision each is shown at, so an invisible last-decimal
-    # wobble never fires a banner the owner cannot see the cause of.
+    # wobble never fires a banner you cannot see the cause of.
     return {"from": meta.get("from"), "bridged_days": meta.get("bridged_days"),
             "fallback": meta.get("fallback"), "was_from": saved.get("from"),
             "moved": now != was, **now, "was": was}
@@ -7037,7 +7037,7 @@ def _plan_for_view(plan, db=None):
         plan["engine_running"] = ENGINE_VERSION
         try:
             plan["seed_now"] = _seed_now(db or get_db(), plan)
-        except Exception as e:      # a staleness read must never cost the owner his plan
+        except Exception as e:      # a staleness read must never cost you your plan
             print(f"[§56] seed staleness read skipped: {e}")
             plan["seed_now"] = None
     return plan
@@ -7300,7 +7300,7 @@ def _profile_cached(db, aid):
         # what is cached (a stale shape is still a pace curve) or say so — before 0.27.1 a miss here
         # made a doomed MCP call and, with a token present, an INSERT on the query_only connection
         # (an HTML 500 instead of the JSON 502; Gemini review #3, verified). The private side fills
-        # the cache the owner's views share.
+        # the cache your views share.
         return cached, RunalyzeError("profile not cached — the public view cannot fetch it")
     try:
         prof = activity_profile(aid)
@@ -7451,7 +7451,7 @@ def api_activity_profile(aid):
 @app.get("/api/activity/<int:aid>/map")
 def api_activity_map(aid):
     """Route polyline (lat/long) + bounds for the private workout map. PRIVATE-ONLY: the public
-    read-only container 403s this in _readonly_guard — the routes reveal where the owner lives."""
+    read-only container 403s this in _readonly_guard — the routes reveal where you live."""
     db = get_db()
     prof, err = _profile_cached(db, aid)
     if prof is None:
@@ -7691,7 +7691,7 @@ def api_settings():
 #                          Restore = stop the container, drop the file in ./data as sparinghorse.db.
 #   • /api/export/json   — a portable JSON of the NON-REBUILDABLE, user-authored tables. Runalyze can
 #                          re-backfill activities/snapshots and every cache is derived; what CANNOT be
-#                          rebuilt is the owner's judgment + history: objectives (+outcomes), readiness
+#                          rebuilt is my judgment + history: objectives (+outcomes), readiness
 #                          check-ins, session_log reflections, adjustments, health_markers (labs are
 #                          manual), ignored_activities (dedup verdicts), the versioned plans (banked
 #                          evidence + frozen weeks), and meta (settings, rebase_start, LTHR stamps).
@@ -8426,7 +8426,7 @@ async function readyProbe(){
   // The verdict lives at j.assessment.verdict and always has (today_readiness returns
   // {date, assessment, session}). This probe read j.verdict / j.readiness.verdict — neither of which
   // the endpoint has ever returned — so it reported FAIL with an empty output from the day it was
-  // written (2026-06-19) until an owner ran the browser check and read the report. A manual harness
+  // written (2026-06-19) until I ran the browser check and read the report. A manual harness
   // nobody re-runs is a test that rots in silence; det/client-probe now pins both ends of this.
   const a=j.assessment||{};
   const verdict=a.verdict||j.verdict||(j.readiness&&j.readiness.verdict);

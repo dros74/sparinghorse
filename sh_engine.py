@@ -45,11 +45,11 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # no longer exists — with no way for the view to know. §FT7 half-covered this by sniffing for a
 # PRE-§FT payload shape (no band and no `today`), which by construction cannot see a plan that is
 # merely one release old: on 2026-07-28 a 0.21.0 plan rendered under 0.21.1 with no marker at all,
-# and the owner reasonably read the unchanged numbers as a failed deploy. A shape sniff can only ever
+# and you reasonably read the unchanged numbers as a failed deploy. A shape sniff can only ever
 # recognise the breakages it was written for; an identity comparison catches every future one.
 # WHY A CONSTANT, not a CHANGELOG parse: the container ships the modules and nothing else (see the
 # Dockerfile), so there is no changelog to read at runtime. WHY NOT A SOURCE HASH: it would fire on comment-only
-# releases and train the owner to ignore the marker, which is the failure it exists to prevent.
+# releases and train you to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
 ENGINE_VERSION = "0.44.6"
@@ -162,14 +162,14 @@ def _resolve_setting(db, spec):
 # which is what makes "keep projected ACWR in band" plannable.
 #
 # Confidence (2026-06-14):
-#  - STRUCTURE confirmed against the owner's account: ACWR = ATL/CTL (Runalyze's 0.952 = 20/21
+#  - STRUCTURE confirmed against my account: ACWR = ATL/CTL (Runalyze's 0.952 = 20/21
 #    exactly), fitness/fatigue are TRIMP EWMAs, and they are whole-body (all sports' TRIMP feed
 #    them — cross-training counts).
 #  - SPANS are Runalyze's *documented defaults*: ATL=7d, CTL=42d, as a standard N-day EWMA
 #    CTL_t = CTL_{t-1}·(1-α) + TRIMP_t·α with smoothing factor α = 2/(N+1) — see _ewma_step below.
 #    (blog.runalyze.com/tutorial/runalyze-understanding-the-calculations)
 #  - Reconstruction match at today (CTL 20.83/ATL 20.20 vs Runalyze 21/20) is consistent but
-#    WEAK proof of τ on its own: he's at a plateau (CTL≈ATL) where ACWR≈1 regardless of τ.
+#    WEAK proof of τ on its own: you's at a plateau (CTL≈ATL) where ACWR≈1 regardless of τ.
 #    The τ values rest on Runalyze's docs, not this single point. RE-VALIDATE as daily snapshots
 #    accrue — especially rebuild weeks where CTL and ATL diverge (the discriminating data).
 #  - 2026-06-29 — FORMULA CORRECTED. The earlier code used α = 1−e^(-1/N), which is ~half the
@@ -188,7 +188,7 @@ def _resolve_setting(db, spec):
 #    a phantom run reconciled by a single impulse fitting CTL and ATL at once — a data-coverage
 #    artifact, never a model error). `_stc_projector` (§6k) therefore validates only LIKE-FOR-LIKE
 #    (settled rest-day snapshots behind the frontier). Same day-ahead seam the §6j scorecard de-seams.
-#  - Caveat: "default" — if the owner changed his Runalyze calc settings, confirm and adjust.
+#  - Caveat: "default" — if you changed your Runalyze calc settings, confirm and adjust.
 TAU_CTL = 42  # days, "fitness" (CTL) EWMA span — Runalyze default
 TAU_ATL = 7   # days, "fatigue" (ATL) EWMA span — Runalyze default
 
@@ -219,14 +219,14 @@ def find_duplicates(db):
 
 
 def manual_ignores(db):
-    """Activity ids the owner has manually flagged (near-dups / mis-tags the exact-match
+    """Activity ids you have manually flagged (near-dups / mis-tags the exact-match
     heuristic misses). Persisted in `ignored_activities`."""
     return {r["id"] for r in db.execute("SELECT id FROM ignored_activities").fetchall()}
 
 
 def dropped_ids(db):
     """Every activity id excluded from the owned reconstruction: auto-detected exact
-    duplicates ∪ the owner's manual ignore-list. The single source of truth for de-dup —
+    duplicates ∪ your manual ignore-list. The single source of truth for de-dup —
     every projector/actuals consumer drops this set."""
     return set(find_duplicates(db)) | manual_ignores(db)
 
@@ -291,13 +291,13 @@ def latest_snapshot(db):
 # `today` does not: it has already advanced the EWMA through today with whatever TRIMP had landed
 # when it was captured. So today gets applied TWICE — once by Runalyze, once by the roll.
 #
-# MEASURED on his live DB (2026-07-30), exact to the decimal — this is arithmetic, not inference:
+# MEASURED on my live DB (2026-07-30), exact to the decimal — this is arithmetic, not inference:
 #   07-28 settled at ATL 80. The 07-29 snapshot was captured 20:00Z, BEFORE that evening's run, and
 #   read ATL 60 == _ewma_step(80, 0, 7) — i.e. today already applied as a REST day. Plan #70 was
 #   seeded from it and the week's allowance came out 50.9 km (laid 47.3, with a 9.4 km Sunday long);
 #   seeded from the settled state the same code allows 25.4 km. A 22-point ATL under-read doubled
-#   the week, and he was then told he had "over-run" it.
-#   The settled 07-29 snapshot later read ATL 82 == _ewma_step(80, 88, 7) with his real 88-TRIMP run
+#   the week, and you were then told you had "over-run" it.
+#   The settled 07-29 snapshot later read ATL 82 == _ewma_step(80, 88, 7) with my real 88-TRIMP run
 #   — and OVERWROTE the row (one row per day), erasing the evidence. `plans.inputs` is the only
 #   surviving record of what a plan was actually built from.
 # 13 of the 41 plans generated in July 2026 were built from an ATL the same-day snapshot later
@@ -366,13 +366,13 @@ def project_forward(planned, ctl0, atl0, start_date):
 
 
 # ── §SJ split sessions ("1+1") — several recordings, one session (PROJECT_LOG §30) ─────
-# The owner deliberately records a mixed session as separate parts (easy body saved, fresh recording
+# You deliberately records a mixed session as separate parts (easy body saved, fresh recording
 # for the strides) so neither part pollutes the other's numbers — the right instinct watch-side; the
 # engine must read the parts back as ONE session. Groups are DERIVED at read time (a pure function
 # over one day's owned rows) — activity rows are Runalyze's raw truth and are never merged at rest.
 SJ_MAX_GAP_MIN = 30   # a save-and-restart between parts is minutes; a real morning/evening double is
 #                       hours apart. Overlapping recordings NEVER join (same-instant duplicate-source
-#                       pairs exist in his history under different TZ spellings — a restart starts
+#                       pairs exist in your history under different TZ spellings — a restart starts
 #                       after the previous part ended).
 SJ_PART_MIN_S = 180   # a grouped part's own §RD floor: the GROUP supplies the context RD_MIN_RUN_S
 
@@ -393,7 +393,7 @@ def _session_groups(rows):
         0 ≤ start(next) − end(prev) ≤ SJ_MAX_GAP_MIN — end from elapsed_time (wall clock), falling
         back to duration; chains (wu + reps + cd as three recordings) join transitively;
       • a NEGATIVE gap (overlap) never joins: a restart starts after the previous part ended —
-        overlap means duplicate-source rows (his 2023 history has same-instant pairs under
+        overlap means duplicate-source rows (your 2023 history has same-instant pairs under
         different TZ spellings);
       • a blank/unparseable date_time never joins (the dedup blank-timestamp posture), nor does a
         naive/aware timestamp mix (the gap is not computable — honesty over guessing).
@@ -453,14 +453,14 @@ ACWR_HARD = 1.30   # never exceed (the model has error near the boundary, §6a-b
 # CTL_RAMP_MAX stay on the RAW CTL, so they remain the true acute-spike + chronic-growth brakes (verified:
 # under the floor, real ACWR rides UP TO 1.30 — the hard cap — and no further; it is the new binding
 # ceiling). Displayed/historical ACWR stays RAW (honest). OPT-IN: only the live ASSERTIVE plan passes it
-# (caution stays byte-identical, default off ⇒ every constructed test is unchanged). Owner-approved
+# (caution stays byte-identical, default off ⇒ every constructed test is unchanged). My call
 # 2026-06-30 (the masters/post-illness acute safety = the raw peak + ramp, both preserved).
 ACWR_SOFT_CTL_FLOOR = 45.0
-# §PRO10 — progressive-overload floor on the ASSERTIVE ceiling (2026-07-23, owner-approved: "I can't
+# §PRO10 — progressive-overload floor on the ASSERTIVE ceiling (2026-07-23, my call: "I can't
 # see the logic of a plan that establishes a peak CTL this far from the race"). The ceiling is STATE-
-# based (a ratio of the carried CTL), so riding it has a fixed point: at his chronic load the soft
+# based (a ratio of the carried CTL), so riding it has a fixed point: at your chronic load the soft
 # test allows ~maintenance+ε, down weeks hand the ε back, and the 19 projected weeks Aug→Nov drew CTL
-# 44→45 — a plan honestly claiming he won't get fitter (verified on plan 58: every non-down week
+# 44→45 — a plan honestly claiming you won't get fitter (verified on plan 58: every non-down week
 # pinned at eow_soft≈1.25 against the floored denominator, i.e. ATL_end ≈ 1.25×ACWR_SOFT_CTL_FLOOR,
 # CTL equilibrium ≈ the floor itself; §PRO8 raised the old ~31 fixed point to ~45, it didn't remove
 # it). The fix: a BUILDING week's allowance may not be soft-clipped below (1+PROG_RAMP)× the last
@@ -474,9 +474,9 @@ ACWR_SOFT_CTL_FLOOR = 45.0
 # floor ⇒ byte-identical. Weeks the floor actually lifted carry `prog_ridden` (honest label: the
 # drawn trajectory assumes continued clean absorption).
 PROG_RAMP = 0.06           # ≥6%/wk over the last realised non-down load — the classic conservative
-#                            progression band (his absorbed-but-unproductive June ramp ran ~26%/wk;
+#                            progression band (your absorbed-but-unproductive June ramp ran ~26%/wk;
 #                            eVO₂ stayed flat — that audit is why this is 6, not 10)
-EASY_TRIMP_PER_MIN = 1.3   # calibrated from his easy runs (HR≤135 → ~1.1–1.5/min)
+EASY_TRIMP_PER_MIN = 1.3   # calibrated from my easy runs (HR≤135 → ~1.1–1.5/min)
 EASY_PACE_FRAC = 0.72      # fraction of vVO2max for easy running (top of the easy zone; sits just under LT1)
 
 # §3.4 — LT1 (aerobic threshold) as the PACE-anchored easy bar (ENGINE_SCIENCE.md §3.4 + the §6.3 decision:
@@ -492,13 +492,13 @@ MARATHON_PACE_FRAC = 0.81  # fraction of vVO2max at marathon pace — ONE defini
 # (§FORM1 2026-08-18 — the §6e banked-week machinery is GONE: graduation, the earned volume lift,
 # the 6th-run unlock, and the regime's banked-streak clause all judged plan OBEDIENCE, not the body.
 # A travel week — 30.1 km run and cleanly absorbed against a 5-run lay — zeroed a 3-week streak and
-# collapsed the assertive road into a 13 km/wk detraining re-base (live, 2026-08-18). The owner's
+# collapsed the assertive road into a 13 km/wk detraining re-base (live, 2026-08-18). My
 # ruling: the plan follows MEASURED form toward the objective; conservative posture is entered on
 # body evidence only (medical hold / stop-symptom — see training_regime). Volume responsiveness
 # lives in §PRO5's measured-vs-projected ride; frequency spreads live in §PRO9; nothing is "earned"
 # by adherence bookkeeping any more.)
 
-RUN_MIN_KM = 2.5   # §JR — no prescribed run below this (owner call 2026-07-05, after the ACWR brake
+RUN_MIN_KM = 2.5   # §JR — no prescribed run below this (my call 2026-07-05, after the ACWR brake
 
 
 def _vo2_at_v(v):  # Daniels: VO2 cost (ml/kg/min) at velocity v (m/min)
@@ -534,7 +534,7 @@ def fmt_pace(sec):
 
 
 def est_trimp(minutes, zone="easy"):
-    """Estimate a session's TRIMP from duration + intensity zone (calibrated from his data)."""
+    """Estimate a session's TRIMP from duration + intensity zone (calibrated from my data)."""
     per_min = {"easy": EASY_TRIMP_PER_MIN, "marathon": 1.8, "threshold": 2.6,
                "interval": 3.2, "long": 1.4}.get(zone, EASY_TRIMP_PER_MIN)
     return round(minutes * per_min, 1)
@@ -652,12 +652,12 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # final/biggest week grazes the soft cap. Week 4 is a genuine down week.
 #
 # LONG_RUN_MAX_FRAC: the long run's max share of weekly volume. Raised 0.35→0.50 (2026-06-20) after
-# reading the owner's OWN history — his real long runs ran at median 0.33 / p75 0.40 / p90 0.50 of the
-# week, and 44% of his training weeks exceeded 0.35, so the old cap suppressed the cornerstone marathon
-# session below what he actually (and safely) trained. This lifts the *ceiling* and fattens the early
-# long runs; it does NOT front-load the timeline to his fitter-era comeback rate — the long run stays
-# CTL-gated by the same EOW ACWR governor (his big 18–30km long runs rode CTL 80–100; off today's
-# CTL ~24 the safe peak long run is ~12–13km, which his own data confirms — his 22–35km runs ran at
+# reading my OWN history — my real long runs ran at median 0.33 / p75 0.40 / p90 0.50 of the
+# week, and 44% of your training weeks exceeded 0.35, so the old cap suppressed the cornerstone marathon
+# session below what you actually (and safely) trained. This lifts the *ceiling* and fattens the early
+# long runs; it does NOT front-load the timeline to your fitter-era comeback rate — the long run stays
+# CTL-gated by the same EOW ACWR governor (your big 18–30km long runs rode CTL 80–100; off today's
+# CTL ~24 the safe peak long run is ~12–13km, which your own data confirms — your 22–35km runs ran at
 # ACWR 1.26, right at the 1.25 cap). Safety is unchanged: only the EOW ACWR governor bounds load, and
 # it's untouched. NOTE (2026-06-20): "no explicit intraweek-peak-ACWR guard is needed *because the
 # long run is CTL-limited to ~12km here*; if this is ever combined with the volume push the long run
@@ -669,12 +669,12 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # already in place and holding — do not add a second one. What is worth watching instead is that
 # §PRO10's progression floor legitimately rides weeks PAST the 1.25 soft cap up to that hard cap, so
 # the hard cap is the cruising altitude on building weeks, not a rare backstop (3 up : 1 down).
-# ✅ SETTLED 2026-07-28 — THE OWNER'S EXPLICIT CALL: "I want to cruise the hard cap." So this is the
+# ✅ SETTLED 2026-07-28 — MY EXPLICIT CALL: "I want to cruise the hard cap." So this is the
 # intended posture, not drift, and NO code change was made: §PRO10 already rides to ACWR_HARD and
 # must keep doing so. Do not "restore" the soft cap as the assertive ceiling — that would silently
-# revoke a decision he made with the numbers in front of him (building weeks measured at 1.296–1.300
+# revoke a decision you made with the numbers in front of you (building weeks measured at 1.296–1.300
 # against soft 1.25 / hard 1.30, on a 3-up-1-down cadence with down weeks falling to ~1.12–1.18).
-# THE CONSEQUENCE HE OWNS, stated plainly so nobody has to rediscover it: with the backstop adopted
+# THE CONSEQUENCE I OWN, stated plainly so nobody has to rediscover it: with the backstop adopted
 # as the target, there is no longer any ACWR headroom ABOVE normal operation. ACWR_HARD is now both
 # the ceiling and the aim, so it can no longer also serve as the margin that absorbs a bad week —
 # any future emergency brake has to come from a different axis (readiness, §PRO5's ride-cap easing,
@@ -683,15 +683,15 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
 # (REBASE_LONG_CAP) so it stays byte-identical — the recalibration is for the marathon-prep phases.
 # §PRO18 — the long run's share of weekly volume now follows the Daniels / Hansons doctrine (long run
 # ≤ 25–30% of the week, with Daniels' 2:30–3:00 duration ceiling as the cross-check) instead of the
-# 0.42/0.48 fitted on his own history (median 0.33 · p75 0.40 · p90 0.50, calibrated 2026-06-20).
-# ⚠ THIS DELIBERATELY OVERRIDES A HIS-DATA CALIBRATION WITH PUBLISHED DOCTRINE — his ruling
+# 0.42/0.48 fitted on my own history (median 0.33 · p75 0.40 · p90 0.50, calibrated 2026-06-20).
+# ⚠ THIS DELIBERATELY OVERRIDES A CALIBRATION ON MY OWN DATA WITH PUBLISHED DOCTRINE — my ruling
 # 2026-07-29, on measurement, not preference. Under §PRO17 the long run is the biggest single session
 # and so eats the per-session eq_km budget; capping its SHARE frees biomechanical headroom that flows
 # into easy volume (the same redistribution §PRO9 already does when it clips a long run). Measured on
-# his DB: block 933 → 1049 km, peak CTL 92.3 → 96.4, peak week 69.5 → 69.9 km, longest long 32.2 →
-# 23.1 km (= 33% of its week, ≈2:40 at his easy pace — inside BOTH Daniels rules; 32.2 km was ~3:40
+# my DB: block 933 → 1049 km, peak CTL 92.3 → 96.4, peak week 69.5 → 69.9 km, longest long 32.2 →
+# 23.1 km (= 33% of its week, ≈2:40 at your easy pace — inside BOTH Daniels rules; 32.2 km was ~3:40
 # and satisfied neither). Predicted finish moves 4:14:30 → 4:18:38, but that 4 min comes almost
-# entirely from §FT1's ladder term whose SHAPE is an explicit prior with a single anchor (his whole
+# entirely from §FT1's ladder term whose SHAPE is an explicit prior with a single anchor (your whole
 # race corpus sits at ratio 0.71) — the model cannot really rank these two, so the choice was made on
 # the evidence axis instead: Aarhus is specifically about the LONGEST RUN, and 23 km is less
 # single-bout damage than 32 km while the block carries 116 km MORE total training.
@@ -701,14 +701,14 @@ LONG_RUN_MAX_FRAC = 0.30
 # ceiling), and that is the right ceiling for BASE, where chronic volume is being built and the
 # long-run share is competing with frequency for the same biomechanical budget. It is the wrong
 # ceiling for the marathon-specific block: at 0.30 the whole 20-week road tops out at a 24.4 km
-# longest run on a 72.5 km peak week, and the athlete arrives at a marathon never having been on his
-# feet past 2h42. His OWN history (calibrated 2026-06-20) ran median 0.33 · p75 0.40 · p90 0.50, so
-# the peak number below sits inside his p90 rather than past it.
-# ⚠ THE COST IS DURATION, AND IT IS REAL AND OWNED: 32 km at his easy pace is ~3h36, past Daniels'
+# longest run on a 72.5 km peak week, and the athlete arrives at a marathon never having been on your
+# feet past 2h42. My OWN history (calibrated 2026-06-20) ran median 0.33 · p75 0.40 · p90 0.50, so
+# the peak number below sits inside your p90 rather than past it.
+# ⚠ THE COST IS DURATION, AND IT IS REAL AND OWNED: 32 km at your easy pace is ~3h36, past Daniels'
 # 3:00 cross-check by 36 minutes, and Aarhus is specifically about single-bout damage from the
-# LONGEST run. This is the owner's call of 2026-08-25, taken with the simulated ladder in front of
-# him: he judged that arriving at a goal marathon never having run 30 km was the larger risk of the
-# two. Measured on his live DB, the whole block total does not move — the same training, redistributed.
+# LONGEST run. This is my call of 2026-08-25, taken with the simulated ladder in front of
+# you: you judged that arriving at a goal marathon never having run 30 km was the larger risk of the
+# two. Measured on my live DB, the whole block total does not move — the same training, redistributed.
 # ⚠ The two big runs are DELIVERED BY THE STEP CAP, not by this number: §PRO9's +10%-over-trailing-4wk
 # ladder is what actually walks the long run up, so the peak value alone cannot produce them (peak is
 # 2 weeks; from a 23.1 km build ceiling the ladder reaches only ~28 km by race week). The build entry
@@ -824,7 +824,7 @@ BASE_DOWN_EVERY = 4        # every 4th week is a down week (3 build : 1 recovery
 # connective-tissue temper (tendon/bone adapt over weeks, ACWR is partly blind to them). Riding the
 # ACWR soft cap continuously grows CTL ~8%/wk, so this absolute cap is the high backstop that bites
 # only on a strong rebuild (~CTL 60+), with the §PRO6 duration limiter handling sustained near-ceiling
-# riding. Owner-chosen MODERATE (~5 pts/wk, upper end of standard ramp-rate guidance). Threaded as an
+# riding. My choice: MODERATE (~5 pts/wk, upper end of standard ramp-rate guidance). Threaded as an
 # OPTIONAL governor arg (default None ⇒ today's exact behaviour) so caution stays byte-identical and
 # only the assertive regime (§PRO2) passes it. NEVER raises the allowance — a pure additional ceiling.
 CTL_RAMP_MAX = 5.0         # max CTL points/week the plan may add (the assertive-regime tissue backstop)
@@ -837,19 +837,19 @@ CTL_RAMP_MAX = 5.0         # max CTL points/week the plan may add (the assertive
 #   BUILD weeks, at the CTL levels this constant actually governs:
 #     CTL 75–90  n=14   p50 −0.11  p75 +4.32  p90 +5.86  p95 +6.42   (p90 relative 6.7%)
 #     CTL 90+    n=40   p50 −2.34  p75 +4.94  p90 +6.43  p95 +6.72   (p90 relative 6.1%)
-# So 5.0 sits at his p75–p80 on build weeks where it binds — permitting three quarters of what he has
+# So 5.0 sits at your p75–p80 on build weeks where it binds — permitting three quarters of what you have
 # demonstrated in new territory and refusing the top quarter. LEFT UNCHANGED on that evidence.
 # ⚠ TWO LIMITS A FUTURE READER MUST NOT LOSE. (1) Below CTL 75 there are FEWER THAN 5 build weeks in
-# the whole corpus — when he was under 75 he was almost always rebounding. So this is calibrated for
+# the whole corpus — when I was under 75 I was almost always rebounding. So this is calibrated for
 # CTL ≥75 and is UNEVIDENCED below it, which is exactly where a plan's first ~10 weeks live: at CTL 50,
-# 5.0/wk is ~10% relative, faster than anything he has shown on a build week. (2) Over the range we CAN
+# 5.0/wk is ~10% relative, faster than anything you have shown on a build week. (2) Over the range we CAN
 # measure, the absolute form (~+6) and the relative form (~6%) are INDISTINGUISHABLE — the band is too
 # narrow to separate them — and they diverge precisely in the unevidenced region. The relative variant
-# `min(CTL_RAMP_MAX, 0.06 × ctl)` was built and measured on his DB: peak CTL 96.9 → 86.5, block 1070 →
+# `min(CTL_RAMP_MAX, 0.06 × ctl)` was built and measured on my DB: peak CTL 96.9 → 86.5, block 1070 →
 # 928 km, longest long 23.1 → 21.5 km, finish 4:18:09 → 4:24:35. It is the lever if conservatism in the
 # early block is ever wanted; it was not taken because it imposes a high-CTL rate on a region with no
 # data, at a measurable cost. ⛔ As everywhere on this axis: DEMONSTRATED BEHAVIOUR, never injury —
-# his corpus contains none (4 gaps ≥14d in 4.7 years). See PROJECT_LOG §52.
+# my corpus contains none (4 gaps ≥14d in 4.7 years). See PROJECT_LOG §52.
 
 # §PRO6 — duration-aware tissue limiter. Riding the ACWR ceiling sits the athlete at ~1.25 EVERY
 # building week, so the connective-tissue load is sustained far longer than under the timid caution
@@ -865,12 +865,12 @@ MESO_MAX_HARD = 3                      # max consecutive near-ceiling building w
 # §PRO9 — long-run progression cap (the Davis/Aarhus injury lever, ENGINE_SCIENCE.md §3.2). Aarhus
 # (n≈5000): a sharp jump in the SINGLE longest run vs the longest of the trailing ~4 weeks predicts
 # injury MORE strongly than weekly-mileage jumps — a biomechanical-axis signal ACWR/TRIMP structurally
-# cannot see. HARD cap (owner-chosen): the plan never PRESCRIBES a long run beyond LONG_RUN_STEP_CAP ×
+# cannot see. HARD cap (my choice): the plan never PRESCRIBES a long run beyond LONG_RUN_STEP_CAP ×
 # the longest run of the trailing LONG_RUN_STEP_WINDOW weeks; the clip only ever REDUCES the long-run
 # day, and the freed volume redistributes to the week's short easy runs, so weekly total TRIMP + the
 # ACWR projection are UNCHANGED (only the single long-run spike shrinks — and a smaller spike can only
 # lower peak transient, never raise it). Assertive-only, caution byte-identical — the §PRO8 template.
-# Magnitude 🟡 LITERATURE (+10% = the 10% rule); earn a looser step from his corpus before widening.
+# Magnitude 🟡 LITERATURE (+10% = the 10% rule); earn a looser step from my corpus before widening.
 LONG_RUN_STEP_CAP = 1.10    # max long-run jump vs the trailing-window longest (+10%)
 LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progression baseline
 
@@ -881,7 +881,7 @@ LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progress
 # §PRO9's clamp bounds every easy day at the SAME +10% ceiling as the long slot: correct on the
 # biomechanical axis (no run may jump), silent on SHAPE. Once weekly budget ÷ running days reaches
 # that ceiling, every day pins to it and the week has no long run left — five identical days, one of
-# them merely labelled. MEASURED on his 2026-08-03 week: cap 11.4 (= 1.10 × his 10.38 km Sunday,
+# them merely labelled. MEASURED on my 2026-08-03 week: cap 11.4 (= 1.10 × my 10.38 km Sunday,
 # itself a 62-min THRESHOLD effort — the ladder's baseline is "longest run", which does not ask what
 # kind of run it was), budget 56.6 km over 5 days = 11.32 ⇒ long 11.4 vs easy 11.3, ratio 1.01. Four
 # such weeks in one block. The long run's physiology is DURATION-dependent — glycogen depletion and
@@ -893,7 +893,7 @@ LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progress
 #     clears the target, bounded by `long_cap` (the Daniels/Hansons share ceiling). Costs nothing —
 #     no extra running day, weekly total untouched — so it is the preferred lever and runs in BOTH
 #     regimes. This is what a flat week actually needs: a bigger long run, not smaller easy days.
-#   · Long run PINNED by §PRO9 (his real weeks): the long run cannot rise, so LONG_RUN_EASY_FRAC
+#   · Long run PINNED by §PRO9 (my real weeks): the long run cannot rise, so LONG_RUN_EASY_FRAC
 #     bounds each easy day at a fraction of the long run laid and the freed volume spreads onto MORE
 #     easy days — the durability principle §PRO9 already uses in the same block. Weekly total still
 #     untouched, but the week gains a running day. Lives under `long_km_cap` ⇒ assertive-only.
@@ -903,7 +903,7 @@ LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progress
 #     3-run week is capped at ratio 1.077 by construction (seen: re-base wk1, 12.9 km over 3 runs).
 #     Then the plan stops calling it a long run, as _mark_load_integrity already does for a sub-4 stub.
 # ⚠ NOT caution-byte-identical — the raise lever is deliberately regime-independent, because a flat
-# week is not a load question and the §PRO8 template does not apply. MEASURED on his DB: caution block
+# week is not a load question and the §PRO8 template does not apply. MEASURED on my DB: caution block
 # 273.7 → 273.0 km (−0.26%), 66 sessions both, 5 runs/week both, no week gains a day; the whole delta
 # is long runs rising into their share and easy days giving it back. The RE-BASE is load-byte-identical
 # (every km/minute/TRIMP equal — its weeks already sit at REBASE_LONG_CAP), one label moved.
@@ -914,9 +914,9 @@ LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progress
 # assume the long run dominates and never state it). 0.85 is the LOOSEST fraction that still makes
 # the long run unambiguously the week's longest run while forcing the fewest extra running days —
 # tightening it toward the week's own natural shape (n_short × BASE_LONG_FRAC / (1 − BASE_LONG_FRAC)
-# ⇒ 0.75 at 4 easy days) pushes his current weeks to SEVEN running days, which is the decoupled-clocks
+# ⇒ 0.75 at 4 easy days) pushes your current weeks to SEVEN running days, which is the decoupled-clocks
 # problem (CTL-driven weekly volume outrunning the +10% long-run ladder), not this one. Revisit from
-# his own corpus once the ladder has caught up.
+# my own corpus once the ladder has caught up.
 LONG_RUN_EASY_FRAC = 0.85   # max easy-day distance as a fraction of the long run laid that week
 LONG_RUN_MIN_RATIO = 1.15   # below this multiple of the week's longest easy run it is not a long run
 
@@ -924,28 +924,28 @@ LONG_RUN_MIN_RATIO = 1.15   # below this multiple of the week's longest easy run
 # longest and §PRO23 made the week grow with it, but the days underneath stayed uniform by
 # construction: every short easy took (1 − long_w)/n_short, so a base week read
 # 10.3 / 10.3 / 10.3 / 10.3 + a quality touch + the long run. That is not a plan a coach would
-# recognise, and it is the residue of the owner's original complaint — the long run stopped being
+# recognise, and it is the residue of your original complaint — the long run stopped being
 # "just another day", and then every other day still was.
-# ⭐ THE NUMBER IS HIS, NOT THE LITERATURE'S — ENGINE_SCIENCE §0: "Davis gives us theory, Duarte's own
+# ⭐ THE NUMBER IS MINE, NOT THE LITERATURE'S — ENGINE_SCIENCE §0: "Davis gives us theory, Duarte's own
 # data decides the numbers." No source states a within-week easy-day distribution, so this was FITTED
-# to his corpus: 150 weeks with ≥4 run-days and ≥30 km, days summed per date (§SJ) and ranked. His
+# to my corpus: 150 weeks with ≥4 run-days and ≥30 km, days summed per date (§SJ) and ranked. My
 # median shapes are a clean descending ladder and remarkably stable across week sizes —
 #   5 runs: 33.8 / 19.7 / 17.3 / 15.1 / 12.8 %      6 runs: 27.6 / 18.7 / 16.2 / 13.5 / 11.8 / 9.5 %
 #   7 runs: 25.9 / 16.9 / 14.7 / 12.7 / 11.6 / 10.3 / 8.8 %
 # Least squares over the easy ranks (dropping rank 1 = the long run and the shortest day = the
 # quality/shakeout slot the engine sizes on its own) gives STEP = 0.110, mean-square error 0.00385
-# against 0.00914 for the FLAT split the engine lays today — his own weeks fit a ladder 2.4× better
+# against 0.00914 for the FLAT split the engine lays today — your own weeks fit a ladder 2.4× better
 # than they fit uniformity. A pooled per-step RATIO (0.935) was rejected: the observed per-rank
 # ratios flatten (0.89 → 0.94 → 0.98 → 0.98), so a geometric model misfits the head and the tail at
 # once, while a LINEAR decrement reproduces all three week sizes.
-# 🟢 OWNER-MEASURED MAGNITUDE / DOCTRINE ORDER, and it moves no magnitude: the weekly total, the long
+# 🟢 MEASURED ON MY OWN DATA / DOCTRINE ORDER, and it moves no magnitude: the weekly total, the long
 # run and every governor bound are untouched — this only redistributes the SHORT easy budget.
 # ⚠ THE ORDER IS NOT CALENDAR ORDER, and the same 161 weeks say so. Each easy day over its week's
 # mean easy day grades hard by SIZE RANK (1.426 / 1.225 / 1.044 / 0.925 / 0.818 / 0.704, R² 0.545)
 # and NOT AT ALL by weekday (1.038 / 1.112 / 0.949 / 1.034 / 1.005 / 0.965, R² 0.054). So the rungs
-# are his and the order is doctrine: longest easy furthest from any long run, short rungs flanking
+# are your and the order is doctrine: longest easy furthest from any long run, short rungs flanking
 # one — which is also the order §JR already sheds in ("nearest the long run first — the freed day
-# doubles as pre-long freshness"), and the one calendar bucket his data does separate (0.929 ± 0.031
+# doubles as pre-long freshness"), and the one calendar bucket your data does separate (0.929 ± 0.031
 # the day after a long run vs 1.086 ± 0.037 two days out). Laying them in calendar order instead put
 # the head rung on the day the §H1 peak brake pins and cost a live week 6.3 km — see PROJECT_LOG §60.
 EASY_LADDER_STEP = 0.11     # each successive easy day is this much of the longest easy shorter
@@ -954,10 +954,10 @@ EASY_LADDER_FLOOR = 0.15    # ...but never below this fraction of it (the fitted
 # §3.1 — biomechanical load axis (Davis, ENGINE_SCIENCE.md §3.1 + §6.1). eq_km = a DAMAGE-EQUIVALENT
 # distance: km × f(pace), f rising steeply with speed because tissue damage ≈ loading cycles(steps) ×
 # load-per-step(↑ with speed) — fast running does far more damage per km than easy, a biomechanical axis
-# TRIMP/ACWR structurally CANNOT see. f is CALIBRATED TO HIS DATA (2026-07-02, full 4.7yr/1078-run corpus
+# TRIMP/ACWR structurally CANNOT see. f is CALIBRATED TO MY DATA (2026-07-02, full 4.7yr/1078-run corpus
 # replay): the original Davis-literature grid (1.8/3.5/5.0) kept the one true biomechanical catch (the
 # 2022-03 calf/hip escalation week, eq-ratio 1.44 — invisible to volume brakes at km-ratio 1.16) but
-# falsely braked 7 quality weeks he demonstrably absorbed (CTL-138 era); this softer grid keeps the catch
+# falsely braked 7 quality weeks you demonstrably absorbed (CTL-138 era); this softer grid keeps the catch
 # (ratio 1.40 > 1.30) and cuts the false brakes to 3. Harsher grids were strictly worse. The governor stays
 # contained: SOFT (a ceiling with margin), ASSERTIVE-ONLY, caution byte-identical, and it only ever REDUCES
 # load — and because injury is PROBABILISTIC not deterministic (§6.1) it RESHAPES the week (drops the fast
@@ -971,10 +971,10 @@ BIO_EQ_WINDOW = 4           # trailing weeks whose MAX eq_km sets the biomechani
 # number — one biomechanical step, read at two grains (week and session), so nobody has to reason about
 # why they differ. §PRO9 keeps the LONG RUN at its own tighter 1.10 on raw km, because that is the case
 # the Aarhus cohort literally measured (longest-run jumps predicted injury; weekly-mileage jumps did not).
-# ⛔ CALIBRATED ON DEMONSTRATED BEHAVIOUR, NOT ON INJURY — his corpus contains no injuries to fit against
+# ⛔ CALIBRATED ON DEMONSTRATED BEHAVIOUR, NOT ON INJURY — my corpus contains no injuries to fit against
 # (4 gaps ≥14d in 4.7 years, longest 21d). Over 1205 logged sessions, each measured against the largest
 # of the trailing 30 days in eq_km with PERIOD-CORRECT zones (`_zones_asof`): p90 0.907 · p95 1.010 ·
-# p97.5 1.118 · p99 1.377. This refuses 1.49% of them. It says "he has done this without incident",
+# p97.5 1.118 · p99 1.377. This refuses 1.49% of them. It says "you have done this without incident",
 # never "this is safe". See PROJECT_LOG §50 and ENGINE_SCIENCE.
 SESSION_EQ_STEP = BIO_EQ_STEP
 # §PRO17 — the §H1 rescue's own threshold, decoupled from the governor it used to double as. §H1 was
@@ -986,7 +986,7 @@ H1_RESCUE_ACWR = 1.50
 BASE_DOWN_FRAC = 0.75      # down-week volume vs the carried build trajectory
 BASE_LONG_FRAC = 0.25      # long-run target as a fraction of weekly km (capped at LONG_RUN_MAX_FRAC).
                            # §PRO18 (2026-07-29) — Daniels/Hansons band. Was 0.42, itself raised from
-                           # 0.32 on 2026-06-20 toward his own long-run share; see LONG_RUN_MAX_FRAC
+                           # 0.32 on 2026-06-20 toward my own long-run share; see LONG_RUN_MAX_FRAC
                            # for why published doctrine now outranks that fit.
 
 # Quality / polarized model (§6f Step C) — the structured-workout machinery + the polarized "knob".
@@ -1016,7 +1016,7 @@ HARD_ZONES = ("threshold", "interval")  # zones that count toward the "hard" (po
 COMPONENT_BY_KIND = {      # primary component per session kind (quality + the plain long run)
     "interval": "vo2max", "tempo": "ssmax", "long_mp": "resilience", "long": "economy"}
 DAVIS_BASE_VO2_FRAC = 0.05   # Base (assertive): the quality slot becomes a SHORT VO₂ touch. Halved
-                             # from the tempo slot's .10 (calibrated 2026-07-04 on his live corpus):
+                             # from the tempo slot's .10 (calibrated 2026-07-04 on my live corpus):
                              # during the steep post-restart volume rebuild the ramp-back week's plain
                              # km already sits ~98% of the eq_km step, so a .10 touch self-tripped the
                              # §3.1 brake; at .05 the touch fits the biomech budget (zero fires) and
@@ -1104,10 +1104,10 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
 # BASE_RUNS (frequency-advance is the banking-gated §6e step, still deferred). Quality fracs sum to
 # < (1 − POLARIZED_EASY_MIN) so the week stays easy-dominant by construction; the threshold/interval
 # slice alone stays under PHASE_HARD_CAP["build"].
-BUILD_WEEKLY_RAMP = 0.045  # §PRO10 (2026-07-23, owner-approved) — raised 0.02→0.045 (matches Base):
+BUILD_WEEKLY_RAMP = 0.045  # §PRO10 (2026-07-23, my call) — raised 0.02→0.045 (matches Base):
 #                            "lightly growing" build intents + the 3:1 troughs nearly cancelled, so
 #                            even the caution shape asked for a flat Build; specificity AND volume
-#                            grow together for an athlete whose trailing history dwarfs his chronic
+#                            grow together for an athlete whose trailing history dwarfs your chronic
 #                            load. Intent only — the governor still clips what the ceiling won't allow.
 BUILD_DOWN_EVERY = 4
 BUILD_DOWN_FRAC = 0.75
@@ -1204,7 +1204,7 @@ def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
             # §T2 marathon-specific: the long-fast run IS the workout — the MP segment keeps
             # extending at constant speed (resilience: economy decay resistance). The mid-week
             # interval session keeps its FULL size in a maintenance ROLE: shrinking it made the
-            # week peakier and cost total safe load (see DAVIS_INT_FRAC), verified on his corpus.
+            # week peakier and cost total safe load (see DAVIS_INT_FRAC), verified on my corpus.
             quality = [
                 {"kind": "interval", "zone": "interval", "frac": DAVIS_INT_FRAC,
                  "structure": "intervals", "rep_min": 3, "rec_min": 2,
@@ -1434,7 +1434,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # above gives long_w ≥ R/(n_short+R). Bounded by `long_cap` (the Daniels/Hansons share ceiling) so
     # this can never buy a long run the doctrine forbids, and only ever RAISES — §PRO9's clip runs
     # after it and still owns the ceiling, exactly as it does for §PRO15's aim. Where the clip then
-    # binds (his real weeks) the long run cannot rise, so the easy-day clamp below takes over instead:
+    # binds (my real weeks) the long run cannot rise, so the easy-day clamp below takes over instead:
     # one principle, two levers, chosen by whether the biomechanical cap has the long run pinned.
     # BOTH levers aim at the same target — 1/LONG_RUN_EASY_FRAC — and never at LONG_RUN_MIN_RATIO
     # itself: aiming AT the honesty threshold leaves nothing for the round-to-0.1 km at the end, and a
@@ -1452,7 +1452,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # same ceiling next week, for ever. MEASURED on det/regime-plan's fixture (every seeded run 6.0 km):
     # laid long 6.0 against a 6.6 ladder ⇒ the base block froze at 26.2 km for TEN weeks at a 22.9%
     # share, under the floor part 1 was supposed to guarantee. ⭐ THE SAME FIXED POINT that killed the
-    # first cut of part 1 (which bounded on the laid long and froze his real base at 44.3 km / ladder
+    # first cut of part 1 (which bounded on the laid long and froze my real base at 44.3 km / ladder
     # 12.3 / laid long 11.2 for four weeks) — one level out, and invisible to a share-only test.
     # So: raise the long run TO its ladder, bounded by `long_cap` — the same Daniels/Hansons share
     # ceiling every other lever here respects. With part 1 holding the week at ladder/BASE_LONG_FRAC and
@@ -1479,7 +1479,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         # of the week and therefore always the week's longest run by construction. §PRO18 dropped it to
         # 25–30%, and the guarantee broke through a door nobody had opened: with the long slot already
         # at/under the cap (so no clip, so no clamp), the SHORT easies can be laid LONGER than the long
-        # run and sail past the ceiling untouched. Measured on his live plan #67: cap 9.35 km, long slot
+        # run and sail past the ceiling untouched. Measured on my live plan #67: cap 9.35 km, long slot
         # 9.4 ✓, and two "easy" days at 10.6 km — 13% over the +10% ceiling, and `_week_long_km` then
         # seeded the next week's baseline off 10.6, so the ladder ratcheted 9.4 → 11.7 (+24%) and stayed
         # inflated for the whole block. This is the SAME ratchet the 2026-07-01 adversarial review
@@ -1574,7 +1574,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # km BETWEEN days and never into or out of the week.
     # ⚠ OPT-IN, DEFAULT OFF, AND ONLY EVER ON AN ASSERTIVE FULL WEEK — the §PRO8 template.
     #   · not the §6o REMAINDER. A ladder is a property of a WEEK, and the remainder is not one — it is
-    #     whatever days are left after today (Sat+Sun on his 2026-08-07 regen). §PRO15 states the same
+    #     whatever days are left after today (Sat+Sun on my 2026-08-07 regen). §PRO15 states the same
     #     principle two screens up: "the remainder is not the week".
     #   · not CAUTION. Every other lever in this function is assertive-only for the same reason, and
     #     the caution baseline is the byte-identity guard the whole accelerator is measured against.
@@ -1588,17 +1588,17 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # "non-binding cap ≡ no cap" identity in det/long-run-step keeps meaning what it says.
     _short_slots = [i for i in easy_slots if i != long_idx] if ladder else []
     # ⚠⚠ THE RUNGS ARE ORDERED BY DISTANCE FROM THE NEAREST LONG RUN — *NOT* BY CALENDAR ORDER.
-    # MEASURED on 161 of his own weeks (≥4 runs, easy km ÷ the week's mean easy km):
+    # MEASURED on 161 of my own weeks (≥4 runs, easy km ÷ the week's mean easy km):
     #   · by SIZE RANK        1.426 / 1.225 / 1.044 / 0.925 / 0.818 / 0.704 → R² = 0.545
     #   · by calendar weekday 1.038 / 1.112 / 0.949 / 1.034 / 1.005 / 0.965 → R² = 0.054
     # The ladder is REAL and strong; its supposed calendar DIRECTION is not there at all. The first
     # cut of this feature laid the rungs in calendar order — unsupported by the data, and it pointed
     # the heavy end at MONDAY, the single day the §H1 peak-ACWR brake pins (the seed ATL is highest on
-    # day 1 and decays all week). That cost his 2026-08-03 week 39.0 → 32.7 km of INTENT, and because
+    # day 1 and decays all week). That cost my 2026-08-03 week 39.0 → 32.7 km of INTENT, and because
     # §6o's remainder is `intent − already run`, all 6.3 km came out of the one day left: the Sunday
     # long run collapsed 10.0 → 3.7 km and was relabelled a shakeout. A shape rule silently taking a
     # LOAD decision — measured, not reasoned.
-    # So the magnitudes come from his data and the ORDER comes from doctrine, which his data does at
+    # So the magnitudes come from your data and the ORDER comes from doctrine, which your data does at
     # least not contradict — the one calendar bucket that separates is the day AFTER the long run
     # (0.929 ± 0.031 vs 1.086 ± 0.037 two days out, ~3σ), i.e. the classic recovery day. Rung 0 (the
     # longest easy) therefore goes to the day FURTHEST from any long run, and the short rungs fall
@@ -1617,7 +1617,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     short_w = {s: _lad[k] / _lad_tot for k, s in enumerate(_short_slots)}
     # ⚠⚠ THE LADDER MUST NOT SPILL VOLUME THROUGH §PRO9'S PER-DAY CLAMP. A uniform split either cleared
     # `cap_short_trimp` on every short day or on none; a ladder puts its HEAD above the clamp first —
-    # and the clamp is a `min()` that DROPS the excess on the floor. Measured on his 2026-08-03 week
+    # and the clamp is a `min()` that DROPS the excess on the floor. Measured on my 2026-08-03 week
     # before this guard: 30.7 → 22.0 km and the long run gone, because the clipped head was never
     # given back. WATER-FILL instead: peg the breaching days at the cap and redistribute their surplus
     # across the rest, repeating until nothing breaches (redistribution can push a survivor over too).
@@ -1642,9 +1642,9 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # from every heavy session — this week's long run, each quality day, and last week's long one
     # slot back. The old rule ("the first easy run, as in the re-base") predates base-week quality
     # and put a neuromuscular sprint stimulus on the classic recovery day, sandwiching the week's
-    # three hardest stimuli back-to-back-to-back: Sun long → Mon strides → Tue intervals (his
+    # three hardest stimuli back-to-back-to-back: Sun long → Mon strides → Tue intervals (your
     # 2026-08-19 ask — "an increased strain on my legs… three in-a-row"; strain, not stimulus).
-    # It is the same principle §PRO24's ladder measured on his own corpus — the day after a long
+    # It is the same principle §PRO24's ladder measured on my own corpus — the day after a long
     # run runs LIGHT (0.929 ± 0.031 vs 1.086 two days out) — and §JR's pre-long freshness shed.
     # Ties break to the LATER day (further from last week's long). On the standard 6-run base week
     # this lands Thursday; every phase moves with the same rule (a shape rule, not a load lever —
@@ -1680,9 +1680,9 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         # roundings (TRIMP → whole minutes → km to 0.1), and rounding up through both can land the long
         # run just ABOVE the very cap that clipped it. Latent since §PRO9: the overshoot needs the
         # cap's km to sit near a minute boundary, which no fixture happened to hit — found by scanning
-        # his own block after §PRO21 shifted the ladder (2026-09-07: cap 16.7, laid 16.8, and
+        # my own block after §PRO21 shifted the ladder (2026-09-07: cap 16.7, laid 16.8, and
         # det/long-run-step green throughout, because it never constructed the case). The published
-        # number is what he runs and what seeds the next week's baseline, so the promise has to hold
+        # number is what you run and what seeds the next week's baseline, so the promise has to hold
         # on the PUBLISHED value: step whole minutes off until it does. Shorts cannot reach this — the
         # shape cap holds them a clear fraction below the ceiling. (`mp_km` is 0 on this path — the MP
         # long run returns above — so the cap needs no MP allowance here.) `tr` is re-derived from the
@@ -1730,7 +1730,7 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor
     §PRO20b — `actual_floor` ({date: TRIMP}, default None ⇒ byte-identical) raises a day's projected
     load to what was ACTUALLY recorded on it. It exists for one day: TODAY. §PRO20 stops the seed at
     end-of-yesterday, so today's load reaches the projection only through today's PRESCRIPTION — and
-    once he has already run, the prescription is moot (on 2026-07-30 it was a rest day, 0 TRIMP,
+    once I have already run, the prescription is moot (on 2026-07-30 it was a rest day, 0 TRIMP,
     against a real 93). Under-reading today's load makes the rest of the week look freer than it is,
     the same direction as the §PRO20 defect. A FLOOR, not a replacement: it can only ever RAISE
     projected load, so it can only ever tighten the governor, and it is unioned in (a day the plan
@@ -1840,7 +1840,7 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
                                      ladder=ladder)         # §PRO24 — §PRO17's rule: search the week
         #                                                     that will actually be laid, ladder and all
         # §PRO20b — the search must charge today's ACTUAL load, or the allowance it hands back is
-        # bounded against a week he has already partly outrun. Floor-only ⇒ it can only tighten.
+        # bounded against a week you have already partly outrun. Floor-only ⇒ it can only tighten.
         endctl, endatl, eow, peak, eow_flat, m_ctl = _project_week(
             ctl, atl, start, dt, roll_from=roll_from, actual_floor=actual_floor)
         # §PRO16 — judge the SOFT test on the SHAPE-NEUTRAL reading (mean acute / mean chronic across
@@ -1878,7 +1878,7 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         # §PRO23 — THE TWO CLOCKS. Weekly volume grew on the ACWR/CTL clock; the long run grew on the
         # Aarhus ladder (LONG_RUN_STEP_CAP × the trailing-window longest). NOTHING TIED THEM, so the
         # week could outrun the longest run that anchors it and the long run's SHARE — the one number
-        # Daniels/Hansons actually prescribe — was whatever fell out. MEASURED on his 2026-08-07 plan:
+        # Daniels/Hansons actually prescribe — was whatever fell out. MEASURED on my 2026-08-07 plan:
         # base weeks at 20.9 / 22.1 / 22.7 / 23.6% against the 25% doctrine floor, every week pinned to
         # the ACWR ceiling. That is not a plan with a long run in it; it is a volume distribution that
         # happens to have a longest day — and because the ceiling is a RATIO of recent load, the week
@@ -1899,11 +1899,11 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         # never evaluates this ⇒ byte-identical, MEASURED (91 leaves, equal md5, 393.6 km), not argued.
         # Can only ever LOWER the allowance: a pure additional ceiling, the §PRO8 template.
         # ⚠ FLOORED AT THE SHAPE'S OWN INTENT. The coupling exists to stop the ASSERTIVE path riding the
-        # ACWR ceiling FAR ABOVE the designed trajectory (his base weeks ran 2.2–2.9× their skeleton) —
+        # ACWR ceiling FAR ABOVE the designed trajectory (your base weeks ran 2.2–2.9× their skeleton) —
         # it is not a licence to cut BELOW the design. Without this floor a low-volume fixture whose
         # ladder is small (a returning athlete: longest run 5 km ⇒ bound 22 km) has its whole block
         # crushed, and det/regime-plan caught exactly that: the assertive build peak fell to 28.2 km,
-        # BELOW the caution baseline it is supposed to exceed. The floor costs nothing on his real plan
+        # BELOW the caution baseline it is supposed to exceed. The floor costs nothing on my real plan
         # (every base week's bound sits far above its intent) and keeps the constraint a trimmer.
         _couple_km = max(long_km_cap / BASE_LONG_FRAC, (wk.get("km") or 0.0)) if long_km_cap else None
         shape_bad = (bool(long_km_cap) and BASE_LONG_FRAC > 0
@@ -2024,7 +2024,7 @@ def _week_long_km(sessions):
 def _recent_long_runs(db, before, n_weeks=LONG_RUN_STEP_WINDOW):
     """§PRO9 — the longest single logged run (km) in each of the `n_weeks` calendar weeks (Mon–Sun)
     immediately BEFORE `before` (a date), oldest-first, owned data only. Seeds the long-run progression
-    cap's trailing window so the FIRST assertive building weeks are bounded against his real recent long
+    cap's trailing window so the FIRST assertive building weeks are bounded against your real recent long
     runs — assertive skips the re-base, so the plan's own generated weeks don't seed it. Empty weeks
     contribute nothing (a gap can't set the baseline; the cap then binds off whatever recent runs exist)."""
     from datetime import timedelta
@@ -2070,7 +2070,7 @@ def _eq_factor(gap_pace_sec, zones):
     The bucketed form was a step function: `gap_pace <= zone_pace` at 1 s/km granularity, so two runs a
     single second apart differed by a whole factor (1.0 → 1.4 at the marathon edge, +40%). Because the
     zone paces are derived from eVO₂max, the edges MOVE, and a run that has already happened can cross
-    one. Measured on his own data (2026-08-03): his 07-22 run sat at GAP exactly 377 s/km with the
+    one. Measured on my own data (2026-08-03): my 07-22 run sat at GAP exactly 377 s/km with the
     marathon anchor at 377; a good evening run nudged eVO₂max 35.00 → 35.29, the anchor moved to 376,
     and that run's eq_km fell 8.95 → 6.39. It was the trailing window's largest bout, so
     `session_eq_cap` fell 11.635 → 11.05, the week's long bout (11.30) no longer fitted, and the
@@ -2081,7 +2081,7 @@ def _eq_factor(gap_pace_sec, zones):
     and their values are UNCHANGED — at any anchor pace this returns exactly what the buckets returned,
     so §PRO17's calibration points still read the same. What changes is BETWEEN anchors, and it changes
     in the honest direction: a run at 6:43/km with easy 7:16 and marathon 6:17 scored 1.0 (as if it were
-    a recovery jog) and now scores ~1.22. That under-count was systematic for him — his easy runs run
+    a recovery jog) and now scores ~1.22. That under-count was systematic for you — your easy runs run
     hot (8 of the last 14 judged "hot"), so the axis meant to see biomechanical cost was blind to
     exactly the habit that generates it. ⚠ The calibration percentiles move with this; re-measured on
     the full corpus, see PROJECT_LOG §58."""
@@ -2106,7 +2106,7 @@ def _eq_factor(gap_pace_sec, zones):
 
 def _run_eq_km(km, gap_pace_sec, zones):
     """§3.1 — eq_km for an ACTUAL logged run: km weighted by `_eq_factor` at its grade-adjusted pace.
-    No pace or no zones ⇒ treat as easy. Used only to SEED the biomechanical baseline from his real
+    No pace or no zones ⇒ treat as easy. Used only to SEED the biomechanical baseline from your real
     recent weeks (assertive skips the re-base). ⚠ `zones` must be the zones in force WHEN THE RUN
     HAPPENED (`_zones_asof`), never today's — see _recent_eq_km."""
     if not km:
@@ -2117,11 +2117,11 @@ def _run_eq_km(km, gap_pace_sec, zones):
 def _recent_eq_km(db, before, zones, n_weeks=BIO_EQ_WINDOW):
     """§3.1 — the total eq_km logged in each of the `n_weeks` calendar weeks BEFORE `before`, oldest-first,
     owned data only (each run's eq_km from its grade-adjusted pace via `_run_eq_km`). Seeds the biomechanical
-    jump-cap's trailing window from his real recent load — assertive skips the re-base, so the plan's own
+    jump-cap's trailing window from your real recent load — assertive skips the re-base, so the plan's own
     weeks don't seed it. Empty weeks contribute nothing.
 
     §PRO22 — each run is scored against `_zones_asof(its own date)`, NOT the `zones` passed in. A run's
-    biomechanical cost is a property of the run: it happened at the pace he ran, against the fitness he
+    biomechanical cost is a property of the run: it happened at the pace you ran, against the fitness you
     had that day, and nothing that happens afterwards can change it. Scoring the trailing window with
     TODAY's zones made the whole baseline a moving target — every intraday Runalyze sync that nudged
     eVO₂max re-scored weeks of finished training, and §PRO20 deliberately keeps eVO₂max on the NEWEST
@@ -2159,7 +2159,7 @@ def _recent_session_eq(db, before, zones, n_weeks=BIO_EQ_WINDOW):
     """§PRO17 — the LARGEST SINGLE-SESSION eq_km in each of the `n_weeks` calendar weeks before `before`,
     oldest-first, owned data only. Session grain sibling of `_recent_eq_km` (which is week grain), and the
     biomechanical sibling of `_recent_long_runs` (which is the long run in raw km). Seeds the per-session
-    step cap's trailing window from his real recent training — the plan's own weeks extend it in-phase,
+    step cap's trailing window from your real recent training — the plan's own weeks extend it in-phase,
     exactly as §PRO9's window does.
     A logged DAY is the unit, not a recording: §SJ joins minutes-apart parts into one session, so a run
     plus the strides that follow it are one biomechanical bout, not two. Empty weeks contribute nothing.
@@ -2198,7 +2198,7 @@ def _actual_week_caps(db, ws, we, zones):
     """§PRO9/§3.1 — what the athlete ACTUALLY logged inside one plan-week window [ws, we] (ISO,
     inclusive): (longest single run km, total eq_km). Owned data only. Feeds the progression caps'
     trailing windows for weeks already lived: an elapsed week's frozen prescription is not evidence —
-    the athlete may have out- or under-run it, and the +10% step's doc'd contract is "his real recent
+    the athlete may have out- or under-run it, and the +10% step's doc'd contract is "your real recent
     long runs". Anchoring on prescription let the window slide onto fiction (2026-07-16 live case:
     cap 4.3 = 1.1 × a prescribed 3.9 km long while the actual trailing long was 8.4 km → a 7-run
     no-rest week spreading the ceiling volume over junk-sized days).
@@ -2229,14 +2229,14 @@ BANK_PLAN_SCAN = 80        # §PRO12 — how many saved plans `_laid_sessions` m
 
 def _laid_sessions(db, since_iso, until_iso=None):
     """§PRO12 — {date → the session prescribed for it}, resolved across PLAN HISTORY, for dates in
-    [since_iso, until_iso). A saved plan is the ROAD AHEAD (his ruling 2026-07-28 — a re-anchor
+    [since_iso, until_iso). A saved plan is the ROAD AHEAD (my ruling 2026-07-28 — a re-anchor
     dropping lived weeks is CORRECT, never "fix" `_rebase_start`), so it stops covering
     dates it has advanced past — by design — while a prescription lives only inside plan artifacts.
     Reading it off the current road therefore loses it exactly when the road moves. Live 2026-07-27:
     the re-base block expired, the road re-anchored to that Monday, and the effort monitor's 28-day
     window went from 19 prescriptions (3 of them interval sessions: 06-30, 07-14, 07-22) to ONE.
     Prescribed quality dates are matched and EXCLUDED from the easy score, so losing them silently
-    re-graded his hardest sessions against the easy bar.
+    re-graded your hardest sessions against the easy bar.
 
     Newest plan carrying a date wins (elapsed weeks are frozen verbatim by §6f Step E, so the newest
     carrier holds the as-lived prescription). The scan stops as soon as a plan's road starts at or
@@ -2272,7 +2272,7 @@ def _pinned_sessions(db, dates):
 
     The straddling week is re-laid on every regeneration — it has to be, the remainder is governed
     against fresh CTL/ATL — and the ELAPSED slice of that re-lay was being shown as the day's
-    prescription. So a day's prescription kept moving after the day was over: the owner's Monday
+    prescription. So a day's prescription kept moving after the day was over: your Monday
     2026-08-24 was laid at 8.2 km on Monday, read 11.1 km on Tuesday and 11.5 km on Wednesday, purely
     because the week's intent is recomputed daily (2026-08-26, "are we changing the past now?"). A day
     already run is HISTORY. Its prescription is what the road asked for while it was still AHEAD.
@@ -2285,7 +2285,7 @@ def _pinned_sessions(db, dates):
 
     Returns (pinned, covered). `pinned` maps a date to its as-prescribed session. `covered` holds
     every date some qualifying plan actually spoke to: a covered date ABSENT from `pinned` was a
-    prescribed REST day and must stay empty, or re-laying would invent a session on a day he was told
+    prescribed REST day and must stay empty, or re-laying would invent a session on a day you were told
     to rest. A date in neither (fresh or rebuilt DB — no plan old enough) is left to the caller's
     re-lay, which is why this degrades to today's behaviour rather than to a hole.
 
@@ -2337,7 +2337,7 @@ def _pinned_sessions(db, dates):
 
 # §PRO3/§FORM1 — training-REGIME posture, entered on BODY EVIDENCE only. The conservative re-base +
 # min(intent,ceiling) posture exists for one athlete: the one returning from illness/injury. The app
-# KNOWS that athlete — he tells it (readiness stop-symptoms, medical holds via check-ins) — so the
+# KNOWS that athlete — you tell it (readiness stop-symptoms, medical holds via check-ins) — so the
 # posture keys on that evidence directly: a hold in force, a recent medical event, or a recent
 # stop-symptom ⇒ caution; otherwise the plan follows measured form toward the objective (assertive),
 # bounded by the physical governors (per-session/long-run eq caps, ACWR/ramp ceilings, §PRO5's
@@ -2346,11 +2346,11 @@ def _pinned_sessions(db, dates):
 # DISOBEDIENCE, and a travel week (30.1 km run, cleanly absorbed, one run short of the lay) zeroed
 # three banked weeks and collapsed the road into a 13 km/wk detraining re-base. Obedience is not a
 # body signal. A genuinely detrained return without medical evidence needs no gate either: the
-# governors ramp from his real trailing load, so the plan starts small BY MEASUREMENT.
+# governors ramp from your real trailing load, so the plan starts small BY MEASUREMENT.
 # §PRO5 — self-calibrating shape-RESPONSE. The assertive regime rides the full ACWR ceiling by default,
-# but the moderate fixed ramp can't tell whether HE, specifically, is absorbing it. This closes the loop:
-# compare his MEASURED CTL now to what the PRIOR plan PROJECTED for now (stored per-week as `proj_ctl`).
-# Tracking or ahead ⇒ he's responding ⇒ ride the full ceiling. Falling behind ⇒ he's not keeping up
+# but the moderate fixed ramp can't tell whether I, specifically, am absorbing it. This closes the loop:
+# compare your MEASURED CTL now to what the PRIOR plan PROJECTED for now (stored per-week as `proj_ctl`).
+# Tracking or ahead ⇒ you's responding ⇒ ride the full ceiling. Falling behind ⇒ you's not keeping up
 # (under-recovering / over-reached) ⇒ ease the ride toward a floor. Bidirectional, never ABOVE the safety
 # ceiling (factor ≤ 1.0), surfaced. The literal "calculate my shape-increase rate and adapt".
 RESPONSE_MIN = 0.6          # floor on the ride factor ⇒ eased ride_cap never below 1.0 + 0.25·0.6 = 1.15
@@ -2385,13 +2385,13 @@ def training_regime(db, today, prior_plan):
         return "caution", f"a stop-symptom check-in within the last {REGIME_CLEAR_DAYS} days"
     # §PRO3 — only a RED (stop-symptom, caught above by the 56-day window) or a medical hold blocks the
     # regime. AMBER / heavy-legs does NOT: a single tired day shouldn't drop you to conservative.
-    # (Owner call 2026-06-30 — don't make him fight the tool on a tired day.)
+    # (My call 2026-06-30 — don't make me fight the tool on a tired day.)
     return "assertive", (f"no symptom or medical event in {REGIME_CLEAR_DAYS} days — "
                          "the plan follows your measured form")
 
 
 def shape_response(db, today, prior_plan):
-    """§PRO5 — measure how his MEASURED fitness is tracking the plan's PROJECTION, and return a ride
+    """§PRO5 — measure how your MEASURED fitness is tracking the plan's PROJECTION, and return a ride
     factor ∈ [RESPONSE_MIN, 1.0] for the assertive ceiling. Compares today's reconstructed CTL to the
     most recent ELAPSED week's `proj_ctl` carried in the prior plan: realised ≥ projected ⇒ on/ahead of
     track ⇒ 1.0 (full ceiling); below ⇒ ease proportionally (floored). No prior projection (first plan
@@ -2407,9 +2407,9 @@ def shape_response(db, today, prior_plan):
     # §PRO5b — MEASURE AT THE END OF YESTERDAY, the §PRO20 boundary. This read used to end the curve
     # on `today`, and `reconstruct_history` pads to its `end` — so a day with no training logged YET
     # arrived as a day with no training, and the EWMA charged it a full day of decay before it had
-    # happened. On his live DB (2026-08-26) the same curve read 66.6 at the end of the 25th and 63.5
+    # happened. On my live DB (2026-08-26) the same curve read 66.6 at the end of the 25th and 63.5
     # on the morning of the 26th: −3.1 CTL = 66.6 × (1 − 2/43), pure phantom rest. The plan therefore
-    # measured his fitness as ~4% below projection every morning and back on track every evening, and
+    # measured your fitness as ~4% below projection every morning and back on track every evening, and
     # the assertive ceiling followed the TIME OF DAY the plan was regenerated. Yesterday is a complete
     # day; today never is. `projected` is a week-END value, so both sides now sit on day boundaries,
     # and the week filter below (Sunday strictly before today) already means that Sunday is on or
@@ -2543,7 +2543,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     re-prescribing volume as if the week were fiction. Default None = full-week behaviour.
     §PRO20b — `today_trimp` (default None ⇒ byte-identical) is the TRIMP actually recorded today. With
     the §PRO20 seed stopping at end-of-yesterday, today's load would otherwise reach the projection
-    only via today's prescription, which is moot once he has run. Applied as a FLOOR on today's
+    only via today's prescription, which is moot once you have run. Applied as a FLOOR on today's
     projected load, so it can only ever tighten the governor — never as a change to what is laid."""
     from datetime import timedelta
     weeks = []
@@ -2557,7 +2557,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     assertive = regime == "assertive"
     ramp = CTL_RAMP_MAX if assertive else None
     # §PRO5 — assertive rides up to `ride_cap` (the self-calibrating shape-response cap ≤ ACWR_SOFT): full
-    # ceiling when he's tracking/ahead of projection, eased toward it when his data shows he's not keeping
+    # ceiling when you's tracking/ahead of projection, eased toward it when your data shows you's not keeping
     # up. Caution always governs to ACWR_SOFT (its min(intent,allowed) is unchanged). Safety is preserved:
     # ride_cap ≤ ACWR_SOFT, so riding it is always at or under the safe ceiling.
     eff_cap = ride_cap if assertive else ACWR_SOFT
@@ -2608,7 +2608,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # (`chosen = allowed`), so on an assertive week `wk["km"]` understates the real intent by
             # ~40% — and every mid-week regeneration silently re-laid the current week at the caution
             # shape, then let that dip propagate: the light week depresses projected CTL, forward
-            # volume is CTL-responsive, and the whole road to the race shifts down (measured on his
+            # volume is CTL-responsive, and the whole road to the race shifts down (measured on my
             # 2026-07-28 DB: 740 → 653 km, race-day CTL 59 → 54, finish 4:50:22 → 5:01:32 — purely
             # from regenerating on a Tuesday instead of a Monday).
             # This computes the SAME target the full-week path below would choose, and uses it as the
@@ -2635,7 +2635,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
             # §PRO9 — the straddle path never received the long-run progression cap: every call below
             # went out without it, so the "+10% over the trailing-4wk longest" promise was simply not
-            # kept on the one week a mid-week regeneration actually lays (measured on his 2026-07-28
+            # kept on the one week a mid-week regeneration actually lays (measured on my 2026-07-28
             # plan 65: trailing longest 8.5 ⇒ cap 9.35, laid 10.5). Same expression as the full-week
             # path, assertive-only ⇒ caution byte-identical.
             _trailing = [x for x in (seed_longs + blk_longs)[-LONG_RUN_STEP_WINDOW:] if x]
@@ -2717,7 +2717,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 prorate = wk_intent_trimp * len(rem) / max(1, wk["runs"])
                 if week_actuals is not None:
                     # §6o-B — charge the ACTUAL km already run against the week's intent: the
-                    # remainder may never re-prescribe volume he has already done. One-way (min), so
+                    # remainder may never re-prescribe volume you have already done. One-way (min), so
                     # an under-run early week still gets only its day-prorated share — a missed day
                     # is never crammed into the back of the week. (§PRO13: charged against the
                     # regime's real intent, not the skeleton.)
@@ -2740,7 +2740,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §6e3 — quote the intent that MADE the decision, not the shape skeleton. Both tests
                 # above compare against `wk_intent_km` (§PRO13 fixed that deliberately, because an
                 # assertive week is not "already covered" at the skeleton's km); the sentence went on
-                # printing `wk["km"]`. On his 2026-07-30 plan that read "32.0km of 22km planned" while
+                # printing `wk["km"]`. On my 2026-07-30 plan that read "32.0km of 22km planned" while
                 # the number the engine actually decided on was 25.6 — making the week look easier to
                 # have cleared than it was. §6e2's defect, one release later: a sentence asserting
                 # something adjacent to what was measured.
@@ -2772,7 +2772,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      # §CARD — the header counts the sessions it sits above, NOT the skeleton's
                      # template. `{**wk}` spreads the shape's `runs`, and this branch never overrode
                      # it, so a §JR shed or a §PRO9 spread put "5 runs" over a 4- or 6-run listing —
-                     # the owner read it off his own card (2026-08-07, week 08-03: "35.8 km · 5 runs"
+                     # I read it off my own card (2026-08-07, week 08-03: "35.8 km · 5 runs"
                      # above four runs). The full-week path fixed exactly this under §PRO9 ("honest
                      # count") and this hand-built dict didn't inherit the fix. Rest entries are
                      # notes, not runs — the freq-met branch's optional-rest card must not count.
@@ -2795,14 +2795,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             pweek["intent_runs"] = pweek["runs"]
             # §CARD2 — THE STRADDLING WEEK'S HEADER DESCRIBES THE WEEK, NOT THE PRESCRIPTION TRAIL.
             # The old header summed the PRESCRIBED elapsed days + the governed remainder ("display
-            # numbers stay the prescription"), so every km he ran OVER prescription made the current
-            # week's headline SHRINK by the same amount: on 2026-08-07 his card said 35.8 km while
+            # numbers stay the prescription"), so every km you ran OVER prescription made the current
+            # week's headline SHRINK by the same amount: on 2026-08-07 my card said 35.8 km while
             # the week was really 29.1 run + 11.3 ahead = 40.4 — and it read SMALLER than the 38.3
-            # down week, which he rightly called out. Owner overturned that design 2026-08-07
+            # down week, which I rightly called out. I overturned that design 2026-08-07
             # ("yes, do it"): elapsed days count at their ACTUAL distance (the per-session lines
             # already show "7.1k → 10.9k"; the header now agrees with them), remaining days at their
             # prescription. A prescription for a day ALREADY RUN is superseded by its actual
-            # (§PRO20b's principle — "once he has already run, the prescription is moot"), so a
+            # (§PRO20b's principle — "once you have already run, the prescription is moot"), so a
             # same-day regen never counts today twice. `km = round(km_done + km_ahead, 1)` off the
             # ROUNDED parts, so the header identity det/card-truth asserts is exact by construction.
             # `week_actuals is None` (direct det fixtures) keeps the prescription-sum header verbatim.
@@ -2964,11 +2964,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # governor clips a week's easy volume hard at low CTL, the immovable HIGH-INTENSITY rep TRIMP
         # (threshold+interval — HARD_ZONES, MP exempt; see _hard_share) becomes a larger share of a
         # shrinking total, so the hard share climbs past (1 − POLARIZED_EASY_MIN) even while peak stays
-        # UNDER the hard cap (§H1 never fires). That makes the plan more intense exactly when he's most
+        # UNDER the hard cap (§H1 never fires). That makes the plan more intense exactly when you's most
         # fragile — the one safety-negative artifact the corrected EWMA exposed. Remedy = drop the
         # quality → easy and re-govern, like §H1. (MP share is bounded by the LOAD cap, not this
         # polarization floor — by design: on a hard-clipped deep week the fixed MP rep can ride large
-        # as a share, but eow ACWR still ≤ soft cap, and MP is moderate specificity he asked to keep.)
+        # as a share, but eow ACWR still ≤ soft cap, and MP is moderate specificity I asked to keep.)
         # CRITICAL DIFFERENCE: §H1 fires on a PEAK
         # breach when EOW is already near the soft cap, so its refill barely moves total load; §H2 can
         # fire when EOW is LOW (the quality spike, not volume, was the binding constraint), so a naive
@@ -3053,7 +3053,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # template km. In CAUTION `chosen = min(intent_trimp, allowed)`, so the skeleton IS the
                 # ask and `clipped` carries the governor's cut — `wk["km"]` stays, byte-identical. In
                 # ASSERTIVE the week rides the ceiling (`chosen = allowed`) and the template is not the
-                # ask at all: measured on his 2026-08-24 plan the published intent ran 1.76–3.34× BELOW
+                # ask at all: measured on my 2026-08-24 plan the published intent ran 1.76–3.34× BELOW
                 # the laid sheet across the whole base phase and then snapped to ~1.00× at the
                 # base→build boundary — a phase-dependent discontinuity in the one field whose job is to
                 # be the honest bar. §PRO13 and §6e3 already recompute this same intent for the straddle
@@ -3115,7 +3115,7 @@ def generate_rebase(block_start, ctl0, atl0, easy_pace_sec, adjust=None, shape=N
     return generate_block(shape or REBASE_SHAPE, block_start, ctl0, atl0, easy_pace_sec, adjust)
 
 
-# §PRO7 — finish-TIME projection. The honesty valve the owner asked for: a short runway isn't a
+# §PRO7 — finish-TIME projection. The honesty valve I asked for: a short runway isn't a
 # refusal, it's a SLOWER projected finish — so quantify it. Anchored on the Daniels VDOT marathon-pace
 # zone (the pace a runner TRAINED to that effective VO₂max holds), then slowed by an endurance penalty
 # when projected race-day CTL is below the distance's healthy-finish floor: an undertrained body fades
@@ -3131,7 +3131,7 @@ FADE_CAP = 1.35        # never project worse than +35% (beyond that it's a walk,
 # time BY CONSTRUCTION (log §33). Below the floor the old fade is reproduced exactly (the §PER1 F2/F3
 # verdicts stay byte-identical at neutral inputs); above it the gain saturates toward a fully-built
 # athlete's load with the SAME slope at the floor (C¹: FT_DUR_GAIN = FADE_PER_CTL × FT_DUR_TAU).
-# τ and the ladder/shrinkage priors are OUR operationalization, calibrated 2026-07-26 on the owner's
+# τ and the ladder/shrinkage priors are OUR operationalization, calibrated 2026-07-26 on my
 # 4-marathon corpus (CTL 67/92/98/109 → actual/VDOT-base 1.215/1.163/1.339/1.134; robust L1 fit —
 # the three cleanly-executed races land within ±1.5%, the 2023-05 first-marathon blow-up (+16%) is
 # band evidence for §FT3, not curve). Durability-via-the-long-run is Davis-consistent (Maunder,
@@ -3139,7 +3139,7 @@ FADE_CAP = 1.35        # never project worse than +35% (beyond that it's a walk,
 FT_DUR_TAU = 20.0                        # CTL pts to ~63% of the above-floor durability gain
 FT_DUR_GAIN = FADE_PER_CTL * FT_DUR_TAU  # 0.16 — max fractional gain above the floor (C¹ tie)
 FT_LADDER_REF = 0.70    # longest-long / race-km ratio at which the ladder term is neutral (Λ=1) —
-FT_LADDER_RHO = 0.40    # his whole race corpus sits at 0.71, so the ladder SHAPE is a prior, not
+FT_LADDER_RHO = 0.40    # my whole race corpus sits at 0.71, so the ladder SHAPE is a prior, not
 FT_LADDER_L = 0.25      # a corpus fit: ~+8% at ratio 0.28 (12 km longs) vs 0.71 (30 km longs)
 FT_SHRINK_K = 2         # shrinkage prior strength: the population curve counts as K pseudo-races
 FT_LADDER_TRAIL_DAYS = 56   # trailing window for "longest long" race-readiness (§PRO9's lever)
@@ -3147,7 +3147,7 @@ FT_LADDER_TRAIL_DAYS = 56   # trailing window for "longest long" race-readiness 
 # state axes must agree on what "recent" means: the ladder already degrades honestly past this
 # window (no qualifying long ⇒ long_km_now None ⇒ Λ exactly 1.0, the neutral prior), while v₀ used
 # to be the last EWMA point at ANY age — so a runner back after a layoff was shown a pre-layoff
-# value as "off today's shape". His own corpus cannot calibrate a detraining decay to fix that
+# value as "off today's shape". My own corpus cannot calibrate a detraining decay to fix that
 # properly (4 gaps ≥14 days, max 21, re-measurement scattering −9.5 to +0.1 pts per 30 days), and
 # inventing one would be exactly the guess this engine refuses. So the model does not decay a stale
 # anchor — it declines to call it today.
@@ -3155,11 +3155,11 @@ FT_ANCHOR_TRAIL_DAYS = FT_LADDER_TRAIL_DAYS
 FT_MARA_TOL = 0.04      # historical race auto-detect: distance within ±4% of the marathon
 FT_MIN_CTL = {"marathon": 45, "half": 35, "10k": 25, "5k": 20}   # healthy-finish floors (§PER1)
 
-# §FT3 — the prediction is a BAND, never a point (owner-decided: the range is the headline; a
+# §FT3 — the prediction is a BAND, never a point (my decision: the range is the headline; a
 # point invites anchoring on false precision). Predictive spread in log-time, composed from what
 # is genuinely uncertain — ln(actual) = ln(P50) + ε_race + ε_c + ε_state + ε_runway:
 #   race    — race-to-race execution noise, measured as the corpus log-residual spread about its
-#             own mean (his 4 marathons: 0.066 — the 2023-05 blow-up lives here, deliberately);
+#             own mean (your 4 marathons: 0.066 — the 2023-05 blow-up lives here, deliberately);
 #   calib   — posterior spread of the per-runner correction, σ_race/√(n+K) — shrinks as races land;
 #   state   — speed-projection risk, proportional to the PROJECTED eVO₂ gain (truth-anchoring ⇒
 #             zero projected gain ⇒ zero state risk: the band narrows as runs land, structurally);
@@ -3172,7 +3172,7 @@ FT3_SIGMA_RACE_COLD = 0.08   # population race-noise prior when no raced datapoi
 # speed gain, ±50%) and `runway` (0.003 log-time per remaining week): a guess at how wrong the
 # projection might be, plus a guess at completion risk, both invented and — as it turned out —
 # double-counting each other, since the measured dispersion of that projection IS the total error of
-# that same projection. Sweeping every contiguous window of his corpus (log §38) and removing the
+# that same projection. Sweeping every contiguous window of my corpus (log §38) and removing the
 # EWMA's own reading noise (σ≈0.894 pts, a mid-week-vs-neighbours estimator; it stays out because
 # σ_race already carries "the model's read of the runner on race day is imperfect" — putting it here
 # too would double-count) gives the speed axis's genuine forecast dispersion:
@@ -3184,7 +3184,7 @@ FT3_SIGMA_RACE_COLD = 0.08   # population race-noise prior when no raced datapoi
 # Sub-random-walk — dispersion grows like the FOURTH ROOT of horizon, not linearly: fitness is
 # mean-reverting, so week 20 adds far less uncertainty than week 2 did. The retired term was 2.7×
 # too narrow at 4 weeks and 1.7× too wide at 30, and accidentally about right at the 19-week horizon
-# he happens to race at — which is why it never looked wrong. §38's first cut read P≈0.42 from a
+# you happen to race at — which is why it never looked wrong. §38's first cut read P≈0.42 from a
 # crude two-point log-log slope over OVERLAPPING windows; fitting properly (weighted by effective
 # independent windows n/h) gives P=0.25 at rms 0.025 in log.
 # ⚠ h=1 is EXCLUDED from the fit and from the per-runner measurement. De-noising removes 76% of its
@@ -3192,7 +3192,7 @@ FT3_SIGMA_RACE_COLD = 0.08   # population race-noise prior when no raced datapoi
 # informative about the horizon; including it drags P to 0.46 and wrecks the fit (rms 0.140 vs
 # 0.025). P is structural and shared; A is measured per runner and shrunk toward the population
 # value (the `c`/`resp` posture: a corpus earns its own coefficient, a cold start inherits the prior
-# exactly, and the prior is itself his fit — so his own shrinkage reads as neutral).
+# exactly, and the prior is itself your fit — so your own shrinkage reads as neutral).
 FT10_DISP_P = 0.25          # horizon exponent — structural, shared by every runner
 FT10_DISP_A0 = 1.12         # population coefficient (eVO₂ pts of dispersion at h=1 week)
 FT10_DISP_K = 40            # shrinkage strength: the prior counts as K effective windows
@@ -3341,7 +3341,7 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
                 race_long_km=None, correction=1.0, projected_vo2max=None, vo2_curve=None,
                 band_inputs=None):
     """§6a.5 — a sober read on whether the objective is reachable on this runway. CTL can
-    grow ~3–4%/wk sustained; from his detrained CTL that lands far short of his PB shape, so
+    grow ~3–4%/wk sustained; from your detrained CTL that lands far short of your PB shape, so
     we separate 'finish healthy' (realistic) from 'PB/target time' (not on this runway).
     §6f Step E / §PRO7b — when `projected_ctl` is given (the engine's real projected race fitness —
     the PEAK CTL carried into the taper, realized on race day through its freshness — chained
@@ -3396,7 +3396,7 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
         # enough to be about today. v₀ is the last EWMA point at ANY age, so a runner back from a
         # layoff would otherwise be shown their pre-layoff speed as their current one. Past
         # FT_ANCHOR_TRAIL_DAYS — the same window past which the ladder axis already goes neutral —
-        # the read is WITHHELD rather than decayed: his corpus cannot calibrate a detraining rate
+        # the read is WITHHELD rather than decayed: my corpus cannot calibrate a detraining rate
         # (4 gaps ≥14 days, max 21, scatter −9.5…+0.1 pts/30d) and a guessed one would be worse
         # than silence. The race-day projection still stands; it is a projection and says so.
         v_age = bi.get("v0_age_days")
@@ -3556,7 +3556,7 @@ def _ft_correction(db):
     prior, PLUS the band's race-noise inputs: returns (c, sigma_race, n_races, tilt_corpus).
     Predictions at each race use the PRIOR model (c=1) at the reconstructed race-morning state, so
     the estimator is well-defined (never fit against itself). sigma_race = the log-residual spread
-    about the corpus's own mean (None below 2 races — the cold prior takes over). Owner's corpus
+    about the corpus's own mean (None below 2 races — the cold prior takes over). My corpus
     2026-07-26: 4 marathons → c≈1.255, sigma_race≈0.066.
 
     §33e — `tilt_corpus` is the geometric-mean distance tilt of the races that produced `c`, handed
@@ -3564,7 +3564,7 @@ def _ft_correction(db):
     importing marathon-specific scale error. The spread is measured on DE-TILTED residuals for the
     same reason: pooling a 10k and a marathon raw would book the ~2.4% gap between their tilts as
     race-day noise the runner never produced. Both are exactly neutral on a single-distance corpus
-    (a constant shift moves no spread), so the owner's all-marathon numbers are byte-identical."""
+    (a constant shift moves no spread), so your all-marathon numbers are byte-identical."""
     lrs, tilts = [], []
     for race in _ft_race_corpus(db):
         vo2, ctl, long_km = _ft_state_at(db, race["date"])
@@ -3587,7 +3587,7 @@ def _ft_correction(db):
 # values — the exact scale the §FT1 race-corpus states are stated in, so calibration and prediction
 # can never scale-drift. (Runalyze's `effective_vo2max` snapshot applies the user's correction
 # factor and its own smoothing — a DIFFERENT vocabulary, kept for training zones; the two are never
-# mixed inside Model A/B.) Response model, RE-calibrated 2026-07-28 on his 225 consecutive training
+# mixed inside Model A/B.) Response model, RE-calibrated 2026-07-28 on my 225 consecutive training
 # week-pairs (2021→2026): dv/wk = R·resp·(T_wk/100)·max(0, 1 − v/ceiling) — intensity-weighted
 # load drives the response (TRIMP is composition-sensitive by construction: the §T2 quality mix is
 # what lifts a week's TRIMP at equal km), saturating toward the runner's demonstrated ceiling.
@@ -3602,12 +3602,12 @@ def _ft_correction(db):
 # only the remaining weeks — a fast- or slow-responder can never drift from reality (§PRO9-style),
 # and the shrunk response factor pulls the population rate toward the runner's own measured slope.
 # §FT8 — R was refit when the series became per-SESSION (0.169 → 0.139, rmse 1.64 → 1.45/wk). It is
-# a POPULATION PRIOR: leaving the old value would have let his personal shrinkage silently absorb
-# the change (his slope fell 1.00 → 0.83, the same rate wearing a different hat) while every runner
+# a POPULATION PRIOR: leaving the old value would have let your personal shrinkage silently absorb
+# the change (your slope fell 1.00 → 0.83, the same rate wearing a different hat) while every runner
 # with an empty corpus — who gets resp = 1.0 exactly — inherited a rate fit to a series that no
-# longer exists. Refit restores his slope to 1.000, which is the self-consistency check: he IS the
-# calibration population, so his own shrinkage must read as neutral.
-FT2_R = 0.139            # eVO₂ pts/wk per 100 weekly TRIMP at zero saturation (his-corpus fit)
+# longer exists. Refit restores your slope to 1.000, which is the self-consistency check: you IS the
+# calibration population, so my own shrinkage must read as neutral.
+FT2_R = 0.139            # eVO₂ pts/wk per 100 weekly TRIMP at zero saturation (my-corpus fit)
 FT2_CEIL_HEADROOM = 1.15  # ceiling floor: never below v₀ × this, so today's high can't freeze the axis
 FT2_SHRINK_K = 8         # response-factor prior strength (pseudo week-pairs at slope 1.0)
 FT2_EWMA_A = 0.25        # per-SESSION smoothing of the per-run estimates (see §FT8 below)
@@ -3618,7 +3618,7 @@ FT2_EWMA_A = 0.25        # per-SESSION smoothing of the per-run estimates (see �
 # threaded through jog floats, with HR lagging the bursts it is being divided by. The resulting
 # estimate is not noisy so much as meaningless, and it scatters BOTH ways: 26.0 and 26.0 on two
 # stride sets, 50.1 on a 1.3 km piece, 51.2 on a 1.9 km one. Measured against the EWMA of everything
-# before it, his corpus splits hard at 4 km — robust spread (MAD) 4.2–6.2 below vs 1.25–1.44 at and
+# before it, my corpus splits hard at 4 km — robust spread (MAD) 4.2–6.2 below vs 1.25–1.44 at and
 # above, a 3–4× collapse — and the duration axis agrees (break at ~20–25 min) but blunter, so
 # distance is the gate. Its ceiling is the shortest distance the model must never lose:
 # min(RACE_KM) = 5 km, so a 5 km race still anchors the axis it is direct evidence for.
@@ -3634,7 +3634,7 @@ def _ft_vo2_series(db):
     projector consumer (2258): a duplicated row would otherwise double-step the EWMA and drag v₀,
     the ceiling and the response fit off the owned truth.
 
-    §FT8 — the unit is the SESSION, not the recording, for exactly that reason. He deliberately
+    §FT8 — the unit is the SESSION, not the recording, for exactly that reason. You deliberately
     splits a session into parts (§SJ), so a raw-row EWMA steps twice for one training day and lands
     on whichever fragment was saved last: on 2026-07-27 a 1.3 km STRIDE set recorded 87 s after a
     6 km easy run carried an estimate of 26.0 and, being last, WAS v₀ — dragging the anchor
@@ -3683,7 +3683,7 @@ def _ft_weekly_series(db):
         d = _date(iso)
         wk_v[(d - timedelta(days=d.weekday())).isoformat()] = v
     # §33f-8 — RUN-ONLY, to match what the projection is fed: the laid plan's weekly TRIMPs are
-    # run sessions, so calibrating the response against whole-body load (his non-run share ≈ 5.6%)
+    # run sessions, so calibrating the response against whole-body load (my non-run share ≈ 5.6%)
     # would fit a rate the plan side can never deliver. §33f-2 — and de-duped, like every sibling.
     for r in db.execute("SELECT id, date, trimp FROM activities WHERE " + RUN_FAMILY_SQL +
                         " AND date != '' AND trimp IS NOT NULL").fetchall():
@@ -4089,7 +4089,7 @@ def _rebase_start(db, today):
 # bridge into the next); gap < recovery → SUBORDINATE (a short sharpen/mini-taper, not a full peak it
 # can't recover from). The threshold scales with the EARLIER race's distance — a marathon needs far
 # longer than a 10k before a second peak, and the ACWR governor can't see connective-tissue recovery.
-# Adjudication stays HUMAN: this reads the priorities the owner set; it does not auto-rank A vs B.
+# Adjudication stays HUMAN: this reads the priorities you set; it does not auto-rank A vs B.
 RACE_RECOVERY_WEEKS = {"5k": 3, "10k": 3, "half": 4, "marathon": 6, "custom": 4}
 RACE_RECOVERY_DEFAULT = 4
 
@@ -4227,10 +4227,10 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
         # §PRO9/§3.1 — seed the future weeks' caps off the ACTUAL elapsed history: recent actuals +
         # what was really RUN inside this phase's already-lived week windows, in date order, tail-
         # trimmed to each window. The frozen weeks' planned sessions are NOT evidence — the athlete
-        # may have out- or under-run them, and the +10% step's contract is "his real recent long
+        # may have out- or under-run them, and the +10% step's contract is "your real recent long
         # runs". Anchoring on prescription let the window slide onto fiction (2026-07-16 live case:
-        # cap 4.3 = 1.1 × a prescribed 3.9 while his actual trailing long was 8.4 → a 7-run no-rest
-        # week). No db (det fixtures) ⇒ the planned sessions stand in, as before; weeks he skipped
+        # cap 4.3 = 1.1 × a prescribed 3.9 while your actual trailing long was 8.4 → a 7-run no-rest
+        # week). No db (det fixtures) ⇒ the planned sessions stand in, as before; weeks I skipped
         # entirely contribute nothing (a gap can't set the baseline — same as `_recent_long_runs`).
         elapsed_now = sorted(frozen + backfilled, key=lambda w: w["start"])
         if db is not None:
@@ -4306,7 +4306,7 @@ def _trim_post_race(plan, chain, block_start):
                 w["sessions"] = kept
                 # §CARD — this is a read-model edit, and the header IS part of the read model: the
                 # race week's card kept quoting the untrimmed week ("5 runs" over the single
-                # remaining shakeout, on the owner's live plan). Recompute every summary this
+                # remaining shakeout, on my live plan). Recompute every summary this
                 # function's own trim invalidated. The CTL projection deliberately stays untrimmed
                 # (see docstring); proj_* fields describe the projection, not the listing, so they
                 # are left alone.
@@ -4325,9 +4325,9 @@ def _card_truth_elapsed(plan, db, today):
     prescription (§6f Step E — a plan is the road ahead, past prescriptions come from plan history);
     this is a read-model edit in _trim_post_race's class, never a history rewrite.
 
-    Motive (the owner's fossil, found 2026-08-15): §CARD/§CARD2 fixed every PUBLISHER, but a week
+    Motive (my fossil, found 2026-08-15): §CARD/§CARD2 fixed every PUBLISHER, but a week
     frozen from a pre-fix artifact is carried verbatim past all of them — week 07-27 kept saying
-    "48.6 km · 5 runs" over a 6-session listing he actually ran as 42.4 km, and it would have said
+    "48.6 km · 5 runs" over a 6-session listing you actually ran as 42.4 km, and it would have said
     so for the life of the block. Recomputing at the read-model seam self-heals every carried week
     on the next regen (and keeps healing if a late sync adds a run to a past week).
 
@@ -4415,7 +4415,7 @@ def generate_plan(db, force_regime=None, today=None):
     regime, regime_reason = training_regime(db, today, prior_plan)
     if force_regime in ("caution", "assertive"):   # §PRO10 — counterfactual regime for the drift overlay
         regime, regime_reason = force_regime, f"counterfactual ({force_regime})"   # pure: never persisted
-    # §PRO5 — self-calibrating ride cap from his measured-vs-projected CTL response (assertive only).
+    # §PRO5 — self-calibrating ride cap from my measured-vs-projected CTL response (assertive only).
     resp = shape_response(db, today, prior_plan)
     ride_cap = round(1.0 + (ACWR_SOFT - 1.0) * resp["factor"], 3) if regime == "assertive" else ACWR_SOFT
 
@@ -4453,7 +4453,7 @@ def generate_plan(db, force_regime=None, today=None):
     _rb0 = REBASE_SHAPE[0]
     live = {"ctl": ctl0, "atl": atl0, "started": False,
             "consec_hard": 0, "last_nondown": None,   # §PRO6 — tissue streak + trough anchor across phases
-            # §PRO9/§3.1 — trailing long-run + biomechanical eq_km windows, seeded from his real recent weeks
+            # §PRO9/§3.1 — trailing long-run + biomechanical eq_km windows, seeded from your real recent weeks
             # (assertive skips the re-base, so the plan's own weeks won't seed the first building weeks) and
             # carried across phases.
             "recent_longs": _recent_long_runs(db, block_start) or [float(_rb0["long"])],
@@ -4467,7 +4467,7 @@ def generate_plan(db, force_regime=None, today=None):
     # verbatim instead of being regenerated from today's CTL.
     week_actuals = _current_week_actuals(db, today)   # §6e-FREQ — runs+km logged this calendar week
     # §PRO20b — the TRIMP actually recorded today. With the §PRO20 seed stopping at end-of-yesterday,
-    # today's load would otherwise reach the projection only as a PRESCRIPTION, which is moot once he
+    # today's load would otherwise reach the projection only as a PRESCRIPTION, which is moot once you
     # has already run (2026-07-30: prescribed rest, ran 93 TRIMP). Floored into the projection only —
     # never into what is laid — so it can only tighten the governor. None on a day with no runs yet
     # ⇒ byte-identical.
@@ -4526,8 +4526,8 @@ def generate_plan(db, force_regime=None, today=None):
         "rebase": {**rb, "full_len": len(REBASE_SHAPE)},
         # §PRO3 — which regime drove this plan + why (auto-flips, so it's surfaced, never silent)
         "regime": {"mode": regime, "reason": regime_reason},
-        # §PRO5 — self-calibrating shape-response: how his measured fitness tracks the projection + the
-        # resulting assertive ride cap (full 1.25 when on track, eased when he's falling behind)
+        # §PRO5 — self-calibrating shape-response: how my measured fitness tracks the projection + the
+        # resulting assertive ride cap (full 1.25 when on track, eased when you's falling behind)
         "shape_response": {**resp, "ride_cap": ride_cap},
         # §PRO10 — the progressive-overload floor on the assertive ceiling. Surfaced, never silent:
         # the drawn trajectory now COMPOUNDS instead of equilibrating, and that assumes continued
@@ -4634,7 +4634,7 @@ def generate_plan(db, force_regime=None, today=None):
         # day; the +4/+8-week curve points keep training at the build's peak weekly load. Falls back
         # to the frozen effective value only when the corpus is empty (fresh/synthetic db).
         race_long = _ft_plan_race_long(plan, anchor.get("date"))
-        _, _, long_now = _ft_state_at(db, today.isoformat())   # §FT6 — the ladder already behind him
+        _, _, long_now = _ft_state_at(db, today.isoformat())   # §FT6 — the ladder already behind me
         ft_corr, ft_sigma, ft_n, ft_tilt = _ft_correction(db)
         # §33e — carry the correction onto THIS race's distance. Neutral (byte-identical) when the
         # corpus is the same distance as the objective, which is the established path.
@@ -4724,7 +4724,7 @@ def _adj_summary(d):
 
 
 def diff_plans(old, new):
-    """Summarize how a regeneration changed the road ahead (§6b — so the owner sees it)."""
+    """Summarize how a regeneration changed the road ahead (§6b — so you see it)."""
     if not old:
         return {"first": True, "summary": "First plan generated."}
     changes = []

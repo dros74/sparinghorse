@@ -90,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **The assertive ceiling followed the time of day the plan was regenerated.** `shape_response` — the
-  §PRO5 read that compares measured fitness to the plan's own projection and eases the ride when he
+  §PRO5 read that compares measured fitness to the plan's own projection and eases the ride when the athlete
   is behind — ended the CTL curve on **today**. `reconstruct_history` pads to its `end`, so a day
   whose training had not been logged yet arrived as a day with *no* training, and the EWMA charged it
   a full day of decay before it had happened.
@@ -131,7 +131,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a correctly-executed session into a red mark on the card.
 
   **A rep is a contiguous stretch of work running, not a single block.** Segmentation cuts on pace
-  CONTRAST, so a rep he did not hold perfectly flat splits in two — and each fragment was then
+  CONTRAST, so a rep not held perfectly flat splits in two — and each fragment was then
   measured against the ~2min rep floor *alone*. In the reported session rep 1 went out hard and
   settled (45s @4:51 +
   90s @5:21, a 10% shift, one frame over the sustain bar); both halves fell under the floor, both

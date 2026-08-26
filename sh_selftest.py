@@ -546,7 +546,7 @@ def _stc_image_completeness():
     whole story; it is now one of four, and each split adds another. The failure mode is nasty
     precisely because nothing local catches it: the suite is green on a checkout, the mirror is
     green, and the container is the only place that is missing a file — which is the one place the
-    owner cannot easily read a traceback from. So the recipe is checked against the imports rather
+    you cannot easily read a traceback from. So the recipe is checked against the imports rather
     than trusted: every module the app (or the battery it spawns) imports from this directory must
     be COPYed, and so must `static/`, which is read at import time.
 
@@ -747,7 +747,7 @@ def _stc_runs_browser():
 
 
 def _stc_map_privacy(db):
-    """The workout route map is private-only — the routes reveal where the owner lives. Assert the
+    """The workout route map is private-only — the routes reveal where you live. Assert the
     WIRING, not just the predicate: drive the real endpoints via a test client so a future refactor
     that drops the guard or the geo-strip is caught (a predicate-only check would miss that). (a) On
     a read-only instance, GET /map → 403. (b) /profile (served on the public container) carries NO
@@ -852,7 +852,7 @@ def _stc_day_spacing():
             bad.append(f"{ph}6:long-off-weekend")
     detail.append({"six_run": six})
     # cross-week BOUNDARY spacing (2026-06-22 fix): a week must never end AND the next begin on a
-    # rest — the double-rest seam the owner hit (a 3-run week ending Sat, the next week resting Mon).
+    # rest — the double-rest seam you hit (a 3-run week ending Sat, the next week resting Mon).
     # Every layout ends on the Sunday slot, so the gap from one week's last run to the next week's
     # first run stays ≤2 calendar days (≤1 rest) for every frequency transition the plan uses. (The
     # OLD 3→4 layout gapped 3 days = 2 rests — this guard would have caught it.)
@@ -880,7 +880,7 @@ def _stc_day_spacing():
 
 def _stc_availability():
     """§AV — availability-aware layout. Golden byte-identity with no blocks; the Tue relocation
-    (his July 2026 flight — the feature's founding case); the weekend block moving the long to the
+    (your July 2026 flight — the feature's founding case); the weekend block moving the long to the
     last available day; the heavy block shedding runs WITH their load (prorate, never cram); the
     straddling week's remainder avoiding a blocked day; and the hard-gap invariant on re-laid sets."""
     from datetime import date, timedelta
@@ -1160,7 +1160,7 @@ def _stc_public_allowlist():
           av trace on the public log; no `adjustment`/`cold_start` on the public plan; no HR on the
           public activity.
       (c) THE PRIVATE VIEW IS UNTOUCHED — every one of those fields still reaches the private box.
-          An allowlist that silently starved the owner's own console would be the worse bug.
+          An allowlist that silently starved your own console would be the worse bug.
       (d) FAIL CLOSED — a resource with no spec RAISES rather than serving the payload, and every
           registered spec is reachable (a spec nobody calls is a spec nobody maintains)."""
     import sqlite3 as _sq
@@ -1186,7 +1186,7 @@ def _stc_public_allowlist():
     plan = {"phases": [{"key": "base", "kind": "base"}, {"key": "bridge1", "kind": "bridge"}],
             "base": {"weeks": [wk("2026-08-10", av_dates=["2026-08-11"], av_shed=1)]},
             "bridge1": {"weeks": [wk("2026-08-17", av_dates=["2026-08-18"])]},
-            "adjustment": {"situation": "medical", "note": "his doctor said"},
+            "adjustment": {"situation": "medical", "note": "your doctor said"},
             "cold_start": {"age": 52, "hrmax_prior": 178},
             "regime": {"mode": "caution", "reason": "because of your history"},
             "pace_zones": {"easy_top": "6:30/km"}}
@@ -1292,7 +1292,7 @@ def _stc_public_allowlist():
             body = c.get(path).get_json()
             missing = [n for n in names if f'"{n}"' not in S.json.dumps(body)]
             if missing:
-                fails.append(f"PRIVATE {path} lost {missing} — the allowlist ran on the owner's own "
+                fails.append(f"PRIVATE {path} lost {missing} — the allowlist ran on my own "
                              f"console")
         detail["private_kept"] = sorted(kept)
     finally:
@@ -1332,7 +1332,7 @@ def _stc_av_public_strip():
     included — the 0.27.0 strip walked base/build/peak/taper only; Gemini review 2026-08-21 #1/#6) and on
     EVERY payload that spreads week dicts: /api/plan AND /api/log (block_log → _plan_all_weeks →
     {**w, "sessions"} carries av_dates for every phase and api_log popped only `reflection` — on
-    in July 2026 the public log served one of the owner's away dates for a week). Drives the REAL endpoints under
+    in July 2026 the public log served one of your away dates for a week). Drives the REAL endpoints under
     READONLY through a throwaway DB (a fixture-only strip check is exactly what let the gap through);
     the private view must KEEP the fields (the ✈ week chip reads them). /api/availability stays
     private-only."""
@@ -1559,7 +1559,7 @@ def _stc_sync_lock():
 def _stc_scheduler_health():
     """TECH-8 (0.27.2) — the nightly can't skip silently anymore. (a) /healthz carries the scheduler
     telemetry: timestamps + fail count on the private box, BOOLEANS ONLY on the public one (a probe
-    must not learn when the owner's nightly runs). (b) the boot catch-up decision: owed when
+    must not learn when your nightly runs). (b) the boot catch-up decision: owed when
     sched:last_ok is missing or >26 h stale. (c) the nightly job itself, on a temp-dir DB with a
     stubbed sync: success records last_run/last_ok and zeroes fail_count + drops a rotated VACUUM
     snapshot beside the DB (newest 7 kept); a failed sync increments fail_count, leaves last_ok
@@ -2005,7 +2005,7 @@ def _stc_one_clock():
         # (g) ⚠⚠ THE CONTAINER'S CASE, CONSTRUCTED. python:slim has no /usr/share/zoneinfo, so the
         # tzdata wheel's own database is the only thing tzset() can read there — and on a host that
         # HAS the system database that limb never executes, which is exactly how a first revert test
-        # passed here while the same revert would have left his NAS on UTC. So inject the container's
+        # passed here while the same revert would have left my NAS on UTC. So inject the container's
         # answer, and prove the directory it names really is a loadable TZDIR by moving the clock with it.
         _os.environ.pop("TZDIR", None)
         wheel = S._glibc_tzdir(system_has_db=False)
@@ -2278,15 +2278,15 @@ def _stc_readiness_provenance():
 def _stc_efficiency():
     """§EF — aerobic efficiency (speed per heartbeat), and the two design calls the card makes.
 
-    The owner asked for this chart on 2026-08-25, judging that the durability tile only earns its
-    space once his runs get long (his longest is 12.3 km) while efficiency reads on every easy run he
-    does. He asked for "two vertical axes, plot both separately". Limbs (b) and (d) are those words
+    I asked for this chart on 2026-08-25, judging that the durability tile only earns its
+    space once your runs get long (your longest is 12.3 km) while efficiency reads on every easy run you
+    does. I asked for "two vertical axes, plot both separately". Limbs (b) and (d) are those words
     turned into invariants, because both are decisions a future edit could quietly undo:
 
       (b) EFFICIENCY AND TEMPERATURE ARE SEPARATE PLOTS, never one twin-axis frame. Overlaying two
           series on two y-scales is the standard way to make them look like they explain each other,
-          and that is precisely the open question here — heat depresses efficiency, and his cool runs
-          are also his most recent and fittest. Stacked panels sharing only a time axis let him see
+          and that is precisely the open question here — heat depresses efficiency, and your cool runs
+          are also your most recent and fittest. Stacked panels sharing only a time axis let you see
           both without the chart having asserted the answer.
       (d) TEMPERATURE IS RETURNED, NEVER SUBTRACTED. The published trend must be the RAW slope of
           what is drawn. A temperature-adjusted figure would bake in a coefficient the corpus has not
@@ -2294,8 +2294,8 @@ def _stc_efficiency():
           what this window's 30 pairs suggest, and that is unsettled. Same discipline that keeps
           decoupling display-only (§3.3, DIR-3).
 
-    (c) is the confound the owner did NOT raise and that matters more than heat: EF only compares
-    between runs of SIMILAR EFFORT. Unfiltered, his March HR-176 5k efforts sit beside August's
+    (c) is the confound you did NOT raise and that matters more than heat: EF only compares
+    between runs of SIMILAR EFFORT. Unfiltered, your March HR-176 5k efforts sit beside August's
     HR-133 easy hours and the trend reads the training mix. Measured: r 0.40 unfiltered → 0.78
     restricted to aerobic runs."""
     import sqlite3 as _sq
@@ -2388,8 +2388,8 @@ def _stc_readiness_session_aware():
 
     `llm_readiness` received HRV, legs, sleep and the free-text note — and nothing about the day. So
     on a 4×2min VO₂ day it wrote "run as planned at an easy, conversational effort": green's verb
-    with amber's qualifier, printed directly above a card reading INTERVAL SESSION. The owner caught
-    it on his own card (2026-08-25).
+    with amber's qualifier, printed directly above a card reading INTERVAL SESSION. I caught
+    it on my own card (2026-08-25).
 
     That is the ENGINE_SCIENCE §9 crossing, not merely clumsy copy — telling a runner to take a
     prescribed interval session conversationally IS a prescription change, and §9 allows the LLM to
@@ -2468,8 +2468,8 @@ def _stc_forecast_decomposition():
     """§TR-A — the scorecard separates PRESCRIPTION error from PROJECTION error.
 
     `bias` alone fuses two failures that need opposite fixes: the model's physics being wrong, and
-    the athlete not running the plan. On his own four scored weeks the entire 32–57% CTL
-    under-prediction resolves to the second — the plans laid 24.5–38.4 km and he ran 30.1–53.4 km —
+    the athlete not running the plan. On your own four scored weeks the entire 32–57% CTL
+    under-prediction resolves to the second — the plans laid 24.5–38.4 km and you ran 30.1–53.4 km —
     so the fused headline would have invited a correction to the projector, which is the fixed-point
     trap already on the record (a governor fed by a variable derived from what it governs).
 
@@ -2556,8 +2556,8 @@ def _stc_long_run_phase_cap():
 
     §PRO18 put one Daniels/Hansons number (0.30) across the whole block. That is right where chronic
     volume is being built and wrong for the marathon-specific block: at 0.30 the road tops out at a
-    24.4 km longest run, and the athlete reaches the start line never having been on his feet past
-    2h42. The owner's call of 2026-08-25 lifts it for build/peak only.
+    24.4 km longest run, and the athlete reaches the start line never having been on your feet past
+    2h42. My call of 2026-08-25 lifts it for build/peak only.
 
     The safety argument is limb (d), and it is the whole reason this is a small change: the two big
     long runs are delivered by §PRO9's +10%-over-trailing-4wk LADDER, not by this number. A share
@@ -2712,7 +2712,7 @@ def _stc_intent_bar():
     because `intent_km` is the only "what was asked of this week" number in the payload, so every
     reader downstream — adherence, the §H5 load fingerprint, and any future absorbed-fraction test —
     was dividing by a number that is right in caution and 1.8–3.3× too small in an assertive base
-    week. Measured on his 2026-08-24 plan: base weeks published 16–24 against a 42–65 km sheet and
+    week. Measured on my 2026-08-24 plan: base weeks published 16–24 against a 42–65 km sheet and
     then snapped to ~1.00× at the base→build boundary, a phase-dependent discontinuity in the bar
     itself. The regression this pins: revert §PRO25 and the assertive limbs below read the skeleton.
 
@@ -2800,7 +2800,7 @@ def _rd_stream_fixture(plan, seed=12345):
 
 
 def _stc_rd_double_count():
-    """§RD v9 — THE DOUBLE-COUNT. His 4×2min VO₂ session (2026-08-25) read back as "3× reps + 4×
+    """§RD v9 — THE DOUBLE-COUNT. My 4×2min VO₂ session (2026-08-25) read back as "3× reps + 4×
     strides": one rep lost, and the same two minutes counted a second time on the stride axis. The
     fixture below reproduces that verbatim — pre-fix it returns n_work 3 / strides 4, which is what
     makes every tooth here observable rather than decorative.
@@ -2813,7 +2813,7 @@ def _stc_rd_double_count():
     (b) THE PEAK INSIDE A REP IS NOT A STRIDE. A rep's own summit is short, rides far over the local
         floor and lifts cadence — every stride gate passes. The stride pass now runs after the block
         grammar and skips the frames the reps already own.
-    (c) THE OWNER-VISIBLE CONSEQUENCE. The lost rep was the SLOWEST (first off the warm-up), so
+    (c) THE VISIBLE CONSEQUENCE. The lost rep was the SLOWEST (first off the warm-up), so
         dropping it biased the effort monitor's work pace FAST — 4:53 against a true 4:57 — and
         §6m graded an on-target session `too_hard` by 0.04 s/km. The detected work pace must equal
         the session's real one; the 3-rep read misses this band, which is the whole point.
@@ -2838,7 +2838,7 @@ def _stc_rd_double_count():
         sec = sum(s["sec"] for s in w)
         return round(sum(s["pace"] * s["sec"] for s in w) / sec) if sec else None
 
-    # ── his session: 4×2min, rep 1 taken out hard and settling ⇒ it segments in two ──────────
+    # ── your session: 4×2min, rep 1 taken out hard and settling ⇒ it segments in two ──────────
     SESSION = [(600, 420, 156),
                (45, 291, 176), (90, 321, 172),          # rep 1 — the split one
                (105, 405, 158),
@@ -2850,7 +2850,7 @@ def _stc_rd_double_count():
     if r.get("kind") != "interval":
         fails.append(f"(fixture) the session no longer reads as an interval workout: {r.get('kind')}")
     if r.get("n_work") != 4:
-        fails.append(f"(a) read back {r.get('n_work')} reps of a 4-rep session — a rep he ran was "
+        fails.append(f"(a) read back {r.get('n_work')} reps of a 4-rep session — a rep you ran was "
                      f"absorbed into the warm-up because it segmented in two")
     if r.get("strides"):
         fails.append(f"(b) counted {r.get('strides')} strides inside a rep session — the reps' own "
@@ -2885,7 +2885,7 @@ def _stc_rd_double_count():
     return _st("det", "rd-double-count",
                "§RD v9 a rep is contiguous WORK (a rep that segments in two is fused before the "
                "length floor, not absorbed into the warm-up) and a rep's own summit is not also "
-               "counted as a stride — his 4×2min read '3× reps + 4× strides' and biased the §6m "
+               "counted as a stride — my 4×2min read '3× reps + 4× strides' and biased the §6m "
                "work pace fast; genuine strides still count, fusion never crosses a recovery, and a "
                "lone surge still isn't a session",
                passed=not fails,
@@ -2902,8 +2902,8 @@ def _stc_lived_days_pinned(db):
 
     The straddling week is re-laid on every regeneration (the remainder must be re-governed against
     fresh CTL/ATL) and its ELAPSED slice was published as the day's prescription. So finished days
-    drifted with the week's intent: the owner's Monday 2026-08-24 was laid at 8.2 km on Monday, read
-    11.1 km on Tuesday and 11.5 km on Wednesday off his own card ("are we changing the past now?",
+    drifted with the week's intent: my Monday 2026-08-24 was laid at 8.2 km on Monday, read
+    11.1 km on Tuesday and 11.5 km on Wednesday off your own card ("are we changing the past now?",
     2026-08-26). `_pinned_sessions` reads each lived day back out of PLAN HISTORY instead.
 
     Six teeth, and the first two are the ones that must be SEEN to fail on a revert — the fixture is
@@ -2912,7 +2912,7 @@ def _stc_lived_days_pinned(db):
     (a) THE PIN. Monday shows what the road asked for while Monday was still ahead, not what today's
         arithmetic would ask now. Guarded by (a′): the re-lay must differ, or the tooth is vacuous.
     (b) STABILITY. Re-generating on Thursday and again on Friday, off DIFFERENT seeds that move the
-        remainder, leaves the lived days byte-identical. This is the owner-visible property.
+        remainder, leaves the lived days byte-identical. This is you-visible property.
     (c) A REST DAY STAYS REST. A lived day the road covered but prescribed nothing for must not gain
         a session because today's lay happens to place one there — pre-fix it silently did.
     (d) NEWEST-ON-OR-BEFORE WINS. A plan generated AFTER the day is a re-lay, never evidence, however
@@ -3144,7 +3144,7 @@ def _stc_straddle_long():
     `long_w` is a SHARE of whatever budget a lay receives, so a §6o remainder (mid-week regen, or
     early days over-run) shrank the long run in exact proportion with the easy days — and because
     the §PRO9 window takes the MAX over laid long runs, that shrunken long then capped the next
-    four weeks too. Measured on his 2026-07-28 data: long 5.6 km where the same week in full lays
+    four weeks too. Measured on my 2026-07-28 data: long 5.6 km where the same week in full lays
     9.4, and the following weeks' caps 9.2/10.1/11.1 instead of 10.3/11.2/12.4.
     Also pins the second half: the straddle path never received `long_km_cap` at all, so §PRO9's
     "+10% over the trailing-4wk longest" promise — a biomechanical guarantee, not a preference —
@@ -3292,7 +3292,7 @@ def _stc_session_step():
 
 def _stc_rescue_not_governor():
     """§PRO17/§49 — §H1 is a RESCUE, not the volume governor, and the two are now separated.
-    §49 measured the confusion: on his real DB the per-day ACWR ceiling bound 11 of 21 governor
+    §49 measured the confusion: on my real DB the per-day ACWR ceiling bound 11 of 21 governor
     searches while the §H1 rescue it was supposed to trigger fired ZERO times in 19 weeks. §H1's own
     docstring describes the pathology it was written for at ~1.5–1.6 (a quality session's fixed TRIMP
     floor becoming a huge day among small ones at low CTL); ACWR_HARD = 1.30 was never that number.
@@ -3524,7 +3524,7 @@ def _stc_settings():
             fails.append(f"validate({key},{val!r}) ≠ {want}")
     # Assert the WIRING (like _stc_map_privacy): the settings + geocode endpoints must stay private —
     # the public read-only container relies on _private_only_path to 403 them. A refactor that drops
-    # one (typo / tuple reorder) must fail here, not leak the owner's settings + an open geocode proxy.
+    # one (typo / tuple reorder) must fail here, not leak your settings + an open geocode proxy.
     for p in ("/api/settings", "/api/geocode"):
         if not S._private_only_path(p):
             fails.append(f"{p} not gated private")
@@ -3682,7 +3682,7 @@ def _stc_secrets():
     carries a FINGERPRINT that identifies WHICH value is stored without describing it: eight hex of
     sha256, present only when configured, MOVING when the value is rotated (the whole point — before
     it, a save that silently failed and one that worked were the same screen), stable for the same
-    value, matching a digest the owner can compute themselves, and never a prefix of the value. Uses a temp store + a
+    value, matching a digest you can compute themselves, and never a prefix of the value. Uses a temp store + a
     synthetic env; restores ALL module/env globals in a finally (incl. SH_SCHEDULE so no thread spawns)."""
     import sqlite3 as _sq, os as _os, tempfile, json as _json
     pass   # the rebinds below land on the app module (S.<name> = …), TECH-1
@@ -3713,7 +3713,7 @@ def _stc_secrets():
         want = _hl.sha256(b"ENVTOKEN").hexdigest()[:8]
         if fp("runalyze_token") != want:
             fails.append(f"fingerprint {fp('runalyze_token')!r} is not sha256(value)[:8] ({want}) — "
-                         f"the owner cannot check it against their own machine")
+                         f"you cannot check it against your own machine")
         if fp("anthropic_api_key"):
             fails.append("an UNSET secret reported a fingerprint — nothing is stored to identify")
         if "ENVTOKEN".startswith(fp("runalyze_token")) or fp("runalyze_token") in "ENVTOKEN":
@@ -4904,7 +4904,7 @@ def _stc_explain_cache():
         a plan that has moved can never be narrated by the answer written for the plan before it;
       · a changed ATHLETE CONTEXT ⇒ a new call. It is interpolated into the system prompt, so it is
         the one setting that changes the answer without the plan moving;
-      · `fresh=True` re-rolls and re-seeds the entry — a generative answer the owner may want again;
+      · `fresh=True` re-rolls and re-seeds the entry — a generative answer you may want again;
       · a FAILED call is NEVER cached: an API hiccup must not be pinned to the plan for its lifetime;
       · and the cache is bounded, so a long-lived process cannot grow one.
     Drives the real `explain_plan` with `llm_json` stubbed by a counter — no key, no network."""
@@ -4991,7 +4991,7 @@ def _stc_explain_cache():
 def _stc_health_staleness():
     """§HS — the health view had no way to say a feed had DIED. On 2026-08-15 the watch stopped
     sending nights; the sleep and HRV charts kept drawing their full lines with the last point
-    sitting there reading like today's, and the owner found the eight-day hole by eye a week later.
+    sitting there reading like today's, and you found the eight-day hole by eye a week later.
     Nothing on the page had said a word. `health_staleness` is the sentence the page was missing.
 
     The teeth are mostly about NOT crying wolf, because a cue that fires on ordinary data is a cue
@@ -5536,7 +5536,7 @@ def _stc_guide_notify():
     ran with every transition firing on time, a beep at each boundary, and not one word about what
     the athlete was supposed to be doing — the instructions were on a page nobody was looking at.
     `notification` is the only part of a guide that lands on whatever screen is actually in front of
-    him, and we emitted none.
+    you, and we emitted none.
 
     Locked here: every step has one, inside the documented 13/54 limits; the popup names the effort
     AND its targets; segments are dropped WHOLE rather than cut mid-token; a rep does not announce
@@ -5684,7 +5684,7 @@ def _stc_hr_zones():
         fails.append(f"effort monitor didn't anchor on lthr when confident: anchor={dc.get('anchor')}")
     if dc.get("easy_hr_ceiling") != round(S.LTHR_EASY_FRAC * dc.get("lthr", 0)):
         fails.append(f"lthr easy ceiling wrong: {dc.get('easy_hr_ceiling')} vs lthr={dc.get('lthr')}")
-    # the switch must NEVER LOOSEN his easy bar — the LTHR ceiling stays ≤ the %HRmax ceiling on the
+    # the switch must NEVER LOOSEN your easy bar — the LTHR ceiling stays ≤ the %HRmax ceiling on the
     # same data (a future LTHR drift can't silently re-introduce a looser easy ceiling).
     if dc.get("easy_hr_ceiling", 999) > round(S.EASY_HR_FRAC * dc.get("hrmax", 0)):
         fails.append(f"lthr easy ceiling LOOSER than %HRmax: {dc.get('easy_hr_ceiling')} > "
@@ -6179,7 +6179,7 @@ def _stc_building_load_integrity():
 
 def _stc_seed_stale():
     """§56 — the day-staleness banner must fire when the seed has actually MOVED and stay silent when
-    it has not. Both halves are the test: a marker that fires every day is one the owner learns to
+    it has not. Both halves are the test: a marker that fires every day is one you learn to
     scroll past, which is the failure §PRO14's own docstring names, and this is the second marker
     stacked in the same slot — so it has to earn each appearance.
 
@@ -6217,13 +6217,13 @@ def _stc_seed_stale():
     if S.plan_seed(db, AUG1)[3]["from"] != D31:
         fail.append("anti-vacuity: plan_seed is not reading 07-31 — (a) is vacuous")
 
-    # (b) THE REAL CASE — his own 2026-07-31 numbers. A plan seeded 07-30 (CTL 58 · ATL 85), read on
+    # (b) THE REAL CASE — my own 2026-07-31 numbers. A plan seeded 07-30 (CTL 58 · ATL 85), read on
     # 08-01 when the settled 07-31 row (56 · 64) is available ⇒ must fire.
     r = S._seed_now(db, mkplan(D30, 34.79, 58.0, 85.0), AUG1)
     if not r or not r["moved"]:
         fail.append(f"SILENT on the real case: a plan seeded 07-30 (58/85) read on 08-01 (56/64): {r}")
     elif (r["ctl"], r["atl"], r["was"]["atl"], r["from"]) != (56.0, 64.0, 85.0, D31):
-        fail.append(f"fires but misreports the numbers it shows him: {r}")
+        fail.append(f"fires but misreports the numbers it shows you: {r}")
 
     # (c) ⭐ CRYING WOLF — a DIFFERENT source day whose values are identical must stay SILENT.
     db2 = mkdb([(D30, 34.79, 56.0, 64.0), (D31, 34.79, 56.0, 64.0)])
@@ -6249,7 +6249,7 @@ def _stc_seed_stale():
         fail.append("a cold start (no snapshot at all) must yield None, not a fabricated comparison")
 
     return _st("det", "seed-stale",
-               "§56 the day-staleness banner fires when the SEED moved (his real 07-30→07-31 case, and "
+               "§56 the day-staleness banner fires when the SEED moved (my real 07-30→07-31 case, and "
                "on eVO₂max alone), stays silent when the plan is already current, stays silent when a "
                "new source day carries identical numbers (no crying wolf), and says NOTHING at all "
                "when it cannot know (pre-§PRO20 artifact / cold start)",
@@ -6261,7 +6261,7 @@ def _stc_plan_seed():
     """§PRO20 — the plan's load seed is END-OF-YESTERDAY, never "today's snapshot". `generate_block`
     rolls the projection from `today` INCLUSIVE (its docstring: "model A — no double-count"), so a seed
     that has already advanced through today applies today TWICE. Runalyze's same-day row does exactly
-    that: captured before the day's run it reads today as a REST day (his real 2026-07-29 row: ATL
+    that: captured before the day's run it reads today as a REST day (my real 2026-07-29 row: ATL
     60 == _ewma_step(80, 0, 7) off a settled 80); captured after, it holds the day's load. MEASURED
     consequence: plan #70 was seeded 60 and its week allowance came out 50.9 km; from the settled 80 the
     same code allows 25.4 km. 13 of the 41 plans generated in July 2026 carried the bias, every one in
@@ -6305,7 +6305,7 @@ def _stc_plan_seed():
                     f"re-applies — pace zones must not move with this change): got {vo2}")
 
     # (b) IT HAS TEETH — the two seeds must lay DIFFERENT weeks, else (a) asserts nothing that reaches
-    # him. Same straddling shape either way; only the seed changes.
+    # you. Same straddling shape either way; only the seed changes.
     shape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 0, "intent": "Base — aerobic volume"}]
     bs = today - timedelta(days=3)                     # today lands mid-week ⇒ the §6o straddle path
 
@@ -6337,7 +6337,7 @@ def _stc_plan_seed():
 
     # (d) UNCONDITIONAL — a today-row captured AFTER the run (so it genuinely HOLDS today's load) is
     # still not the seed. The rule is "end of yesterday", not a captured_at race the clock can lose.
-    post = round(S._ewma_step(82.0, 93.0, S.TAU_ATL))       # his real 2026-07-30: settled 82 + a 93-TRIMP day
+    post = round(S._ewma_step(82.0, 93.0, S.TAU_ATL))       # my real 2026-07-30: settled 82 + a 93-TRIMP day
     _v, _c, a_p, _m = S.plan_seed(mkdb([(yday.isoformat(), VO2_OLD, 57.0, 82.0),
                                       (today.isoformat(), VO2_NEW, 58.0, post)],
                                      [(today.isoformat(), 93.0)]), today)
@@ -6427,7 +6427,7 @@ def _stc_plan_seed():
 def _stc_today_actual():
     """§PRO20b — today's ACTUAL load floors today's PROJECTED load. §PRO20 stops the seed at
     end-of-yesterday, so today reaches the projection only through today's PRESCRIPTION — which is
-    moot once he has already run (2026-07-30: prescribed rest, ran 93 TRIMP; the projected in-week peak
+    moot once I have already run (2026-07-30: prescribed rest, ran 93 TRIMP; the projected in-week peak
     read 1.132 against Runalyze's measured 1.466). A FLOOR, so it can only ever RAISE projected load
     and therefore only ever TIGHTEN the governor, and it goes into the PROJECTION only — never into
     what is laid. Covers BOTH paths: the §6o straddle AND the full-week path, which is what a Monday
@@ -6464,7 +6464,7 @@ def _stc_today_actual():
         if not big["peak_acwr"] > off["peak_acwr"]:
             fail.append(f"{label}: today's real load did not reach the projection "
                         f"(peak {big['peak_acwr']} vs {off['peak_acwr']}) — the week is bounded "
-                        f"against load he has already outrun")
+                        f"against load you have already outrun")
         if not big["km"] < off["km"]:
             fail.append(f"{label}: the tightened projection did not tighten the lay "
                         f"({big['km']}km vs {off['km']}km)")
@@ -6542,7 +6542,7 @@ def _stc_frequency_met():
         fail.append("_split_freeze did not propagate week_actuals → frequency_met")
     # §6e3 — the optional-rest NOTE must quote the intent that MADE the decision. Both tests compare
     # against `wk_intent_km`, which on an ASSERTIVE week is far above the shape skeleton's km (§PRO13);
-    # the sentence printed the skeleton. His 2026-07-30 plan read "32.0km of 22km planned" while the
+    # the sentence printed the skeleton. My 2026-07-30 plan read "32.0km of 22km planned" while the
     # engine had decided on 25.6 — making the week look easier to have cleared than it was. Needs an
     # assertive week, since on caution intent == skeleton and the two numbers coincide.
     a_shape = [{"wk": 1, "km": 15, "runs": 4, "long": 6, "strides": 0,
@@ -6772,7 +6772,7 @@ def _stc_durability_api():
     Locks: (a) PRIVATE-ONLY — READONLY answers a JSON 403 (decoupling is HR-adjacent; the
     /api/run-metrics discipline, never the sanitized one); (b) the payload is durability_signal's
     contract — verdict/trend/medians — plus the tracker chart's `series`: long-run points, newest
-    first, EACH carrying km + decoupling_pct (the §55d caveat: duration must stay visible — on his
+    first, EACH carrying km + decoupling_pct (the §55d caveat: duration must stay visible — on your
     corpus longer runs decouple LESS, so a chart that hides distance lies); (c) a corpus with no
     qualifying long runs answers 200 ok:False, not an error. Driven through the real route on
     in-memory DBs via a rebound get_db (the plandrift no-plan probe's pattern) — nothing persists."""
@@ -7172,9 +7172,9 @@ def _stc_long_run_identity():
     (d) §PRO9 STILL OWNS THE CEILING — the raise only ever runs before the clip, so no published long
         run exceeds its cap. Asserted on the PUBLISHED km with NO tolerance, swept across caps and
         paces: the km is reached through two roundings (TRIMP → whole minutes → km at 0.1) and rounding
-        up through both put a 16.8 km long run under a 16.7 km cap on his own block while
+        up through both put a 16.8 km long run under a 16.7 km cap on your own block while
         det/long-run-step stayed green — that det allows +0.3 for exactly this rounding, which is what
-        hid it. A promise about the number he actually runs has to be checked on that number.
+        hid it. A promise about the number you actually runs has to be checked on that number.
     (e) HONESTY BACKSTOP where neither lever can win — at ≤2 short easy days the raise would need
         R/(n_short+R) = 0.37, above every `long_cap` we set, so a 3-run week is capped at ratio 1.077
         by construction. Then the session is relabelled off 'long' and the week flagged `long_flat`,
@@ -7233,9 +7233,9 @@ def _stc_long_run_identity():
         if abs(km_on - km_off) > 0.65:
             fail.append(f"{lbl}: reshape shed volume {km_off} → {km_on}")
             break
-    # (a2) the PINNED case — his real weeks, and the only one that exercises the easy-day clamp. The
+    # (a2) the PINNED case — my real weeks, and the only one that exercises the easy-day clamp. The
     # survey shapes are ~30 km against a 10.45 cap, so §PRO9 never bites there and the clamp is never
-    # asked to do anything; reverting it left a ratio-only det green. This is his 2026-08-03 week: a
+    # asked to do anything; reverting it left a ratio-only det green. This is my 2026-08-03 week: a
     # 57 km budget over 5 slots against an 11.4 km cap, i.e. 11.3 per day straight into the ceiling.
     pin = {"wk": 1, "km": 57, "runs": 5, "long": 14, "strides": 0, "quality": []}
     pin_s, _ = S._distribute_week(pin, bs, 445.0, 360.0, z, long_km_cap=11.4)
@@ -7297,7 +7297,7 @@ def _stc_eq_stable():
         unmoved and the constant keeps meaning what it was fitted to mean.
     (b) PERIOD-CORRECTNESS — a logged run is scored against `_zones_asof(its own date)`, so changing
         TODAY's eVO₂max cannot re-score training that already happened. This is the one that bit:
-        2026-08-03, his 07-22 run at GAP 377 s/km with the marathon anchor at 377; an evening run
+        2026-08-03, my 07-22 run at GAP 377 s/km with the marathon anchor at 377; an evening run
         moved eVO₂max 35.00 → 35.29, the anchor moved to 376, and the run's eq_km fell 8.95 → 6.39.
         It was the trailing window's largest bout, so session_eq_cap fell 11.635 → 11.05 and the
         governor cut the week 49.7 → 42.6 km. Asserted by building a DB whose history is fixed and
@@ -7334,7 +7334,7 @@ def _stc_eq_stable():
         m.executescript(S.SCHEMA)
         base = date(2026, 8, 3)
         gap = 3600.0 / S.pace_zones(35.0)["marathon"]   # GAP parked exactly ON the marathon anchor —
-        #                                               the case that actually moved on his own data
+        #                                               the case that actually moved on your own data
         for i in range(1, 29):                        # 4 full weeks of history before `base`
             d = (base - timedelta(days=i)).isoformat()
             m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
@@ -7395,7 +7395,7 @@ def _stc_clock_couple():
         Bounding the week on the LAID long run instead of the ladder is arithmetically seductive and
         DEADLOCKS: the laid long is a fixed share of the week, so long/week is constant in the search
         variable, the constraint bites only on a rounding edge, and the long run settles strictly BELOW
-        its own cap — whereupon `1.10 × laid` reproduces the same cap forever. Measured on his DB it
+        its own cap — whereupon `1.10 × laid` reproduces the same cap forever. Measured on my DB it
         froze the base block at 44.3 km for four consecutive weeks (ladder 12.3, laid long 11.2). So:
         the laid long must REACH its ladder on binding weeks, and the long run must not plateau across
         three consecutive building weeks. A share-only or bound-only det passes the broken version.
@@ -7410,7 +7410,7 @@ def _stc_clock_couple():
     fail = []
     LONGISH = lambda s: str(s.get("kind") or "").startswith("long")
 
-    # His own situation, which is the whole point: a LOW designed intent (24 km) under an ACWR ceiling
+    # Your own situation, which is the whole point: a LOW designed intent (24 km) under an ACWR ceiling
     # that would happily pay for 2.5× that. The intent floor is therefore slack for every cap ≥ 6.0 and
     # the LADDER is what governs — if the floor were doing the work this sweep would prove nothing.
     WK = {"wk": 1, "km": 24, "runs": 5, "long": 6, "strides": 0, "quality": []}
@@ -7483,15 +7483,15 @@ def _stc_easy_ladder():
     (a) GRADED. The short easies of an assertive full week are strictly decreasing in km, and the
         spread matches the fitted rungs. Reverting to the even split makes them all equal.
     (b) ⚠⚠ ORDERED BY DISTANCE FROM THE NEAREST LONG RUN — NOT BY CALENDAR. This is the tooth that
-        catches the version I wrote first. His own 161 weeks grade strongly by SIZE RANK (R² 0.545)
-        and not at all by weekday (R² 0.054), so the magnitudes are his and the ORDER is doctrine:
+        catches the version I wrote first. Your own 161 weeks grade strongly by SIZE RANK (R² 0.545)
+        and not at all by weekday (R² 0.054), so the magnitudes are your and the ORDER is doctrine:
         rung 0 goes to the day FURTHEST from any long run, and the days flanking a long run (the
         recovery day after last week's, the freshness day before this week's) take the short rungs.
         Laying the rungs in calendar order instead put the HEAD on Monday — the one day the §H1
         peak-ACWR brake pins, because the seed ATL is highest on day 1 and decays all week — and the
         governed week fell 39.0 → 32.7 km. So: the first day of the week is never the longest easy.
     (c) ⚠⚠ VOLUME-NEUTRAL. Same `week_trimp` in, same total km out, ladder on or off. This is the
-        guarantee that failed live: a shape rule quietly cost his 2026-08-03 week 6.3 km of intent,
+        guarantee that failed live: a shape rule quietly cost my 2026-08-03 week 6.3 km of intent,
         and because §6o's remainder is `intent − already run`, ALL of it came out of the one day left
         — the Sunday long run collapsed 10.0 → 3.7 km and was relabelled a shakeout.
     (d) §PRO21 SURVIVES. On a real assertive block no easy day may exceed LONG_RUN_EASY_FRAC × the
@@ -7574,7 +7574,7 @@ def _stc_easy_ladder():
         fail.append("a flat week passed the ladder teeth — they cannot see the defect")
 
     return _st("det", "easy-ladder",
-               "§PRO24 an assertive week's easy days are a LADDER (his own 161 weeks grade by SIZE "
+               "§PRO24 an assertive week's easy days are a LADDER (my own 161 weeks grade by SIZE "
                "RANK, R² 0.545, and not by weekday, R² 0.054) ordered by distance from the nearest "
                "long run — never calendar order, which points the head rung at the day the peak-ACWR "
                "brake pins; the shape is volume-neutral, opt-in, and never lets an easy day overtake "
@@ -7703,7 +7703,7 @@ def _stc_regime_gate():
         return {"base": {"weeks": wks}, "phases": [{"key": "base"}]}
 
     def log_travel_week(m):
-        # he ran 3 runs / 30.1 km of it — MORE km than laid, fewer runs, cleanly absorbed
+        # you ran 3 runs / 30.1 km of it — MORE km than laid, fewer runs, cleanly absorbed
         ws = today - timedelta(weeks=1)
         for off, km in ((0, 10.0), (2, 10.0), (5, 10.1)):
             d = (ws + timedelta(days=off)).isoformat()
@@ -7729,7 +7729,7 @@ def _stc_regime_gate():
     # not illness — the plan starts small BY MEASUREMENT, not by gate)
     r_fresh = S.training_regime(fresh(), today, None)[0]
     # 5 — LATEST readiness AMBER/heavy ⇒ STILL ASSERTIVE (only red blocks; a tired day shouldn't
-    # drop you to conservative — §PRO3 owner call). stop_symptom stays 0 here.
+    # drop you to conservative — §PRO3 my call). stop_symptom stays 0 here.
     m = fresh(); log_travel_week(m)
     m.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,0)", (today.isoformat(), "heavy"))
     r_heavy = S.training_regime(m, today, travel_plan())[0]
@@ -7781,10 +7781,10 @@ def _stc_shape_response():
     §PRO5b (2026-08-26) — WHAT IS MEASURED, AND WHEN. `realized` ended the curve on TODAY, and
     `reconstruct_history` pads to its `end`, so a day whose training had not been logged YET arrived
     as a day with no training and the EWMA charged it a full day of decay before it had happened. The
-    ride factor therefore tracked the TIME OF DAY: on his live DB the same curve read 66.6 at the end
+    ride factor therefore tracked the TIME OF DAY: on my live DB the same curve read 66.6 at the end
     of the 25th and 63.5 on the morning of the 26th — −3.1 CTL, exactly ×(1 − 2/43) — so a morning
-    regeneration measured him ~4.5% below projection (outside the 2% dead band) and an evening one
-    read him on track. Measured at the end of YESTERDAY, a complete day, both agree. Teeth (f)/(g)
+    regeneration measured you ~4.5% below projection (outside the 2% dead band) and an evening one
+    read you on track. Measured at the end of YESTERDAY, a complete day, both agree. Teeth (f)/(g)
     below pin it, and they are built so the pre-fix code straddles the RESPONSE_ONTRACK boundary —
     "full ceiling" in the evening against "ease off" in the morning, same athlete, same day."""
     import sqlite3 as _sq
@@ -7806,8 +7806,8 @@ def _stc_shape_response():
             wks.append({"start": cur, "proj_ctl": extra})   # a later, in-progress week
         return {"base": {"weeks": wks}}
     realized = R["realized"] or 50.0
-    ahead = S.shape_response(mem, today, prior(realized * 0.7))    # he's well ahead of projection
-    behind = S.shape_response(mem, today, prior(realized * 1.6))   # he's well behind
+    ahead = S.shape_response(mem, today, prior(realized * 0.7))    # you's well ahead of projection
+    behind = S.shape_response(mem, today, prior(realized * 1.6))   # you's well behind
     deep = S.shape_response(mem, today, prior(realized * 3.0))     # deep behind ⇒ floor clamps
     # the current week's end-projection must NOT be used (it would read low and ease wrongly)
     ignores_current = S.shape_response(mem, today, prior(realized * 0.7, extra=realized * 5.0))
@@ -8336,7 +8336,7 @@ def _stc_ft_scale():
     if not (S._ft_transfer_correction(1.1, t10, "marathon") > 1.1):
         fail.append("10k→marathon transfer should move the other way")
     # (5) the sigma de-tilt: a SINGLE-distance corpus shifts by a constant, so its spread — and
-    #     therefore the owner's banded numbers — cannot move; a MIXED corpus sheds the between-
+    #     therefore my banded numbers — cannot move; a MIXED corpus sheds the between-
     #     distance gap it was booking as race-day noise the runner never produced
     spread = lambda xs: (lambda m: S.math.sqrt(sum((x - m) ** 2 for x in xs) / len(xs)))(sum(xs) / len(xs))
     one = [0.10, 0.20, 0.35]
@@ -8662,7 +8662,7 @@ def _stc_straddle_streak():
         branch `continue`d past the bookkeeping), three near-ceiling lived weeks + the straddling
         down week left consec_hard at the cap, §PRO6 tripped on the very next week, and §PRO11
         pulled the block's END down week forward: TWO consecutive absorption weeks, no recovery
-        left in the block tail — the exact plan the owner flagged ("the absorption week moved to
+        left in the block tail — the exact plan you flagged ("the absorption week moved to
         next week").
     (b) DAY-INVARIANCE — a near-ceiling BUILDING week underway must COUNT: the §PRO6 trip lands on
         the same week a Monday regeneration (frozen fold, same judgment) would put it."""
@@ -8930,7 +8930,7 @@ def _stc_caution_baseline():
     On a FIT seed (CTL 70) the conservative engine famously UNDER-prescribes: it follows the timid fixed
     ramp off the ~19 km re-base end (base peak ~23, build ~20) regardless of fitness, the build peak
     lands BELOW the base peak (flat-to-declining), and end-CTL is not inflated above the seed (caution
-    never grows a fit athlete — it lets him detrain). This test asserts exactly that baseline; the
+    never grows a fit athlete — it lets you detrain). This test asserts exactly that baseline; the
     assertive regime is asserted to FIX it (uses the headroom, CTL retained) in det/regime-assertive.
     Self-contained (constructed seed, no ambient DB) per the det-hygiene lesson [[governor-lever-retune]]."""
     from datetime import date
@@ -8974,7 +8974,7 @@ def _stc_polarized():
     phases = [("base", S.base_shape(8, 19)), ("build", S.build_shape(6, 24)),
               ("peak", S.peak_shape(2, 26)), ("taper", S.taper_shape(3, 26))]
     bad, detail, saw_interval, saw_mp = [], [], False, False
-    # Seeded at a detrained-restart CTL (30) — the regime he ACTUALLY occupies. The invariant holds
+    # Seeded at a detrained-restart CTL (30) — the regime you ACTUALLY occupies. The invariant holds
     # here WITHOUT §H2 firing (verified: 0 quality suppressions at this seed): the easy share is now
     # MP-EXEMPT, and the prior CTL-30 erosion that forced the old reseed-to-45 was MP-driven (the MP
     # finish counted against easy), so exempting MP lifts it clear on its own. §H2's actual job — the
@@ -9268,7 +9268,7 @@ def _stc_taper_touch(db):
     # (`--past-race`, any maintenance road) the plan has no taper at all, and the anti-vacuity guard
     # below then failed for the ENVIRONMENT rather than for the code. The fixtures also close the
     # other half of the claim — the "any other race ⇒ threshold" branch has no live road at all
-    # while the owner's anchor is a marathon.
+    # while your anchor is a marathon.
     def _road(plan, tag):
         anchor = ((plan.get("chain") or [{}])[-1].get("type") or
                   (plan.get("objective") or {}).get("type") or "").lower()
@@ -9446,8 +9446,8 @@ def _stc_down_weeks():
 
 def _stc_long_run():
     """§ long-run recalibration (2026-06-20): the long run is the marathon cornerstone and must reach a
-    REAL fraction of the week — LONG_RUN_MAX_FRAC raised 0.35→0.50 after the owner's OWN history showed
-    his real long runs ran ~0.40–0.50 of the week. This guards two things so a future tightening can't
+    REAL fraction of the week — LONG_RUN_MAX_FRAC raised 0.35→0.50 after my OWN history showed
+    my real long runs ran ~0.40–0.50 of the week. This guards two things so a future tightening can't
     silently revert: (a) base-build long runs clear the OLD ~0.35 ceiling; (b) the pure-easy re-base
     keeps its conservative REBASE_LONG_CAP (the post-illness restart stays byte-identical). The size is
     still CTL-gated by the unchanged EOW ACWR governor (peak long run ~12km off this base, not 30) —
@@ -9463,7 +9463,7 @@ def _stc_long_run():
     rb_max = max(longfrac(w) for w in rb)
     fail = []
     # §PRO18 — the long run now follows the Daniels/Hansons doctrine (≤30% of weekly volume), which
-    # DELIBERATELY reverts the 2026-06-20 his-history recalibration this det used to pin at ≥0.37.
+    # DELIBERATELY reverts the 2026-06-20 my-history recalibration this det used to pin at ≥0.37.
     # It must still be a long run (clearly the week's longest), and the doctrine cap must actually bind.
     if bb_max > S.LONG_RUN_MAX_FRAC + 0.02:
         fail.append(f"base-build long fraction {round(bb_max, 2)} > doctrine cap {S.LONG_RUN_MAX_FRAC}")
@@ -9513,9 +9513,9 @@ def _stc_ctl_floor_removed():
 def _stc_effort_discipline(db):
     """§6m effort monitor — HR-LED, not TE-led (the load-bearing design choice). The DISCRIMINATING
     case: a long easy run with LOW HR but a duration-lifted high Training Effect must read ON, never
-    'too hard' (TE-gating would false-flag his cleanest easy run). Plus: a threshold-paced 'easy' run
+    'too hard' (TE-gating would false-flag your cleanest easy run). Plus: a threshold-paced 'easy' run
     flags too_hard, TE only sets confidence, quality sandbagging reads too_easy/low, and the live read
-    is structurally sound with a spike-resistant HRmax (his raw max is a 210 strap artifact).
+    is structurally sound with a spike-resistant HRmax (your raw max is a 210 strap artifact).
     §RD extension: with a detected structure CACHED, a quality run is graded on its work reps vs the
     prescribed zone band (on/moderate + seg_read; sandbagged reps ⇒ too_easy; no-HR reps ⇒ pace
     fallback), and without one the whole-run read stands — cached-only, never a fetch."""
@@ -9579,7 +9579,7 @@ def _stc_effort_discipline(db):
         fails.append("seg read claimed without a cached structure")
     # §PRO12 — A ROAD THAT HAS MOVED PAST A DATE STILL KNOWS WHAT IT PRESCRIBED THERE. Live
     # 2026-07-27: the re-base block expired, the road re-anchored to that Monday, and this monitor's
-    # 28-day window fell from 19 prescriptions (3 of them intervals) to ONE — so his 07-22 VO₂
+    # 28-day window fell from 19 prescriptions (3 of them intervals) to ONE — so your 07-22 VO₂
     # session was re-graded against the EASY bar (`easy`/`too_hard` instead of `interval`/`on`) and
     # leaked into the easy score. Save a NEWER plan whose road starts today, i.e. covering neither
     # date, and require both prescriptions to survive out of plan history.
@@ -9631,7 +9631,7 @@ def _stc_effort_discipline(db):
     r_pace = qread()
     if not (r_pace.get("seg_read") and r_pace.get("verdict") == "on"):
         fails.append(f"pace-fallback rep read wrong: {r_pace.get('verdict')} seg={r_pace.get('seg')}")
-    # HR-LAG case (owner's 2026-07-05 observation): a SHORT rep's within-rep HR under-reads — it
+    # HR-LAG case (my 2026-07-05 observation): a SHORT rep's within-rep HR under-reads — it
     # starts rested and peaks into the recovery — so 2-min reps with low in-rep HR but ON-target
     # pace must read 'on' via the pace anchor, never 'sandbagged' off the lagging HR.
     put_struct(150, work_pace=S.pace_zones(50.0)["interval"], rep_sec=120)
@@ -9641,7 +9641,7 @@ def _stc_effort_discipline(db):
                      f"(within-rep HR lags; pace must lead under {S.EFFORT_SEG_HR_MIN_S}s)")
     # §RD9b — A DECODE FROM A SUPERSEDED `STRUCT_VERSION` IS DISPLAYED, BUT NEVER GRADED. The
     # cached-only path hands a mismatched row back verbatim, because there is no fetch to heal it —
-    # so after the v8→v9 rep-fusion fix the owner's 4×2min session was read correctly on its own
+    # so after the v8→v9 rep-fusion fix my 4×2min session was read correctly on its own
     # tile (opening it re-classified and stored v9) while this panel, still on the v8 row, kept
     # grading it `too_hard` off the three reps v8 had found. The verdict was always dynamic; its
     # INPUT was a fossil from a version whose meaning of "a rep" had changed underneath it.
@@ -9780,7 +9780,7 @@ def _stc_error_shape():
 def _stc_accent2_fallback():
     """UX-5a → UX-5b → ratified (0.30.0) — the square-polychrome palette IS the house palette again.
 
-    The overlay came out in 0.29.0 on the owner's word and came BACK in 0.30.0 on it: the flat
+    The overlay came out in 0.29.0 on your word and came BACK in 0.30.0 on it: the flat
     single-hue dashboard read too dull. The ratify path (REVISED_PLAN Phase 2) is what shipped:
     the block is restored, DESIGN.md §2.3 carries the spec, and the shape tiles key their hue off
     the tile's data-m METRIC IDENTITY rather than :nth-child — which silently re-hued every tile
@@ -9939,8 +9939,8 @@ def _stc_copy_posture(db):
     ACWR brakes themselves are owned by det/acwr-ceiling, det/peak-acwr-floor and det/soft-ctl-floor.
       (a) the readiness HALTS are generic — the stop-symptom flag path and the §H2 deterministic note
           path BOTH still answer red+halt (semantics locked), and neither action narrates a year or a
-          person (the owner's clinical history ships to every self-hoster otherwise);
-      (b) the LLM reply schema addresses "the runner", never a gendered owner ("TO him");
+          person (your clinical history ships to every self-hoster otherwise);
+      (b) the LLM reply schema addresses "the runner", never a gendered owner ("TO you");
       (c) the dashboard's ACWR copy makes no sweet-spot / injury-risk / "safe ceiling" claim (our own
           ENGINE_SCIENCE §1: injury lives on the biomechanical axis, a load ratio cannot see it — Davis,
           Aarhus, Impellizzeri), and the regime badge names the cap it quotes: the hard-cap literal it
@@ -9981,6 +9981,43 @@ def _stc_copy_posture(db):
         fails.append(f"(c) regime badge does not print the hard cap as ACWR_HARD={S.ACWR_HARD:.2f}")
     if f"under a {S.ACWR_HARD:.2f} ceiling ({S.ACWR_SOFT:.2f} is its planning target)" not in S.UI_SOURCE:
         fails.append("(c) the ACWR tile's ceiling/target literals drifted from ACWR_HARD/ACWR_SOFT")
+    # (e) §43 EXTENDED TO THE PUBLISHED SOURCE. (a)/(b) have policed the PRODUCT COPY since 0.27.0 —
+    # "the owner's clinical history ships to every self-hoster otherwise" — but the mirror publishes
+    # the source and the docs too, and nobody had ever looked there. On 2026-08-26 that came back:
+    # the CHANGELOG narrated "the owner read his own card" and "on his live database", and the source
+    # carried ~330 more. The project's own AUTHORS.md says this work is authored by its copyright
+    # holder; comments that describe that person in the third person read as though the ASSISTANT
+    # were narrating about a distant user, which is precisely backwards. Provenance speaks in the
+    # first person ("measured on my own corpus"), anything about whoever self-hosts speaks in the
+    # second ("activity ids you have flagged"). ANTI-VACUITY (§43): the forbidden words are built by
+    # concatenation, so this function's own source can never satisfy the scan it runs.
+    third = (chr(104) + "is", chr(104) + "im", chr(104) + "e", "t" + "he owner", "owner" + chr(39) + "s")
+    # …legitimate uses, each a ROLE or an external field name rather than a person:
+    allow = ('owner": "Sparing Horse',      # Suunto's Guide payload — their field name, not ours
+             '("owner", 64)',               # …and the length limit that pins it
+             "owner-only",                  # an access class (the account holder), not a person
+             "its owner",                   # the plan explainer's prompt — generic by construction
+             "gendered owner", "owner-addressed",   # (b)'s own policy wording
+             "Private (owner)",             # README's capability table: the private INSTANCE
+             "personal = (", '_re.search(r"')      # (b)'s matcher, and this tooth's own vocabulary
+    # The PUBLISHED set, named rather than globbed: publish_mirror.sh archives TRACKED files only, so
+    # a glob would sweep in untracked working notes (the plan/review drafts) that never reach the
+    # mirror at all — and fail on documents whose whole job is to discuss the athlete. PROJECT_LOG.md
+    # and ENGINE_SCIENCE.md are tracked but stripped by EXCLUDES, so they are out too.
+    for path in list(APP_SOURCES) + ["static/app.js", "README.md", "MANUAL.md",
+                                     "CHANGELOG.md", "AUTHORS.md"]:
+        try:
+            body = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        for i, line in enumerate(body.split("\n"), 1):
+            if any(a in line for a in allow):
+                continue
+            low = line.lower()
+            hit = [w for w in third if _re.search(r"\b" + w + r"\b", low)]
+            if hit:
+                fails.append(f"(e) {path}:{i} narrates a third person {hit}: {line.strip()[:70]!r}")
+
     # (d) — raw sinks + secrets-store mode.
     if "${e}" in S.UI_SOURCE:
         fails.append("(d) a catch→innerHTML sink still interpolates the raw error (${e})")
@@ -10013,7 +10050,7 @@ def _stc_copy_posture(db):
 
 def _stc_card_truth(db):
     """§CARD — every number a week's card asserts is recomputed from the sessions listed under it.
-    The owner read "35.8 km · 5 runs" above a FOUR-run week off his own live card (2026-08-07): the
+    I read "35.8 km · 5 runs" above a FOUR-run week off my own live card (2026-08-07): the
     header printed the SKELETON's template count while the listing showed the governed lay. Three
     publishers, one had the fix (§PRO9's "honest count"), two didn't — the hand-built straddle dict
     and §PER1's race-week trim, which edits the listing and used to leave the header describing
@@ -10031,8 +10068,8 @@ def _stc_card_truth(db):
     No slack on (a): a count is exact or it is wrong.
 
     §CARD3 (2026-08-15) — the fourth publisher was TIME: a week frozen from a PRE-fix artifact rode
-    past all three fixed publishers verbatim, so the owner's original screenshot week (07-27,
-    "48.6 km · 5 runs" over a week he ran as 42.4) survived the whole §CARD campaign. Lived weeks
+    past all three fixed publishers verbatim, so your original screenshot week (07-27,
+    "48.6 km · 5 runs" over a week you ran as 42.4) survived the whole §CARD campaign. Lived weeks
     are now asserted against the LOG (header == Mon–Sun actuals, ahead settled, sessions verbatim),
     and the as-laid bar must survive in intent_runs, distinct from the actuals (the prescription
     record is history the header rewrite must never overwrite — §FORM1: provenance, not a decision).
@@ -10227,7 +10264,7 @@ def _stc_card_truth(db):
                "VALUES(?,?,?,?,?,?,?)",
                ("marathon", "Goal", (_t + timedelta(weeks=24)).isoformat(), "finish", "A",
                 "upcoming", S._now_iso()))
-    for _d, _km in (("2026-05-25", 5.0), ("2026-05-27", 6.2)):     # what he ACTUALLY ran
+    for _d, _km in (("2026-05-25", 5.0), ("2026-05-27", 6.2)):     # what I ACTUALLY ran
         _m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
                    "VALUES(?,?,?,?,?,?)", (_d, _d + "T18:00", S.RUNNING_SPORT, _km, _km * 400, 40.0))
     _foss_ss = [{"date": f"2026-05-{d:02d}", "km": 9.7, "kind": "easy"} for d in (25, 26, 28, 30)] \
@@ -10265,8 +10302,8 @@ def _stc_card_truth(db):
     return _st("det", "card-truth",
                "§CARD a week's header states what its own listing shows: runs == non-rest sessions "
                "and km == the sessions' sum, swept over every published week in both regimes with "
-               "the straddle and race-trim paths provably exercised — the owner caught '5 runs' "
-               "over a 4-run listing on his live card; §CARD3 a week fully LIVED states what "
+               "the straddle and race-trim paths provably exercised — I caught '5 runs' "
+               "over a 4-run listing on my live card; §CARD3 a week fully LIVED states what "
                "actually happened (header == the log's Mon–Sun actuals, sessions verbatim, the "
                "as-laid bar preserved in intent_runs, distinct from the actuals) — incl. a "
                "constructed pre-fix fossil carried through generate_plan",
@@ -10997,7 +11034,7 @@ def _stc_junk_floor():
 
 
 def _stc_strides_day():
-    """Strides land on the freshest-legs day (his 2026-08-19 ask): the short easy slot with the
+    """Strides land on the freshest-legs day (my 2026-08-19 ask): the short easy slot with the
     max-min day distance to every heavy session — this week's long, each quality day, and last
     week's long one slot back. The old rule rode the FIRST easy run, stacking Sun long → Mon
     strides → Tue intervals three-in-a-row. Locks: the 6-run quality week carries strides ≥2 days
@@ -11047,7 +11084,7 @@ def _stc_strides_day():
 def _stc_structure():
     """§RD — the workout-structure classifier reads a recorded pace profile back into the plan's
     vocabulary. Fixtures are synthesized 1Hz streams with deterministic jitter; the flagship case is
-    the owner's worked example VERBATIM (12min@5:50 wu · 3:00@5:10 / 1:00@6:10 / 4:00@5:05 / 1:30@
+    your worked example VERBATIM (12min@5:50 wu · 3:00@5:10 / 1:00@6:10 / 4:00@5:05 / 1:30@
     6:15 / 3:30@5:15 · 15min@6:30 cd ⇒ intervals, 3 work reps). Locks: interval/tempo/long_mp/easy/
     long shapes, jitter invariance (same verdict under a different noise seed), the GAP path (a
     constant-EFFORT run over rolling ±6% grades must read flat easy, not intervals), strides noted
@@ -11149,7 +11186,7 @@ def _stc_structure():
     expect("hilly-const-effort", synth([(3000, 380)], hilly=True), "easy", 0)  # GAP flattens hills
     # in-run strides at REALISTIC contrast (~35% over easy, cadence up ~11% — the RD_STRIDE_PEAK
     # bar exists exactly so that 10–20% easy-run texture does NOT count, and the RD_STRIDE_CAD
-    # gate so that a GPS speed spike with FLAT cadence does not either: his 2026-07-04 easy run
+    # gate so that a GPS speed spike with FLAT cadence does not either: my 2026-07-04 easy run
     # grew 4 phantom strides from wobbles at a flat 10% bar, then 4 more from GPS spikes that
     # cleared even the 22% pace bar at full stream resolution)
     st = expect("strides", synth([(1500, 385, 158), (25, 285, 176), (300, 385, 158),
@@ -11171,8 +11208,8 @@ def _stc_structure():
                 synth([(300, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 5 + [(210, 540, 110)]),
                 "strides", 0)   # ≥4 strides over a walking base ⇒ the dedicated Strides kind
     if ss:
-        # the global peak pass counts what the CHART shows (the owner's 2026-07-05 framing) — on a
-        # clean fixture that's exact, and he reads the number off the tile as ground truth
+        # the global peak pass counts what the CHART shows (my 2026-07-05 framing) — on a
+        # clean fixture that's exact, and you read the number off the tile as ground truth
         if ss.get("strides") != 5:
             fails.append(f"strides session: counted {ss.get('strides')} of 5 peaks")
         tot_s = sum(s["sec"] for s in ss["segments"])
@@ -11201,9 +11238,9 @@ def _stc_structure():
     ww = expect("wall-to-wall", synth([(1200, 300)]), "tempo", 0)
     if ww and ("no easy bracket" not in ww["summary"] or ww.get("strides")):
         fails.append(f"wall-to-wall hard read regressed: {ww['summary']} strides={ww.get('strides')}")
-    # v7 cadence-burst recovery (the owner's ground truth 2026-07-20: TEN strides on ~18s rests,
+    # v7 cadence-burst recovery (my ground truth 2026-07-20: TEN strides on ~18s rests,
     # frames counted 6 — a 36s stride cycle against the 15s grid aliases every other stride into a
-    # pace blend; the raw 1Hz cadence stream keeps ten distinct high-cadence runs; his hint).
+    # pace blend; the raw 1Hz cadence stream keeps ten distinct high-cadence runs; my hint).
     ten = expect("strides-ten-subframe-rest",
                  synth([(150, 420, 150)] + [(18, 290, 172), (18, 420, 150)] * 10
                        + [(120, 420, 150)], with_hr=True), "strides", 0)
@@ -11216,7 +11253,7 @@ def _stc_structure():
         slow = [r["pace"] for r in ten.get("stride_reps") or [] if (r.get("pace") or 0) >= 400]
         if slow:   # a rep's pace must come from its fastest touched frame, never a rest blend
             fails.append(f"sub-frame rests: rep pace from a rest frame: {slow}")
-    # FUSED cluster (the real 2026-07-05 under-count: 6 of his 11 at full streams): two strides
+    # FUSED cluster (the real 2026-07-05 under-count: 6 of my 11 at full streams): two strides
     # bridged by a quick-but-still-fast recovery form ONE wide episode — its internal dip-separated
     # peaks must each count, not be discarded with the episode
     fu = expect("strides-fused",
@@ -11225,7 +11262,7 @@ def _stc_structure():
                        (240, 540, 110)]), "strides", 0)
     if fu and fu.get("strides") != 4:
         fails.append(f"fused cluster: counted {fu.get('strides')} of 4 (2 fused + 2 apart)")
-    # SET grouping — his "5 then a longer rest then 6": a clearly longer gap splits the sets
+    # SET grouping — your "5 then a longer rest then 6": a clearly longer gap splits the sets
     ts = expect("strides-two-sets",
                 synth([(300, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 3
                       + [(120, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 3
@@ -11239,7 +11276,7 @@ def _stc_structure():
         if S.classify_structure(bad, Z).get("ok"):
             fails.append(f"{name} input classified instead of refused")
     return _st("det", "structure",
-               "§RD classifier: owner's worked example reads back verbatim (3-rep intervals + wu/cd),"
+               "§RD classifier: my worked example reads back verbatim (3-rep intervals + wu/cd),"
                " tempo/long_mp/easy/long shapes, jitter-invariant, grade-adjusted (constant-effort"
                " hills stay easy), strides noted, short/garbage refused, deterministic",
                passed=not fails, expect="every fixture shape reads back; no forced labels",
@@ -12132,7 +12169,7 @@ def _stc_acwr_agreement():
     The readiness card's rest-day line ("your load is light (ACWR 0.87)…") divides the snapshot's
     fatigue by its fitness; the Acute:chronic gauge painted Runalyze's own acuteChronicWorkloadRatio
     field — computed on another basis entirely (the schema itself warns "API mixes units!") and able
-    to sit a quarter-point away from ATL÷CTL on the SAME row (seen on the owner's NAS after the
+    to sit a quarter-point away from ATL÷CTL on the SAME row (seen on my NAS after the
     0.29.0 deploy: 0.87 vs 1.09). The gauge's own caption claims ATL ÷ CTL, so the gauge now
     divides, and the field is only the fallback for a row with no fitness to divide by.
 
@@ -12194,7 +12231,7 @@ def _stc_client_probe():
     them fails silently for as long as nobody looks. `readyProbe` read `j.verdict` / `j.readiness
     .verdict`; `/api/readiness` has always answered `{date, assessment, session}` with the verdict at
     `assessment.verdict`. It therefore reported FAIL with an empty output from 2026-06-19 until the
-    owner ran the check on the 0.28.0 box and pasted the report. Both ends are pinned here:
+    I ran the check on the 0.28.0 box and pasted the report. Both ends are pinned here:
 
       (a) the CONTRACT — /api/readiness carries assessment.verdict in the traffic-light vocabulary, on
           the private payload AND the public projection (the public box redacts the inputs, never the

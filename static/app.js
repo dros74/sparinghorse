@@ -687,7 +687,7 @@ document.addEventListener("click", e=>{ if(!e.target.closest(".rcal-day")) rcalC
 
 // ── Workout route map (private only) ────────────────────────────────────────
 // Leaflet is loaded lazily from a CDN and ONLY on the private instance — the public read-only
-// container never fetches it, and its /map endpoint 403s, because the routes reveal where the owner
+// container never fetches it, and its /map endpoint 403s, because the routes reveal where you
 // lives (the whole reason this feature is private). Falls back to a clean empty state with no GPS.
 let LEAFLET_READY=null;
 function ensureLeaflet(){
@@ -887,7 +887,7 @@ async function loadReadiness(){
 // Long-run aerobic decoupling (the pace:HR drift, first→second half) as the resilience proxy,
 // displayed MEASURE-FIRST: tracked + trended, never governing. PRIVATE-only (HR-adjacent) — the
 // public shell removes the card. The §55d caveats shape the chart: every bar carries its distance
-// in the tooltip (on his corpus longer runs decouple LESS — duration must stay visible), and the
+// in the tooltip (on my corpus longer runs decouple LESS — duration must stay visible), and the
 // engine itself voids the trend when the recent-vs-prior distance mix shifts.
 async function loadEfficiency(){
   const body=$("#effbody"); if(!body) return;              // the card is removed on the public box
@@ -897,7 +897,7 @@ async function loadEfficiency(){
 // §EF — TWO panels, one shared time axis, each with its OWN vertical scale, drawn one above the
 // other and never overlaid. A twin-axis overlay is the classic way to make two unrelated series
 // look like they explain each other, and that is exactly the open question here: heat depresses
-// efficiency, and his cool runs are also his most recent and fittest. Stacked panels let the eye
+// efficiency, and my cool runs are also my most recent and fittest. Stacked panels let the eye
 // compare them without the chart having asserted an answer. Both SVGs stretch and NEITHER letters
 // itself — every value is HTML around the plot (UX-8, det/axis-legibility).
 function effPlot(pts, key, cls, fit){
@@ -1312,7 +1312,7 @@ function wireObjActions(){
         headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
       const d=await r.json();
       if(!d.ok){ interp.textContent="⚠ "+(d.error||"couldn't parse"); interp.className="nlinterp err"; return; }
-      // fill the structured form — the owner reviews, then clicks Add objective
+      // fill the structured form — you review, then click Add objective
       $("#ao_label").value=d.label||""; $("#ao_type").value=d.type||"marathon";
       $("#ao_date").value=d.date||""; $("#ao_pri").value=d.priority||"A";
       $("#ao_target").value=d.target||"finish";
@@ -1772,7 +1772,7 @@ function renderPlan(p){
   // Today's measured shape → the race-day projection, with the gain named. The runway curve is not
   // lost — it moves into the hover, labelled as the what-if it always was.
   const FT = p.feasibility && p.feasibility.finish_time;
-  // §FT3 — the RANGE is the headline (owner-decided: a point invites anchoring on false precision);
+  // §FT3 — the RANGE is the headline (my decision: a point invites anchoring on false precision);
   // the median rides as the trend detail.
   const FTB = FT && FT.band, FTT = FT && FT.today;
   // §FT7 — a plan SAVED by an EARLIER engine renders through today's UI: /api/plan serves the last
@@ -2234,7 +2234,7 @@ async function loadEffort(){
       `<th>GAP ${qhint("Grade Adjusted Pace — pace corrected for hills so efforts compare fairly across terrain (from Runalyze).")}</th>`+
       `<th>vs easy ${qhint("Whether the grade-adjusted pace stayed at or below the easy-pace ceiling. The public read judges on pace; heart rate stays private.")}</th>`;
     capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed at easy pace (≤ <b>${esc(d.easy_pace_ceiling||"—")}</b>/km, grade-adjusted).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran quicker than easy.`:""}`;
-    note=`Judged on grade-adjusted pace, not heart rate (HR stays private). Pace is a rough proxy — a run that looks easy on pace can still have been hard on heart rate (heat, hills, fatigue it can't see), so a verdict here can differ from the owner's HR-led console on the same run.`;
+    note=`Judged on grade-adjusted pace, not heart rate (HR stays private). Pace is a rough proxy — a run that looks easy on pace can still have been hard on heart rate (heat, hills, fatigue it can't see), so a verdict here can differ from the private HR-led console on the same run.`;
   }else{
     // private read — full HR-led detail
     rows=(d.runs||[]).map(r=>{
@@ -2807,7 +2807,7 @@ async function saveSettings(e){
 // so the field is always empty and shows status only. Private console only (#secretsBox is removed on
 // the public view). Saving applies live — no .env edit, no restart.
 // §SG — `justSaved` is the key whose field should come back EMPTY; every other field keeps whatever
-// the owner had typed into it. Re-rendering the whole block used to wipe unsaved siblings, which with
+// you had typed into it. Re-rendering the whole block used to wipe unsaved siblings, which with
 // five keys means pasting three Suunto credentials and losing two of them to the first Save.
 async function loadSecrets(probe, justSaved){
   const host=$("#secretsBox"); if(!host) return;
