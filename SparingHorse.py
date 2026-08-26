@@ -1123,7 +1123,7 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
             "stride_reps": sinfo.get("reps") or [], "confidence": conf}
 
 
-def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S):
+def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S, stale_ok=True):
     """§RD — the current-version detected structure for an activity: from structcache, else (when
     `fetch` allows) classified from freshly-pulled streams + stored. Mirrors _profile_cached:
     re-classifies on a VERSION mismatch, and on a fetch failure returns (stale_or_None, err).
@@ -1131,7 +1131,18 @@ def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S):
     bulk read (a panel load must never fan out into stream fetches). Tolerates a DB without the
     structcache table (minimal det fixtures) — absent reads as unclassified.
     §SJ: `min_s` < RD_MIN_RUN_S (a grouped part) also RETRIES a cached refusal — a short part
-    refused as a lone run may be readable under the group's relaxed floor."""
+    refused as a lone run may be readable under the group's relaxed floor.
+
+    §RD9b — `stale_ok=False` refuses a row from a SUPERSEDED `STRUCT_VERSION` in the cached-only
+    path, where the mismatch would otherwise be served verbatim (there is no fetch to heal it). The
+    version exists to say the decoder's semantics MOVED, so a caller that turns the structure into a
+    JUDGEMENT must not read one written under the old ones: after the v8→v9 fix the owner's 4×2min
+    session had been re-read correctly on its own tile, while the effort panel — cached-only, and
+    still holding the v8 row — went on grading it `too_hard` off the three reps v8 had found
+    (2026-08-26, "is it dynamic?"). DISPLAY keeps the default: a slightly-old decode is descriptive,
+    it self-heals the moment the private box views or re-syncs the run, and the public container
+    shares this DB but can never fetch — blanking it there would strand the read-back with nothing
+    to restore it."""
     try:
         row = db.execute("SELECT structure FROM structcache WHERE activity_id=?", (aid,)).fetchone()
     except sqlite3.OperationalError:
@@ -1144,6 +1155,8 @@ def _structure_cached(db, aid, date_iso=None, fetch=True, min_s=RD_MIN_RUN_S):
         if cached.get("ok") or (min_s >= RD_MIN_RUN_S and cached.get("streams_final")):
             return cached, None
     if not fetch:
+        if not stale_ok and cached and cached.get("v") != STRUCT_VERSION:
+            return None, None          # §RD9b — superseded semantics are not evidence for a grade
         return cached, None
     try:
         act = activity_details(aid)
@@ -3317,7 +3330,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             # verdict while a read body exists (it converges to exclusion once read anyway).
             parts = []
             for p in g:
-                st, _e = _structure_cached(db, p["id"], fetch=False)
+                st, _e = _structure_cached(db, p["id"], fetch=False, stale_ok=False)   # §RD9b
                 parts.append((p, st.get("kind") if (st and st.get("ok")) else None))
             body = ([p for p, pk in parts if pk in AEROBIC_KINDS]
                     or [p for p, pk in parts if pk is None] or [p for p, _ in parts])
@@ -3375,7 +3388,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             if kind not in AEROBIC_KINDS:
                 works = []                                # §SJ — reps live in whichever PART ran them
                 for p in g:
-                    stp, _e = _structure_cached(db, p["id"], fetch=False)
+                    stp, _e = _structure_cached(db, p["id"], fetch=False, stale_ok=False)   # §RD9b
                     if stp and stp.get("ok"):
                         works += [s for s in stp.get("segments", []) if s.get("role") == "work"]
                 if works:

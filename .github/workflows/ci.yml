@@ -96,7 +96,13 @@ jobs:
       - run: pip install -r requirements.txt
       - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          # The Node the BROWSER TESTS run on — a different axis from the `node24` runtime the
+          # actions themselves use, and not what the deprecation notice was about. 20 went
+          # end-of-life in April 2026, so the gate was driving Playwright on an unsupported
+          # runtime; 24 is the active LTS (until 2028-04-30) and 22 is already in maintenance.
+          # It also puts the tests and the actions on the same major, which is one less thing
+          # to reason about the next time a runtime moves under us.
+          node-version: '24'
       - name: Install Playwright (chromium only)
         run: |
           npm install --no-save playwright

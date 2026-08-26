@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.44.5] - 2026-08-26
+
+### Fixed
+
+- **A read the decoder had superseded was still being used to grade a session.** After 0.44.3 the
+  owner opened his 25 Aug intervals: the read-back was correct — 4× 2min — while the Effort
+  Discipline panel a few centimetres away still called it *too hard*. He asked the right question:
+  *"did that classification happen on the previous read back and won't change, or is it dynamic?"*
+
+  It was always dynamic — `/api/effort-discipline` has no response cache and recomputes every grade
+  on every load. What was stale was its **input**. The monitor reads structures cached-only
+  (`fetch=False`) by design: it grades a dozen runs at once, and letting a panel load fan out into a
+  dozen stream fetches is exactly the cost that rule exists to prevent. But on a `STRUCT_VERSION`
+  mismatch the cached-only path handed the old row back **verbatim** — there is no fetch to heal it —
+  so the panel went on grading the session off the three reps v8 had found, at a work pace biased
+  fast by the rep v8 had lost. Opening the run is what re-classified and stored v9; the panel had
+  been rendered before that write.
+
+  A version stamp is the decoder saying *its semantics moved*. So a caller that turns a structure
+  into a **judgement** may no longer read one written under the old ones: the two cached-only reads
+  in the effort monitor now pass `stale_ok=False` and fall back to the whole-run read — a verdict it
+  can justify, at **low** confidence, with no per-rep claim attached. It stops asserting a reading it
+  no longer has.
+
+  **Display deliberately keeps the old behaviour.** A slightly-old decode is descriptive rather than
+  a judgement; it self-heals the moment the private box views or re-syncs the run; and the public
+  container shares this same database while never being able to fetch, so blanking the read-back
+  there would strand it with nothing that could ever restore it. `stale_ok` therefore defaults to
+  true, and only the grading path opts out.
+
+  Four teeth added to `det/effort-discipline`, on the same fixture as the per-rep read they qualify:
+  the identical cached row one version stamp apart must grade sharply at the current version and not
+  at all at the superseded one, the display path must still receive it, and a current-version row
+  must survive the same flag — otherwise a fix that simply stopped trusting the cache would pass
+  while silently killing the per-rep read for every run. Both halves of the wiring reverted and seen
+  to fail.
+
 ## [0.44.4] - 2026-08-26
 
 ### Fixed

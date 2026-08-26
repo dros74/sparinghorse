@@ -9559,13 +9559,14 @@ def _stc_effort_discipline(db):
     # fall back to pace vs the zone target. The easy run keeps the aerobic path (never seg-graded).
     mem.execute("CREATE TABLE structcache(activity_id INTEGER PRIMARY KEY, structure TEXT, cached_at TEXT)")
 
-    def put_struct(work_hr, work_pace=295, rep_sec=180):
+    def put_struct(work_hr, work_pace=295, rep_sec=180, v=None):
         segs = [{"role": "warmup", "zone": "easy", "sec": 600, "km": 1.7, "pace": 350, "hr": 140}] + \
                [{"role": "work", "zone": "interval", "sec": rep_sec, "km": 0.6, "pace": work_pace,
                  "hr": work_hr} for _ in range(3)] + \
                [{"role": "cooldown", "zone": "easy", "sec": 600, "km": 1.6, "pace": 360, "hr": 138}]
         mem.execute("INSERT OR REPLACE INTO structcache VALUES(?,?,?)",
-                    (1, S.json.dumps({"v": S.STRUCT_VERSION, "ok": True, "kind": "interval",
+                    (1, S.json.dumps({"v": S.STRUCT_VERSION if v is None else v,
+                                    "ok": True, "kind": "interval",
                                     "segments": segs}), "now"))
         mem.commit()
 
@@ -9593,6 +9594,40 @@ def _stc_effort_discipline(db):
     if not (r_short.get("seg_read") and r_short.get("verdict") == "on"):
         fails.append(f"short-rep HR-lag mis-judged: {r_short.get('verdict')} "
                      f"(within-rep HR lags; pace must lead under {S.EFFORT_SEG_HR_MIN_S}s)")
+    # §RD9b — A DECODE FROM A SUPERSEDED `STRUCT_VERSION` IS DISPLAYED, BUT NEVER GRADED. The
+    # cached-only path hands a mismatched row back verbatim, because there is no fetch to heal it —
+    # so after the v8→v9 rep-fusion fix the owner's 4×2min session was read correctly on its own
+    # tile (opening it re-classified and stored v9) while this panel, still on the v8 row, kept
+    # grading it `too_hard` off the three reps v8 had found. The verdict was always dynamic; its
+    # INPUT was a fossil from a version whose meaning of "a rep" had changed underneath it.
+    # Same row, same call, one version stamp apart:
+    put_struct(140)                                        # current version ⇒ graded, and sharply
+    if qread().get("verdict") != "too_easy":
+        fails.append("fixture: the current-version row no longer grades too_easy, so the §RD9b "
+                     "teeth below cannot show a difference")
+    put_struct(140, v=S.STRUCT_VERSION - 1)                # …the identical read, one version back
+    r_stale = qread()
+    if r_stale.get("seg_read"):
+        fails.append(f"§RD9b a superseded decode was GRADED: seg={r_stale.get('seg')} — the version "
+                     f"exists to say the semantics moved, so it is not evidence for a verdict")
+    if r_stale.get("verdict") == "too_easy":
+        fails.append("§RD9b the per-rep verdict survived the version bump that invalidated it")
+    if r_stale.get("confidence") != "low":
+        fails.append(f"§RD9b fell back but kept confidence {r_stale.get('confidence')!r} — a "
+                     f"whole-run read that lost its rep detail must say so")
+    # …and DISPLAY still gets it: the public container shares this DB and can never re-fetch, so
+    # blanking the read-back there would strand it with nothing able to restore it.
+    shown, _ = S._structure_cached(mem, 1, fetch=False)
+    if not (shown and shown.get("v") == S.STRUCT_VERSION - 1):
+        fails.append(f"§RD9b the DISPLAY path lost the cached decode ({shown!r}) — only the grade "
+                     f"refuses a superseded row")
+    # …and the flag tests the VERSION, not the cache: a current row must survive the same call, or
+    # the per-rep read is silently dead for every run.
+    put_struct(175)
+    cur, _ = S._structure_cached(mem, 1, fetch=False, stale_ok=False)
+    if not (cur and cur.get("v") == S.STRUCT_VERSION):
+        fails.append(f"§RD9b stale_ok=False rejected a CURRENT-version row ({cur!r}) — the rule is "
+                     f"'superseded', not 'cached'")
     mem.execute("DELETE FROM structcache")
     mem.commit()
     # Nearest-prescription matching (§6m follow-up): the pure matcher is the contract effort_discipline
