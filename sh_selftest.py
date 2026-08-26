@@ -10018,6 +10018,49 @@ def _stc_copy_posture(db):
             if hit:
                 fails.append(f"(e) {path}:{i} narrates a third person {hit}: {line.strip()[:70]!r}")
 
+    # (f) DIRECT ADDRESS BELONGS TO THE PRODUCT, NOT TO THE SOURCE. A comment is read by whoever
+    # opens the file, so a second-person pronoun there is ambiguous — it can as easily mean the
+    # developer holding the source as the person training. Product copy has the opposite property:
+    # it reaches exactly one reader, and speaking to them directly is the whole point. So comments
+    # and docstrings name the ROLE ("the athlete" for training, "the user" for operating the app),
+    # while UI strings, settings help, LLM prompts and the docs keep their direct address. This is
+    # the ambiguity half of the same policy (e) enforces for the third person.
+    # A comment QUOTING product copy is reporting it, not adopting it, so quoted spans are exempt —
+    # DOUBLE and typographic quotes only: a straight apostrophe would swallow half a sentence and
+    # quietly hide a real violation, which is the wrong way for a gate to fail.
+    # ANTI-VACUITY (§43), as in (e): the pronoun is assembled by concatenation, so this block's own
+    # source can never satisfy the scan it runs.
+    import io as _io, tokenize as _tok
+    addr = _re.compile(r"\b" + "yo" + "ur?" + r"\b", _re.I)
+    quoted = _re.compile('"[^"]*"|“[^”]*”|‘[^’]*’')
+
+    def _addr_flag(path, lineno, text):
+        if addr.search(quoted.sub("", text)):
+            fails.append(f"(f) {path}:{lineno} addresses a reader directly in a comment — name the "
+                         f"role instead: {text.strip()[:64]!r}")
+
+    TRIPLES = ('"' * 3, "'" * 3)
+    for path in APP_SOURCES:
+        try:
+            body = open(path, encoding="utf-8").read()
+            toks = list(_tok.generate_tokens(_io.StringIO(body).readline))
+        except (OSError, _tok.TokenError, IndentationError, SyntaxError):
+            continue
+        for t in toks:
+            if t.type == _tok.COMMENT:
+                _addr_flag(path, t.start[0], t.string)
+            elif t.type == _tok.STRING and t.string[:3] in TRIPLES:
+                for k, ln in enumerate(t.string[3:-3].split("\n")):
+                    _addr_flag(path, t.start[0] + k, ln)
+    try:
+        js = open("static/app.js", encoding="utf-8").read().split("\n")
+    except OSError:
+        js = []
+    for i, line in enumerate(js, 1):
+        st = line.lstrip()
+        if st.startswith("//") or st.startswith("*"):
+            _addr_flag("static/app.js", i, line)
+
     # (d) — raw sinks + secrets-store mode.
     if "${e}" in S.UI_SOURCE:
         fails.append("(d) a catch→innerHTML sink still interpolates the raw error (${e})")
@@ -10043,7 +10086,10 @@ def _stc_copy_posture(db):
                "product words match the engine and narrate nobody's history: readiness halts generic "
                "(red+halt kept), reply schema says 'the runner', SPA makes no sweet-spot/injury-risk/"
                "safe-ceiling claim and prints the hard cap = ACWR_HARD, catch sinks + self-test row "
-               "escaped, secrets store 0600",
+               "escaped, secrets store 0600; and the same posture reaches the PUBLISHED SOURCE "
+               "the mirror ships — no third-person narration of one person anywhere (e), and no "
+               "direct address in a comment or docstring, where it cannot say whether it means "
+               "the developer or the athlete (f)",
                passed=not fails, expect="no personal/overclaiming product strings; hygiene in place",
                got={"violations": fails or "none"})
 
