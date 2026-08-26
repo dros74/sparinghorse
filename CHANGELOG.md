@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scenario that takes the no-snapshot path. **Measured before accepting it**, because the headline
   number moved the alarming way: week 1's reported `peak_acwr` goes 2.635 → 3.334 while its
   prescribed distance does not move at all (10.1 km either way), and the whole 21-week road changes
-  by **+1.2 km — 0.15%, rounding**. The ratio rose because the seed now states his acute load
+  by **+1.2 km — 0.15%, rounding**. The ratio rose because the seed now states the acute load
   honestly against a near-zero cold-start chronic base, not because the governor loosened; on a cold
   start the ACWR ceiling cannot bind at CTL ≈ 4 and the §PER1 floors own the verdict, which is why
   the *distance* is unchanged. Every later week reads a marginally **lower** ACWR than before.
@@ -51,12 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A read the decoder had superseded was still being used to grade a session.** After 0.44.3 the
-  owner opened his 25 Aug intervals: the read-back was correct — 4× 2min — while the Effort
-  Discipline panel a few centimetres away still called it *too hard*. He asked the right question:
-  *"did that classification happen on the previous read back and won't change, or is it dynamic?"*
+- **A read the decoder had superseded was still being used to grade a session.** After 0.44.3 an
+  interval session showed the two halves of one page disagreeing: the read-back was correct —
+  4× 2min — while the Effort Discipline panel a few centimetres away still called it *too hard*.
+  Which raises the right question: is that classification a stored verdict from the previous
+  read-back, or is it recomputed?
 
-  It was always dynamic — `/api/effort-discipline` has no response cache and recomputes every grade
+  It is always recomputed — `/api/effort-discipline` has no response cache and recomputes every grade
   on every load. What was stale was its **input**. The monitor reads structures cached-only
   (`fetch=False`) by design: it grades a dozen runs at once, and letting a panel load fan out into a
   dozen stream fetches is exactly the cost that rule exists to prevent. But on a `STRUCT_VERSION`
@@ -94,7 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose training had not been logged yet arrived as a day with *no* training, and the EWMA charged it
   a full day of decay before it had happened.
 
-  On his live database the same curve read **66.6** at the end of the 25th and **63.5** on the
+  On a live database the same curve read **66.6** at the end of the 25th and **63.5** on the
   morning of the 26th — a drop of 3.1, exactly `66.6 × (1 − 2/43)`, pure phantom rest. With a
   2% on-track dead band, that put every *morning* regeneration ~4.5% below projection (ease the ride)
   and every *evening* one on track (full ceiling). Same athlete, same day, same data.
@@ -131,9 +132,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **A rep is a contiguous stretch of work running, not a single block.** Segmentation cuts on pace
   CONTRAST, so a rep he did not hold perfectly flat splits in two — and each fragment was then
-  measured against the ~2min rep floor *alone*. His rep 1 went out hard and settled (45s @4:51 +
+  measured against the ~2min rep floor *alone*. In the reported session rep 1 went out hard and
+  settled (45s @4:51 +
   90s @5:21, a 10% shift, one frame over the sustain bar); both halves fell under the floor, both
-  were re-labelled *warm-up*, and a rep he had actually run vanished from the read. Adjacent fast
+  were re-labelled *warm-up*, and a rep that had actually been run vanished from the read. Adjacent fast
   blocks carry no recovery between them, so they are one effort by construction: they are now fused
   first and measured after, at the honest time-over-distance pace.
 
@@ -147,11 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   warm-up — so dropping it biased the effort monitor's work pace fast: **4:53/km instead of 4:57**,
   against a 5:05 interval target with a ±4% tolerance. The session was graded `too_hard` by
   **0.0001 in log space, about 0.04 s/km**. With all four reps counted it reads `on` — which is what
-  he ran.
+  the session actually was.
 
   `STRUCT_VERSION` 8 → 9, so cached reads re-classify lazily on first view.
 
-  **Impact measured, not assumed.** His real streams were re-fetched and v8 A/B'd against v9 on
+  **Impact measured, not assumed.** Real streams were re-fetched and v8 A/B'd against v9 on
   identical inputs across 14 activities — every quality session, every strides session and the
   easy-runs-with-strides in the recent corpus. **Exactly one read changes: the broken one.** ⚠ A
   first pass at that sweep reported six changes and every one was the harness — today's pace zones
@@ -160,7 +162,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `det/rd-double-count` builds 1Hz streams from a plan of legs with deterministic jitter (a flat
   synthetic pace chart has no peaks at all, so the stride tooth could never have bitten without
-  texture) and reproduces his session verbatim: pre-fix it returns 3 reps / 4 strides. Six teeth,
+  texture) and reproduces that session verbatim: pre-fix it returns 3 reps / 4 strides. Six teeth,
   each half of the fix reverted and seen to fail independently — including the work pace coming back
   as 293 against the session's real 297. Three of the six exist to stop the fix over-reaching: a
   genuine strides session still counts its strides, fusion never crosses a recovery (2×5min with a
@@ -173,12 +175,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A day already run kept changing what it had been asked to do.** The owner read his own card and
-  asked the right question: *"Are we changing the past now?"* His Monday 24 Aug was prescribed
-  **8.2 km** on Monday; by Tuesday the same day read **11.1 km**, and by Wednesday **11.5 km**. The
-  plan history holds the whole trail — 7.4 → 8.1 → 8.2 → 11.1 → 11.5 — and none of it was a
+- **A day already run kept changing what it had been asked to do.** Reported from a live plan card:
+  a Monday prescribed **8.2 km** on Monday read **11.1 km** by Tuesday and **11.5 km** by Wednesday.
+  Plan history holds the whole trail — 7.4 → 8.1 → 8.2 → 11.1 → 11.5 — and none of it was a
   re-anchor or a regime change: the week's intent is legitimately recomputed every day against fresh
-  CTL/ATL, and the days he had *already run* were being recomputed along with it.
+  CTL/ATL, and the days *already run* were being recomputed along with it.
 
   The straddling week has to be re-laid on every regeneration — the remainder must be re-governed —
   and the elapsed slice of that re-lay was published as the day's prescription. `generate_block`'s
@@ -191,7 +192,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   day itself carries it in the governed remainder — which means a re-laid value can never become the
   source. And once the day passes, no new plan can qualify: the answer is frozen by construction
   rather than by a flag. A day the road covered but prescribed **nothing** for stays empty, so a
-  rest day he was told to take cannot gain a session after the fact. A day no saved plan reaches
+  prescribed rest day cannot gain a session after the fact. A day no saved plan reaches
   (fresh or rebuilt DB) falls back to the re-lay, so this degrades to the old behaviour rather than
   to a hole.
 
@@ -333,7 +334,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runner's data. The card says so in as many words, and carries the correlation as a number.
   Aerobic runs only — average heart rate at or below the top of Z2, using the app's own
   LTHR-anchored zones. Mixing an all-out 5k with an easy hour makes the trend read the training mix
-  rather than the athlete: on the owner's corpus that alone moved the fit from r 0.40 to r 0.78.
+  rather than the athlete: on the calibration corpus that alone moved the fit from r 0.40 to r 0.78.
   Private-only, like durability — it is heart-rate data. Measure-first: shown and trended, governing
   nothing.
 
@@ -382,8 +383,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   may not add a single metre. Every other brake is untouched.
   ⚠ The cost is time on feet, and it is deliberate: 32 km at an easy pace is about 3h36, past the
   2:30–3:00 duration cross-check the doctrine also carries, and the injury evidence behind the
-  ladder is specifically about the longest run. Recorded as the owner's call, with the simulated
-  ladder in front of him, in the calibration inventory.
+  ladder is specifically about the longest run. Recorded as a deliberate operator decision, with
+  the simulated ladder alongside it, in the calibration inventory.
 - **The scorecard says which half was wrong.** The engine has been grading its own four-week fitness
   forecasts since 0.37.0, and every settled forecast so far came in low. That single number fused
   two very different failures: a model whose physics is wrong, and a plan the runner did not run.
@@ -842,7 +843,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Away days no longer reach the public view — on any phase, through any payload.** The public plan
   strip covered the four classic phases only, so a re-base week or a multi-race chain segment kept its
   away dates; and the public training log (`/api/log`) spread the same week records whole and was never
-  stripped at all — a real away date of the owner's was served there for the week it mattered. The
+  stripped at all — a real away date was served there for the week it mattered. The
   strip now walks every record at any depth and runs on the plan *and* the log; the self-test drives
   both endpoints for real instead of checking a fixture. Found by an external review (Gemini 3.1 Pro),
   widened in verification.
@@ -988,7 +989,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Out-running the plan no longer shrinks the current week's headline.** The week in progress
   summed its *prescribed* elapsed days plus the remaining prescription — so every kilometre you ran
   beyond a day's prescription made the week's total *smaller*, and a well-run week could read below
-  a recovery week (the owner's case: the card said 35.8 km while the week was really 29.1 already
+  a recovery week (the reported case: the card said 35.8 km while the week was really 29.1 already
   run + 11.3 still ahead = 40.4, above the 38.3 km down week it appeared to sit under). The current
   week's header now counts days you have already run at their real logged distance and days ahead at
   their prescription, shows the split ("29.1 run + 11.3 ahead"), and a same-evening replan never
@@ -1876,13 +1877,13 @@ stops a cheerful check-in from slowing your graduation.
   which no longer costs anything. Locked into the regime-gate self-test with both cases.
 
 ### Changed
-- **Biomechanical damage weights calibrated to the owner's own history.** The eq_km damage-per-km
+- **Biomechanical damage weights calibrated against a real training history.** The eq_km damage-per-km
   multipliers shipped in 0.8.0 as a literature starting point, with the promise they'd be tuned to real
   data before hardening. A full-history replay (4.7 years, ~1,100 runs, zones tracking fitness at the
   time) kept its promise pointing the other way: the one week in the whole record where a fast-load spike
   coincided with an escalating overuse symptom is caught by this axis (and only this axis — volume
   brakes pass it), but the literature weights would also have falsely eased seven quality weeks the
-  owner demonstrably absorbed at his fittest. The weights are now softened (marathon ×1.4, threshold
+  corpus demonstrably absorbed at peak fitness. The weights are now softened (marathon ×1.4, threshold
   ×2.5, interval ×3.5) — the true catch is kept, false brakes on proven-absorbable training drop by
   more than half, and the jump threshold is unchanged. Harsher weights were strictly worse on the same
   data. With a single true positive on record this remains a false-positive-rate calibration, not a

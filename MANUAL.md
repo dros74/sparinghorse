@@ -21,13 +21,14 @@ one-paragraph pitch, the feature list and the public-vs-private capability matri
 5. [Setting objectives](#5-setting-objectives)
 6. [Reading the dashboard, panel by panel](#6-reading-the-dashboard-panel-by-panel)
 7. [The AI layer](#7-the-ai-layer)
-8. [Day-to-day and week-to-week](#8-day-to-day-and-week-to-week)
-9. [Easing, medical holds and adjustments](#9-easing-medical-holds-and-adjustments)
-10. [The privacy model](#10-the-privacy-model)
-11. [Settings and secrets](#11-settings-and-secrets)
-12. [Backing up your data](#12-backing-up-your-data)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Glossary](#14-glossary)
+8. [Sending the plan to a Suunto watch (optional)](#8-sending-the-plan-to-a-suunto-watch-optional)
+9. [Day-to-day and week-to-week](#9-day-to-day-and-week-to-week)
+10. [Easing, medical holds and adjustments](#10-easing-medical-holds-and-adjustments)
+11. [The privacy model](#11-the-privacy-model)
+12. [Settings and secrets](#12-settings-and-secrets)
+13. [Backing up your data](#13-backing-up-your-data)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Glossary](#15-glossary)
 
 ---
 
@@ -81,7 +82,7 @@ layer (optional) only narrates and parses — it never overrides the determinist
 - **Anthropic API key** *(optional)* — enables the natural-language layer. Leave it blank and every AI
   feature stays dormant; the deterministic engine is unaffected.
 
-You can supply both **in the app's Settings window** (recommended — see [§11](#11-settings-and-secrets)); no
+You can supply both **in the app's Settings window** (recommended — see [§12](#12-settings-and-secrets)); no
 file editing is required for day-to-day use.
 
 ### Run locally
@@ -104,7 +105,7 @@ file editing is required for day-to-day use.
 
 **Why two containers and not one with a toggle?** The public container literally has no token and a
 query-only DB connection, so it *cannot* sync, write, or call the AI even if it wanted to. The split is the
-security boundary; see [§10](#10-the-privacy-model).
+security boundary; see [§11](#11-the-privacy-model).
 
 ### Install it as an app (PWA)
 
@@ -122,7 +123,7 @@ iOS the home-screen icon is lower-fidelity (Safari doesn't render the SVG app ic
 On a fresh database the private dashboard shows a three-step guided card. In order:
 
 1. **Connect Runalyze.** Open **Settings → Connections & keys** and paste your Personal API token. (It is
-   stored in a private-only secrets store, never the shared DB — see [§11](#11-settings-and-secrets).)
+   stored in a private-only secrets store, never the shared DB — see [§12](#12-settings-and-secrets).)
 2. **Pull your history.** Hit **Sync now**, then **Backfill all** once to load your full activity history.
    The first backfill can take a minute or two depending on how many years you have.
 3. **Add your first race.** Open the **Objectives** panel and add a goal race (label, date, type, target,
@@ -405,6 +406,26 @@ distance, so compare like distances, and the trend word voids itself when your l
 is **measure-first**: displayed and trended, never feeding the plan. It is HR-derived, so the card is
 **private-only** and never appears on the public box.
 
+### Aerobic efficiency
+Under the readiness cards, a full-width chart plots **speed per heartbeat** — metres per minute per
+bpm — one point per run over the last 180 days, with a trend line. It is the least model-dependent
+read the app holds: the same pace at a lower heart rate *is* the adaptation, and unlike CTL nothing
+has to be inferred — it comes straight off the watch.
+
+Only **aerobic** runs are plotted (average HR at or below the top of Z2). That filter is the whole
+trick: mixing an all-out 5k with an easy hour makes the line read your training *mix* rather than
+your fitness.
+
+**Temperature sits in its own panel below**, never subtracted from the efficiency figure and never
+plotted against the same axis. Heat genuinely depresses efficiency, but cool-weather runs also tend
+to be the most recent ones — so in any rebuild the two are confounded exactly where the trend looks
+most flattering. The card publishes both series and the correlation between them **as a number**,
+and corrects for nothing, because the size of that correction is not settled on one runner's data.
+A chart that quietly applied it would be asserting a finding the evidence has not made.
+
+Efficiency is **measure-first**: shown and trended, governing no part of the plan. HR-derived, so
+the card is **private-only**.
+
 ### Latest running activity + route map
 The most recent **running** activity (trail and treadmill count), with a per-point trace (pace / HR / cadence
 / elevation) and a route map. The **map is private-only** (location privacy). If the most recent activity is
@@ -443,7 +464,39 @@ out of a red/halt. Blank key = every one of these is dormant and the determinist
 
 ---
 
-## 8. Day-to-day and week-to-week
+## 8. Sending the plan to a Suunto watch (optional)
+
+The plan can be pushed to a connected Suunto account as **Guides**, so the next week's sessions are
+on your wrist instead of on a screen at home. Entirely optional — the app is complete without it —
+and **private container only**.
+
+**Setup.** Register an OAuth app at `apizone.suunto.com` and put its three values into **Settings →
+Connections & keys**: *client id*, *client secret* and *subscription key*. Then press **Connect** and
+approve the OAuth prompt. Settings shows whether the account is configured and connected;
+**Disconnect** forgets the user tokens and leaves the app credentials in place.
+
+**What gets pushed.** The next **7 days** of the plan (today inclusive), one guide per planned day,
+re-pushed nightly. It is idempotent: each guide carries an external id, so a re-plan updates the
+existing entries rather than duplicating them, and a cleanup pass deletes the ones the re-plan
+superseded — a changed session kind, a moved run, a day now in the past. The watch ends up with one
+guide per planned day and nothing behind today. There is also a **push now** button for when you
+have just re-planned and don't want to wait for the nightly run.
+
+**Rebuild.** A plain push *updates* a guide, and a watch that has already synced will not re-download
+an updated record — so if you deleted a guide off the wrist, updating it never brings it back.
+**Rebuild** re-creates the window under fresh ids, which is the only thing that does. Use it when
+guides are missing from the watch but the app says they were pushed.
+
+⚠ **Where the instructions actually appear.** A guide's countdown, pace and HR targets live on the
+SuuntoPlus display, which is *a screen of its own* — on a Race S you reach it by pressing the crown
+mid-exercise, and the watch never switches to it for you. The only part that arrives on whatever
+screen you happen to be looking at is the short **popup at each step boundary**, so that is where
+the app puts the step's essentials. If you glance down at a beep and see nothing useful, you are on
+a different screen, not looking at a broken guide.
+
+---
+
+## 9. Day-to-day and week-to-week
 
 - **Daily:** glance at readiness before a hard session. Log nothing manually — your runs flow in from
   Runalyze on the next sync and attach themselves to the matching prescribed session.
@@ -457,7 +510,7 @@ out of a red/halt. Blank key = every one of these is dormant and the determinist
 
 ---
 
-## 9. Easing, medical holds and adjustments
+## 10. Easing, medical holds and adjustments
 
 - A **qualitative check-in** ("legs flat", "easy week, travelling") applies a *clamped* load adjustment for a
   bounded window — the engine eases volume, never raises it from a complaint.
@@ -477,7 +530,7 @@ out of a red/halt. Blank key = every one of these is dormant and the determinist
 
 ---
 
-## 10. The privacy model
+## 11. The privacy model
 
 The two containers **share one `./data` DB**, so the hard rule is: **anything written to the shared DB is
 readable by the public container.** Sparing Horse is built around that constraint:
@@ -502,11 +555,13 @@ The decision line: *training shape + plan* can be public; *medical / location / 
 
 ---
 
-## 11. Settings and secrets
+## 12. Settings and secrets
 
 The **Settings** window (private container only) is where you configure the app without editing files:
 
-- **Connections & keys** — set your **Runalyze token** and (optional) **Claude API key** here. They are
+- **Connections & keys** — set your **Runalyze token**, (optional) **Claude API key**, and — if you
+  want the plan on your wrist ([§8](#8-sending-the-plan-to-a-suunto-watch-optional)) — the three
+  **Suunto** values (client id, client secret, subscription key) plus the **Connect** button. They are
   written to the private-only secrets store, applied live (no restart), and **write-only**: the UI shows
   whether a key is configured and whether it currently **validates** ("✓ in use · valid" / "✗ key rejected"),
   but never echoes the secret back. The Claude key check uses a zero-token metadata call. Each stored
@@ -549,7 +604,7 @@ Anything you'd rather set via environment still works — see the env table in t
 
 ---
 
-## 12. Backing up your data
+## 13. Backing up your data
 
 Everything the app knows lives in one SQLite file — but only some of it can be rebuilt. Runalyze can
 re-backfill your activities and fitness history any time; what **cannot** be rebuilt is what you put
@@ -570,7 +625,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
@@ -585,7 +640,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 ---
 
-## 14. Glossary
+## 15. Glossary
 
 - **CTL** — Chronic Training Load. A slow (~42-day) average of training load; the app's proxy for *fitness*.
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.
