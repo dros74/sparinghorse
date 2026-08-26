@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.44.1"
+ENGINE_VERSION = "0.44.4"
 
 
 def _zones_asof(db, date_iso=None):
@@ -2267,6 +2267,74 @@ def _laid_sessions(db, since_iso, until_iso=None):
     return out
 
 
+def _pinned_sessions(db, dates):
+    """§PAST — what each already-lived day was ACTUALLY prescribed, read back from plan history.
+
+    The straddling week is re-laid on every regeneration — it has to be, the remainder is governed
+    against fresh CTL/ATL — and the ELAPSED slice of that re-lay was being shown as the day's
+    prescription. So a day's prescription kept moving after the day was over: the owner's Monday
+    2026-08-24 was laid at 8.2 km on Monday, read 11.1 km on Tuesday and 11.5 km on Wednesday, purely
+    because the week's intent is recomputed daily (2026-08-26, "are we changing the past now?"). A day
+    already run is HISTORY. Its prescription is what the road asked for while it was still AHEAD.
+
+    For each date the winner is the NEWEST saved plan generated ON OR BEFORE that date whose road
+    covers it. Such a plan necessarily laid the date as a today-or-future day — the elapsed slice is
+    strictly `< today`, so a plan generated on the day itself still carries it in the governed
+    remainder — which means a re-laid value can never become the source. And once the date has passed
+    no new plan can qualify, so the answer is frozen by construction rather than by a flag.
+
+    Returns (pinned, covered). `pinned` maps a date to its as-prescribed session. `covered` holds
+    every date some qualifying plan actually spoke to: a covered date ABSENT from `pinned` was a
+    prescribed REST day and must stay empty, or re-laying would invent a session on a day he was told
+    to rest. A date in neither (fresh or rebuilt DB — no plan old enough) is left to the caller's
+    re-lay, which is why this degrades to today's behaviour rather than to a hole.
+
+    This is the §PRO12 posture applied to the current week. `_laid_sessions` deliberately lets the
+    NEWEST carrier win, which is right for fully-elapsed weeks (frozen verbatim by §6f Step E) and
+    exactly wrong here — the newest carrier IS the re-lay."""
+    pinned, covered = {}, set()
+    if db is None or not dates:
+        return pinned, covered
+    want = set(dates)
+    try:
+        rows = db.execute("SELECT created_at, plan FROM plans ORDER BY id DESC LIMIT ?",
+                          (BANK_PLAN_SCAN,)).fetchall()
+    except Exception:
+        return pinned, covered
+    for r in rows:
+        if not want:
+            break
+        made = (r["created_at"] or "")[:10]          # the DAY it was generated; '' can't precede one
+        if not made or made > max(want):             # still newer than every date left → skip
+            continue
+        try:
+            p = json.loads(r["plan"])
+        except (ValueError, TypeError):
+            continue
+        weeks = _plan_all_weeks(p)
+        spans = []
+        for w in weeks:
+            try:                                     # a corrupt start must not take the plan down
+                spans.append((w["start"], (_date(w["start"]) + timedelta(days=6)).isoformat()))
+            except (KeyError, TypeError, ValueError):
+                continue
+        laid = {s["date"]: s for w in weeks for s in w.get("sessions", []) if s.get("date")}
+        for d in sorted(want):
+            if made > d or not any(a <= d <= b for a, b in spans):
+                continue                             # generated after it, or the road never reached it
+            s = laid.get(d)
+            # A session this generation can't publish (pre-`km` schema) is not evidence — leave the
+            # date open so an older plan, or failing that the caller's re-lay, still answers for it.
+            # `km` is summed unguarded into the week header, so a partial pin would crash the plan.
+            if s is not None and not isinstance(s.get("km"), (int, float)):
+                continue
+            covered.add(d)
+            if s is not None:
+                pinned[d] = s
+            want.discard(d)
+    return pinned, covered
+
+
 # §PRO3/§FORM1 — training-REGIME posture, entered on BODY EVIDENCE only. The conservative re-base +
 # min(intent,ceiling) posture exists for one athlete: the one returning from illness/injury. The app
 # KNOWS that athlete — he tells it (readiness stop-symptoms, medical holds via check-ins) — so the
@@ -2336,7 +2404,17 @@ def shape_response(db, today, prior_plan):
     # correct across midnight; the difference shows up wherever the clock is injected, which is why
     # det/clock-purity could see it and the md5 gate could not.
     td = _date(today) if isinstance(today, str) else today
-    hist = reconstruct_history(db, end=td.isoformat())   # `end` is parsed with _date() — pass the ISO string
+    # §PRO5b — MEASURE AT THE END OF YESTERDAY, the §PRO20 boundary. This read used to end the curve
+    # on `today`, and `reconstruct_history` pads to its `end` — so a day with no training logged YET
+    # arrived as a day with no training, and the EWMA charged it a full day of decay before it had
+    # happened. On his live DB (2026-08-26) the same curve read 66.6 at the end of the 25th and 63.5
+    # on the morning of the 26th: −3.1 CTL = 66.6 × (1 − 2/43), pure phantom rest. The plan therefore
+    # measured his fitness as ~4% below projection every morning and back on track every evening, and
+    # the assertive ceiling followed the TIME OF DAY the plan was regenerated. Yesterday is a complete
+    # day; today never is. `projected` is a week-END value, so both sides now sit on day boundaries,
+    # and the week filter below (Sunday strictly before today) already means that Sunday is on or
+    # before the day we measure. Today's own load is not lost — §PRO20b floors the projection with it.
+    hist = reconstruct_history(db, end=(td - timedelta(days=1)).isoformat())   # `end` is parsed with _date()
     realized = round(hist[-1]["ctl"], 1) if hist else None
     # §PRO5 fix — only FULLY-elapsed weeks (Sunday strictly before today): a week still in progress has a
     # `proj_ctl` for its END (a future value), so comparing today's mid-week CTL to it reads chronically
@@ -2434,7 +2512,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
                    recent_eq=None, week_actual_long=None, week_actual_eq=None, blocked=None,
-                   recent_session_eq=None, today_trimp=None):
+                   recent_session_eq=None, today_trimp=None, pinned_past=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -2452,7 +2530,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     `today` (§6o — within-week awareness) enables PARTIAL handling of the one week that straddles it:
     the seed (ctl0/atl0 = today's snapshot) already embodies what was done earlier this week, so the
     elapsed days are kept verbatim for matching/display while only TODAY-ONWARD days are governed and
-    projected from today (model A — no double-count). The remaining days are generated EASY (a
+    projected from today (model A — no double-count). "Verbatim" is what `pinned_past` finally makes
+    true: this docstring claimed it from the start, but the elapsed slice was cut from a FRESH re-lay
+    of the whole week, so it silently tracked today's intent (§PAST — see `_pinned_sessions`). Pass
+    `(pinned, covered)` from there and each already-lived day shows the prescription that was in force
+    on it; default None ⇒ the old re-lay, so every direct-fixture caller stays byte-identical. The remaining days are generated EASY (a
     partially-done week's remainder is governed recovery volume; a missed quality day isn't crammed
     into the back of the week). Load already done this week therefore shrinks the remaining allowance,
     and the EOW ACWR ceiling still holds. §6o-B: when `week_actuals` is supplied, the km already RUN
@@ -2575,6 +2657,24 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                        days_override=av_days, av_blocked=av_off,
                                        long_km_cap=long_km_cap, ladder=assertive)   # §PRO24
             elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
+            # §PAST — but a day already RUN is history, not a slice of today's arithmetic. `full` has
+            # to be re-laid (the remainder is governed off `wk_intent_trimp`, and this is its basis);
+            # its elapsed slice must not be shown as the prescription, because the week's intent moves
+            # with CTL/ATL every day and drags the finished days along with it. Union over both sides:
+            # a day the road no longer places still shows what it was told to do, and a day the road
+            # NOW places but history covered as REST stays empty rather than gaining a session after
+            # the fact. Only days no saved plan reaches fall back to the re-lay.
+            from_history = set()
+            if pinned_past:
+                _pin, _cov = pinned_past
+                _relaid = {s["date"]: s for s in elapsed}
+                elapsed = []
+                for _d in sorted(set(_relaid) | set(_pin)):
+                    if _d in _pin:
+                        elapsed.append(_pin[_d])
+                        from_history.add(_d)
+                    elif _d not in _cov:
+                        elapsed.append(_relaid[_d])
             # §6e-FREQ + §6o-B — what this week's ACTUALS already cover. freq_met: run COUNT *and* km
             # both logged → the remainder is optional rest (a met-week junk run does nothing for
             # aerobic shape). vol_met (§6o-B, the 2026-07-05 over-run incident): the km intent alone
@@ -2719,7 +2819,13 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # §PRO9 — surface the ceiling at week level too, exactly as the full-week path does; the
             # straddle branch built `pweek` by hand and never carried it, so a capped straddle week
             # showed the note on the session but nothing on the card.
-            if long_km_cap and any(s.get("long_step_capped") for s in sessions):
+            # §PAST — read the flag only off sessions THIS generation laid. A pinned day carries the
+            # flag from the cap that was in force when it was written, and the card names `long_km_cap`
+            # — today's trailing-4wk number. Pairing an old decision with today's figure is the §6e2
+            # defect (a sentence asserting something adjacent to what was measured), so a pinned day
+            # no longer speaks for the week's current ceiling.
+            if long_km_cap and any(s.get("long_step_capped") for s in sessions
+                                   if s["date"] not in from_history):
                 pweek["long_step_capped"] = long_km_cap
             if av_dates:                                   # §AV — laid around away days (PRIVATE-only
                 pweek["av_dates"] = av_dates               # field; the public plan view strips it)
@@ -4130,11 +4236,18 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
         # the straddling week's truth: the longest run / eq_km already LOGGED in its window so far,
         # so its display-only elapsed planned days never anchor the caps for the weeks after it.
         wal = wae = None
+        pinned_past = None
         if db is not None:
             for wk in future_sub:
                 ws_d = phase_start + timedelta(weeks=wk["wk"] - 1)
                 if ws_d < today <= ws_d + timedelta(days=6):
                     wal, wae = _actual_week_caps(db, ws_d.isoformat(), today.isoformat(), pace_zones)
+                    # §PAST — the same window, read off PLAN HISTORY: what each already-lived day of
+                    # this week was actually prescribed. `ws_d < today` is exactly the elapsed-days
+                    # condition, so a regeneration on the week's own Monday asks for nothing.
+                    pinned_past = _pinned_sessions(
+                        db, [(ws_d + timedelta(days=i)).isoformat()
+                             for i in range((today - ws_d).days)])
                     break
         fweeks, fbound = generate_block(future_sub, phase_start, end_ctl, end_atl,
                                         easy_pace_sec, adjust, zones, today=today,   # §6o partial week
@@ -4146,6 +4259,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                                         recent_session_eq=recent_session_eq,               # §PRO17
                                         week_actual_long=wal, week_actual_eq=wae,
                                         today_trimp=today_trimp,                     # §PRO20b today's actual
+                                        pinned_past=pinned_past,                     # §PAST — lived days
                                         blocked=blocked)                             # §AV — away days
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True

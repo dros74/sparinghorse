@@ -2780,6 +2780,313 @@ def _stc_intent_bar():
                     "skeleton_km": shape["km"]})
 
 
+def _rd_stream_fixture(plan, seed=12345):
+    """§RD det support — a plan of (seconds, pace sec/km, cadence spm) legs → 1Hz streams. The
+    per-second jitter is a deterministic LCG, not `random`: a perfectly flat synthetic pace chart
+    has no peaks at all, so a stride pass would have nothing to (wrongly) count and the
+    double-count tooth below could never bite. HR is a lagged function of speed — realistic, and
+    never a structure input (§RD reads pace only)."""
+    t, d, hr, cad, rng = [], [], [], [], seed
+    tt, dd, h = 0, 0.0, 110.0
+    for sec, pace, cd in plan:
+        for _ in range(sec):
+            rng = (1103515245 * rng + 12345) % (1 << 31)
+            j = 1.0 + ((rng >> 16) % 1000 - 500) / 20000.0        # ±2.5% per-second speed jitter
+            dd += (1000.0 / pace) * j
+            tt += 1
+            h += (60 + 8.5 * (3600.0 / pace) - h) * 0.012         # lagged drift toward the demand
+            t.append(tt); d.append(round(dd, 2)); hr.append(round(h)); cad.append(cd)
+    return {"time": t, "distance": d, "heart_rate": hr, "cadence": cad}
+
+
+def _stc_rd_double_count():
+    """§RD v9 — THE DOUBLE-COUNT. His 4×2min VO₂ session (2026-08-25) read back as "3× reps + 4×
+    strides": one rep lost, and the same two minutes counted a second time on the stride axis. The
+    fixture below reproduces that verbatim — pre-fix it returns n_work 3 / strides 4, which is what
+    makes every tooth here observable rather than decorative.
+
+    Two independent causes, one symptom, and BOTH must be reverted-and-seen-to-fail:
+    (a) A REP IS CONTIGUOUS WORK, NOT ONE BLOCK. Segmentation cuts on contrast, so rep 1 (out hard
+        at 4:51, settling to 5:21 — one frame over the sustain bar) split in two, and each fragment
+        was then measured against RD_MIN_WORK_S alone. Both fell under it; both were re-labelled
+        warm-up. Adjacent fast blocks carry no recovery between them: fuse, THEN apply the floor.
+    (b) THE PEAK INSIDE A REP IS NOT A STRIDE. A rep's own summit is short, rides far over the local
+        floor and lifts cadence — every stride gate passes. The stride pass now runs after the block
+        grammar and skips the frames the reps already own.
+    (c) THE OWNER-VISIBLE CONSEQUENCE. The lost rep was the SLOWEST (first off the warm-up), so
+        dropping it biased the effort monitor's work pace FAST — 4:53 against a true 4:57 — and
+        §6m graded an on-target session `too_hard` by 0.04 s/km. The detected work pace must equal
+        the session's real one; the 3-rep read misses this band, which is the whole point.
+    (d) NO OVER-SUPPRESSION. A genuine strides session has no work reps, so nothing is excluded and
+        its strides still count. A fix that silenced the stride pass would pass (a)–(c) and break
+        the feature.
+    (e) FUSION DOES NOT CROSS RECOVERY. 2×5min with a real float between stays TWO reps. Only
+        ADJACENT fast blocks fuse; a rep separated by a float is separated in the block list too.
+    (f) FUSION DOES NOT MINT A SESSION. Two adjacent fast blocks on an easy run now fuse into one
+        135s candidate where there were two sub-floor ones — the lone-short-surge rule must still
+        refuse to call that a workout.
+    """
+    fails = []
+    Z = {"easy": 422, "easy_top": 411, "lt1": 389, "marathon": 365, "threshold": 336,
+         "interval": 305, "p5k": 311}
+
+    def read(plan):
+        return S.classify_structure(_rd_stream_fixture(plan), Z)
+
+    def work_pace(r):
+        w = [s for s in r["segments"] if s.get("role") == "work"]
+        sec = sum(s["sec"] for s in w)
+        return round(sum(s["pace"] * s["sec"] for s in w) / sec) if sec else None
+
+    # ── his session: 4×2min, rep 1 taken out hard and settling ⇒ it segments in two ──────────
+    SESSION = [(600, 420, 156),
+               (45, 291, 176), (90, 321, 172),          # rep 1 — the split one
+               (105, 405, 158),
+               (120, 299, 174), (120, 402, 158),
+               (120, 290, 175), (120, 418, 157),
+               (120, 289, 175),
+               (645, 399, 156)]
+    r = read(SESSION)
+    if r.get("kind") != "interval":
+        fails.append(f"(fixture) the session no longer reads as an interval workout: {r.get('kind')}")
+    if r.get("n_work") != 4:
+        fails.append(f"(a) read back {r.get('n_work')} reps of a 4-rep session — a rep he ran was "
+                     f"absorbed into the warm-up because it segmented in two")
+    if r.get("strides"):
+        fails.append(f"(b) counted {r.get('strides')} strides inside a rep session — the reps' own "
+                     f"summits are being counted a second time on the stride axis")
+    fused = [s for s in r["segments"] if s.get("role") == "work" and s["sec"] == 135]
+    if not fused:
+        fails.append("(a) no 135s rep — the 45s+90s halves of rep 1 were not fused into one effort")
+    # (c) the number §6m actually grades. True work pace over the five constructed rep legs:
+    _legs = [(45, 291), (90, 321), (120, 299), (120, 290), (120, 289)]
+    true_wp = round(sum(s for s, _ in _legs) / sum(s / p for s, p in _legs))
+    got_wp = work_pace(r)
+    if got_wp is None or abs(got_wp - true_wp) > 2:
+        fails.append(f"(c) work pace read {got_wp}s/km against the session's real {true_wp}s/km — "
+                     f"the effort monitor grades this number, and a dropped slow rep biases it fast")
+    # ── (d) a genuine strides session still counts its strides ──────────────────────────────
+    st = read([(300, 430, 156)] + [(20, 260, 186), (100, 445, 154)] * 6 + [(300, 430, 156)])
+    if st.get("n_work"):
+        fails.append(f"(d) fixture: the strides run grew {st.get('n_work')} work reps")
+    if (st.get("strides") or 0) < 4:
+        fails.append(f"(d) a genuine strides session counted {st.get('strides')} strides — the "
+                     f"work-rep exclusion is suppressing real ones")
+    # ── (e) fusion never crosses a recovery ────────────────────────────────────────────────
+    tw = read([(600, 420, 156), (300, 330, 170), (180, 415, 157), (300, 330, 170), (600, 420, 156)])
+    if tw.get("n_work") != 2:
+        fails.append(f"(e) 2×5min with a float between read {tw.get('n_work')} reps — fusion is "
+                     f"merging across recovery")
+    # ── (f) two adjacent fast blocks on an easy run are still not a workout ─────────────────
+    lone = read([(900, 420, 156), (45, 291, 176), (90, 321, 172), (900, 420, 156)])
+    if lone.get("n_work"):
+        fails.append(f"(f) a lone {lone.get('n_work')}-rep 'session' was minted from one surge — "
+                     f"fusion must not defeat the lone-short-surge rule")
+    return _st("det", "rd-double-count",
+               "§RD v9 a rep is contiguous WORK (a rep that segments in two is fused before the "
+               "length floor, not absorbed into the warm-up) and a rep's own summit is not also "
+               "counted as a stride — his 4×2min read '3× reps + 4× strides' and biased the §6m "
+               "work pace fast; genuine strides still count, fusion never crosses a recovery, and a "
+               "lone surge still isn't a session",
+               passed=not fails,
+               expect="4 reps · 0 strides · work pace == the session's own · strides session intact",
+               got={"violations": fails or "none", "n_work": r.get("n_work"),
+                    "strides": r.get("strides"), "work_pace": got_wp, "true_work_pace": true_wp,
+                    "summary": r.get("summary"),
+                    "strides_session": {"n": st.get("strides"), "n_work": st.get("n_work")},
+                    "two_rep": tw.get("n_work"), "lone_surge": lone.get("n_work")})
+
+
+def _stc_lived_days_pinned(db):
+    """§PAST — a day already RUN never changes its prescription again.
+
+    The straddling week is re-laid on every regeneration (the remainder must be re-governed against
+    fresh CTL/ATL) and its ELAPSED slice was published as the day's prescription. So finished days
+    drifted with the week's intent: the owner's Monday 2026-08-24 was laid at 8.2 km on Monday, read
+    11.1 km on Tuesday and 11.5 km on Wednesday off his own card ("are we changing the past now?",
+    2026-08-26). `_pinned_sessions` reads each lived day back out of PLAN HISTORY instead.
+
+    Six teeth, and the first two are the ones that must be SEEN to fail on a revert — the fixture is
+    built so the re-lay and the history disagree, which is the whole regression:
+
+    (a) THE PIN. Monday shows what the road asked for while Monday was still ahead, not what today's
+        arithmetic would ask now. Guarded by (a′): the re-lay must differ, or the tooth is vacuous.
+    (b) STABILITY. Re-generating on Thursday and again on Friday, off DIFFERENT seeds that move the
+        remainder, leaves the lived days byte-identical. This is the owner-visible property.
+    (c) A REST DAY STAYS REST. A lived day the road covered but prescribed nothing for must not gain
+        a session because today's lay happens to place one there — pre-fix it silently did.
+    (d) NEWEST-ON-OR-BEFORE WINS. A plan generated AFTER the day is a re-lay, never evidence, however
+        new it is; the fixture plants a wild 99 km Monday in a later plan to prove the ordering.
+    (e) GRACEFUL. A day no saved plan reaches (fresh or rebuilt DB) keeps the re-lay — the fix
+        degrades to the old behaviour rather than to a hole. Same for a pre-`km` schema session.
+    (f) THE GOVERNOR IS UNTOUCHED. Pinning is a DISPLAY read: today-onward sessions and the ACWR
+        projection are byte-identical with and without it. A pin that moved the ceiling would be a
+        safety change wearing an honesty change's clothes.
+    (g) ⚠ THE SEAM IS WIRED. (a)–(f) drive `generate_block` directly, so all six pass with the
+        `pinned_past=` argument DELETED from the one call site that supplies it — measured, not
+        assumed. This tooth plants a distinctive km in a saved plan and drives the REAL path
+        (`generate_plan` → `_split_freeze` → `generate_block`) end to end; a control run with plan
+        history wiped proves the value could only have come from history.
+    """
+    import sqlite3 as _sq, json as _j
+    from datetime import date, timedelta
+    fails = []
+    mon = date(2026, 8, 3)                      # Monday
+    thu, fri = mon + timedelta(days=3), mon + timedelta(days=4)
+    easy = 425
+    shape = {"wk": 1, "km": 20, "runs": 5, "long": 6, "strides": 0, "intent": "General — aerobic"}
+
+    def _wk(sessions):
+        return {"base": {"weeks": [{"wk": 1, "start": mon.isoformat(), "sessions": sessions}]}}
+
+    def _sess(d, km, kind="easy"):
+        return {"date": d, "kind": kind, "km": km, "minutes": 50, "trimp": 60.0, "note": "easy run"}
+
+    hist = _sq.connect(":memory:")
+    hist.row_factory = _sq.Row
+    hist.execute("CREATE TABLE plans (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, plan TEXT)")
+    # The road as it stood ON Monday: 6.0 km Monday, NOTHING Tuesday (a prescribed rest day), 6.0 Wed.
+    hist.execute("INSERT INTO plans (created_at, plan) VALUES (?,?)",
+               ("2026-08-03T20:00:00+00:00",
+                _j.dumps(_wk([_sess("2026-08-03", 6.0), _sess("2026-08-05", 6.0)]))))
+    # (d) a LATER plan that re-laid the same lived days — the exact artifact the bug published.
+    hist.execute("INSERT INTO plans (created_at, plan) VALUES (?,?)",
+               ("2026-08-06T07:00:00+00:00",
+                _j.dumps(_wk([_sess("2026-08-03", 99.0), _sess("2026-08-04", 99.0),
+                                _sess("2026-08-05", 99.0)]))))
+    hist.commit()
+
+    lived = [(mon + timedelta(days=i)).isoformat() for i in range(3)]     # Mon/Tue/Wed
+    pin, cov = E._pinned_sessions(hist, lived)
+    if (pin.get("2026-08-03") or {}).get("km") != 6.0:
+        fails.append(f"(d) newest-on-or-before lost: Monday pinned to "
+                     f"{(pin.get('2026-08-03') or {}).get('km')}, expected 6.0 (99.0 = the re-lay)")
+    if "2026-08-04" not in cov or "2026-08-04" in pin:
+        fails.append("(c) Tuesday was a prescribed REST day — must be covered but unpinned, "
+                     f"got covered={'2026-08-04' in cov} pinned={'2026-08-04' in pin}")
+    # (e) a date no road reaches, and a pre-`km` schema session, both leave the date open.
+    if E._pinned_sessions(hist, ["2026-06-01"]) != ({}, set()):
+        fails.append("(e) a date no saved plan covers was claimed anyway")
+    # …on a DB of its own: a plan that covers the week is evidence about EVERY day in it, so planting
+    # this one in the fixture above would re-prescribe Tuesday and Wednesday as rest and make (b) read
+    # a different world on its second call.
+    hist2 = _sq.connect(":memory:")
+    hist2.row_factory = _sq.Row
+    hist2.execute("CREATE TABLE plans (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, plan TEXT)")
+    hist2.execute("INSERT INTO plans (created_at, plan) VALUES (?,?)",
+                ("2026-08-03T20:00:00+00:00", _j.dumps(_wk([_sess("2026-08-03", 6.0)]))))
+    hist2.execute("INSERT INTO plans (created_at, plan) VALUES (?,?)",
+                ("2026-08-03T21:00:00+00:00",
+                 _j.dumps({"base": {"weeks": [{"wk": 1, "start": mon.isoformat(), "sessions": [
+                     {"date": "2026-08-03", "kind": "easy"}]}]}})))      # no km — unpublishable
+    hist2.commit()
+    pin2, _ = E._pinned_sessions(hist2, ["2026-08-03"])
+    if (pin2.get("2026-08-03") or {}).get("km") != 6.0:
+        fails.append("(e) a pre-`km` session was pinned instead of falling through to the older plan")
+
+    # ── the lay itself ────────────────────────────────────────────────────────────────────────
+    def _lay(today, atl, pinned_past):
+        wks, _ = S.generate_block([dict(shape)], mon, 50.0, atl, easy, today=today,
+                                  week_actuals=(1, 5.0), regime="assertive", last_nondown=400.0,
+                                  pinned_past=pinned_past)
+        return wks[0]
+
+    base_thu = _lay(thu, 45.0, None)                       # the pre-fix lay
+    pin_thu = _lay(thu, 45.0, (pin, cov))
+    pin_fri = _lay(fri, 52.0, E._pinned_sessions(hist, lived + [thu.isoformat()]))
+
+    def _on(w, d):
+        return next((s for s in w["sessions"] if s["date"] == d), None)
+
+    relaid_mon = (_on(base_thu, "2026-08-03") or {}).get("km")
+    # (a′) the fixture must SEPARATE history from the re-lay, or (a) proves nothing on a revert.
+    if relaid_mon == 6.0 or relaid_mon is None:
+        fails.append(f"fixture vacuous — the re-lay already puts {relaid_mon} on Monday, so the pin "
+                     f"is unobservable and a revert would still pass")
+    if (_on(pin_thu, "2026-08-03") or {}).get("km") != 6.0:
+        fails.append(f"(a) Monday published {(_on(pin_thu, '2026-08-03') or {}).get('km')}km, "
+                     f"the road asked for 6.0km — the past is still being rewritten")
+    if _on(base_thu, "2026-08-04") is None:
+        fails.append("fixture vacuous — the re-lay puts nothing on Tuesday, so (c) can't bite")
+    elif _on(pin_thu, "2026-08-04") is not None:
+        fails.append("(c) a lived REST day gained a session from today's re-lay")
+    # (b) two regenerations, different seeds, different remainders — the lived days do not move.
+    if [_on(pin_thu, d) for d in lived] != [_on(pin_fri, d) for d in lived]:
+        fails.append("(b) the lived days changed between a Thursday and a Friday regeneration")
+    if pin_thu["sessions"] == pin_fri["sessions"]:
+        fails.append("fixture vacuous — the two regenerations laid the same week, so (b) can't bite")
+    # (f) pinning is display-only: the governed remainder and the ceiling are untouched.
+    ahead = [s for s in base_thu["sessions"] if s["date"] >= thu.isoformat()]
+    if ahead != [s for s in pin_thu["sessions"] if s["date"] >= thu.isoformat()]:
+        fails.append("(f) pinning changed the GOVERNED remainder — it must be a display read only")
+    for k in ("proj_acwr", "peak_acwr", "proj_acwr_flat", "proj_ctl"):
+        if base_thu.get(k) != pin_thu.get(k):
+            fails.append(f"(f) pinning moved the projection: {k} {base_thu.get(k)} → {pin_thu.get(k)}")
+    _gov_ok("pinned straddle", pin_thu, True, fails)
+
+    # ── (g) the seam, end to end on the REAL path ────────────────────────────────────────────
+    # Same construction as §CARD3's fossil tooth: an in-memory copy of the ambient DB with its road
+    # anchor and plan history reset, so the fixture is STRUCTURAL rather than a race against
+    # whatever the host DB happens to hold today.
+    e2e = "not reached"
+    anchor = S.datetime.now().date()
+    e2e_thu = anchor + timedelta(days=(3 - anchor.weekday()) % 7)
+    e2e_mon = e2e_thu - timedelta(days=3)
+    PLANT = 4.4                                   # distinctive: history's answer, never the re-lay's
+    mem = _sq.connect(":memory:")
+    mem.row_factory = _sq.Row
+    db.backup(mem)
+    mem.execute("DELETE FROM plans")
+    mem.execute("DELETE FROM meta WHERE key='rebase_start'")
+    mem.commit()
+    road = S.generate_plan(mem, today=e2e_mon)     # the road as it stood on the week's own Monday
+    planted = None
+    for w in E._plan_all_weeks(road):
+        for s in w.get("sessions") or []:
+            if s.get("date") == e2e_mon.isoformat() and isinstance(s.get("km"), (int, float)):
+                s["km"], planted = PLANT, w.get("pk")
+    if planted is None:
+        fails.append("(g) fixture: the Monday road laid nothing on its own Monday — cannot plant")
+    else:
+        mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                    (e2e_mon.isoformat() + "T20:00:00+00:00", e2e_mon.isoformat(), "{}",
+                     S.json.dumps(road)))
+        mem.commit()
+
+        def _monday_km(plan):
+            for w in E._plan_all_weeks(plan):
+                for s in w.get("sessions") or []:
+                    if s.get("date") == e2e_mon.isoformat():
+                        return s.get("km")
+            return None
+
+        e2e = _monday_km(S.generate_plan(mem, today=e2e_thu))
+        mem.execute("DELETE FROM plans")           # …and the control: no history ⇒ the pure re-lay
+        mem.commit()
+        ctrl = _monday_km(S.generate_plan(mem, today=e2e_thu))
+        if ctrl == PLANT:
+            fails.append(f"(g) fixture vacuous — the re-lay independently produced {PLANT}km, so the "
+                         f"planted value proves nothing; pick another")
+        elif e2e != PLANT:
+            fails.append(f"(g) the real path published {e2e}km for a lived Monday that history "
+                         f"records as {PLANT}km (re-lay says {ctrl}) — `pinned_past` is not reaching "
+                         f"generate_block from _split_freeze")
+    mem.close()
+
+    return _st("det", "lived-days-pinned",
+               "§PAST a day already run keeps the prescription that was in force on it: read back "
+               "from plan history (newest plan generated ON OR BEFORE the day — a later plan is a "
+               "re-lay, not evidence), stable across regenerations on different seeds, a prescribed "
+               "REST day stays empty, a day no plan covers falls back to the re-lay, and the governed "
+               "remainder + ACWR projection are byte-identical either way",
+               passed=not fails,
+               expect="Monday pinned to 6.0km ≠ the re-lay · lived days identical Thu vs Fri · "
+                      "rest day stays empty · remainder untouched",
+               got={"violations": fails or "none",
+                    "monday_relaid": relaid_mon, "monday_pinned": (_on(pin_thu, "2026-08-03") or {}).get("km"),
+                    "covered": sorted(cov), "pinned": sorted(pin), "end_to_end_monday": e2e})
+
+
 def _stc_straddle_intent():
     """§PRO13 — the week straddling `today` must lay the intent ITS REGIME holds, not the skeleton.
     §6o/§6o-B were written against the caution model (`chosen = min(intent, allowed)`), where the
@@ -7424,7 +7731,17 @@ def _stc_shape_response():
     """§PRO5 — the self-calibrating shape-response: realised CTL vs the prior plan's projection sets the
     assertive ride factor. Ahead/on-track ⇒ full ceiling (1.0); behind ⇒ eased & floored at RESPONSE_MIN;
     no prior projection ⇒ full (graceful). And the eased ride_cap actually LOWERS volume & ACWR vs full,
-    while ride_cap=ACWR_SOFT leaves assertive byte-identical. Self-contained constructed seed."""
+    while ride_cap=ACWR_SOFT leaves assertive byte-identical. Self-contained constructed seed.
+
+    §PRO5b (2026-08-26) — WHAT IS MEASURED, AND WHEN. `realized` ended the curve on TODAY, and
+    `reconstruct_history` pads to its `end`, so a day whose training had not been logged YET arrived
+    as a day with no training and the EWMA charged it a full day of decay before it had happened. The
+    ride factor therefore tracked the TIME OF DAY: on his live DB the same curve read 66.6 at the end
+    of the 25th and 63.5 on the morning of the 26th — −3.1 CTL, exactly ×(1 − 2/43) — so a morning
+    regeneration measured him ~4.5% below projection (outside the 2% dead band) and an evening one
+    read him on track. Measured at the end of YESTERDAY, a complete day, both agree. Teeth (f)/(g)
+    below pin it, and they are built so the pre-fix code straddles the RESPONSE_ONTRACK boundary —
+    "full ceiling" in the evening against "ease off" in the morning, same athlete, same day."""
     import sqlite3 as _sq
     from datetime import date, timedelta
     mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
@@ -7474,11 +7791,44 @@ def _stc_shape_response():
                 for w in eased)            # §PRO17 — the eased cap binds the governed reading
     if not (_emax <= 1.16):
         fail.append(f"eased ride should hold the governed ACWR near 1.15, got {_emax}")
+    # ── §PRO5b (f)/(g) — the measurement boundary ───────────────────────────────────────────
+    def _seed(with_today):
+        """The same athlete on the same day, seen before and after the day's run is logged."""
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)
+        span = 70 if not with_today else 71          # …the extra day IS today
+        for i in range(span):
+            d = (today - timedelta(days=70 - i)).isoformat()
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                      "VALUES(?,?,?,?,?,?)", (d, d + "T18:00", S.RUNNING_SPORT, 10.0, 3000, 50.0))
+        return m
+    # the bar = the settled end-of-yesterday CTL, so being ON it is exactly "on track"
+    settled = S.reconstruct_history(_seed(False), end=(today - timedelta(days=1)).isoformat())[-1]["ctl"]
+    morning = S.shape_response(_seed(False), today, prior(round(settled, 1)))
+    evening = S.shape_response(_seed(True), today, prior(round(settled, 1)))
+    if morning["realized"] != evening["realized"]:
+        fail.append(f"(f) `realized` moved with the time of day: {morning['realized']} before today's "
+                    f"run was logged vs {evening['realized']} after — today is being charged a full "
+                    f"day of decay before it has happened")
+    if morning["factor"] != evening["factor"]:
+        fail.append(f"(g) the assertive ride factor followed the CLOCK, not the athlete: "
+                    f"{morning['factor']} in the morning vs {evening['factor']} in the evening")
+    if morning["realized"] != round(settled, 1):
+        fail.append(f"(f) `realized` {morning['realized']} is not the settled end-of-yesterday CTL "
+                    f"{round(settled, 1)} — the curve is not being read at a day boundary")
+    if morning["factor"] != 1.0:
+        fail.append(f"(g) fixture: on the bar exactly should read on-track/full, got {morning['factor']}")
     return _st("det", "shape-response",
                "shape-response: ahead/on-track ⇒ full ceiling, behind ⇒ eased & floored, no projection ⇒ "
-               "full; the eased ride_cap genuinely lowers volume & ACWR (never above the safety cap)",
-               passed=not fail, expect="factor 1.0 ahead/none; eased∈[0.6,1) behind; eased ride < full",
+               "full; the eased ride_cap genuinely lowers volume & ACWR (never above the safety cap); "
+               "§PRO5b realised fitness is measured at the settled END OF YESTERDAY, so the ride factor "
+               "is the same before and after today's run is logged (it used to follow the time of day)",
+               passed=not fail, expect="factor 1.0 ahead/none; eased∈[0.6,1) behind; eased ride < full; "
+                                       "morning read == evening read",
                got={"realized": R["realized"], "ahead_f": ahead["factor"], "behind_f": behind["factor"],
+                    "settled_yesterday": round(settled, 1),
+                    "morning": {"realized": morning["realized"], "factor": morning["factor"]},
+                    "evening": {"realized": evening["realized"], "factor": evening["factor"]},
                     "failures": fail or "none"})
 
 
@@ -11888,7 +12238,7 @@ def run_server_selftest(db, categories=None):
 def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
-                 lambda: _stc_within_week(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
+                 lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),

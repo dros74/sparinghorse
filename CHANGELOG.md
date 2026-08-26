@@ -10,6 +10,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.44.4] - 2026-08-26
+
+### Fixed
+
+- **The assertive ceiling followed the time of day the plan was regenerated.** `shape_response` — the
+  §PRO5 read that compares measured fitness to the plan's own projection and eases the ride when he
+  is behind — ended the CTL curve on **today**. `reconstruct_history` pads to its `end`, so a day
+  whose training had not been logged yet arrived as a day with *no* training, and the EWMA charged it
+  a full day of decay before it had happened.
+
+  On his live database the same curve read **66.6** at the end of the 25th and **63.5** on the
+  morning of the 26th — a drop of 3.1, exactly `66.6 × (1 − 2/43)`, pure phantom rest. With a
+  2% on-track dead band, that put every *morning* regeneration ~4.5% below projection (ease the ride)
+  and every *evening* one on track (full ceiling). Same athlete, same day, same data.
+
+  Realised fitness is now measured at the settled **end of yesterday**. Yesterday is a complete day;
+  today never is. This is §PRO20's boundary — the plan's seed was moved there for the same reason,
+  and `_ft_state_at` already reads a race day at `day_before` — with the measurement side the one
+  place still reading a partial day. `projected` is a week-END value, so both sides now sit on day
+  boundaries, and the existing "Sunday strictly before today" filter already places that Sunday on or
+  before the day being measured. Today's own load is not lost: §PRO20b still floors the projection
+  with it.
+
+  `det/shape-response` gains two teeth for the property that actually matters — the same athlete on
+  the same day, seen before and after the day's run is logged, must produce the same `realized` and
+  the same ride factor. They are built so the pre-fix code straddles the on-track boundary, and on
+  revert they report the defect in its own terms: **0.954 in the morning against 1.0 in the
+  evening.** ⚠ The det's existing assertions were all *relative* to whatever `realized` came back, so
+  it passed identically before and after; it could never have caught this.
+
+### Changed
+
+- The ten golden plans are rewritten, and the diff is the point: **10 lines, one `realized` field per
+  scenario, nothing else.** Every golden scenario carries `projected: null`, so its ride factor was
+  1.0 either way and no prescribed number moved. Which also means the goldens never exercised the
+  ratio path at all.
+
+## [0.44.3] - 2026-08-26
+
+### Fixed
+
+- **A 4×2min VO₂ session read back as "3× reps + 4× strides", and the effort monitor called it too
+  hard.** Two independent defects in the §RD decoder produced one symptom, and the second one turned
+  a correctly-executed session into a red mark on the card.
+
+  **A rep is a contiguous stretch of work running, not a single block.** Segmentation cuts on pace
+  CONTRAST, so a rep he did not hold perfectly flat splits in two — and each fragment was then
+  measured against the ~2min rep floor *alone*. His rep 1 went out hard and settled (45s @4:51 +
+  90s @5:21, a 10% shift, one frame over the sustain bar); both halves fell under the floor, both
+  were re-labelled *warm-up*, and a rep he had actually run vanished from the read. Adjacent fast
+  blocks carry no recovery between them, so they are one effort by construction: they are now fused
+  first and measured after, at the honest time-over-distance pace.
+
+  **The peak inside a rep is not a stride.** The stride pass ran *before* the block grammar and
+  counted prominent short peaks anywhere in the run. A rep's own summit is short, rides far over the
+  local floor and lifts cadence — every stride gate passes — so the same two minutes were counted on
+  both axes at once. It now runs after work detection and skips the frames the reps already own.
+  A genuine strides session has no work reps, so nothing is excluded and its count is untouched.
+
+  **Why it mattered beyond the read-back.** The lost rep was the *slowest* — the first one, off the
+  warm-up — so dropping it biased the effort monitor's work pace fast: **4:53/km instead of 4:57**,
+  against a 5:05 interval target with a ±4% tolerance. The session was graded `too_hard` by
+  **0.0001 in log space, about 0.04 s/km**. With all four reps counted it reads `on` — which is what
+  he ran.
+
+  `STRUCT_VERSION` 8 → 9, so cached reads re-classify lazily on first view.
+
+  **Impact measured, not assumed.** His real streams were re-fetched and v8 A/B'd against v9 on
+  identical inputs across 14 activities — every quality session, every strides session and the
+  easy-runs-with-strides in the recent corpus. **Exactly one read changes: the broken one.** ⚠ A
+  first pass at that sweep reported six changes and every one was the harness — today's pace zones
+  applied to June runs, and the wrong floor for §SJ parts. A comparison of this kind needs
+  `_zones_asof` and the part-relative `min_s`, or it invents regressions.
+
+  `det/rd-double-count` builds 1Hz streams from a plan of legs with deterministic jitter (a flat
+  synthetic pace chart has no peaks at all, so the stride tooth could never have bitten without
+  texture) and reproduces his session verbatim: pre-fix it returns 3 reps / 4 strides. Six teeth,
+  each half of the fix reverted and seen to fail independently — including the work pace coming back
+  as 293 against the session's real 297. Three of the six exist to stop the fix over-reaching: a
+  genuine strides session still counts its strides, fusion never crosses a recovery (2×5min with a
+  float between stays two reps), and a lone surge still isn't a workout.
+
+  ⚠ The §RD decoder had **no det at all** before this — which is why a change of this size passed
+  the suite silently on the first run.
+
+## [0.44.2] - 2026-08-26
+
+### Fixed
+
+- **A day already run kept changing what it had been asked to do.** The owner read his own card and
+  asked the right question: *"Are we changing the past now?"* His Monday 24 Aug was prescribed
+  **8.2 km** on Monday; by Tuesday the same day read **11.1 km**, and by Wednesday **11.5 km**. The
+  plan history holds the whole trail — 7.4 → 8.1 → 8.2 → 11.1 → 11.5 — and none of it was a
+  re-anchor or a regime change: the week's intent is legitimately recomputed every day against fresh
+  CTL/ATL, and the days he had *already run* were being recomputed along with it.
+
+  The straddling week has to be re-laid on every regeneration — the remainder must be re-governed —
+  and the elapsed slice of that re-lay was published as the day's prescription. `generate_block`'s
+  own docstring had promised the opposite since §6o ("the elapsed days are kept verbatim"), but the
+  slice was cut from a fresh lay of the whole week, so it tracked today's arithmetic.
+
+  Lived days are now read back from **plan history**: for each one, the newest saved plan generated
+  *on or before* that date whose road covers it. Such a plan necessarily laid the day as a
+  today-or-future session — the elapsed slice is strictly `< today`, so even a plan generated on the
+  day itself carries it in the governed remainder — which means a re-laid value can never become the
+  source. And once the day passes, no new plan can qualify: the answer is frozen by construction
+  rather than by a flag. A day the road covered but prescribed **nothing** for stays empty, so a
+  rest day he was told to take cannot gain a session after the fact. A day no saved plan reaches
+  (fresh or rebuilt DB) falls back to the re-lay, so this degrades to the old behaviour rather than
+  to a hole.
+
+  This is the §PRO12 posture applied to the current week. `_laid_sessions` deliberately lets the
+  *newest* carrier win, which is correct for fully-elapsed weeks (frozen verbatim by §6f Step E) and
+  exactly wrong here — the newest carrier **is** the re-lay.
+
+  Two knock-on corrections came with it. The week-level §PRO9 cap note is now read only off sessions
+  *this* generation laid: a pinned day carries the flag from the cap in force when it was written,
+  and the card names today's trailing-4wk number — pairing an old decision with today's figure is
+  the §6e2 defect. And a pinned session that predates the `km` field is refused rather than
+  published, because `km` is summed unguarded into the week header and a partial pin would have
+  crashed plan generation outright.
+
+  `det/lived-days-pinned` pins seven teeth: the pin itself, stability across two regenerations on
+  different seeds, rest days staying empty, the newest-on-or-before ordering, the graceful fallback,
+  and the governed remainder plus ACWR projection being byte-identical with and without pinning.
+  ⚠ The seventh exists because the first six were **measured** to be vacuous at the seam — with the
+  `pinned_past=` argument deleted from its one call site they all still passed. It plants a
+  distinctive distance in a saved plan and drives `generate_plan` → `_split_freeze` →
+  `generate_block` end to end, with a control run on wiped history proving the value could only have
+  come from history. Both reverts now fail: deleting the wiring, and neutering the pin.
+
 ## [0.44.1] - 2026-08-25
 
 ### Fixed

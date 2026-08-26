@@ -427,7 +427,21 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 8   # v8 (2026-07-23): the workout ENDS — a trailing work-zone block whose gap since
+STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. His 4×2min VO₂ session read back as "3×
+#                      reps + 4× strides" — the same 2 minutes counted on both axes, and one rep
+#                      lost entirely. Two independent causes, one symptom:
+#                      (1) A REP IS CONTIGUOUS WORK, NOT ONE BLOCK. Segmentation cuts on contrast,
+#                      so rep 1 (out hard, then settling: 45s @4:51 + 90s @5:21) split in two, each
+#                      fragment fell under RD_MIN_WORK_S alone, and both were re-labelled warm-up.
+#                      Adjacent fast blocks carry no recovery between them, so they are one effort:
+#                      fuse first, apply the length floor after. The lost rep was the SLOWEST, so
+#                      the effort monitor's work pace read 4:53 instead of 4:58 and called an
+#                      on-target session too_hard — by 0.04 s/km (§6m, the owner's 2026-08-26 report).
+#                      (2) THE PEAK INSIDE A REP IS NOT A STRIDE. The stride pass ran before the
+#                      block grammar and counted peaks anywhere; a rep's summit clears every stride
+#                      gate (short, prominent, cadence up). It now runs after work detection and
+#                      skips the frames the reps already own.
+#                      v8 (2026-07-23): the workout ENDS — a trailing work-zone block whose gap since
 #                      the previous rep dwarfs the session's own rest scale (≥ RD_TAIL_REST_MIN_S and
 #                      ≥ RD_TAIL_REST_FACTOR × the longest real inter-rep rest) is cooldown drift,
 #                      not a rep. First live §SJ-era interval read (2026-07-22): the uphill run-home
@@ -613,7 +627,7 @@ def _rd_frames(streams, min_s=RD_MIN_RUN_S):
     return frames, (valid / nf if nf else 0.0)
 
 
-def _rd_strides(frames, cad_pts=None):
+def _rd_strides(frames, cad_pts=None, exclude=None):
     """Strides counted the way the owner reads the chart (his 2026-07-05 framing: 'count the
     peaks, look at the time axis'): a GLOBAL peak pass over the RAW grade-adjusted speed, not
     incremental burst state (which leaked half a real session's strides through merges and
@@ -627,7 +641,12 @@ def _rd_strides(frames, cad_pts=None):
     the 15s frame grid alias strides into pace blends (his real 10 counted 6), but the ~1Hz
     cadence stream keeps one distinct high-cadence run per stride; bursts are pace-corroborated
     (half the stride bar) and deduped against pace-counted centers, so pace stays primary and a
-    flat-pace cadence flutter never counts. Returns {"n", "sets", "pace", "reps"}."""
+    flat-pace cadence flutter never counts. Returns {"n", "sets", "pace", "reps"}.
+    v9: `exclude` — frame ranges [i0, i1) the BLOCK grammar has already claimed as work reps. The
+    peak inside a rep is that rep's own summit, not a stride: it is short, it rides far over the
+    local floor, and its cadence rises, so every gate here passes and the same 2 minutes got
+    counted twice — once as a rep, once as a stride (his 4×2min VO₂ read back "3× reps + 4×
+    strides", 2026-08-25)."""
     spd = [(1000.0 / f["raw"]) if f.get("raw") else None for f in frames]
     cads = [f.get("cad") for f in frames]
     n, W = len(frames), RD_STRIDE_FLOOR_WIN
@@ -722,6 +741,14 @@ def _rd_strides(frames, cad_pts=None):
                 continue
             centers.append(fidx)
         centers.sort()
+    # v9 — drop what the block grammar already owns. A rep's summit satisfies every stride gate
+    # (short, prominent, cadence up), so without this the same effort is counted on both axes and
+    # the strides-only pace is contaminated by rep frames.
+    if exclude:
+        def _claimed(k):
+            return any(a <= k < b for a, b in exclude)
+        centers = [c for c in centers if not _claimed(c)]
+        ep_frames = [k for k in ep_frames if not _claimed(k)]
     if not centers:
         return {"n": 0, "sets": [], "pace": None, "reps": []}
     # set grouping: a gap clearly longer than the typical stride cadence starts a new set
@@ -891,20 +918,12 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     tarr, carr = streams.get("time") or [], streams.get("cadence") or []
     cad_pts = [(tarr[k], carr[k]) for k in range(min(len(tarr), len(carr)))
                if tarr[k] is not None and carr[k] is not None]
-    sinfo = _rd_strides(frames, cad_pts)     # global peak pass + v7 cadence-burst recovery
-    strides = sinfo["n"]
-
-    def stride_note():
-        # "11× strides (5+6) @4:20/km" — count, the set grouping when the gaps show one, and the
-        # strides-only pace (the overall pace already covers the rest of the run — his spec)
-        note = f"{strides}× strides"
-        if len(sinfo["sets"]) > 1:
-            note += f" ({'+'.join(str(x) for x in sinfo['sets'])})"
-        if sinfo.get("pace"):
-            note += f" @{fmt_pace(sinfo['pace'])}/km"
-        return note
     if not blocks:
         return {"v": STRUCT_VERSION, "ok": False, "reason": "no coherent pace blocks"}
+    # v9 — the frame range each segment covers, kept alongside `segs` (which sheds i0/i1 so they
+    # never leak into the cached payload). Fusion maintains it, and the stride pass reads it to see
+    # which frames the block grammar has already claimed.
+    span = [(b["i0"], b["i1"]) for b in blocks]
     segs = [{**b, "zone": _rd_zone(b["pace"], zones)} for b in blocks]
     for s in segs:
         s["pace"] = round(s["pace"])
@@ -934,6 +953,47 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     fast_ix = [i for i, s in enumerate(segs)
                if s["zone"] in RD_WORK_ZONES
                and math.log(baseline / s["pace"]) >= math.log1p(RD_WORK_CONTRAST)]
+    # v9 — A REP IS A CONTIGUOUS STRETCH OF WORK RUNNING, NOT A SINGLE BLOCK. The segmenter cuts on
+    # CONTRAST, so a rep he did not hold perfectly flat splits in two, and each fragment is then
+    # measured against RD_MIN_WORK_S alone — so a real rep can vanish while its neighbours survive.
+    # Live 2026-08-25, his 4×2min VO₂: rep 1 came out as 45s @4:51 + 90s @5:21 (he went out hard and
+    # settled — a 10% shift, one frame over the sustain bar), both fragments under the 100s floor,
+    # both re-labelled `warmup`. The session read "3× reps", and because the lost rep was the SLOWEST
+    # one, the effort monitor's work pace came out 4:53 instead of 4:58 and graded the session
+    # too_hard by 0.04 s/km. Fuse first, measure after: adjacent fast blocks have no recovery between
+    # them, so they are one effort by construction. Fused pace is time-over-distance (the honest
+    # number the baseline and overall pace already use), HR duration-weighted.
+    def _fuse(lo, hi):                                       # segs[lo..hi] → one rep
+        parts = segs[lo:hi + 1]
+        sec = sum(x["sec"] for x in parts)
+        km = sum(x["km"] for x in parts)
+        hrs = [(x["hr"], x["sec"]) for x in parts if x.get("hr")]
+        cads = [x["cad"] for x in parts if x.get("cad")]
+        pace = round(sec / km) if km else parts[0]["pace"]
+        return {"sec": sec, "km": round(km, 3), "pace": pace,
+                "cad": _rd_median(cads) if cads else None,
+                "hr": round(sum(h * w for h, w in hrs) / sum(w for _, w in hrs)) if hrs else None,
+                "zone": _rd_zone(pace, zones)}
+    if fast_ix:
+        _fast, _segs, _span, fast_ix = set(fast_ix), [], [], []
+        i = 0
+        while i < len(segs):
+            if i in _fast:
+                j = i
+                while j + 1 < len(segs) and (j + 1) in _fast:
+                    j += 1
+                fast_ix.append(len(_segs))       # a fused rep stays FAST by construction — it is
+                #                                  made only of blocks that already cleared both
+                #                                  gates, so re-testing the average could drop a
+                #                                  genuine rep that faded across its own halves.
+                _segs.append(_fuse(i, j) if j > i else segs[i])
+                _span.append((span[i][0], span[j][1]))
+                i = j + 1
+            else:
+                _segs.append(segs[i])
+                _span.append(span[i])
+                i += 1
+        segs, span = _segs, _span
     work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
     # (fast blocks too short to be reps — e.g. strides that segmented out on their own — are
     #  simply not work; the _rd_strides peak pass already counts them from the whole-run signal)
@@ -951,6 +1011,25 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
             work_ix.pop()
         else:
             break
+
+    # v9 — the stride pass runs HERE, after the block grammar has settled which frames are reps, and
+    # is told to skip them. It used to run before segmentation and count peaks anywhere, so a rep's
+    # own summit was counted a second time as a stride. Nothing above reads `strides`, and the
+    # strides-SESSION branch below is reached only when `work_ix` is empty (no exclusion, so a
+    # genuine strides session is untouched).
+    sinfo = _rd_strides(frames, cad_pts,                     # global peak pass + v7 cadence bursts
+                        exclude=[span[i] for i in work_ix])
+    strides = sinfo["n"]
+
+    def stride_note():
+        # "11× strides (5+6) @4:20/km" — count, the set grouping when the gaps show one, and the
+        # strides-only pace (the overall pace already covers the rest of the run — his spec)
+        note = f"{strides}× strides"
+        if len(sinfo["sets"]) > 1:
+            note += f" ({'+'.join(str(x) for x in sinfo['sets'])})"
+        if sinfo.get("pace"):
+            note += f" @{fmt_pace(sinfo['pace'])}/km"
+        return note
 
     def seg_roles():
         for i, s in enumerate(segs):
