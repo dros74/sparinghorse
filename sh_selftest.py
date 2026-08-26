@@ -6367,6 +6367,51 @@ def _stc_plan_seed():
     if (sh.get("seed") or {}).get("from") != yday.isoformat():
         fail.append("generate_plan did not surface the seed provenance")
 
+    # (g) §PRO5b — THE COLD-START SEED USES THE SAME BOUNDARY. `_ft_cold_start` fills the SAME
+    # `ctl0`/`atl0` argument as `plan_seed` (generate_plan takes one or the other), so it owes the
+    # same contract — and it did not: it reconstructed to `end=today`, and `reconstruct_history`
+    # pads to its `end`. So the no-snapshot intake charged today a full day of decay before it had
+    # happened, and a cold-start plan generated in the morning was seeded differently from the same
+    # plan generated that evening. Two seeds, one parameter, two day boundaries.
+    # Nothing is lost by stopping at yesterday: `today_trimp` is computed for BOTH paths and floors
+    # today under §PRO20b, so today's run is applied once — by the roll — instead of twice.
+    def _cold(with_today_run):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)                      # NO shape_snapshots ⇒ the cold path
+        for i in range(30, 0, -1):                       # a month of steady running, ending YESTERDAY
+            d = (today - timedelta(days=i)).isoformat()
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                        "VALUES(?,?,?,?,?,?)", (d, d + "T18:00", S.RUNNING_SPORT, 8.0, 2900, 70.0))
+        rd = (today - timedelta(days=20)).isoformat()    # …one qualifying 5k effort to seed eVO₂
+        mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                    "VALUES(?,?,?,?,?,?)", (rd, rd + "T18:00", S.RUNNING_SPORT, 5.0, 1320, 80.0))
+        if with_today_run:
+            d = today.isoformat()
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                        "VALUES(?,?,?,?,?,?)", (d, d + "T07:00", S.RUNNING_SPORT, 8.0, 2900, 70.0))
+        mem.commit()
+        return mem
+    before, after = S._ft_cold_start(_cold(False), today), S._ft_cold_start(_cold(True), today)
+    if not (before and after):
+        fail.append("(g) fixture: the cold-start intake found no qualifying effort to seed from")
+    else:
+        settled = S.reconstruct_history(_cold(False), end=yday.isoformat())[-1]
+        if (before["ctl0"], before["atl0"]) != (after["ctl0"], after["atl0"]):
+            fail.append(f"(g) the cold-start seed moved with the TIME OF DAY: "
+                        f"{(before['ctl0'], before['atl0'])} before today's run was logged vs "
+                        f"{(after['ctl0'], after['atl0'])} after — today belongs to the roll (§PRO20b "
+                        f"floors it), never to the seed")
+        if before["atl0"] != round(settled["atl"], 1):
+            fail.append(f"(g) cold-start ATL₀ {before['atl0']} is not the settled end-of-yesterday "
+                        f"{round(settled['atl'], 1)} — the curve is not read at a day boundary")
+        # anti-vacuity, stated between the two BOUNDARIES rather than against the implementation —
+        # compared to `before["atl0"]` it would misfire in the very reverted state it exists to
+        # police, reporting "vacuous" for a fixture that had just caught the bug.
+        stale = S.reconstruct_history(_cold(False), end=today.isoformat())[-1]
+        if round(stale["atl"], 1) == round(settled["atl"], 1):
+            fail.append("(g) fixture vacuous — the two boundaries read the same ATL here, so "
+                        "nothing distinguishes them and a revert would still pass")
+
     return _st("det", "plan-seed",
                "§PRO20 the load seed is END-OF-YESTERDAY: today's snapshot (pre-run = today applied as "
                "REST, post-run = today's load already in) is never the seed, so the roll-from-today "

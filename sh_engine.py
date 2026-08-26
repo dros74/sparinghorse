@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the owner to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.44.5"
+ENGINE_VERSION = "0.44.6"
 
 
 def _zones_asof(db, date_iso=None):
@@ -3936,7 +3936,18 @@ def _ft_cold_start(db, today=None):
                         "vo2_seed": round(vo2, 1)}
     if not best:
         return None
-    hist = reconstruct_history(db, end=td.isoformat())
+    # §PRO5b — END OF YESTERDAY, the same boundary `plan_seed` uses. These two feed the SAME
+    # `ctl0`/`atl0` argument (generate_plan takes one or the other), and §PRO20 defines that slot
+    # as end-of-yesterday because `generate_block` rolls from today INCLUSIVE — so a seed that
+    # already ran through today gets today applied twice. The snapshot path was fixed for that in
+    # §PRO20 and this one was not, which left two seeds filling one parameter on two different day
+    # boundaries. It also carried §PRO5b's phantom rest day: `reconstruct_history` pads to its
+    # `end`, so a cold-start plan generated in the MORNING charged today a full day of decay before
+    # it had happened, and read a lower CTL₀ than the same plan generated that evening.
+    # Nothing is lost by stopping at yesterday: `today_trimp` is computed for BOTH seed paths and
+    # floors today's projection under §PRO20b, so today's own run is applied exactly once — by the
+    # roll — instead of once by the seed and again by the roll.
+    hist = reconstruct_history(db, end=(td - timedelta(days=1)).isoformat())
     m = hist[-1] if hist else None
     best["ctl0"] = round(m["ctl"], 1) if m else 0.0
     best["atl0"] = round(m["atl"], 1) if m else 0.0

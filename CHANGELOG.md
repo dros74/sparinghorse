@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.44.6] - 2026-08-26
+
+### Fixed
+
+- **The cold-start intake seeded its load state from a day that had not finished.** `_ft_cold_start`
+  and `plan_seed` fill the **same** `ctl0`/`atl0` argument — `generate_plan` takes one or the other —
+  so they owe the same contract, and §PRO20 defines that slot as the state at the **end of
+  yesterday**, because `generate_block` rolls the projection from today *inclusive*. A seed that has
+  already run through today gets today applied twice. The snapshot path was fixed for that in
+  §PRO20; the no-snapshot path was not, leaving two seeds filling one parameter on two different day
+  boundaries.
+
+  It carried §PRO5b's phantom rest day with it. `reconstruct_history` pads to its `end`, so a
+  cold-start plan generated in the *morning* charged today a full day of decay before it had
+  happened. Measured on a constructed month of steady running: **ATL₀ 52.5 before the day's run was
+  logged against 70.0 after** — the same athlete, the same day, a 33% swing in the acute-load seed
+  decided by what time the plan was generated.
+
+  Nothing is lost by stopping at yesterday: `today_trimp` is computed for **both** seed paths and
+  floors today's projection under §PRO20b, so today's own run is applied exactly once — by the roll —
+  instead of once by the seed and again by the roll.
+
+  Tooth (g) on `det/plan-seed`, beside the §PRO20 teeth it completes: two databases identical but
+  for a run logged today must seed identically, and the seed must equal the settled end-of-yesterday
+  reconstruction. Reverted and seen to fail on both.
+
+### Changed
+
+- `test/golden/cold-start.json` is rewritten; the other nine are byte-identical, since it is the only
+  scenario that takes the no-snapshot path. **Measured before accepting it**, because the headline
+  number moved the alarming way: week 1's reported `peak_acwr` goes 2.635 → 3.334 while its
+  prescribed distance does not move at all (10.1 km either way), and the whole 21-week road changes
+  by **+1.2 km — 0.15%, rounding**. The ratio rose because the seed now states his acute load
+  honestly against a near-zero cold-start chronic base, not because the governor loosened; on a cold
+  start the ACWR ceiling cannot bind at CTL ≈ 4 and the §PER1 floors own the verdict, which is why
+  the *distance* is unchanged. Every later week reads a marginally **lower** ACWR than before.
+
 ## [0.44.5] - 2026-08-26
 
 ### Fixed
