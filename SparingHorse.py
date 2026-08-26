@@ -3,7 +3,7 @@
 Sparing Horse — a self-hosted, data-owning running companion built on Runalyze.
 
 Single-file Flask + waitress app: an embedded vanilla SPA over a
-locally-owned SQLite copy of your Runalyze data. Reuses Runalyze's computed
+locally-owned SQLite copy of the athlete's Runalyze data. Reuses Runalyze's computed
 sports-science metrics ("current shape") and will grow a dynamic, objective-driven
 training-plan engine on top (see PROJECT_LOG.md).
 
@@ -493,7 +493,7 @@ RD_STRIDE_CAD = 0.06       # cadence must corroborate: a stride is legs turning 
 #                            so one-leg (halved) cadence sources compare cleanly.
 RD_STRIDE_DIP = 0.10       # inside a FUSED fast episode (strides bridged by a quick recovery),
 #                            consecutive speed maxima separated by a ≥10% dip count individually —
-#                            you can't run two strides without slowing between; a wide episode was
+#                            the athlete can't run two strides without slowing between; a wide episode was
 #                            previously discarded whole (6 of my real 11 counted, 2026-07-05)
 RD_STRIDES_SESSION_MIN = 4 # ≥ this many strides over a NON-easy base (slower than the easy zone's
 #                            slow edge = walking/standing recovery, not an easy run) ⇒ the run IS
@@ -526,10 +526,10 @@ RD_PAUSE_PACE = 1200       # slower than 20:00/km = standing/pause frame (breaks
 RD_GOOD_VALID = 0.9        # ≥ this share of readable frames ⇒ "good" read; ≥0.7 ⇒ "rough"
 RD_WORK_ZONES = ("marathon", "threshold", "interval")   # the zones a work block can be named
 RD_WORK_CONTRAST = 0.10    # a WORK block must be ≥10% faster than the run's own easy baseline —
-#                            a zone label alone is NOT work: at low fitness your ordinary easy-pace
+#                            a zone label alone is NOT work: at low fitness the athlete's ordinary easy-pace
 #                            drift crosses easy_top (the easy-days-run-hard pattern the effort
 #                            monitor owns), and calling that "intervals" misreads a plain easy run.
-#                            Structure is what you SEE in the pace chart: contrast. Zones only name it.
+#                            Structure is what the athlete SEE in the pace chart: contrast. Zones only name it.
 RD_BASE_MIN_SHARE = 0.25   # the baseline = the SLOWEST pace level carrying ≥ this share of the run
 #                            (or ≥10min) — so a 15min wu + 30min tempo still baselines on the wu side
 RD_MIN_WORK_S = 100        # a work REP is ≥ ~2min in the plan's vocabulary (DAVIS_BASE_VO2_REP_MIN);
@@ -1283,7 +1283,7 @@ CREATE TABLE IF NOT EXISTS plans (
 );
 
 -- §TR — the track record (DIR-2). One row per SETTLED prediction, written by the nightly the first
--- time the outcome is knowable and NEVER rewritten (INSERT OR IGNORE): a prediction you can re-score
+-- time the outcome is knowable and NEVER rewritten (INSERT OR IGNORE): a prediction the athlete can re-score
 -- after seeing the result is not a prediction. The live drift view already compares the CURRENT plan
 -- against reality, but a re-plan replaces the prediction — so without this table the model's own
 -- history is erased every night by the next forecast.
@@ -1328,14 +1328,14 @@ CREATE TABLE IF NOT EXISTS structcache (
     cached_at   TEXT
 );
 
--- Qualitative adjustments (§6c). Your free-text input ("knee's sore", "travelling")
+-- Qualitative adjustments (§6c). The athlete's free-text input ("knee's sore", "travelling")
 -- is parsed by the LLM into a bounded directive, CLAMPED by the engine, and applied as a
 -- forward window. Stored so the plan stays a pure function of (today, shape, objectives,
 -- adjustments) and each change is versioned/diff-able.
 CREATE TABLE IF NOT EXISTS adjustments (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at   TEXT,
-    note         TEXT,              -- your raw words
+    note         TEXT,              -- the athlete's raw words
     directive    TEXT,              -- JSON: the engine-clamped directive that was applied
     applies_from TEXT,              -- YYYY-MM-DD inclusive
     applies_until TEXT,             -- YYYY-MM-DD inclusive
@@ -1354,7 +1354,7 @@ CREATE TABLE IF NOT EXISTS session_log (
     created_at TEXT
 );
 
--- Manual data-quality ignore-list: activities you flag as duplicates or mis-tagged
+-- Manual data-quality ignore-list: activities the user flags as duplicates or mis-tagged
 -- that the exact-match heuristic (find_duplicates) can't catch — e.g. a re-upload whose
 -- timestamp drifted a few seconds. Honored everywhere the reconstruction de-dups
 -- (dropped_ids), persisted across syncs. One-click from the latest-activity tile.
@@ -1375,7 +1375,7 @@ CREATE TABLE IF NOT EXISTS availability (
     created_at TEXT,
     date_from  TEXT,               -- YYYY-MM-DD inclusive
     date_to    TEXT,               -- YYYY-MM-DD inclusive
-    note       TEXT,               -- optional, your words ("flight", "family week")
+    note       TEXT,               -- optional, the athlete's words ("flight", "family week")
     active     INTEGER DEFAULT 1   -- 0 once deleted
 );
 
@@ -1438,7 +1438,7 @@ SELECT
   ROUND(a.hr_avg * 1.0 / NULLIF(json_extract(a.raw,'$.gap'),0), 2) AS hr_cost_gap,
   -- daily shape snapshot, joined on date. Named *_snapshot (not *_start): the snapshot is the day's
   -- capture and leads the activity frontier by a day (the documented seam), so it's not a guaranteed
-  -- pre-run reading — especially for your evening runs.
+  -- pre-run reading — especially for the athlete's evening runs.
   s.fitness            AS ctl_snapshot,
   s.fatigue            AS atl_snapshot,
   s.acwr               AS acwr_snapshot,
@@ -1474,10 +1474,10 @@ MARKERS = {
     "ferritin":          {"label": "Ferritin", "unit": "µg/L", "ref": [30, 400], "good": "band"},
     "systolic":          {"label": "Blood pressure (systolic)", "unit": "mmHg", "ref": [None, 130], "good": "low"},
     # Watch-recorded daily metrics, synced from Runalyze (no fixed clinical band — they're individual;
-    # the trend vs your OWN history is the signal). HRV = sleeping RMSSD.
+    # the trend vs the athlete's OWN history is the signal). HRV = sleeping RMSSD.
     "resting_hr":        {"label": "Resting HR", "unit": "bpm", "ref": [None, None], "good": "low"},
     "hrv":               {"label": "HRV (sleeping RMSSD)", "unit": "ms", "ref": [None, None], "good": "high"},
-    # Sleep, synced from Runalyze's per-night summary. No clinical band — the trend vs your own history
+    # Sleep, synced from Runalyze's per-night summary. No clinical band — the trend vs the athlete's own history
     # is the signal; displayed alongside HRV/RHR, never a plan input. night_hr = overnight lowest HR
     # (a de-facto resting-HR that, unlike resting_hr, continues through the Suunto era).
     "sleep_duration":    {"label": "Sleep", "unit": "h", "ref": [None, None], "good": "high"},
@@ -1855,11 +1855,11 @@ def secret_fingerprint(value):
     """§SG — eight hex characters of sha256(value), or "" for an unset secret.
 
     The write-only field is the right posture (a key is never sent back to the browser), but it left
-    you unable to answer the one question a key box has to answer: *which* value is in there.
+    the user unable to answer the one question a key box has to answer: *which* value is in there.
     After rotating a token, "configured" looks identical before and after — a save that silently
     failed and a save that worked are the same screen. A fingerprint is the smallest thing that
     distinguishes them, and it is not a leak: sha256 is one-way, eight hex characters of a
-    high-entropy credential identify without describing, and you can compute the same digest
+    high-entropy credential identify without describing, and the athlete can compute the same digest
     on their own machine to confirm the box holds the value they think it does:
 
         printf %s "$TOKEN" | sha256sum | cut -c1-8
@@ -1974,7 +1974,7 @@ def validate_secret(key):
 
 # ── Suunto Cloud API — SuuntoPlus Guides push (§SG) ─────────────────────────
 # Partner-program integration (approved 2026-07-10): the plan's next few days are converted to
-# SuuntoPlus Guides and pushed to your watch, so each prescribed session shows its steps,
+# SuuntoPlus Guides and pushed to the athlete's watch, so each prescribed session shows its steps,
 # pace band, and HR band ON the wrist during the run. Three layers, cleanly separable:
 #   1. OAuth2 (authorization-code + refresh) — one-time "Connect Suunto" in Settings; the user
 #      token pair lives in the PRIVATE secrets store under an internal key (never in the UI spec).
@@ -2167,11 +2167,11 @@ def _pace_label(sec_per_km):
 def _guide_notification(title, text, dur, pace_sec, hr):
     """The ~20-second popup the watch shows AT A STEP BOUNDARY — §SG3, and the reason the first
     guided workout guided nothing. Everything else a step carries (countdown, pace and HR targets,
-    detail line) lives on the SuuntoPlus display, which is a SCREEN OF ITS OWN: on a Race S you get
-    there by pressing the crown during the exercise, and the watch never switches to it for you. So
+    detail line) lives on the SuuntoPlus display, which is a SCREEN OF ITS OWN: on a Race S the user gets
+    there by pressing the crown during the exercise, and the watch never switches to it for the athlete. So
     the transitions fired on time, the watch beeped at every boundary, and the athlete was told
     nothing — all the instructions were on a page nobody was looking at. This popup is the only part
-    of a guide that arrives on whatever screen is actually in front of you.
+    of a guide that arrives on whatever screen is actually in front of the user.
 
     Segments are appended whole while they fit the documented 54 characters: a target cut in half
     ('HR 169-1') is worse than a target left out. The duration is dropped when the detail already
@@ -2501,7 +2501,7 @@ def sync_activities(db, max_pages=60, backfill=False):
                 new_here += 1
             elif json.dumps(a, separators=(",", ":")) != existing.get(aid):
                 # §DB1 MED-1 — an already-synced activity changed upstream (e.g. Runalyze recomputed
-                # TRIMP, or you cropped an over-long run → load edited DOWN). The old code SKIPPED
+                # TRIMP, or the athlete cropped an over-long run → load edited DOWN). The old code SKIPPED
                 # every known id, so a stale-high load lingered forever. Refresh it so the local copy
                 # converges. NOT counted as new (new_here untouched), so the incremental stop-condition
                 # below is preserved: recent edits (page 1, always fetched) converge on the next sync;
@@ -2599,7 +2599,7 @@ def health_staleness(series, today=None):
 
     Returns {"markers": {marker: {last, days, watched, stale}}, "summary": … or None}, where the
     summary names the stale feeds and the NEWEST reading among them — "nothing since the 15th" is
-    the sentence you needed, and the newest is the one that dates the outage."""
+    the sentence the athlete needed, and the newest is the one that dates the outage."""
     td = _date(today) if today else datetime.now().date()
     out, stale = {}, []
     for marker, pts in (series or {}).items():
@@ -2625,7 +2625,7 @@ def health_staleness(series, today=None):
 
 def _sleep_main_by_date(items):
     """Runalyze can return several sleep records for one day (naps, split sleep). Attribute each to the
-    morning you WOKE (start + duration) and keep the single longest per wake-date — the main overnight
+    morning the athlete WOKE (start + duration) and keep the single longest per wake-date — the main overnight
     sleep — so the series is one honest point per night. Returns {wake_date_iso: item}."""
     from datetime import datetime as _dt, timedelta as _td
     best = {}
@@ -2743,7 +2743,7 @@ def current_model(db):
 
 
 # ── Effort-discipline monitor (§6m) — did each run land in its prescribed effort band? ───────────
-# The plan is polarized (easy ≥80%) and the engine KNOWS your easy days run too hard — but it only
+# The plan is polarized (easy ≥80%) and the engine KNOWS the athlete's easy days run too hard — but it only
 # said so once, at plan-gen. This measures it, every run. Core design choice: judge INTENSITY by
 # HEART RATE, not pace. Pace is confounded by vertical / heat / wind; HR is the effort response that
 # already internalizes them — and Runalyze's GAP / Training-Effect / decoupling are all built from
@@ -2782,12 +2782,12 @@ LTHR_ZONE_FRACS = (0.85, 0.90, 0.95, 1.00)
 # unifying the model). det/hr-zones locks the equality so a future un-derive is caught.
 LTHR_EASY_FRAC = LTHR_ZONE_FRACS[0]   # Z1/Z2 boundary (Friel easy/recovery ceiling): above this an 'easy'
 #                                       run drifted hot. =0.85 → ≤ the old %HRmax ceiling, so the LTHR switch
-#                                       never LOOSENS your easy bar (the streamless LTHR is biased low).
+#                                       never LOOSENS the athlete's easy bar (the streamless LTHR is biased low).
 LTHR_HARD_FRAC = LTHR_ZONE_FRACS[2]   # Z3/Z4 boundary: at/above threshold ⇒ an 'easy' run was threshold+
 LTHR_MIN_CONFIDENCE = {"moderate", "high"}   # only ANCHOR on a derived LTHR this trustworthy (else %HRmax)
 HRMAX_ZONE_FRACS = (0.60, 0.70, 0.80, 0.90)  # %HRmax fallback grid — the values the reconstruction confirmed
 LTHR_TRUSTED = ("derived", "manual")         # sources the zone/monitor anchor may trust (gate ∧ confidence)
-# Manual LTHR (slice #2): a field-tested number you typed in. It goes STALE as fitness moves
+# Manual LTHR (slice #2): a field-tested number the user typed in. It goes STALE as fitness moves
 # (guardrail #2 — LTHR drifts UP through a rebuild, so an old manual value can mis-anchor either way):
 # confidence decays with the age of the entry, and the derived estimate takes back over once it out-ranks
 # the decayed manual one. An UNDATED manual value (env-provided) is capped at moderate.
@@ -2821,7 +2821,7 @@ def _pctile(xs, q):
 
 
 def _manual_lthr(db, today):
-    """Your manual LTHR entry (Settings → 'Manual LTHR'), age-decayed per guardrail #2.
+    """The user's manual LTHR entry (Settings → 'Manual LTHR'), age-decayed per guardrail #2.
     Returns (bpm, confidence, set_on, age_days) or (None, None, None, None) when unset/invalid.
     Tolerates a DB without the meta table (det fixtures) — absent means unset. The set-date is
     stamped by save_settings; an undated value (env-provided) is capped at moderate."""
@@ -2860,7 +2860,7 @@ def derive_lthr(db, today=None):
     STRUCTURED tempos (warmup/cooldown dilute the whole-run avg) — fine for a confidence-flagged v1.
 
     Returns {lthr, source, confidence, n, n_recent, hrmax, pct_hrmax, provisional}:
-      • source: 'manual' (your field-tested entry, age-decayed) | 'derived' (from efforts) |
+      • source: 'manual' (the athlete's field-tested entry, age-decayed) | 'derived' (from efforts) |
         'hrmax_proxy' (fallback) | None (no HRmax at all)
       • confidence: 'high' | 'moderate' | 'low' | 'none'
       • a MANUAL entry (slice #2) wins while its age-decayed confidence out-ranks (or ties) the
@@ -2914,7 +2914,7 @@ def hr_zones(db, today=None):
     """The app's OWN 5-zone HR model in bpm — the bridge until Runalyze exposes real boundaries. Anchors
     on a DATA-DERIVED LTHR (Friel %LTHR grid) when that LTHR is trustworthy (source='derived' and
     confidence ≥ moderate — see derive_lthr), else falls back to a fixed %HRmax grid (60/70/80/90, the
-    values the Runalyze reconstruction already confirmed for you, so the fallback is continuous with the
+    values the Runalyze reconstruction already confirmed for the athlete, so the fallback is continuous with the
     chart today). PURE + token-free (derive_lthr is streamless), so it's seed-testable and det-lockable.
     Distinct from derive_hr_zones, which stays the (token-gated, slow) corroboration against Runalyze's
     own zones — this is what the app should USE, that is what checks our work.
@@ -2984,7 +2984,7 @@ def training_zones(db, today=None):
 
 
 def derive_hr_zones(db, sample=12):
-    """Reconstruct the user's 5 HR zones as %HRmax. Runalyze exposes the per-activity time-in-zone
+    """Reconstruct the athlete's 5 HR zones as %HRmax. Runalyze exposes the per-activity time-in-zone
     DISTRIBUTION (get_activity_details.zone_distribution_hr) but NOT the boundaries (the `sport`
     config is 403 for the personal token). So for each recent HR-rich run we find the 4 HR values
     that split its time-weighted samples to match the distribution, express them as %HRmax, and
@@ -3076,9 +3076,9 @@ def _effort_verdict(kind, hrf, te, easy_frac=EASY_HR_FRAC, hard_frac=HARD_HR_FRA
     anchor. Default anchor = %HRmax (0.78/0.85); when a derived LTHR is trustworthy the caller passes
     %LTHR fractions instead (0.90/0.95 = Friel Z2-top / Z4-start), a sharper read at the easy↔threshold
     turnpoint. For an aerobic (easy/long) session: on / hot / too_hard by fraction, confidence rising to
-    'high' when a too-hard read is backed by a high Training Effect. For a quality session: 'did you hit
+    'high' when a too-hard read is backed by a high Training Effect. For a quality session: 'did the athlete hits
     it' — too_easy if HR never reached the aerobic ceiling (sandbagged), else on — always LOW confidence
-    (little compliant-quality data yet, and your problem is the too-hard direction). hrf None ⇒
+    (little compliant-quality data yet, and the athlete's problem is the too-hard direction). hrf None ⇒
     ('unknown','none')."""
     if hrf is None:
         return "unknown", "none"
@@ -3095,7 +3095,7 @@ def _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="easy_top"):
     """The PACE-based easy-discipline verdict — no heart rate. An aerobic (easy/long) run is judged on
     grade-adjusted pace vs the pace zones: 'on' at/slower than the easy ceiling (a 3% grace for GPS/grade
     noise), 'too_hard' faster than marathon pace, 'hot' between. A quality run isn't pace-judged here — the
-    honest 'did you hit it' read needs HR — so it's 'unknown' (excluded). gap_pace/zones are sec/km; larger
+    honest 'did the athlete hits it' read needs HR — so it's 'unknown' (excluded). gap_pace/zones are sec/km; larger
     = slower. `ceiling_key` selects the easy bar: 'easy_top' (the conservative public ceiling) or 'lt1' (the
     §3.4 fitness-tracking LT1 = Davis's aerobic-threshold easy bar; used as the private moving anchor)."""
     easy_ceiling = (zones or {}).get(ceiling_key) or (zones or {}).get("easy_top")
@@ -3276,7 +3276,7 @@ def _match_prescriptions(run_dates, prescribed, match_days=EFFORT_MATCH_DAYS):
 def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     """Per-run effort vs prescription over the recent window (§6m). Each run's prescribed kind comes
     from the saved plan (frozen past weeks included); an unplanned run defaults to 'easy' (the
-    polarized expectation), and the easy-discipline SCORE is the headline (your easy days run hard).
+    polarized expectation), and the easy-discipline SCORE is the headline (the athlete's easy days run hard).
 
     PRIVATE (default): the HR-led read — HR fraction gates, Training Effect corroborates, GAP is a
     terrain-fair pace, subjective_feeling + decoupling as context.
@@ -3324,7 +3324,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
         else:
             # §SJ multi-part: the easy-discipline verdict judges the session's aerobic BODY —
             # duration-weighted HR/GAP over the parts whose cached read is easy/long. The strides/
-            # quality part's numbers stay out of the easy read (the entire point of your
+            # quality part's numbers stay out of the easy read (the entire point of the athlete's
             # split-recording workflow); its reps are graded by the per-rep read below. Preference
             # order read-aerobic → unread → all: a still-unclassified addendum must not tilt the
             # verdict while a read body exists (it converges to exclusion once read anyway).
@@ -3360,7 +3360,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
             # §3.4 verdict switch — the PACE-vs-LT1 cross-check on the MOVING, fitness-tracking LT1 bar
             # (the §6.3 anchor), computed for every run so the monitor visibly reads against LT1, not a
             # fixed %HRmax. HR stays the PRIMARY easiness truth WHERE a trustworthy (moving) LTHR exists —
-            # your own data shows HR is the honest read of easiness (low HR = easy whatever the pace) and a
+            # the athlete's own data shows HR is the honest read of easiness (low HR = easy whatever the pace) and a
             # naive flip to pace-primary would over-police a detrained rebuild (the reconciled §3.4 finding).
             pace_verdict = _effort_verdict_pace(kind, gap_pace, zones, ceiling_key="lt1")
             if use_lthr:                                  # HR-led on the MOVING LTHR (Friel %LTHR ceilings)
@@ -3372,7 +3372,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                 # Mild cardiac decoupling (easy pace, HR merely elevated 78–85%) is deliberately NOT policed
                 # — the reconciled finding, and why HR isn't primary here. But an easy-PACED run whose HR sat
                 # at THRESHOLD+ effort (≥ the hard bar) was hard on the honest axis (TRIMP already scores it
-                # so), so it can't read easy/hot — else the monitor tells a detrained returner your redline was
+                # so), so it can't read easy/hot — else the monitor tells a detrained returner the athlete's redline was
                 # fine. Retiring the fixed %HRmax bar dropped this catch; restore it as a one-way escalation.
                 if hrmax and verdict in ("too_easy", "on", "hot") and hr_avg / hrmax >= HARD_HR_FRAC:
                     verdict, conf = "too_hard", "moderate"
@@ -3464,7 +3464,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
 
 
 PACE_HR_OVER_FRAC = 0.5     # ≥ this share of easy-PACED runs landing over the easy HR ceiling ⇒ the
-#                             two models disagree (your easy pace is ahead of your aerobic fitness)
+#                             two models disagree (the athlete's easy pace is ahead of the athlete's aerobic fitness)
 PACE_HR_MIN_RUNS = 3        # need at least this many easy-paced runs with HR to judge coherence
 
 
@@ -3540,7 +3540,7 @@ def lt1(db, today=None):
       • PACE (primary): LT1 velocity = LT1_5K_FRAC × (V5K_VVO2MAX_FRAC × vVO2max), off the CURRENT effective
         VO2max — so the bar MOVES with fitness (a detrained rebuild gets a SLOWER LT1, never a stale fast one).
       • HR (cross-check): the derived-LTHR easy ceiling (LTHR_EASY_FRAC × LTHR) when LTHR is trustworthy.
-    Also flags DETRAINED (pace ahead of HR — cardiac decoupling): on a rebuild your easy runs sit a touch above
+    Also flags DETRAINED (pace ahead of HR — cardiac decoupling): on a rebuild the user's easy runs sit a touch above
     LT1, which is NORMAL and self-corrects, so we DON'T over-police it (the reconciled §3.4 finding — trust
     HR/effort on easy days then). Read-only; carries HR ⇒ PRIVATE. Does NOT change any prescription or the
     effort verdict — it's the surfaced, moving easy-bar reference the monitor reads against."""
@@ -3791,7 +3791,7 @@ def run_metrics_analysis(db):
 DURABILITY_MIN_KM = 16.0       # a run long enough for economy decay to manifest (durability is a long-run trait)
 DURABILITY_GOOD_RAW = 500.0    # decoupling below this on a long run ≈ durable (economy held); Runalyze raw units
 DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the distance
-# Runalyze stores aerobic_decoupling_pace in raw units ≈ percentage ×100 (your median long-run ≈540 ≈5.4%; your
+# Runalyze stores aerobic_decoupling_pace in raw units ≈ percentage ×100 (the athlete's median long-run ≈540 ≈5.4%; the athlete's
 # last marathon ≈1740 ≈17.4% w/ feel=1) — the ×100→% is INFERRED (units officially TBD upstream), so the RAW
 # value is the source of truth and % is only a reading aid.
 DURABILITY_PCT_SCALE = 100.0
@@ -3807,10 +3807,10 @@ def efficiency_signal(db, window_days=EFFICIENCY_WINDOW_D, recent_n=EFFICIENCY_R
 
     EF = metres per minute per bpm. It is the cleanest single read of aerobic fitness we hold: the
     same pace at a lower heart rate IS the adaptation, and unlike CTL it needs no model — just the
-    watch. Your rebuild moved it from ~0.90 in mid-June to ~1.09 in late August.
+    watch. The athlete's rebuild moved it from ~0.90 in mid-June to ~1.09 in late August.
 
-    ⚠ TEMPERATURE IS RETURNED, NEVER APPLIED. Heat depresses EF, and your cool-weather runs are also
-    your most recent and fittest, so the two are confounded in exactly the window that looks most
+    ⚠ TEMPERATURE IS RETURNED, NEVER APPLIED. Heat depresses EF, and the athlete's cool-weather runs are also
+    the user's most recent and fittest, so the two are confounded in exactly the window that looks most
     impressive. This read publishes both series and the correlation between them and adjusts for
     NOTHING: [[feel-context-modelling]]'s far better-powered test (n=298 controlled pairs) put the
     heat cost at roughly a quarter of what this window's 30 pairs suggest, and the difference is not
@@ -4047,12 +4047,12 @@ def worked_example(db, activity_id=None):
 #                    template's run count sheds DAYS instead. Mild by design — it fires only on
 #                    sub-floor stubs, never grows a normal week's runs (the min-dose consolidation
 #                    experiment stays REVERTED), and the ACWR/peak governors still project whatever
-#                    layout results. Sits at your historical junk bar (~2.6km).
+#                    layout results. Sits at the athlete's historical junk bar (~2.6km).
 
 # ── Seed objective (fresh-install convenience) ───────────────────────────────
-# Optionally seed a first objective on a fresh DB, so you don't start at a blank screen:
+# Optionally seed a first objective on a fresh DB, so the user doesn't start at a blank screen:
 #   SH_SEED_OBJECTIVE="Berlin Marathon|2026-09-27|marathon|finish|A"  (label|date|type|target|priority)
-# Empty = no seed; add your race in the Objectives UI. With none, the engine runs in maintenance mode.
+# Empty = no seed; add the athlete's race in the Objectives UI. With none, the engine runs in maintenance mode.
 def _parse_seed_objective(spec):
     bits = [b.strip() for b in (spec or "").split("|")]
     if len(bits) == 5 and bits[1]:
@@ -4232,7 +4232,7 @@ def _tr_prescription(db, plan_id, week_start):
 
     The forecast error alone fuses two different failures that need opposite fixes: the model's
     physics being wrong, and the athlete not running the plan. Measured on my own four scored weeks,
-    the whole 32–57% CTL under-prediction resolves to the second — the plans laid 24.5–38.4 km and you
+    the whole 32–57% CTL under-prediction resolves to the second — the plans laid 24.5–38.4 km and the athlete
     ran 30.1–53.4 km, so given the volume it prescribed, the projector was roughly right. Publishing
     only "under-predicted by a median 45%" would invite a correction to the projector, which is the
     fixed-point trap already on the record. So the split is derived and published beside the error.
@@ -4608,7 +4608,7 @@ OBJECTIVE_SCHEMA = {
 
 def parse_objective_nl(text, today=None):
     """Turn 'sub-45 10k in October' / 'spring marathon, want to BQ' into a structured objective
-    (§6c). Returns the parsed fields for you to review — it does NOT save; the existing
+    (§6c). Returns the parsed fields for the user to review — it does NOT save; the existing
     deterministic add path (which periodizes + validates) stays the single writer."""
     today = today or datetime.now().date().isoformat()
     system = (
@@ -4723,7 +4723,7 @@ def propose_adjustment(text, today=None, easy_pace=None):
         change, just a warm reply that affirms it with the plan's own logic. Routed to the
         session journal, never saved as an adjustment.
       • a real *adjustment* ('knee's sore', 'travelling Mon–Fri') → kind='adjust': a bounded,
-        engine-clamped directive you confirm via apply.
+        engine-clamped directive the user confirms via apply.
     Proposal only — nothing is saved here."""
     today = today or datetime.now().date().isoformat()
     pace_line = (
@@ -4949,7 +4949,7 @@ def explain_plan(db, diff=None, fresh=False):
     """§6c — plain-language 'why' for the latest plan (and the most recent change).
 
     Cached by (plan id, diff, athlete context) — see TECH-7 above. `fresh=True` re-rolls: the
-    narration is a generative answer, and you are entitled to ask for another one."""
+    narration is a generative answer, and the athlete is entitled to ask for another one."""
     row = db.execute("SELECT id, plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return {"ok": False, "error": "no plan yet — generate one first"}
@@ -5007,7 +5007,7 @@ def explain_plan(db, diff=None, fresh=False):
 
 # Multi-objective conflict adjudication (§6c) — when ≥2 upcoming A-races compete, the LLM advises
 # which should be the true peak and which to demote to a tune-up. ADVISORY: it recommends priority
-# changes; you apply them, then the deterministic engine periodizes from the result.
+# changes; the user applies them, then the deterministic engine periodizes from the result.
 ADJUDICATE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -5314,7 +5314,7 @@ def todays_session(db, today):
 
 def latest_easy_pace(db):
     """The easy-pace string ('7:11') from the most recent plan, or None — fed to the §6c
-    reflection reply so it can affirm 'your easy target is X, you were running threshold'."""
+    reflection reply so it can affirm 'the athlete's easy target is X, the athlete was running threshold'."""
     row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
     if not row:
         return None
@@ -5409,7 +5409,7 @@ def block_log(db):
                     "reflection": notes.get(d), "runs": _breakdown(a), "activity_id": a["id"]})
         sessions.sort(key=lambda s: s["date"])              # unplanned runs slot into calendar order
         out_weeks.append({**w, "sessions": sessions})
-    # What you actually ran across the block window (dups already excluded) — real recorded
+    # What the athlete actually ran across the block window (dups already excluded) — real recorded
     # distance + duration, so "ran so far" is owned data, not km×pace.
     ran = {"km": round(sum(a["km"] for a in acts.values()), 1),
            "min": round(sum(a["sec"] for a in acts.values()) / 60),
@@ -5448,7 +5448,7 @@ def today_readiness(db):
                                 "they've cleared you.",
                       "reasons": ["Active medical hold — awaiting doctor clearance"], "source": "engine"}
     # A green light on a planned rest day means "follow the plan — which today is rest", not
-    # "run your session". Reword so the action matches the day (engine or LLM source alike). And when
+    # "run the athlete's session". Reword so the action matches the day (engine or LLM source alike). And when
     # ACWR is low (clear headroom), surface the §6o BONUS-RUN affordance: an easy run is safe extra
     # aerobic base, not a breach — offered, never prescribed (the governor still caps the week).
     if assessment.get("verdict") == "green" and (session or {}).get("kind") == "rest":
@@ -5613,7 +5613,7 @@ def _close_db(exc):
 def _private_only_path(p):
     """Paths the public read-only container must never serve — location/medical/personal privacy.
     Centralised so the map-privacy self-test can assert this invariant can't silently regress:
-    `/api/health` (blood markers), the workout `/map` (route geo reveals where you live),
+    `/api/health` (blood markers), the workout `/map` (route geo reveals where the athlete lives),
     `/api/settings` + `/api/secrets` (athlete context + keys are personal, owner-only control surfaces),
     and `/api/geocode` (the city-picker proxy). NOTE `/api/effort-discipline` is NOT here: it self-
     sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
@@ -5621,7 +5621,7 @@ def _private_only_path(p):
     return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
                   "/api/secrets/validate", "/api/runs")   # §RB — calendar carries HR-zone grades
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
-            or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — your data
+            or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the user's data
             or p.startswith("/api/availability")          # §AV — away days = empty-house broadcast
             or (p.startswith("/api/activity/") and p.endswith("/map")))
 
@@ -6056,7 +6056,7 @@ def plan_public_view(plan):
 @app.get("/healthz")
 def healthz():
     """Liveness + scheduler telemetry (TECH-8). The private box gets the raw timestamps; the PUBLIC box
-    gets booleans only — an unauthenticated probe must not learn when your nightly runs (their
+    gets booleans only — an unauthenticated probe must not learn when the athlete's nightly runs (their
     routine is private), but an uptime check can still see that syncing works and is fresh."""
     db = get_db()
     last_sync = get_meta(db, "last_sync")
@@ -6388,7 +6388,7 @@ def api_plandrift():
     """The plan's drift from its founding statement (§6b, visible). Three slow-moving, weekly
     series comparing the FIRST saved plan (the original road) with where the plan stands now:
       • distance — cumulative planned km of the initial road vs actuals-to-date + the current
-        plan's projection forward (so the gap reads as 'ahead of / behind your original road');
+        plan's projection forward (so the gap reads as 'ahead of / behind the athlete's original road');
       • ctl     — the initial plan's projected fitness vs the de-duplicated actual curve continued
         by the current plan's forward projection;
       • outcome — projected race-day CTL as recorded by each plan version over time: is the goal
@@ -6578,7 +6578,7 @@ def api_plandrift():
     settled = race_date is not None and today >= race_date
 
     # §6s — post-race reckoning: once the race date passes, stop PROJECTING and settle against what
-    # ACTUALLY happened — the fitness you arrived with vs what the founding road promised, and the
+    # ACTUALLY happened — the fitness the athlete arrived with vs what the founding road promised, and the
     # finish vs the goal. The honest endgame §6j left open (its race axis was projection-vs-projection).
     # The finish time + goal are the runner's personal result — a category beyond §6j's public-safe
     # "shape + plan only" posture — so the reckoning is PRIVATE-only (withheld on the read-only mirror).
@@ -6787,8 +6787,8 @@ def api_objectives_add():
 
 @app.post("/api/objectives/parse")
 def api_objectives_parse():
-    """§6c — parse a natural-language goal into structured fields for you to review.
-    Advisory only: returns the proposal; you confirm via the normal add path."""
+    """§6c — parse a natural-language goal into structured fields for the user to review.
+    Advisory only: returns the proposal; the user confirms via the normal add path."""
     d = body()
     text = (d.get("text") or "").strip()
     if not text:
@@ -6827,7 +6827,7 @@ def api_objectives_remove(oid):
 
 @app.get("/api/availability")
 def api_availability():
-    """§AV — your away-day windows still in play (this week's Monday onward, so a window
+    """§AV — the user's away-day windows still in play (this week's Monday onward, so a window
     covering days already lived stays listed until its week closes). PRIVATE-ONLY: the whole
     /api/availability surface is blocked on the public box (_private_only_path) — away dates are
     an empty-house broadcast."""
@@ -6971,7 +6971,7 @@ def _seed_now(db, plan, today=None):
     DAY moving. A plan is seeded from the load state at the end of the day before it was generated
     (§PRO20), so once tomorrow arrives that seed describes a state the athlete has since left. The
     nightly regenerates at 22:30, which is the right time to INGEST the day's runs and the wrong time
-    to be the plan you wake up to — on 2026-07-31 the 22:30 plan correctly read the week as spent and
+    to be the plan the athlete wakes up to — on 2026-07-31 the 22:30 plan correctly read the week as spent and
     laid nothing for the weekend, while the same engine run on Saturday morning brought back Sat easy
     7.4 km + Sun long 9.4 km. Nothing was broken; the plan was simply built for the previous day.
 
@@ -6984,7 +6984,7 @@ def _seed_now(db, plan, today=None):
 
     TRIGGERED ON VALUES, NOT PROVENANCE, and that distinction is the whole honesty of it: if the seed
     is drawn from a different DAY but reads the same to the displayed precision, NOTHING has moved and
-    firing would be crying wolf — the exact failure §PRO14's docstring warns trains you to
+    firing would be crying wolf — the exact failure §PRO14's docstring warns trains the athlete to
     ignore the marker. So a new day alone does not fire it; a new day whose numbers differ does.
 
     Returns None — and the banner is then OMITTED, never guessed — when the plan predates §PRO20 (no
@@ -7010,7 +7010,7 @@ def _seed_now(db, plan, today=None):
     # eVO₂max rides along because it IS part of the seed tuple (§PRO20 keeps it on the newest row) and
     # it moves the pace zones — a changed fitness read is as much a reason to re-read today as a
     # changed load state. Compared at the precision each is shown at, so an invisible last-decimal
-    # wobble never fires a banner you cannot see the cause of.
+    # wobble never fires a banner the athlete cannot see the cause of.
     return {"from": meta.get("from"), "bridged_days": meta.get("bridged_days"),
             "fallback": meta.get("fallback"), "was_from": saved.get("from"),
             "moved": now != was, **now, "was": was}
@@ -7037,7 +7037,7 @@ def _plan_for_view(plan, db=None):
         plan["engine_running"] = ENGINE_VERSION
         try:
             plan["seed_now"] = _seed_now(db or get_db(), plan)
-        except Exception as e:      # a staleness read must never cost you your plan
+        except Exception as e:      # a staleness read must never cost the athlete their plan
             print(f"[§56] seed staleness read skipped: {e}")
             plan["seed_now"] = None
     return plan
@@ -7300,7 +7300,7 @@ def _profile_cached(db, aid):
         # what is cached (a stale shape is still a pace curve) or say so — before 0.27.1 a miss here
         # made a doomed MCP call and, with a token present, an INSERT on the query_only connection
         # (an HTML 500 instead of the JSON 502; Gemini review #3, verified). The private side fills
-        # the cache your views share.
+        # the cache the athlete's views share.
         return cached, RunalyzeError("profile not cached — the public view cannot fetch it")
     try:
         prof = activity_profile(aid)
@@ -7451,7 +7451,7 @@ def api_activity_profile(aid):
 @app.get("/api/activity/<int:aid>/map")
 def api_activity_map(aid):
     """Route polyline (lat/long) + bounds for the private workout map. PRIVATE-ONLY: the public
-    read-only container 403s this in _readonly_guard — the routes reveal where you live."""
+    read-only container 403s this in _readonly_guard — the routes reveal where the user lives."""
     db = get_db()
     prof, err = _profile_cached(db, aid)
     if prof is None:
@@ -7997,7 +7997,7 @@ _scheduler_started = False
 # end-of-yesterday whenever it is read), but `week_actuals` — which decides whether the week's volume
 # is already run — still reads the day. Overridable via SH_SYNC_AT (validated in start_scheduler).
 SYNC_AT_DEFAULT = "22:00"
-# Fire the nightly sync at your wall-clock hour, not the container's. Set SH_TZ to your IANA zone
+# Fire the nightly sync at the user's wall-clock hour, not the container's. Set SH_TZ to the user's IANA zone
 # (e.g. "Europe/Lisbon", "America/New_York"); defaults to UTC. Falls back to UTC on a bad name.
 try:
     _config_swap(sync_tz=ZoneInfo(os.environ.get("SH_TZ", "UTC")))
@@ -8022,7 +8022,7 @@ def _daily_replan():
     manual 'Generate plan'. This is what makes 'the plan is a function recomputed forward from
     today' true day-to-day. No-ops when no plan exists yet (we refresh one, never auto-create
     one) — and the frozen rebase_start keeps the block from sliding. The stored diff is just
-    versioning metadata; it is never surfaced as a 'you changed something' banner in the UI."""
+    versioning metadata; it is never surfaced as a 'the athlete changed something' banner in the UI."""
     db = connect_db()
     try:
         if not db.execute("SELECT 1 FROM plans LIMIT 1").fetchone():

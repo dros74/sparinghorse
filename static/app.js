@@ -204,7 +204,7 @@ function isoWeekMonday(year, wk){
   monday.setUTCDate(simple.getUTCDate()-((dow+6)%7));
   return monday;
 }
-// Weekly volume: we hold the FULL history and show a fixed window you can grab-drag
+// Weekly volume: we hold the FULL history and show a fixed window the user can grab-drag
 // horizontally to pan back/forth through time (bar heights stay on a global scale so weeks
 // are comparable across the whole span).
 const WEEKLY_WIN=26;
@@ -687,7 +687,7 @@ document.addEventListener("click", e=>{ if(!e.target.closest(".rcal-day")) rcalC
 
 // ── Workout route map (private only) ────────────────────────────────────────
 // Leaflet is loaded lazily from a CDN and ONLY on the private instance — the public read-only
-// container never fetches it, and its /map endpoint 403s, because the routes reveal where you
+// container never fetches it, and its /map endpoint 403s, because the routes reveal where the user
 // lives (the whole reason this feature is private). Falls back to a clean empty state with no GPS.
 let LEAFLET_READY=null;
 function ensureLeaflet(){
@@ -1085,7 +1085,7 @@ function confirmDanger(opts){
 }
 // A house NOTICE — the same dialog, one button, no Cancel. This replaces window.alert(), which is
 // modal to the whole browser, unstyled, unthemed, unreadable on a phone (where it reads like a
-// browser error rather than something this app is telling you) and impossible to assert on. The
+// browser error rather than something this app is telling the user) and impossible to assert on. The
 // native call survives only as the no-<dialog> fallback, same as confirmDanger's.
 function notice(opts){
   const o = opts||{};
@@ -1312,7 +1312,7 @@ function wireObjActions(){
         headers:{"Content-Type":"application/json"},body:JSON.stringify({text})});
       const d=await r.json();
       if(!d.ok){ interp.textContent="⚠ "+(d.error||"couldn't parse"); interp.className="nlinterp err"; return; }
-      // fill the structured form — you review, then click Add objective
+      // fill the structured form — the user reviews, then click Add objective
       $("#ao_label").value=d.label||""; $("#ao_type").value=d.type||"marathon";
       $("#ao_date").value=d.date||""; $("#ao_pri").value=d.priority||"A";
       $("#ao_target").value=d.target||"finish";
@@ -2203,7 +2203,7 @@ function scorecardHTML(sc, r){
       scoreRow(r&&r.label?r.label:"Race day", raceMain, raceSub, raceCls)+
     `</div>${chainHTML}<div class="sc-verdict">${esc(sc.headline)}${wks}</div></div>`;
 }
-// §6m — effort discipline: HR-led "are your easy days actually easy?" Judged by heart rate (terrain
+// §6m — effort discipline: HR-led "are the athlete's easy days actually easy?" Judged by heart rate (terrain
 // & heat already live in HR), TE corroborates, GAP shown as terrain-fair pace.
 const EFFP = s => s ? `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}` : "—";
 const EFFV = {on:["var(--ok)","on target"], hot:["var(--warn)","hot"],
@@ -2424,8 +2424,8 @@ async function loadDrift(){
     const ACC2="var(--accent2, var(--accent))", ACC="var(--accent)";
     const lbl=rn(cf.regime), nlbl=rn(cf.vs);
     // direction matters (Duarte's 2026-07-04 catch): from a CONSERVATIVE plan the assertive road is
-    // the upper envelope you can EARN; from an ASSERTIVE plan the conservative road is the FLOOR the
-    // engine would hold you to if the gate re-closed — "what earning it unlocks" reads as nonsense there.
+    // the upper envelope the athlete can EARN; from an ASSERTIVE plan the conservative road is the FLOOR the
+    // engine would hold the athlete to if the gate re-closed — "what earning it unlocks" reads as nonsense there.
     const upside=cf.regime==="assertive";
     const aEff=(d.effort.actual||[]).map(p=>({date:p.date,val:p.trimp})), aCtl=(d.ctl.actual||[]).map(p=>({date:p.date,val:p.ctl}));
     const cfDist=(cf.distance||[]).map(p=>({date:p.date,val:p.cum}));
@@ -2807,7 +2807,7 @@ async function saveSettings(e){
 // so the field is always empty and shows status only. Private console only (#secretsBox is removed on
 // the public view). Saving applies live — no .env edit, no restart.
 // §SG — `justSaved` is the key whose field should come back EMPTY; every other field keeps whatever
-// you had typed into it. Re-rendering the whole block used to wipe unsaved siblings, which with
+// the user had typed into it. Re-rendering the whole block used to wipe unsaved siblings, which with
 // five keys means pasting three Suunto credentials and losing two of them to the first Save.
 async function loadSecrets(probe, justSaved){
   const host=$("#secretsBox"); if(!host) return;

@@ -546,7 +546,7 @@ def _stc_image_completeness():
     whole story; it is now one of four, and each split adds another. The failure mode is nasty
     precisely because nothing local catches it: the suite is green on a checkout, the mirror is
     green, and the container is the only place that is missing a file — which is the one place the
-    you cannot easily read a traceback from. So the recipe is checked against the imports rather
+    the athlete cannot easily read a traceback from. So the recipe is checked against the imports rather
     than trusted: every module the app (or the battery it spawns) imports from this directory must
     be COPYed, and so must `static/`, which is read at import time.
 
@@ -747,7 +747,7 @@ def _stc_runs_browser():
 
 
 def _stc_map_privacy(db):
-    """The workout route map is private-only — the routes reveal where you live. Assert the
+    """The workout route map is private-only — the routes reveal where the athlete lives. Assert the
     WIRING, not just the predicate: drive the real endpoints via a test client so a future refactor
     that drops the guard or the geo-strip is caught (a predicate-only check would miss that). (a) On
     a read-only instance, GET /map → 403. (b) /profile (served on the public container) carries NO
@@ -852,7 +852,7 @@ def _stc_day_spacing():
             bad.append(f"{ph}6:long-off-weekend")
     detail.append({"six_run": six})
     # cross-week BOUNDARY spacing (2026-06-22 fix): a week must never end AND the next begin on a
-    # rest — the double-rest seam you hit (a 3-run week ending Sat, the next week resting Mon).
+    # rest — the double-rest seam the athlete hits (a 3-run week ending Sat, the next week resting Mon).
     # Every layout ends on the Sunday slot, so the gap from one week's last run to the next week's
     # first run stays ≤2 calendar days (≤1 rest) for every frequency transition the plan uses. (The
     # OLD 3→4 layout gapped 3 days = 2 rests — this guard would have caught it.)
@@ -880,7 +880,7 @@ def _stc_day_spacing():
 
 def _stc_availability():
     """§AV — availability-aware layout. Golden byte-identity with no blocks; the Tue relocation
-    (your July 2026 flight — the feature's founding case); the weekend block moving the long to the
+    (the athlete's July 2026 flight — the feature's founding case); the weekend block moving the long to the
     last available day; the heavy block shedding runs WITH their load (prorate, never cram); the
     straddling week's remainder avoiding a blocked day; and the hard-gap invariant on re-laid sets."""
     from datetime import date, timedelta
@@ -1160,7 +1160,7 @@ def _stc_public_allowlist():
           av trace on the public log; no `adjustment`/`cold_start` on the public plan; no HR on the
           public activity.
       (c) THE PRIVATE VIEW IS UNTOUCHED — every one of those fields still reaches the private box.
-          An allowlist that silently starved your own console would be the worse bug.
+          An allowlist that silently starved the user's own console would be the worse bug.
       (d) FAIL CLOSED — a resource with no spec RAISES rather than serving the payload, and every
           registered spec is reachable (a spec nobody calls is a spec nobody maintains)."""
     import sqlite3 as _sq
@@ -1332,7 +1332,7 @@ def _stc_av_public_strip():
     included — the 0.27.0 strip walked base/build/peak/taper only; Gemini review 2026-08-21 #1/#6) and on
     EVERY payload that spreads week dicts: /api/plan AND /api/log (block_log → _plan_all_weeks →
     {**w, "sessions"} carries av_dates for every phase and api_log popped only `reflection` — on
-    in July 2026 the public log served one of your away dates for a week). Drives the REAL endpoints under
+    in July 2026 the public log served one of the athlete's away dates for a week). Drives the REAL endpoints under
     READONLY through a throwaway DB (a fixture-only strip check is exactly what let the gap through);
     the private view must KEEP the fields (the ✈ week chip reads them). /api/availability stays
     private-only."""
@@ -1559,7 +1559,7 @@ def _stc_sync_lock():
 def _stc_scheduler_health():
     """TECH-8 (0.27.2) — the nightly can't skip silently anymore. (a) /healthz carries the scheduler
     telemetry: timestamps + fail count on the private box, BOOLEANS ONLY on the public one (a probe
-    must not learn when your nightly runs). (b) the boot catch-up decision: owed when
+    must not learn when the athlete's nightly runs). (b) the boot catch-up decision: owed when
     sched:last_ok is missing or >26 h stale. (c) the nightly job itself, on a temp-dir DB with a
     stubbed sync: success records last_run/last_ok and zeroes fail_count + drops a rotated VACUUM
     snapshot beside the DB (newest 7 kept); a failed sync increments fail_count, leaves last_ok
@@ -2279,14 +2279,14 @@ def _stc_efficiency():
     """§EF — aerobic efficiency (speed per heartbeat), and the two design calls the card makes.
 
     I asked for this chart on 2026-08-25, judging that the durability tile only earns its
-    space once your runs get long (your longest is 12.3 km) while efficiency reads on every easy run you
+    space once the athlete's runs get long (the athlete's longest is 12.3 km) while efficiency reads on every easy run the athlete
     does. I asked for "two vertical axes, plot both separately". Limbs (b) and (d) are those words
     turned into invariants, because both are decisions a future edit could quietly undo:
 
       (b) EFFICIENCY AND TEMPERATURE ARE SEPARATE PLOTS, never one twin-axis frame. Overlaying two
           series on two y-scales is the standard way to make them look like they explain each other,
-          and that is precisely the open question here — heat depresses efficiency, and your cool runs
-          are also your most recent and fittest. Stacked panels sharing only a time axis let you see
+          and that is precisely the open question here — heat depresses efficiency, and the athlete's cool runs
+          are also the athlete's most recent and fittest. Stacked panels sharing only a time axis let the athlete sees
           both without the chart having asserted the answer.
       (d) TEMPERATURE IS RETURNED, NEVER SUBTRACTED. The published trend must be the RAW slope of
           what is drawn. A temperature-adjusted figure would bake in a coefficient the corpus has not
@@ -2294,8 +2294,8 @@ def _stc_efficiency():
           what this window's 30 pairs suggest, and that is unsettled. Same discipline that keeps
           decoupling display-only (§3.3, DIR-3).
 
-    (c) is the confound you did NOT raise and that matters more than heat: EF only compares
-    between runs of SIMILAR EFFORT. Unfiltered, your March HR-176 5k efforts sit beside August's
+    (c) is the confound the athlete did NOT raise and that matters more than heat: EF only compares
+    between runs of SIMILAR EFFORT. Unfiltered, the athlete's March HR-176 5k efforts sit beside August's
     HR-133 easy hours and the trend reads the training mix. Measured: r 0.40 unfiltered → 0.78
     restricted to aerobic runs."""
     import sqlite3 as _sq
@@ -2468,8 +2468,8 @@ def _stc_forecast_decomposition():
     """§TR-A — the scorecard separates PRESCRIPTION error from PROJECTION error.
 
     `bias` alone fuses two failures that need opposite fixes: the model's physics being wrong, and
-    the athlete not running the plan. On your own four scored weeks the entire 32–57% CTL
-    under-prediction resolves to the second — the plans laid 24.5–38.4 km and you ran 30.1–53.4 km —
+    the athlete not running the plan. On the athlete's own four scored weeks the entire 32–57% CTL
+    under-prediction resolves to the second — the plans laid 24.5–38.4 km and the athlete ran 30.1–53.4 km —
     so the fused headline would have invited a correction to the projector, which is the fixed-point
     trap already on the record (a governor fed by a variable derived from what it governs).
 
@@ -2556,7 +2556,7 @@ def _stc_long_run_phase_cap():
 
     §PRO18 put one Daniels/Hansons number (0.30) across the whole block. That is right where chronic
     volume is being built and wrong for the marathon-specific block: at 0.30 the road tops out at a
-    24.4 km longest run, and the athlete reaches the start line never having been on your feet past
+    24.4 km longest run, and the athlete reaches the start line never having been on the athlete's feet past
     2h42. My call of 2026-08-25 lifts it for build/peak only.
 
     The safety argument is limb (d), and it is the whole reason this is a small change: the two big
@@ -2838,7 +2838,7 @@ def _stc_rd_double_count():
         sec = sum(s["sec"] for s in w)
         return round(sum(s["pace"] * s["sec"] for s in w) / sec) if sec else None
 
-    # ── your session: 4×2min, rep 1 taken out hard and settling ⇒ it segments in two ──────────
+    # ── the athlete's session: 4×2min, rep 1 taken out hard and settling ⇒ it segments in two ──────────
     SESSION = [(600, 420, 156),
                (45, 291, 176), (90, 321, 172),          # rep 1 — the split one
                (105, 405, 158),
@@ -2903,7 +2903,7 @@ def _stc_lived_days_pinned(db):
     The straddling week is re-laid on every regeneration (the remainder must be re-governed against
     fresh CTL/ATL) and its ELAPSED slice was published as the day's prescription. So finished days
     drifted with the week's intent: my Monday 2026-08-24 was laid at 8.2 km on Monday, read
-    11.1 km on Tuesday and 11.5 km on Wednesday off your own card ("are we changing the past now?",
+    11.1 km on Tuesday and 11.5 km on Wednesday off the user's own card ("are we changing the past now?",
     2026-08-26). `_pinned_sessions` reads each lived day back out of PLAN HISTORY instead.
 
     Six teeth, and the first two are the ones that must be SEEN to fail on a revert — the fixture is
@@ -2912,7 +2912,7 @@ def _stc_lived_days_pinned(db):
     (a) THE PIN. Monday shows what the road asked for while Monday was still ahead, not what today's
         arithmetic would ask now. Guarded by (a′): the re-lay must differ, or the tooth is vacuous.
     (b) STABILITY. Re-generating on Thursday and again on Friday, off DIFFERENT seeds that move the
-        remainder, leaves the lived days byte-identical. This is you-visible property.
+        remainder, leaves the lived days byte-identical. This is the athlete-visible property.
     (c) A REST DAY STAYS REST. A lived day the road covered but prescribed nothing for must not gain
         a session because today's lay happens to place one there — pre-fix it silently did.
     (d) NEWEST-ON-OR-BEFORE WINS. A plan generated AFTER the day is a re-lay, never evidence, however
@@ -3524,7 +3524,7 @@ def _stc_settings():
             fails.append(f"validate({key},{val!r}) ≠ {want}")
     # Assert the WIRING (like _stc_map_privacy): the settings + geocode endpoints must stay private —
     # the public read-only container relies on _private_only_path to 403 them. A refactor that drops
-    # one (typo / tuple reorder) must fail here, not leak your settings + an open geocode proxy.
+    # one (typo / tuple reorder) must fail here, not leak the user's settings + an open geocode proxy.
     for p in ("/api/settings", "/api/geocode"):
         if not S._private_only_path(p):
             fails.append(f"{p} not gated private")
@@ -3682,7 +3682,7 @@ def _stc_secrets():
     carries a FINGERPRINT that identifies WHICH value is stored without describing it: eight hex of
     sha256, present only when configured, MOVING when the value is rotated (the whole point — before
     it, a save that silently failed and one that worked were the same screen), stable for the same
-    value, matching a digest you can compute themselves, and never a prefix of the value. Uses a temp store + a
+    value, matching a digest the athlete can compute themselves, and never a prefix of the value. Uses a temp store + a
     synthetic env; restores ALL module/env globals in a finally (incl. SH_SCHEDULE so no thread spawns)."""
     import sqlite3 as _sq, os as _os, tempfile, json as _json
     pass   # the rebinds below land on the app module (S.<name> = …), TECH-1
@@ -4603,7 +4603,7 @@ def _stc_track_record():
       (b) the LEAD rule — a forecast made a week before the outcome is not scorable at all, because
           grading the plan regenerated the night before a week ends is grading hindsight;
       (c) WRITE-ONCE — re-scanning after the underlying plan (or the result) has changed must leave
-          the row exactly as it was. This is the whole mechanism: a score you can revise after
+          the row exactly as it was. This is the whole mechanism: a score the athlete can revise after
           seeing the outcome is not a score;
       (d) the T-8 horizon picks the plan nearest eight weeks out, and refuses when the nearest plan
           is not near enough;
@@ -4904,7 +4904,7 @@ def _stc_explain_cache():
         a plan that has moved can never be narrated by the answer written for the plan before it;
       · a changed ATHLETE CONTEXT ⇒ a new call. It is interpolated into the system prompt, so it is
         the one setting that changes the answer without the plan moving;
-      · `fresh=True` re-rolls and re-seeds the entry — a generative answer you may want again;
+      · `fresh=True` re-rolls and re-seeds the entry — a generative answer the athlete may want again;
       · a FAILED call is NEVER cached: an API hiccup must not be pinned to the plan for its lifetime;
       · and the cache is bounded, so a long-lived process cannot grow one.
     Drives the real `explain_plan` with `llm_json` stubbed by a counter — no key, no network."""
@@ -4991,7 +4991,7 @@ def _stc_explain_cache():
 def _stc_health_staleness():
     """§HS — the health view had no way to say a feed had DIED. On 2026-08-15 the watch stopped
     sending nights; the sleep and HRV charts kept drawing their full lines with the last point
-    sitting there reading like today's, and you found the eight-day hole by eye a week later.
+    sitting there reading like today's, and the athlete found the eight-day hole by eye a week later.
     Nothing on the page had said a word. `health_staleness` is the sentence the page was missing.
 
     The teeth are mostly about NOT crying wolf, because a cue that fires on ordinary data is a cue
@@ -5532,11 +5532,11 @@ def _stc_stream_optin():
 def _stc_guide_notify():
     """§SG3 the boundary popup — the fix for a guided workout that guided nothing. Everything a step
     carries lives on the SuuntoPlus display, a screen of its own that the watch never switches to on
-    its own (on a Race S you press the crown to reach it). So the first live guided interval session
+    its own (on a Race S the user presses the crown to reach it). So the first live guided interval session
     ran with every transition firing on time, a beep at each boundary, and not one word about what
     the athlete was supposed to be doing — the instructions were on a page nobody was looking at.
     `notification` is the only part of a guide that lands on whatever screen is actually in front of
-    you, and we emitted none.
+    the athlete, and we emitted none.
 
     Locked here: every step has one, inside the documented 13/54 limits; the popup names the effort
     AND its targets; segments are dropped WHOLE rather than cut mid-token; a rep does not announce
@@ -5684,7 +5684,7 @@ def _stc_hr_zones():
         fails.append(f"effort monitor didn't anchor on lthr when confident: anchor={dc.get('anchor')}")
     if dc.get("easy_hr_ceiling") != round(S.LTHR_EASY_FRAC * dc.get("lthr", 0)):
         fails.append(f"lthr easy ceiling wrong: {dc.get('easy_hr_ceiling')} vs lthr={dc.get('lthr')}")
-    # the switch must NEVER LOOSEN your easy bar — the LTHR ceiling stays ≤ the %HRmax ceiling on the
+    # the switch must NEVER LOOSEN the athlete's easy bar — the LTHR ceiling stays ≤ the %HRmax ceiling on the
     # same data (a future LTHR drift can't silently re-introduce a looser easy ceiling).
     if dc.get("easy_hr_ceiling", 999) > round(S.EASY_HR_FRAC * dc.get("hrmax", 0)):
         fails.append(f"lthr easy ceiling LOOSER than %HRmax: {dc.get('easy_hr_ceiling')} > "
@@ -6179,7 +6179,7 @@ def _stc_building_load_integrity():
 
 def _stc_seed_stale():
     """§56 — the day-staleness banner must fire when the seed has actually MOVED and stay silent when
-    it has not. Both halves are the test: a marker that fires every day is one you learn to
+    it has not. Both halves are the test: a marker that fires every day is one the athlete learns to
     scroll past, which is the failure §PRO14's own docstring names, and this is the second marker
     stacked in the same slot — so it has to earn each appearance.
 
@@ -6305,7 +6305,7 @@ def _stc_plan_seed():
                     f"re-applies — pace zones must not move with this change): got {vo2}")
 
     # (b) IT HAS TEETH — the two seeds must lay DIFFERENT weeks, else (a) asserts nothing that reaches
-    # you. Same straddling shape either way; only the seed changes.
+    # the athlete. Same straddling shape either way; only the seed changes.
     shape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 0, "intent": "Base — aerobic volume"}]
     bs = today - timedelta(days=3)                     # today lands mid-week ⇒ the §6o straddle path
 
@@ -6772,7 +6772,7 @@ def _stc_durability_api():
     Locks: (a) PRIVATE-ONLY — READONLY answers a JSON 403 (decoupling is HR-adjacent; the
     /api/run-metrics discipline, never the sanitized one); (b) the payload is durability_signal's
     contract — verdict/trend/medians — plus the tracker chart's `series`: long-run points, newest
-    first, EACH carrying km + decoupling_pct (the §55d caveat: duration must stay visible — on your
+    first, EACH carrying km + decoupling_pct (the §55d caveat: duration must stay visible — on the athlete's
     corpus longer runs decouple LESS, so a chart that hides distance lies); (c) a corpus with no
     qualifying long runs answers 200 ok:False, not an error. Driven through the real route on
     in-memory DBs via a rebound get_db (the plandrift no-plan probe's pattern) — nothing persists."""
@@ -7172,9 +7172,9 @@ def _stc_long_run_identity():
     (d) §PRO9 STILL OWNS THE CEILING — the raise only ever runs before the clip, so no published long
         run exceeds its cap. Asserted on the PUBLISHED km with NO tolerance, swept across caps and
         paces: the km is reached through two roundings (TRIMP → whole minutes → km at 0.1) and rounding
-        up through both put a 16.8 km long run under a 16.7 km cap on your own block while
+        up through both put a 16.8 km long run under a 16.7 km cap on the athlete's own block while
         det/long-run-step stayed green — that det allows +0.3 for exactly this rounding, which is what
-        hid it. A promise about the number you actually runs has to be checked on that number.
+        hid it. A promise about the number the athlete actually runs has to be checked on that number.
     (e) HONESTY BACKSTOP where neither lever can win — at ≤2 short easy days the raise would need
         R/(n_short+R) = 0.37, above every `long_cap` we set, so a 3-run week is capped at ratio 1.077
         by construction. Then the session is relabelled off 'long' and the week flagged `long_flat`,
@@ -7334,7 +7334,7 @@ def _stc_eq_stable():
         m.executescript(S.SCHEMA)
         base = date(2026, 8, 3)
         gap = 3600.0 / S.pace_zones(35.0)["marathon"]   # GAP parked exactly ON the marathon anchor —
-        #                                               the case that actually moved on your own data
+        #                                               the case that actually moved on the athlete's own data
         for i in range(1, 29):                        # 4 full weeks of history before `base`
             d = (base - timedelta(days=i)).isoformat()
             m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) "
@@ -7410,7 +7410,7 @@ def _stc_clock_couple():
     fail = []
     LONGISH = lambda s: str(s.get("kind") or "").startswith("long")
 
-    # Your own situation, which is the whole point: a LOW designed intent (24 km) under an ACWR ceiling
+    # The athlete's own situation, which is the whole point: a LOW designed intent (24 km) under an ACWR ceiling
     # that would happily pay for 2.5× that. The intent floor is therefore slack for every cap ≥ 6.0 and
     # the LADDER is what governs — if the floor were doing the work this sweep would prove nothing.
     WK = {"wk": 1, "km": 24, "runs": 5, "long": 6, "strides": 0, "quality": []}
@@ -7483,8 +7483,8 @@ def _stc_easy_ladder():
     (a) GRADED. The short easies of an assertive full week are strictly decreasing in km, and the
         spread matches the fitted rungs. Reverting to the even split makes them all equal.
     (b) ⚠⚠ ORDERED BY DISTANCE FROM THE NEAREST LONG RUN — NOT BY CALENDAR. This is the tooth that
-        catches the version I wrote first. Your own 161 weeks grade strongly by SIZE RANK (R² 0.545)
-        and not at all by weekday (R² 0.054), so the magnitudes are your and the ORDER is doctrine:
+        catches the version I wrote first. The athlete's own 161 weeks grade strongly by SIZE RANK (R² 0.545)
+        and not at all by weekday (R² 0.054), so the magnitudes are the athlete's and the ORDER is doctrine:
         rung 0 goes to the day FURTHEST from any long run, and the days flanking a long run (the
         recovery day after last week's, the freshness day before this week's) take the short rungs.
         Laying the rungs in calendar order instead put the HEAD on Monday — the one day the §H1
@@ -7703,7 +7703,7 @@ def _stc_regime_gate():
         return {"base": {"weeks": wks}, "phases": [{"key": "base"}]}
 
     def log_travel_week(m):
-        # you ran 3 runs / 30.1 km of it — MORE km than laid, fewer runs, cleanly absorbed
+        # the athlete ran 3 runs / 30.1 km of it — MORE km than laid, fewer runs, cleanly absorbed
         ws = today - timedelta(weeks=1)
         for off, km in ((0, 10.0), (2, 10.0), (5, 10.1)):
             d = (ws + timedelta(days=off)).isoformat()
@@ -7729,7 +7729,7 @@ def _stc_regime_gate():
     # not illness — the plan starts small BY MEASUREMENT, not by gate)
     r_fresh = S.training_regime(fresh(), today, None)[0]
     # 5 — LATEST readiness AMBER/heavy ⇒ STILL ASSERTIVE (only red blocks; a tired day shouldn't
-    # drop you to conservative — §PRO3 my call). stop_symptom stays 0 here.
+    # drop the athlete to conservative — §PRO3 my call). stop_symptom stays 0 here.
     m = fresh(); log_travel_week(m)
     m.execute("INSERT INTO readiness(date,energy,stop_symptom) VALUES(?,?,0)", (today.isoformat(), "heavy"))
     r_heavy = S.training_regime(m, today, travel_plan())[0]
@@ -7783,8 +7783,8 @@ def _stc_shape_response():
     as a day with no training and the EWMA charged it a full day of decay before it had happened. The
     ride factor therefore tracked the TIME OF DAY: on my live DB the same curve read 66.6 at the end
     of the 25th and 63.5 on the morning of the 26th — −3.1 CTL, exactly ×(1 − 2/43) — so a morning
-    regeneration measured you ~4.5% below projection (outside the 2% dead band) and an evening one
-    read you on track. Measured at the end of YESTERDAY, a complete day, both agree. Teeth (f)/(g)
+    regeneration measured the athlete ~4.5% below projection (outside the 2% dead band) and an evening one
+    read the athlete on track. Measured at the end of YESTERDAY, a complete day, both agree. Teeth (f)/(g)
     below pin it, and they are built so the pre-fix code straddles the RESPONSE_ONTRACK boundary —
     "full ceiling" in the evening against "ease off" in the morning, same athlete, same day."""
     import sqlite3 as _sq
@@ -7806,8 +7806,8 @@ def _stc_shape_response():
             wks.append({"start": cur, "proj_ctl": extra})   # a later, in-progress week
         return {"base": {"weeks": wks}}
     realized = R["realized"] or 50.0
-    ahead = S.shape_response(mem, today, prior(realized * 0.7))    # you's well ahead of projection
-    behind = S.shape_response(mem, today, prior(realized * 1.6))   # you's well behind
+    ahead = S.shape_response(mem, today, prior(realized * 0.7))    # the athlete's well ahead of projection
+    behind = S.shape_response(mem, today, prior(realized * 1.6))   # the athlete's well behind
     deep = S.shape_response(mem, today, prior(realized * 3.0))     # deep behind ⇒ floor clamps
     # the current week's end-projection must NOT be used (it would read low and ease wrongly)
     ignores_current = S.shape_response(mem, today, prior(realized * 0.7, extra=realized * 5.0))
@@ -8662,7 +8662,7 @@ def _stc_straddle_streak():
         branch `continue`d past the bookkeeping), three near-ceiling lived weeks + the straddling
         down week left consec_hard at the cap, §PRO6 tripped on the very next week, and §PRO11
         pulled the block's END down week forward: TWO consecutive absorption weeks, no recovery
-        left in the block tail — the exact plan you flagged ("the absorption week moved to
+        left in the block tail — the exact plan the user flagged ("the absorption week moved to
         next week").
     (b) DAY-INVARIANCE — a near-ceiling BUILDING week underway must COUNT: the §PRO6 trip lands on
         the same week a Monday regeneration (frozen fold, same judgment) would put it."""
@@ -8930,7 +8930,7 @@ def _stc_caution_baseline():
     On a FIT seed (CTL 70) the conservative engine famously UNDER-prescribes: it follows the timid fixed
     ramp off the ~19 km re-base end (base peak ~23, build ~20) regardless of fitness, the build peak
     lands BELOW the base peak (flat-to-declining), and end-CTL is not inflated above the seed (caution
-    never grows a fit athlete — it lets you detrain). This test asserts exactly that baseline; the
+    never grows a fit athlete — it lets the athlete detrain). This test asserts exactly that baseline; the
     assertive regime is asserted to FIX it (uses the headroom, CTL retained) in det/regime-assertive.
     Self-contained (constructed seed, no ambient DB) per the det-hygiene lesson [[governor-lever-retune]]."""
     from datetime import date
@@ -8974,7 +8974,7 @@ def _stc_polarized():
     phases = [("base", S.base_shape(8, 19)), ("build", S.build_shape(6, 24)),
               ("peak", S.peak_shape(2, 26)), ("taper", S.taper_shape(3, 26))]
     bad, detail, saw_interval, saw_mp = [], [], False, False
-    # Seeded at a detrained-restart CTL (30) — the regime you ACTUALLY occupies. The invariant holds
+    # Seeded at a detrained-restart CTL (30) — the regime the athlete ACTUALLY occupies. The invariant holds
     # here WITHOUT §H2 firing (verified: 0 quality suppressions at this seed): the easy share is now
     # MP-EXEMPT, and the prior CTL-30 erosion that forced the old reseed-to-45 was MP-driven (the MP
     # finish counted against easy), so exempting MP lifts it clear on its own. §H2's actual job — the
@@ -9268,7 +9268,7 @@ def _stc_taper_touch(db):
     # (`--past-race`, any maintenance road) the plan has no taper at all, and the anti-vacuity guard
     # below then failed for the ENVIRONMENT rather than for the code. The fixtures also close the
     # other half of the claim — the "any other race ⇒ threshold" branch has no live road at all
-    # while your anchor is a marathon.
+    # while the athlete's anchor is a marathon.
     def _road(plan, tag):
         anchor = ((plan.get("chain") or [{}])[-1].get("type") or
                   (plan.get("objective") or {}).get("type") or "").lower()
@@ -9513,9 +9513,9 @@ def _stc_ctl_floor_removed():
 def _stc_effort_discipline(db):
     """§6m effort monitor — HR-LED, not TE-led (the load-bearing design choice). The DISCRIMINATING
     case: a long easy run with LOW HR but a duration-lifted high Training Effect must read ON, never
-    'too hard' (TE-gating would false-flag your cleanest easy run). Plus: a threshold-paced 'easy' run
+    'too hard' (TE-gating would false-flag the athlete's cleanest easy run). Plus: a threshold-paced 'easy' run
     flags too_hard, TE only sets confidence, quality sandbagging reads too_easy/low, and the live read
-    is structurally sound with a spike-resistant HRmax (your raw max is a 210 strap artifact).
+    is structurally sound with a spike-resistant HRmax (the athlete's raw max is a 210 strap artifact).
     §RD extension: with a detected structure CACHED, a quality run is graded on its work reps vs the
     prescribed zone band (on/moderate + seg_read; sandbagged reps ⇒ too_easy; no-HR reps ⇒ pace
     fallback), and without one the whole-run read stands — cached-only, never a fetch."""
@@ -9579,7 +9579,7 @@ def _stc_effort_discipline(db):
         fails.append("seg read claimed without a cached structure")
     # §PRO12 — A ROAD THAT HAS MOVED PAST A DATE STILL KNOWS WHAT IT PRESCRIBED THERE. Live
     # 2026-07-27: the re-base block expired, the road re-anchored to that Monday, and this monitor's
-    # 28-day window fell from 19 prescriptions (3 of them intervals) to ONE — so your 07-22 VO₂
+    # 28-day window fell from 19 prescriptions (3 of them intervals) to ONE — so the user's 07-22 VO₂
     # session was re-graded against the EASY bar (`easy`/`too_hard` instead of `interval`/`on`) and
     # leaked into the easy score. Save a NEWER plan whose road starts today, i.e. covering neither
     # date, and require both prescriptions to survive out of plan history.
@@ -9780,7 +9780,7 @@ def _stc_error_shape():
 def _stc_accent2_fallback():
     """UX-5a → UX-5b → ratified (0.30.0) — the square-polychrome palette IS the house palette again.
 
-    The overlay came out in 0.29.0 on your word and came BACK in 0.30.0 on it: the flat
+    The overlay came out in 0.29.0 on the athlete's word and came BACK in 0.30.0 on it: the flat
     single-hue dashboard read too dull. The ratify path (REVISED_PLAN Phase 2) is what shipped:
     the block is restored, DESIGN.md §2.3 carries the spec, and the shape tiles key their hue off
     the tile's data-m METRIC IDENTITY rather than :nth-child — which silently re-hued every tile
@@ -9939,8 +9939,8 @@ def _stc_copy_posture(db):
     ACWR brakes themselves are owned by det/acwr-ceiling, det/peak-acwr-floor and det/soft-ctl-floor.
       (a) the readiness HALTS are generic — the stop-symptom flag path and the §H2 deterministic note
           path BOTH still answer red+halt (semantics locked), and neither action narrates a year or a
-          person (your clinical history ships to every self-hoster otherwise);
-      (b) the LLM reply schema addresses "the runner", never a gendered owner ("TO you");
+          person (the athlete's clinical history ships to every self-hoster otherwise);
+      (b) the LLM reply schema addresses "the runner", never a gendered owner ("TO the athlete");
       (c) the dashboard's ACWR copy makes no sweet-spot / injury-risk / "safe ceiling" claim (our own
           ENGINE_SCIENCE §1: injury lives on the biomechanical axis, a load ratio cannot see it — Davis,
           Aarhus, Impellizzeri), and the regime badge names the cap it quotes: the hard-cap literal it
@@ -9989,7 +9989,7 @@ def _stc_copy_posture(db):
     # holder; comments that describe that person in the third person read as though the ASSISTANT
     # were narrating about a distant user, which is precisely backwards. Provenance speaks in the
     # first person ("measured on my own corpus"), anything about whoever self-hosts speaks in the
-    # second ("activity ids you have flagged"). ANTI-VACUITY (§43): the forbidden words are built by
+    # second ("activity ids the user has flagged"). ANTI-VACUITY (§43): the forbidden words are built by
     # concatenation, so this function's own source can never satisfy the scan it runs.
     third = (chr(104) + "is", chr(104) + "im", chr(104) + "e", "t" + "he owner", "owner" + chr(39) + "s")
     # …legitimate uses, each a ROLE or an external field name rather than a person:
@@ -10068,8 +10068,8 @@ def _stc_card_truth(db):
     No slack on (a): a count is exact or it is wrong.
 
     §CARD3 (2026-08-15) — the fourth publisher was TIME: a week frozen from a PRE-fix artifact rode
-    past all three fixed publishers verbatim, so your original screenshot week (07-27,
-    "48.6 km · 5 runs" over a week you ran as 42.4) survived the whole §CARD campaign. Lived weeks
+    past all three fixed publishers verbatim, so the athlete's original screenshot week (07-27,
+    "48.6 km · 5 runs" over a week the athlete ran as 42.4) survived the whole §CARD campaign. Lived weeks
     are now asserted against the LOG (header == Mon–Sun actuals, ahead settled, sessions verbatim),
     and the as-laid bar must survive in intent_runs, distinct from the actuals (the prescription
     record is history the header rewrite must never overwrite — §FORM1: provenance, not a decision).
@@ -10423,14 +10423,14 @@ def _stc_rebase_runway_clamp():
 def _stc_feasibility_floor():
     """§PER1 F2/F3 — feasibility is a THREE-WAY verdict on the projected race-day fitness vs a distance
     floor: 'too soon' (short runway AND below floor — no time AND no base), 'earn it' (long runway but the
-    engine's own projection is still below floor — reachable only if you build into it, §F3 closes the
+    engine's own projection is still below floor — reachable only if the athlete builds into it, §F3 closes the
     'CTL 16 · finish' incongruity), and 'finish' (projection at/above the floor). A short runway off HIGH
     fitness is never 'too soon' (the §F2 false-positive guard); an unknown distance has no floor → 'finish'."""
     def v(typ, wks, proj):
         return S.feasibility({"label": "R", "type": typ}, 25.0, 50.0, wks, projected_ctl=proj)["verdict"]
     cases = [
         ("marathon", 6, 30.0, "too soon"),   # short AND below floor (45) → the genuine pathology
-        ("marathon", 20, 30.0, "earn it"),   # long runway but 30<45 → reachable only if you build (§F3)
+        ("marathon", 20, 30.0, "earn it"),   # long runway but 30<45 → reachable only if the athlete builds (§F3)
         ("marathon", 20, 22.0, "earn it"),   # long-runway detrained, 22<45 → 'earn it', NOT a flat 'finish'
         ("marathon", 20, 46.0, "finish"),    # long runway AND projection at/above floor → a real finish call
         ("marathon", 10, 55.0, "finish"),    # short remaining runway BUT well-built (≥45) → NOT too soon, a finish
@@ -10835,7 +10835,7 @@ def _stc_medical_track(db):
     p_super = S.active_medical_halt(mem) and n_med == 1
     out.append({"case": "a fresh hold supersedes the prior (one active medical row)",
                 "active_medical": n_med, "passed": p_super}); ok = ok and p_super
-    # the explicit clear (doctor cleared you) releases everything
+    # the explicit clear (doctor cleared the athlete) releases everything
     mem.execute("UPDATE adjustments SET active=0 WHERE active=1"); mem.commit()
     p_rel = (not S.active_medical_halt(mem)) and S.active_adjustment(mem, today) is None
     out.append({"case": "explicit clear releases the hold", "passed": p_rel}); ok = ok and p_rel
@@ -10874,7 +10874,7 @@ def _llm_enabled():
     """Should the paid `llm/*` scenarios actually run? A key alone is no longer enough (TECH-1): the
     default battery is free and deterministic, so CI, the release gate and a curious self-hoster can
     run it without spending anyone's money or depending on a model's mood. Opt in with
-    SH_SELFTEST_LLM=1 when you want the key-gated paths exercised for real — which is the point of
+    SH_SELFTEST_LLM=1 when the user wants the key-gated paths exercised for real — which is the point of
     running the battery ON the box where the key lives."""
     return S.llm_available() and os.environ.get("SH_SELFTEST_LLM", "").lower() in ("1", "true", "yes")
 
@@ -11084,7 +11084,7 @@ def _stc_strides_day():
 def _stc_structure():
     """§RD — the workout-structure classifier reads a recorded pace profile back into the plan's
     vocabulary. Fixtures are synthesized 1Hz streams with deterministic jitter; the flagship case is
-    your worked example VERBATIM (12min@5:50 wu · 3:00@5:10 / 1:00@6:10 / 4:00@5:05 / 1:30@
+    the athlete's worked example VERBATIM (12min@5:50 wu · 3:00@5:10 / 1:00@6:10 / 4:00@5:05 / 1:30@
     6:15 / 3:30@5:15 · 15min@6:30 cd ⇒ intervals, 3 work reps). Locks: interval/tempo/long_mp/easy/
     long shapes, jitter invariance (same verdict under a different noise seed), the GAP path (a
     constant-EFFORT run over rolling ±6% grades must read flat easy, not intervals), strides noted
@@ -11209,7 +11209,7 @@ def _stc_structure():
                 "strides", 0)   # ≥4 strides over a walking base ⇒ the dedicated Strides kind
     if ss:
         # the global peak pass counts what the CHART shows (my 2026-07-05 framing) — on a
-        # clean fixture that's exact, and you read the number off the tile as ground truth
+        # clean fixture that's exact, and the athlete reads the number off the tile as ground truth
         if ss.get("strides") != 5:
             fails.append(f"strides session: counted {ss.get('strides')} of 5 peaks")
         tot_s = sum(s["sec"] for s in ss["segments"])
@@ -11262,7 +11262,7 @@ def _stc_structure():
                        (240, 540, 110)]), "strides", 0)
     if fu and fu.get("strides") != 4:
         fails.append(f"fused cluster: counted {fu.get('strides')} of 4 (2 fused + 2 apart)")
-    # SET grouping — your "5 then a longer rest then 6": a clearly longer gap splits the sets
+    # SET grouping — the athlete's "5 then a longer rest then 6": a clearly longer gap splits the sets
     ts = expect("strides-two-sets",
                 synth([(300, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 3
                       + [(120, 540, 110)] + [(25, 280, 172), (90, 540, 110)] * 3
@@ -11742,7 +11742,7 @@ def _stc_ui_dialogs():
 
     (a) NO native `alert()` / `confirm()` outside the two documented no-<dialog> fallbacks. A native
         dialog is modal to the whole browser, unstyled, unthemed, and on a phone reads like a browser
-        error rather than something this app is telling you — and it cannot be asserted on, which is
+        error rather than something this app is telling the athlete — and it cannot be asserted on, which is
         why eight of them survived this long.
     (b) The freshness chip exists and is PRIVATE-ONLY: the public box answers /healthz with booleans
         and no timestamps precisely so a stranger cannot learn when the household syncs (TECH-8), and
@@ -12166,7 +12166,7 @@ def _stc_pwa_polish():
 def _stc_acwr_agreement():
     """0.30.0 — the dashboard shows ONE acute:chronic ratio, computed one way.
 
-    The readiness card's rest-day line ("your load is light (ACWR 0.87)…") divides the snapshot's
+    The readiness card's rest-day line ("the athlete's load is light (ACWR 0.87)…") divides the snapshot's
     fatigue by its fitness; the Acute:chronic gauge painted Runalyze's own acuteChronicWorkloadRatio
     field — computed on another basis entirely (the schema itself warns "API mixes units!") and able
     to sit a quarter-point away from ATL÷CTL on the SAME row (seen on my NAS after the
