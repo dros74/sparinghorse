@@ -10,6 +10,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.44.10] - 2026-08-27
+
+### Fixed
+
+- **The spacing gate could never pass, so the engine paid for rest days in volume it did not have
+  to spend (§REST2).** 0.44.9 stopped the free-day spread from chaining run days, and it worked —
+  the forward plan's worst streak went from eight days to four. But the gate it used asks whether
+  ONE loose day, dropped into a layout that was designed as a whole, keeps the spacing; and no
+  loose day does. Every candidate for `RUN_DAY_LAYOUTS[5] = [0,1,3,5,6]` chains four running days
+  (Wednesday makes Mon–Thu, Friday makes Thu–Sun), and every shape the engine lays uses five runs.
+  So the spread was not gated but **dead**, and the volume it exists to hold was shed instead:
+  −6.3 km on a 54 km week at an 11 km long-run cap, **−18.4 km at 7 km**. The live plan barely
+  noticed (its cap hardly binds today), which is exactly why it needed measuring rather than
+  assuming — a runner coming back from a layoff has a small trailing long run and a tight cap.
+
+  The spread now **re-lays** the week to the next vetted layout instead of appending to the current
+  one: `RUN_DAY_LAYOUTS[6]` is Mon–Wed, **Thursday rest**, Fri–Sun — three consecutive days at
+  most, the same number §AV enforces, and a structure the methodology already endorses (Davis
+  reports athletes over 160 km/wk running best on six days with a rest day, and — on precisely the
+  question this lever decides — that the same weekly mileage spread over MORE days is less
+  stressful on the body). Where no legal layout exists the week still sheds, and now says **how
+  much**: the `rest_shed_km` that 0.44.9's own comment promised but never wrote. Bounded by
+  `RELAY_MAX_RUNS` (never the seven-day layout — the 2026-07-16 no-rest week) and
+  `RELAY_MAX_SEAM_STREAK` across the week boundary.
+
+  **What this costs, stated plainly:** six runs in seven days means one rest day, so two 6-run
+  weeks in a row run Friday→Wednesday and rest Thursday. The forward plan's worst streak is
+  therefore **6, not 4** — on one seam, in one place (2026-09-04 → 09-09), where 0.44.9 held 4 and
+  the pre-0.44.9 engine chained 8 with no rest day at all. Every week keeps a real rest day. The
+  number is a constant, not a consequence: `RELAY_MAX_SEAM_STREAK = 5` permits the sixth run only
+  after a lighter week, `4` refuses it outright and returns to 0.44.9's behaviour.
+
+- **The published weekly intent stopped tracking the week the athlete actually gets.** §REST's
+  HELD bound was meant to end the governor's runaway (charging a week that can no longer absorb
+  the charge). It catches a week that stops responding entirely, but not one that sheds a *fraction*
+  of every charge — so on the live plan `intent_km` read **78.6 km against a 58.8 km lay**, a
+  19.8 km fiction where the pre-0.44.9 engine was within 1.3. `intent_km` is the only "what was
+  asked of this week" number in the payload; it is published on the public box and it is what the
+  plan explainer narrates as the block's volume range. A week that re-lays absorbs its charge
+  again, and the two weeks affected are back to 60.0 and 66.0 against lays of 58.7 and 64.7.
+
+- **A "held to rest days" chip on a week that held everything.** The marker fired whenever the day
+  picker ran out of legal days, which is not the same as the week losing anything — three weeks of
+  the live plan carried it while shedding 0.0 km. It now rides only a week that actually gave
+  volume up, and carries the amount.
+
+### Changed
+
+- `det/rest-streaks` locks the re-lay contract: the laid day set must BE a vetted layout (an
+  append and a re-lay are indistinguishable by day *count* — `[0,1,2,3,5,6]` also has six), the
+  volume must land where a legal layout exists, the seam is checked on both sides of its bound, and
+  every frequency the re-lay can reach must keep a rest day. Its founding-case tooth ran a 14.8 km
+  cap against a 13 km long run, so the cap never bound and the tooth passed identically with the
+  fix reverted; it now binds, and says so if it ever stops.
+
+## [0.44.9] - 2026-08-27
+
+### Fixed
+
+- **The engine no longer trades rest days for volume: the §PRO9 free-day spread is streak-gated
+  (§REST).** When the +10% long-run cap clipped a week, the spread that redistributes the freed
+  volume onto extra easy days picked those days in raw calendar order — no spacing rule, no streak
+  limit, no awareness of the week boundary. On the live plan it padded every 5-run base week to 6
+  (Mon–Thu, one rest), filled the current week's remainder Thu–Sun, and chained an **8-day run
+  streak across the seam — 14 run days out of 15**, with the only rest days invisible in the UI.
+  The 2026-07-16 7-run no-rest week was the same defect at its pathological end; the fix then
+  anchored the caps on truth but left the day-picker untouched.
+
+  The spread now answers to the same spacing doctrine as every other day-laying rule in the engine
+  (`AV_MAX_STREAK = 3`, the §AV relocation cap): an added easy day may never manufacture a run
+  streak longer than 3 — measured within the week, against the week's already-fixed days, and
+  across the seam into last week's run tail (threaded through the generator like the other carry
+  state). What a gated week can't legally hold is **not** crammed back onto the days by inflating
+  every easy run to the ceiling — that flattened the week past `LONG_RUN_MIN_RATIO` (the long run
+  relabelled out of existence, measured on det/straddle-long's fixture) and sat every short AT the
+  +10% ceiling, where the minute-rounding published 8.2 km against an 8.1 cap. The volume the
+  spacing rule refuses to hold sheds instead — lighter, never denser — and the week says so with a
+  `rest_gated` marker and a "held to rest days — spacing kept" chip. The governor itself also
+  learned the HELD bound: a charge above what a gated week can lay no longer runs the search away
+  (a 49-km-capable week was governed to `allowed` = 700, `intent_km` ≈ 90 — a fiction), so the
+  published intent is again the week the athlete actually gets.
+
+  The streak cap is the engine's own coaching guardrail, **not** a Davis-derived rule: the Davis
+  corpus has no consecutive-day concept at all (checked against the nine saved Running Writings
+  articles and *Marathon Excellence for Everyone* — the book's higher-mileage plans run 6–7-day
+  weeks the engine deliberately never prescribes; its 5-run templates mirror the book's entry-tier
+  structure, two rest days included). The methodology's aligned levers — the damage-equivalent
+  ceilings, the +10% long-run ladder, and the redistribute-rather-than-shed trade the spread
+  exists for — are untouched. The forward plan now holds a rest day at least every 3 days within
+  every week.
+
+- **Rest days are visible.** The plan JSON lists run sessions only, so every week card read as an
+  unbroken wall of runs — the streak above was invisible, and so were the healthy weeks. Week
+  cards now fill each uncovered weekday with a muted *Rest* line (display-only; the engine
+  artifact is unchanged).
+
+## [0.44.8] - 2026-08-27
+
+### Fixed
+
+- **A session the athlete completed as prescribed was filed as bonus volume and counted for
+  nothing.** `block_log` decides "was this day scheduled?" by asking the CURRENT plan — but the
+  current plan is the road ahead, and past prescriptions come from plan history. An *overflow* day
+  (§PRO15's free-day spread borrows a non-template weekday only while the week's budget will not
+  fit across the template's days) stops being needed the moment its own run lands, because that run
+  is what stops it fitting. Run it, and the day vanishes from the next regeneration — leaving a run
+  on a day with no session, tagged `unplanned`, explicitly excluded from adherence.
+
+  Measured on the live block: Wednesday was laid at 8.6 km that morning, run at 8.62, and by the
+  evening regeneration block adherence read **17/24 whether or not the run existed**. It now reads
+  18/25.
+
+  `_prescribed_at_start` restores such a session from plan history, and the normal enrichment owns
+  it from there — done/missed, the actual overlay and both counters follow. A day the plan told the
+  athlete to REST stays a genuine bonus run, as does a day no saved plan ever reached.
+
+  The lookup is keyed on the run's **start**, not its date: a day resolution cannot separate the
+  plan the athlete left the house under from the one written after they got back. Stamps are
+  compared as instants — plans are written in UTC and activities arrive in the athlete's local
+  offset, so a text compare reads one clock against the other and is wrong by exactly the offset.
+
+## [0.44.7] - 2026-08-26
+
+### Fixed
+
+- **The public plan card rendered `nullk` for an unplanned run.** An unplanned run — a logged run on
+  a day the plan places no session — carries `km: None`, because there is no prescription to state.
+  The card knows to read the `unplanned` flag instead. `_PV_SESSION` published the `None` and
+  withheld the flag, so the public line fell through both of its branches at once: it printed
+  `nullk → 8.6k @ 6:49` under a ✓, as though the athlete had been told to run an unknown distance
+  and had done it. The flag describes the absence of a prescription, not the athlete, and is now
+  published with the field it governs.
+
+  The `seed` DB lays no unplanned runs, so this field never appeared in a public-surface diff —
+  the same gap in the same allowlist that the last one went through.
+
+- `sessSummary` now returns `—` for a session with no prescribed distance instead of interpolating
+  the absence into its label. The allowlist fix removes today's cause; this removes the class.
+
 ## [0.44.6] - 2026-08-26
 
 ### Fixed

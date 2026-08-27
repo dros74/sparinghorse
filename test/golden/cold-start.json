@@ -131,7 +131,7 @@
         "phase": "base",
         "proj_acwr": 2.208,
         "proj_acwr_flat": 2.076,
-        "proj_acwr_soft": 0.5193,
+        "proj_acwr_soft": 0.5191,
         "proj_ctl": 13.3,
         "quality": [
           {
@@ -371,7 +371,7 @@
         "phase": "base",
         "proj_acwr": 1.712,
         "proj_acwr_flat": 1.541,
-        "proj_acwr_soft": 0.7718,
+        "proj_acwr_soft": 0.7712,
         "proj_ctl": 24.9,
         "quality": [
           {
@@ -455,7 +455,7 @@
         "phase": "base",
         "proj_acwr": 1.611,
         "proj_acwr_flat": 1.454,
-        "proj_acwr_soft": 0.885,
+        "proj_acwr_soft": 0.8848,
         "proj_ctl": 29.9,
         "quality": [
           {
@@ -2698,19 +2698,19 @@
         "adjusted": false,
         "clipped": false,
         "elapsed": false,
-        "eq_km": 50.62,
+        "eq_km": 50.52,
         "frozen": false,
         "intent": "Taper \u2014 drop volume, keep sharpness",
         "intent_km": 50.0,
         "intent_runs": 5,
-        "km": 49.5,
+        "km": 49.4,
         "long": 15,
         "peak_acwr": 1.325,
         "phase": "taper",
-        "proj_acwr": 0.988,
-        "proj_acwr_flat": 1.029,
-        "proj_acwr_soft": 1.029,
-        "proj_ctl": 70.4,
+        "proj_acwr": 0.987,
+        "proj_acwr_flat": 1.028,
+        "proj_acwr_soft": 1.028,
+        "proj_ctl": 70.3,
         "quality": [
           {
             "component": "ssmax",
@@ -2886,12 +2886,12 @@
           {
             "date": "2026-11-05",
             "kind": "easy",
-            "km": 10.7,
-            "minutes": 67,
+            "km": 10.6,
+            "minutes": 66,
             "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
             "strides": 2,
-            "trimp": 86.6
+            "trimp": 85.8
           },
           {
             "date": "2026-11-07",
@@ -2915,7 +2915,7 @@
         ],
         "start": "2026-11-02",
         "strides": 2,
-        "trimp_total": 406.3,
+        "trimp_total": 405.5,
         "wk": 1
       },
       {
@@ -3135,9 +3135,9 @@
         "intent_runs": 2,
         "km": 9.5,
         "long": 8,
-        "peak_acwr": 0.769,
+        "peak_acwr": 0.77,
         "phase": "taper",
-        "proj_acwr": 0.698,
+        "proj_acwr": 0.699,
         "proj_acwr_flat": 0.648,
         "proj_acwr_soft": 0.648,
         "proj_ctl": 54.4,

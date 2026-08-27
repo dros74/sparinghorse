@@ -72,7 +72,8 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     NEAR_CEILING_ACWR, PEAK_INTERVAL_FRAC, PEAK_LONG_FRAC, PEAK_MP_FRAC, PEAK_WEEKLY_RAMP,
     PHASE_HARD_CAP, POLARIZED_EASY_MIN, PROG_RAMP, QUALITY_CD_MIN, QUALITY_WU_MIN, RACE_KM,
     RACE_RECOVERY_DEFAULT, RACE_RECOVERY_WEEKS, REBASE_GAP_WEEKS, REBASE_LONG_CAP, REBASE_SHAPE,
-    REGIME_CLEAR_DAYS, RESPONSE_MIN, RESPONSE_ONTRACK, RUN_DAY_LAYOUTS, RUN_FAMILY_SQL,
+    REGIME_CLEAR_DAYS, RELAY_MAX_RUNS, RELAY_MAX_SEAM_STREAK, REST_SHED_MIN_KM,
+    RESPONSE_MIN, RESPONSE_ONTRACK, RUN_DAY_LAYOUTS, RUN_FAMILY_SQL,
     RUN_MIN_KM, SESSION_EQ_STEP, SETTINGS_BY_KEY, SETTINGS_SPEC, SJ_MAX_GAP_MIN, SJ_PART_MIN_S,
     TAPER_BOTTOM, TAPER_LONG_FRAC, TAPER_SHARP_FRAC, TAPER_TOP, TAU_ATL, TAU_CTL,
     V5K_VVO2MAX_FRAC, _actual_week_caps, _adj_directive, _adj_fingerprint, _adj_summary,
@@ -87,7 +88,8 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     _laid_sessions, _mark_load_integrity, _max_streak, _max_week_trimp, _monday, _mp_prog,
     _now_iso, _phase_builds, _plan_all_weeks, _plan_span, _prior_weeks_all,
     _prior_weeks_by_start, _project_finish_time, _project_week, _qblock, _race_seconds,
-    _rebase_start, _recent_eq_km, _recent_long_runs, _recent_session_eq, _recovery_weeks,
+    _prescribed_at_start, _rebase_start, _recent_eq_km, _recent_long_runs, _recent_session_eq,
+    _recovery_weeks,
     _resolve_setting, _run_days, _run_eq_km, _seg_taper, _session_eq_km, _session_from_reps,
     _session_groups, _sj_col, _split_freeze, _trim_post_race, _v_at_vo2max, _vo2_at_v,
     _week_eq_km, _week_long_km, _zones_asof, active_adjustment, active_medical_halt, base_shape,
@@ -5350,12 +5352,17 @@ def block_log(db):
     # display only — daily_trimp_series/the governor are unchanged.
     acts = {}
     for r in db.execute(
-        "SELECT id, date, distance, duration FROM activities "
+        "SELECT id, date, date_time, distance, duration FROM activities "
         "WHERE date>=? AND date<=? AND " + RUN_FAMILY_SQL + " ORDER BY date_time", (start, end)
     ).fetchall():
         if r["id"] in drop or not r["distance"]:
             continue
-        a = acts.setdefault(r["date"], {"km": 0.0, "sec": 0.0, "id": None, "_maxkm": 0.0, "runs": []})
+        a = acts.setdefault(r["date"], {"km": 0.0, "sec": 0.0, "id": None, "_maxkm": 0.0,
+                                        "runs": [], "start_ts": None})
+        # §100 — the day's FIRST start, so "what was I told to do when I set off?" is asked of the
+        # earliest departure. Rows arrive ordered by date_time, so the first to land wins.
+        if a["start_ts"] is None:
+            a["start_ts"] = r["date_time"]
         a["km"] += r["distance"]
         a["sec"] += (r["duration"] or 0.0)
         a["runs"].append({"id": r["id"], "km": r["distance"], "sec": r["duration"] or 0.0})
@@ -5374,9 +5381,27 @@ def block_log(db):
     sched = done = 0
     out_weeks = []
     from datetime import timedelta
+    # §100 — A COMPLETED PRESCRIPTION IS NOT BONUS VOLUME. The unplanned branch below asks the
+    # CURRENT plan whether a day held a session, and the current plan is the road AHEAD — by
+    # Duarte's own ruling, past prescriptions come from plan history. An overflow day (§PRO15's
+    # free-day spread) can leave the plan the moment its own run lands, and the day the athlete was
+    # told to run then read as bonus volume that moves no counter: block adherence 17/24 whether or
+    # not the run existed. So restore, from history, any session the athlete had been given when
+    # they set off, and let the normal enrichment below own it — done/missed, the actual overlay and
+    # both adherence counters all follow for free. A day told to REST stays genuinely unplanned.
+    _laid_now = {s["date"] for w in weeks for s in w["sessions"]}
+    _restored, _ = _prescribed_at_start(
+        db, {d: a["start_ts"] for d, a in acts.items()
+             if a["km"] > 0 and d <= today and d not in _laid_now})
     for w in weeks:
         sessions = []
-        for s in w["sessions"]:
+        wsess = w["sessions"]
+        if _restored:
+            we0 = (_date(w["start"]) + timedelta(days=6)).isoformat()
+            back = [s for d, s in _restored.items() if w["start"] <= d <= we0]
+            if back:
+                wsess = sorted(wsess + back, key=lambda s: s["date"])
+        for s in wsess:
             d = s["date"]
             past = d <= today
             act = acts.get(d)
@@ -5395,7 +5420,7 @@ def block_log(db):
         # session — bonus volume the runner chose to do. Counted as load by the projector/governor
         # already; here we just make it VISIBLE on its day. It does NOT touch adherence (it was never
         # scheduled, so neither sched nor done move) — only the planned-session loop above feeds those.
-        planned = {s["date"] for s in w["sessions"]}
+        planned = {s["date"] for s in wsess}   # §100 — restored days are PLANNED, not bonus
         we = (_date(w["start"]) + timedelta(days=6)).isoformat()
         for d in sorted(acts):
             a = acts[d]
@@ -5787,7 +5812,15 @@ _PV_QUALITY = {"attach": True, "component": True, "frac": True, "kind": True, "l
 _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "component": True,
                "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
                "minutes": True, "missed": True, "note": True, "optional": True,
-               "pace_zone": True, "reps": _PV_REPS, "runs": True, "strides": True, "trimp": True,
+               "pace_zone": True, "reps": _PV_REPS, "rest_gated": True, "rest_shed_km": True,
+               "runs": True, "strides": True, "trimp": True,
+               # `unplanned` = a run on a day the plan places no session. It carries `km: None`
+               # (there IS no prescription), and the card reads the FLAG to know that — so
+               # withholding it while publishing the None made the public line render "nullk →
+               # 8.6k" under a ✓, as if the athlete had been told to run an unknown distance.
+               # The seed DB never lays an unplanned run, which is why the public-surface diff
+               # never saw this field. Describes the PRESCRIPTION's absence, not the athlete.
+               "unplanned": True,
                "zone": True}   # `optional` = the week-complete rest day; without it the card reads
                                # "Rest day" where the private box reads "Optional — week complete"
 # NOT `av_dates` / `av_shed`: away days are an empty-house broadcast (§AV). The 0.27.1 recursive
@@ -5809,6 +5842,12 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             # the ease note, `long_capped`/`long_flat` say why a week has no distinct long run.
             "fatigue_capped": True, "long_capped": True, "long_flat": True,
             "long_step_capped": True,
+            # §REST — same governor-annotation class: the day-spacing gate's honest marker, printed
+            # "held to rest days — spacing kept" on the week card. Describes the prescription, not the athlete.
+            # §REST2 — `rest_shed_km` is the SIZE of that hold. It travels with the flag for the same
+            # reason the flag travels with the lighter km (§100): a number withheld from the box that
+            # publishes what it explains is how the public view states something the private one doesn't.
+            "rest_gated": True, "rest_shed_km": True,
             "runs_ahead": True, "runs_done": True, "sessions": _PV_SESSION, "start": True,
             "strides": True, "trimp_total": True, "volume_met": True, "wk": True}
 _PV_PHASE = {"builds": True, "clipped_by_acwr": True, "end_atl": True, "end_ctl": True,

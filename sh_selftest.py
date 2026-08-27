@@ -878,6 +878,198 @@ def _stc_day_spacing():
                got="ok" if not bad else f"fails: {bad}", output=detail)
 
 
+def _stc_rest_streaks():
+    """§REST/§REST2 — the §PRO9 free-day spread and the spacing doctrine.
+
+    §REST (2026-08-27) found the defect: the day-picker was raw calendar order, so it padded 5-run
+    weeks to six with a Mon–Thu block, filled the straddle remainder Thu–Sun, and chained an 8-day
+    streak across the seam — run days on 14 of 15. It gated the picker with AV_MAX_STREAK.
+    §REST2 (same day) found the gate could never pass: EVERY loose day added to a layout the engine
+    actually lays chains four (Wed makes Mon–Thu of [0,1,3,5,6], Fri makes Thu–Sun), so the spread
+    was not gated but DEAD, and the volume it exists to hold was shed — −6.3 km at an 11 km cap,
+    −18.4 km at 7 km, on a 54 km week. The fix is a RE-LAY, not an append: move the whole week to
+    the next vetted layout (RUN_DAY_LAYOUTS[6] = [0,1,2,4,5,6] — Mon–Wed, Thursday rest, Fri–Sun,
+    max streak 3), bounded by RELAY_MAX_RUNS (never the no-rest 7-day layout) and
+    RELAY_MAX_SEAM_STREAK across the week boundary. Where no legal layout exists the §REST gate
+    still takes over and the week sheds — flagged, and now with the SIZE of the shed attached.
+
+    The three engines each got exactly one of the three constraints wrong, so every tooth below
+    checks all three at once: the day set is a VETTED layout (0.44.8 filled Mon–Thu), the volume
+    LANDS where a legal layout exists (0.44.9 shed it), and the long run stays DISTINCT (§PRO21)."""
+    from datetime import date
+    fail, detail = [], {}
+    easy = 430
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    mon = date(2026, 8, 3)                                    # a Monday
+    LAYOUTS = [list(v) for v in S.RUN_DAY_LAYOUTS.values()]
+
+    def laid(sessions, start=mon):
+        return sorted((S._date(s["date"]) - start).days for s in sessions
+                      if (s.get("kind") or "") != "rest")
+
+    # (a) ⭐ THE FOUNDING CASE — a 5-run template whose §PRO9 cap BINDS. The cap must actually bite
+    # or this tooth tests nothing: §REST's own version of it ran a 14.8 km cap against a 13 km long
+    # run, so the clip never fired, the spread never ran, and all three of its assertions passed
+    # identically with the gate reverted. The anti-vacuity check is stated between the two lays —
+    # capped vs uncapped — never against the implementation.
+    wk5 = {"wk": 1, "km": 54, "runs": 5, "long": 13, "strides": 0, "quality": []}
+    budget5 = 54.0 * (easy / 60.0) * S.EASY_TRIMP_PER_MIN
+    A_CAP = 11.0                                  # must BIND — asserted against the uncapped lay below
+    s_free, _ = S._distribute_week(wk5, mon, budget5, easy, zones, long_km_cap=None)
+    s_a, dt_a = S._distribute_week(wk5, mon, budget5, easy, zones, long_km_cap=A_CAP)
+    d_a, d_free = laid(s_a), laid(s_free)
+    a_km = round(sum(x["km"] for x in s_a), 1)
+    detail["five_run"] = {"days": d_a, "km": a_km, "uncapped_days": d_free,
+                          "sessions": [x["km"] for x in s_a]}
+    if d_a == d_free:
+        fail.append(f"FIXTURE VACUOUS — the {A_CAP} cap changed nothing: capped {d_a} == uncapped "
+                    f"{d_free}. The spread never ran, so this tooth tests nothing.")
+    if d_a not in LAYOUTS:
+        fail.append(f"5-run week re-laid to a non-layout day set — an append, not a re-lay: {d_a}")
+    if d_a != S.RUN_DAY_LAYOUTS[6]:
+        fail.append(f"5-run week did not re-lay to RUN_DAY_LAYOUTS[6]: {d_a}")
+    if S._max_streak(d_a) > S.AV_MAX_STREAK:
+        fail.append(f"re-laid week chains {S._max_streak(d_a)} run days: {d_a}")
+    if len(d_a) >= 7:
+        fail.append(f"re-lay reached the no-rest 7-day layout: {d_a}")
+    if a_km < 53.0:
+        fail.append(f"re-lay lost volume a legal layout could hold: {a_km} km of 54 "
+                    f"(§REST shed 6.3 km here)")
+    if max(x["km"] for x in s_a) > A_CAP + 0.15:
+        fail.append(f"a session ran past the §PRO9 cap: {max(x['km'] for x in s_a)}")
+    _long = max((x.get("km") or 0.0) for x in s_a if str(x.get("kind") or "").startswith("long"))
+    _easy = max((x.get("km") or 0.0) for x in s_a if x.get("kind") == "easy")
+    if _long < S.LONG_RUN_MIN_RATIO * _easy:
+        fail.append(f"re-laid week went flat: long {_long} vs easy {_easy}")
+    if any(x.get("rest_gated") for x in s_a):
+        fail.append("week held its volume on a legal layout but is flagged rest_gated")
+
+    # (a2) EVERY FREQUENCY THE RE-LAY CAN REACH KEEPS A REST DAY. In the engine two guards stop it
+    # reaching RUN_DAY_LAYOUTS[7] — RELAY_MAX_RUNS and the streak test on the candidate layout — and
+    # the streak test alone is sufficient today (the 7-day layout chains 7), so raising
+    # RELAY_MAX_RUNS to 7 changed no fixture and no det. A guard nothing can see fail is a guard
+    # that can be deleted silently. So the contract is stated where it lives: over the whole reach
+    # of the constant, not through one fixture that happens to exercise it.
+    reach = {n: list(S._run_days(n)) for n in range(2, S.RELAY_MAX_RUNS + 1)}
+    detail["reach"] = reach
+    for n, tpl in reach.items():
+        if len(tpl) >= 7:
+            fail.append(f"RELAY_MAX_RUNS lets the spread reach a {len(tpl)}-day week with no rest "
+                        f"day: n={n} -> {tpl}")
+        if S._max_streak(tpl) > S.AV_MAX_STREAK:
+            fail.append(f"RELAY_MAX_RUNS lets the spread reach a layout chaining "
+                        f"{S._max_streak(tpl)} run days: n={n} -> {tpl}")
+
+    # (b) NO LEGAL LAYOUT LEFT — the cap so tight that even the 6-run layout can't hold the budget.
+    # RELAY_MAX_RUNS stops the climb at six (the 7-day layout has no rest day at all — the
+    # 2026-07-16 week), so the surplus SHEDS: lighter, never denser, never a no-rest week, and the
+    # week says how much it gave up.
+    s_b, _ = S._distribute_week(wk5, mon, budget5, easy, zones, long_km_cap=7.0)
+    d_b = laid(s_b)
+    b_shed = max([(x.get("rest_shed_km") or 0.0) for x in s_b] + [0.0])
+    detail["shed"] = {"days": d_b, "km": round(sum(x["km"] for x in s_b), 1), "shed_km": b_shed}
+    if len(d_b) >= 7 or d_b == S.RUN_DAY_LAYOUTS[7]:
+        fail.append(f"a 7-run no-rest week was laid rather than shedding: {d_b}")
+    if d_b not in LAYOUTS:
+        fail.append(f"shed week is not on a vetted layout: {d_b}")
+    if not any(x.get("rest_gated") for x in s_b):
+        fail.append("week shed volume for spacing but carries no rest_gated marker")
+    if b_shed < S.REST_SHED_MIN_KM:
+        fail.append(f"rest_gated week publishes no rest_shed_km — the boolean without the size "
+                    f"is how §REST's 18 km shed went unmeasured for a release (got {b_shed})")
+
+    # (c) THE SEAM, both sides of the boundary. Six-in-seven means one rest day, so a 6-run re-lay
+    # after a 3-day tail chains exactly RELAY_MAX_SEAM_STREAK (Fri→Wed, Thursday rest) — legal, and
+    # the last legal case. One day more of tail and the re-lay is refused and the week sheds.
+    for tail, want_relay in ((0, True), (3, True), (4, False)):
+        s_c, _ = S._distribute_week(wk5, mon, budget5, easy, zones, long_km_cap=A_CAP,
+                                    prev_tail=tail)
+        d_c = laid(s_c)
+        seam = S._max_streak(sorted(d_c + [-(i + 1) for i in range(tail)]))
+        detail[f"seam_tail{tail}"] = {"days": d_c, "seam": seam}
+        if seam > S.RELAY_MAX_SEAM_STREAK:
+            fail.append(f"tail {tail}: seam streak {seam} > RELAY_MAX_SEAM_STREAK: {d_c}")
+        if want_relay and len(d_c) != 6:
+            fail.append(f"tail {tail}: the re-lay was refused where it is legal (seam {seam}): {d_c}")
+        if not want_relay and len(d_c) != 5:
+            fail.append(f"tail {tail}: re-laid across a seam it must refuse (seam {seam}): {d_c}")
+
+    # (d) THE STRADDLE REMAINDER (the live 2026-08-27 case, §REST's own): rem=[3,5,6] (Thu,Sat,Sun),
+    # Mon+Tue already run (fixed_days), a tight cap wanting more days — Friday would fill Thu–Sun.
+    # A remainder can never RE-LAY (the elapsed days are history and the away days are blocked), so
+    # this is where §REST's append-gate still does the work.
+    s_d, _ = S._distribute_week(wk5, mon, budget5 * 0.6, easy, zones, days_override=[3, 5, 6],
+                                long_km_cap=14.8, free_from=3, fixed_days=[0, 1])
+    d_d = laid(s_d)
+    detail["straddle"] = {"days": d_d, "fixed": [0, 1]}
+    if d_d != [3, 5, 6]:
+        fail.append(f"straddle remainder filled to {d_d} — Thu–Sun chaining again (want [3,5,6])")
+    if S._max_streak([0, 1] + d_d) > S.AV_MAX_STREAK:
+        fail.append(f"straddle week streak {S._max_streak([0,1]+d_d)} > AV_MAX_STREAK")
+
+    # (e) END-TO-END, the assertive generator with threaded seams: a 4-week base block off a small
+    # long-run seed (the caps bind from week 1). No week may exceed AV_MAX_STREAK within itself, no
+    # week may lose its rest day, every laid week must be a vetted layout, and the cross-week seam
+    # may never exceed RELAY_MAX_SEAM_STREAK.
+    a_weeks, _ = S.generate_block(S.base_shape(4, 30), mon, 45.0, 42.0, easy, zones=zones,
+                                  regime="assertive", recent_longs=[10.0])
+    prev_days, e2e = None, []
+    for w in a_weeks:
+        d_w = laid(w["sessions"], S._date(w["start"]))
+        streak_here = S._max_streak(d_w) if d_w else 0
+        rests = 7 - len(d_w)
+        seam = S._max_streak((prev_days or []) + d_w) if prev_days else streak_here
+        e2e.append({"wk": w["wk"], "days": d_w, "streak": streak_here, "seam": seam,
+                    "rests": rests, "km": w["km"], "intent_km": w.get("intent_km")})
+        if streak_here > S.AV_MAX_STREAK:
+            fail.append(f"wk{w['wk']}: within-week streak {streak_here} > {S.AV_MAX_STREAK}: {d_w}")
+        if rests < 1:
+            fail.append(f"wk{w['wk']}: no rest day laid: {d_w}")
+        if d_w and d_w not in LAYOUTS:
+            fail.append(f"wk{w['wk']}: not a vetted layout — an append, not a re-lay: {d_w}")
+        if seam > S.RELAY_MAX_SEAM_STREAK:
+            fail.append(f"wk{w['wk']}: cross-week seam streak {seam} > "
+                        f"{S.RELAY_MAX_SEAM_STREAK}: {d_w}")
+        prev_days = [d - 7 for d in d_w]     # re-anchor into this week's offset space
+    detail["block"] = e2e
+
+    # (f) ⭐ THE PUBLISHED INTENT IS THE WEEK THE ATHLETE GETS. `intent_km` is the only "what was
+    # asked of this week" number in the payload (det/intent-bar), it is published on the public box
+    # and it feeds the explainer's volume range. When the lay stops absorbing charge the governor's
+    # projection FREEZES, no other test ever binds, and the search runs away: pre-§REST it reached
+    # the 700 ceiling (intent ≈ 90 km on a 49 km week); under §REST's shed it stopped at the next
+    # ceiling instead and published 78.6 km against a 58.8 km lay on the live plan — the same
+    # fiction, one ceiling down. A week that re-lays absorbs its charge again, and the gap closes.
+    hshape = [{"wk": 1, "km": 57, "runs": 5, "long": 14, "strides": 0, "quality": [],
+               "intent": "Base"}]
+    h_weeks, _ = S.generate_block(hshape, date(2026, 8, 1), 90.0, 88.0, 360.0,
+                                  zones={"easy_top": 360, "easy": 360, "threshold": 270,
+                                         "interval": 240, "marathon": 300},
+                                  regime="assertive", ride_cap=9.99, recent_longs=[10.4])
+    hw = h_weeks[0]
+    detail["held"] = {"intent_km": hw.get("intent_km"), "km": hw["km"],
+                      "rest_gated": hw.get("rest_gated"), "days": laid(hw["sessions"],
+                                                                      S._date(hw["start"]))}
+    if hw.get("intent_km") is None:
+        fail.append("the week published no intent_km at all")
+    else:
+        if hw["intent_km"] > 70.0:
+            fail.append(f"intent ran away from the lay: intent_km {hw['intent_km']} "
+                        f"(700-ceiling runaway read ~90; §REST's read 78.6)")
+        if hw["intent_km"] - hw["km"] > 7.0:
+            fail.append(f"intent/laid gap {hw['intent_km']} vs {hw['km']} — the governor is "
+                        f"charging past what the week absorbs")
+    return _st("det", "rest-streaks",
+               "§REST/§REST2 — the §PRO9 spread RE-LAYS to the next vetted layout instead of "
+               "appending a loose day: a binding cap moves a 5-run week to RUN_DAY_LAYOUTS[6] "
+               "(Thursday rest) and the volume lands; where no legal layout exists it sheds, "
+               "flagged with the size; the seam is bounded both sides; the straddle remainder still "
+               "can't fill Thu–Sun; the block holds it end-to-end; and the published intent is the "
+               "week the athlete actually gets",
+               passed=not fail,
+               expect="vetted layout · volume held where legal · streak ≤3 · seam ≤6 · no 7-run "
+                      "week · intent ≈ laid",
+               got={"failures": fail or "none"}, output=detail)
 def _stc_availability():
     """§AV — availability-aware layout. Golden byte-identity with no blocks; the Tue relocation
     (the athlete's July 2026 flight — the feature's founding case); the weekend block moving the long to the
@@ -1874,6 +2066,86 @@ def _stc_unplanned_log():
                got={"violations": fails or "none"})
 
 
+def _stc_prescribed_restore():
+    """§100 — A COMPLETED PRESCRIPTION IS NOT BONUS VOLUME. block_log's unplanned test asks the
+    CURRENT plan whether a day held a session, and the current plan is the road AHEAD. An OVERFLOW
+    day (§PRO15's free-day spread borrows a non-template weekday while the budget won't fit) leaves
+    the plan the moment its own run lands — so the day the athlete was TOLD to run read as bonus
+    volume moving no counter (live 2026-08-26: block adherence 17/24 whether or not the run existed).
+    `_prescribed_at_start` restores it from plan history; the day must then count like any other.
+
+    ⭐ THE CLOCK IS THE POINT, AND IT IS WHY THIS IS KEYED ON THE RUN'S START. Plans stamp
+    `created_at` in UTC; an activity's `date_time` arrives in the athlete's LOCAL offset. The
+    Wednesday run below starts at 22:00+02:00 — a wall clock two and a half hours LATER than the
+    dropping plan's 20:30+00:00, and an instant two hours EARLIER. A text compare of the two stamps
+    therefore lets the dropping plan win and leaves the day unplanned; only an instant comparison
+    restores it. Both directions are asserted, so neither half can rot into the other.
+
+    Throwaway in-memory DB; dates in the past so the adherence counters engage."""
+    import sqlite3 as _sq
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
+        " distance REAL, duration REAL);"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);"
+        "CREATE TABLE session_log(date TEXT PRIMARY KEY, note TEXT);"
+        "CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT);")
+
+    def _wk(sessions):
+        return {"rebase": {"weeks": [{"wk": 1, "start": "2026-06-08", "km": 20, "runs": len(sessions),
+                                      "intent": "x", "sessions": sessions}]}}
+    TUE = {"date": "2026-06-09", "km": 5.0, "kind": "easy"}
+    WED = {"date": "2026-06-10", "km": 6.0, "kind": "easy"}      # the OVERFLOW day
+    THU = {"date": "2026-06-11", "km": 5.0, "kind": "easy"}
+    SUN = {"date": "2026-06-14", "km": 8.0, "kind": "long"}
+    # morning: the road asks for Wednesday. evening: re-laid after the run, Wednesday is gone.
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}',?)",
+              ("2026-06-10T08:00:00+00:00", "2026-06-10", S.json.dumps(_wk([TUE, WED, THU, SUN]))))
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}',?)",
+              ("2026-06-10T20:30:00+00:00", "2026-06-10", S.json.dumps(_wk([TUE, THU, SUN]))))
+    for i, (d, ts, dist) in enumerate([
+            ("2026-06-09", "2026-06-09T18:00:00+02:00", 5.0),   # planned + run → plain done
+            ("2026-06-10", "2026-06-10T22:00:00+02:00", 6.1),   # 20:00Z — BEFORE the 20:30Z re-lay
+            ("2026-06-12", "2026-06-12T18:00:00+02:00", 4.0)]): # never prescribed → real bonus run
+        m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?)",
+                  (i + 1, d, ts, S.RUNNING_SPORT, dist, 1800))
+
+    fails = []
+    # ANTI-VACUITY: the CURRENT plan must really have dropped Wednesday, or the restore is untested.
+    cur = S.json.loads(m.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()["plan"])
+    if any(s["date"] == "2026-06-10" for s in cur["rebase"]["weeks"][0]["sessions"]):
+        fails.append("anti-vacuity: the newest plan still lays Wednesday — nothing to restore")
+
+    log = S.block_log(m)
+    by = {s["date"]: s for s in log["weeks"][0]["sessions"]}
+    wed = by.get("2026-06-10") or {}
+    if wed.get("unplanned") or wed.get("km") != 6.0 or not wed.get("done"):
+        fails.append(f"a prescribed-then-dropped day was not restored: {wed}")
+    if (wed.get("actual") or {}).get("km") != 6.1:
+        fails.append(f"restored day lost its actual: {wed.get('actual')}")
+    fri = by.get("2026-06-12") or {}
+    if not fri.get("unplanned") or fri.get("km") is not None:
+        fails.append(f"a genuine bonus run was absorbed as prescribed: {fri}")
+    # Tue+Wed done, Sun/Thu missed, Wed restored into the denominator; the Friday bonus touches neither.
+    if log["adherence"] != {"done": 2, "scheduled": 4}:
+        fails.append(f"adherence: {log['adherence']} (want done 2 / scheduled 4)")
+
+    # THE CLOCK, ASSERTED DIRECTLY — same fixture, run moved 90 min later (21:30Z, after the re-lay).
+    # The athlete really did set off under a plan that no longer asked for the day ⇒ bonus, honestly.
+    m.execute("UPDATE activities SET date_time=? WHERE date='2026-06-10'",
+              ("2026-06-10T23:30:00+02:00",))
+    late = {s["date"]: s for s in S.block_log(m)["weeks"][0]["sessions"]}.get("2026-06-10") or {}
+    if not late.get("unplanned"):
+        fails.append(f"a run started AFTER the re-lay was still restored: {late}")
+    m.close()
+    return _st("det", "prescribed-restore",
+               "block_log restores a session the athlete was prescribed when they SET OFF but a later "
+               "re-lay dropped (counted, not bonus) — compared as instants across UTC/local offsets — "
+               "while a never-prescribed run stays unplanned and outside adherence",
+               passed=not fails, expect="Wed restored+counted · Fri bonus · adherence 2/4 · late run bonus",
+               got={"violations": fails or "none"})
+
+
 def _stc_within_week():
     """§6o within-week awareness — for the week straddling `today`, generate_block keeps the elapsed
     days and governs ONLY today-onward volume from today's seed (model A): EOW ACWR still holds ≤ cap,
@@ -2590,14 +2862,29 @@ def _stc_long_run_phase_cap():
 
     # (d) ⭐ THE SAFETY LIMB — with §PRO9's ladder in force, the lifted share may not add one metre
     # past the +10% step. The share ceiling PERMITS; the ladder is what walks the long run up.
+    # §REST (2026-08-27) — the redistribution this fixture used to demand in full is now bounded by
+    # the spacing gate: on a 5-run template EVERY extra day chains a 4-day streak, so nothing may
+    # be added; the week holds the identity capacity (long at the step cap + 4 shorts at
+    # LONG_RUN_EASY_FRAC ≈ 53 km) and honestly sheds the ~70 km fixture excess — it may NOT cram the
+    # surplus onto the days by inflating every easy run to the ceiling (the old relax-to-flat path,
+    # which relabelled the long run and published rounding overshoots above the step cap).
     step_cap = 12.0
     c_s, _ = S._distribute_week(peak_wk, mon, trimp, easy, zones, long_km_cap=step_cap)
     worst = max(x["km"] for x in c_s)
+    c_km = round(sum(x["km"] for x in c_s), 1)
+    c_long = max((x.get("km") or 0.0) for x in c_s if str(x.get("kind") or "").startswith("long"))
+    c_easy = max((x.get("km") or 0.0) for x in c_s if x.get("kind") == "easy")
     if worst > step_cap + 0.15:                  # 0.15 = integer-minute rounding on one session
         fails.append(f"§PRO26 let a session ({worst}km) past the §PRO9 step cap ({step_cap}km) — the "
                      f"share ceiling became a lever instead of a ceiling")
-    if abs(sum(x["km"] for x in c_s) - p_km) > 1.5:
-        fails.append("the step-capped peak week shed volume instead of redistributing it")
+    if c_long < S.LONG_RUN_MIN_RATIO * c_easy:
+        fails.append(f"step-capped peak week went flat: long {c_long} vs easy {c_easy}")
+    if c_km < 50.0:
+        fails.append(f"step-capped peak week shed past the identity capacity: {c_km} km (want ≥ 50)")
+    if abs(c_km - p_km) <= 1.5:
+        fails.append(f"step-capped peak week crammed to the ceiling instead of shedding: {c_km} km")
+    if not any(x.get("rest_gated") for x in c_s):
+        fails.append("step-capped peak week wanted days the gate refused but carries no rest_gated marker")
 
     # (e) an unknown/absent phase falls back to the block-wide doctrine number (never to the lift)
     for tag, wk in (("no phase", {k: v for k, v in base_wk.items() if k != "phase"}),
@@ -3308,8 +3595,11 @@ def _stc_rescue_not_governor():
     q = [{"kind": "interval", "frac": 0.12, "zone": "interval", "reps": 5, "rep_min": 3}]
     # (a) THE PATHOLOGY — very low CTL, so the quality session's fixed TRIMP floor cannot shrink with
     #     the week and the mid-week transient goes pathological. The rescue must still catch it.
+    #     (ctl 12 → 8 with §REST: the held bound keeps the easy budget at the gated capacity, so the
+    #     transient now crosses 1.5 a little lower — the pathology itself is unchanged: peak 1.65,
+    #     the floor stripped, hard_share 0.)
     low = [{"wk": 1, "km": 26, "runs": 5, "long": 7, "strides": 0, "quality": q, "intent": "Build"}]
-    lw, _ = S.generate_block([dict(low[0])], bs, 12.0, 10.0, easy, zones=zones, regime="assertive",
+    lw, _ = S.generate_block([dict(low[0])], bs, 8.0, 7.0, easy, zones=zones, regime="assertive",
                            recent_longs=[6.0], recent_eq=[26.0], recent_session_eq=[7.0])
     fired = S._hard_share(lw[0]["sessions"], lw[0]["trimp_total"]) == 0.0
     if not fired:
@@ -7116,6 +7406,15 @@ def _stc_long_run_step():
     # the freed long-run budget must NOT reappear as an over-cap easy run. NO single session may exceed
     # the cap (else the longest run breaches +10% AND ratchets the trailing baseline); the week spreads
     # onto MORE, shorter easy days instead, and the weekly total is still preserved.
+    # §REST (2026-08-27) — …but only onto days the spacing doctrine allows: the old code filled
+    # Tuesday and Friday too and laid a 7-run NO-REST week.
+    # §REST2 (2026-08-27) — and the way it holds them is a RE-LAY, not an append. §REST gated the
+    # append and, finding no legal loose day on any template the engine lays, shed the volume
+    # instead (measured −18 km on a 54 km week). The spread now moves the whole week up to the next
+    # VETTED layout — here 4 → RUN_DAY_LAYOUTS[6] = [0,1,2,4,5,6], Thursday rest, max streak 3 — so
+    # the volume lands AND the spacing holds. The contract this locks: the laid day set is always a
+    # vetted layout (never an arbitrary fill), never the 7-day one, the long run stays distinct, and
+    # a week with a legal layout available does NOT shed.
     pwk = {"wk": 1, "km": 28, "runs": 4, "long": 12, "strides": 0, "quality": []}
     p_trimp = 28.0 * (easy / 60.0) * S.EASY_TRIMP_PER_MIN   # ~28 easy km of load
     p_s, p_dt = S._distribute_week(pwk, bs, p_trimp, easy, zones, long_km_cap=5.5)
@@ -7124,8 +7423,28 @@ def _stc_long_run_step():
         fail.append(f"redistribution breached the cap: a session ran {p_max}km > 5.5 cap ({[s['km'] for s in p_s]})")
     if len(p_s) <= pwk["runs"]:
         fail.append(f"cap didn't add easy days to hold volume under the cap: {len(p_s)} runs ≤ {pwk['runs']}")
-    if abs(sum(p_dt.values()) - p_trimp) > 3.0:
-        fail.append(f"pathological cap shed volume instead of spreading it: {round(sum(p_dt.values()),1)} vs {round(p_trimp,1)}")
+    p_days = sorted((S._date(s["date"]) - bs).days for s in p_s)
+    if S._max_streak(p_days) > S.AV_MAX_STREAK:
+        fail.append(f"spread manufactured a run streak over {S.AV_MAX_STREAK}: {p_days}")
+    if len(p_days) >= 7:
+        fail.append(f"spread laid a 7-run no-rest week: {p_days}")
+    # ⭐ §REST2 — the day set must BE a vetted layout. This is the tooth that separates a re-lay
+    # from an append: [0,1,2,3,5,6] (the pre-§REST calendar fill) and [0,1,3,4,5,6] both have six
+    # days and neither is a layout the engine designed. Only RUN_DAY_LAYOUTS entries pass.
+    if p_days not in [list(v) for v in S.RUN_DAY_LAYOUTS.values()]:
+        fail.append(f"laid day set is not a vetted layout — an append, not a re-lay: {p_days}")
+    p_long = max((s.get("km") or 0.0) for s in p_s if str(s.get("kind") or "").startswith("long"))
+    p_short = max((s.get("km") or 0.0) for s in p_s if s.get("kind") == "easy")
+    p_km = round(sum(s.get("km") or 0.0 for s in p_s), 1)
+    if p_long < S.LONG_RUN_MIN_RATIO * p_short:
+        fail.append(f"week went flat: long {p_long} vs easy {p_short}")
+    # §REST2 — a legal layout EXISTS here (6 runs, Thursday rest), so the week must hold its volume.
+    # §REST shed 4–5 km of it; that is what this lower bound now catches.
+    if abs(p_km - 28.0) > 1.5:
+        fail.append(f"re-lay lost the week's volume: {p_km} km of a 28 km budget — "
+                    f"§REST shed here rather than re-lay")
+    if any(s.get("rest_gated") for s in p_s):
+        fail.append("week held its volume on a legal layout but is still flagged rest_gated")
     # and it must NOT fire when the cap sits above the even-split (byte-identical to no-cap)
     q_s, _ = S._distribute_week(pwk, bs, p_trimp, easy, zones, long_km_cap=16.5)
     q_none, _ = S._distribute_week(pwk, bs, p_trimp, easy, zones, long_km_cap=None)
@@ -7237,6 +7556,13 @@ def _stc_long_run_identity():
     # survey shapes are ~30 km against a 10.45 cap, so §PRO9 never bites there and the clamp is never
     # asked to do anything; reverting it left a ratio-only det green. This is my 2026-08-03 week: a
     # 57 km budget over 5 slots against an 11.4 km cap, i.e. 11.3 per day straight into the ceiling.
+    # §REST (2026-08-27): the 6th day this week buys was GATED — every open day APPENDED to the
+    # 5-run template chains a 4-day run streak — so §REST shed ~9 km of a 57 km week.
+    # §REST2 (2026-08-27): the day is bought by RE-LAYING to RUN_DAY_LAYOUTS[6] instead
+    # ([0,1,2,4,5,6], Thursday rest, max streak 3), which is legal, so the week keeps its volume AND
+    # its spacing. The three things that must hold together, and each of which one of the three
+    # engines got wrong: the long run stays DISTINCT (§PRO21's flat week — asserted above), the
+    # volume LANDS (§REST's shed), and the day set is a VETTED layout (§PRO9's Mon–Thu fill).
     pin = {"wk": 1, "km": 57, "runs": 5, "long": 14, "strides": 0, "quality": []}
     pin_s, _ = S._distribute_week(pin, bs, 445.0, 360.0, z, long_km_cap=11.4)
     pin_long = max((s.get("km") or 0.0) for s in pin_s if str(s.get("kind") or "").startswith("long"))
@@ -7245,7 +7571,13 @@ def _stc_long_run_identity():
     if pin_easy and pin_long < S.LONG_RUN_MIN_RATIO * pin_easy:
         fail.append(f"cap-pinned week stayed flat: long {pin_long} vs easy {pin_easy}")
     if pin_km < 55.0:
-        fail.append(f"cap-pinned week shed volume: {pin_km} km of a 57 km intent")
+        fail.append(f"cap-pinned week shed volume a legal layout could hold: {pin_km} km of 57 "
+                    f"(§REST laid ~48 here — it gated the append instead of re-laying)")
+    pin_days = sorted((S._date(s["date"]) - bs).days for s in pin_s)
+    if pin_days not in [list(v) for v in S.RUN_DAY_LAYOUTS.values()]:
+        fail.append(f"cap-pinned week is not on a vetted layout — an append, not a re-lay: {pin_days}")
+    if S._max_streak(pin_days) > S.AV_MAX_STREAK:
+        fail.append(f"cap-pinned week chains {S._max_streak(pin_days)} run days: {pin_days}")
     # (d) §PRO9 owns the ceiling — published km, no tolerance, swept over the rounding boundaries.
     wk = {"wk": 1, "km": 60, "runs": 5, "long": 18, "strides": 0, "quality": []}
     over = []
@@ -12399,8 +12731,8 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(),
-                 lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_log_phases(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+                 lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),

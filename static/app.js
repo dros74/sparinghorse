@@ -1527,6 +1527,11 @@ function workoutCard(s, open){
 // §6f Step F — compact label for a planned session. Structured quality sessions (intervals / MP
 // long run / tempo, carried as `reps`) read their structure; plain runs show distance.
 function sessSummary(s){
+  // A session with no prescribed distance has nothing to summarise — say so rather than
+  // interpolating the absence. Reached when `km` is null (an unplanned run's row) and the flag
+  // that would have routed the caller elsewhere is missing; the public allowlist withheld exactly
+  // that flag once, and the line rendered "nullk". A label is not the place to learn about it.
+  if(s.km==null) return "—";
   if(s.reps&&s.reps.length){
     const work=s.reps.filter(r=>r.effort==='work');
     if(s.kind==='interval'&&work.length) return `${work.length}×${work[0].minutes}′ ${work[0].zone}`;
@@ -1551,6 +1556,10 @@ function sessSummary(s){
 // never see it, because their switch falls outside the window this arithmetic walks.
 const weekEndIso = mon => { const d=new Date(mon+"T00:00:00Z"); d.setUTCDate(d.getUTCDate()+6);
   return d.toISOString().slice(0,10); };
+// The 7 ISO dates of the week, same all-UTC arithmetic (the rest-day fill below walks them).
+const weekDates = mon => { const d=new Date(mon+"T00:00:00Z"), out=[];
+  for(let i=0;i<7;i++){ out.push(d.toISOString().slice(0,10)); d.setUTCDate(d.getUTCDate()+1); }
+  return out; };
 // week containing today. Quality sessions are accented; the ACWR badge rides the right rail.
 function weekHtml(w,p,today){
   const down=/down/i.test(w.intent||'');
@@ -1558,14 +1567,27 @@ function weekHtml(w,p,today){
   if(w.start) cur = !w.frozen && w.start<=today && today<=weekEndIso(w.start);
   // LOG-enriched sessions (merged in by renderPlan for elapsed/current weeks) get the journal line
   // (done/missed mark, actual, reflection, doubles); plain future weeks keep the compact summary.
-  const sess=w.sessions.map(s=>{
+  const lines=w.sessions.map(s=>{
     // §W1 — a quality session expands to its instruction card on click (skip done sessions:
     // their line is already the click-to-map affordance, and the prescription moment is past)
     const q=s.reps&&s.reps.length, card=(q&&!s.done)?workoutCard(s):"";
     const label=`<span class="wsi${q?' qs':''}${card?' wsx':''}"${card?' tabindex="0" role="button" title="Show the workout instructions"':''}>${sessSummary(s)}${card?' <span class="wsxc" aria-hidden="true">▸</span>':''}</span>${compChip(s)}${card}`;
-    return ('done' in s) ? logLine(s,today,label)
-      : `<div class="sline"><span class="sdate">${sessDate(s.date)}</span>${label}</div>`;
-  }).join("");
+    return {d:s.date, html:(('done' in s) ? logLine(s,today,label)
+      : `<div class="sline"><span class="sdate">${sessDate(s.date)}</span>${label}</div>`)};
+  });
+  // §REST — the engine lists run sessions only; a rest day has no entry, so every week card read
+  // as an unbroken wall of runs — the athlete reasonably counted "14 days of consecutive running"
+  // on a plan that did hold rest days, and the wall also HID the streaks when the spacing really
+  // broke. Fill each weekday with no session entry with a muted Rest line. Display-only: the
+  // engine's plan JSON is untouched, and a day with an explicit rest card is already covered.
+  if(w.start){
+    const have=new Set(w.sessions.map(s=>s.date));
+    for(const d of weekDates(w.start))
+      if(!have.has(d))
+        lines.push({d, html:`<div class="sline srest"><span class="sdate">${sessDate(d)}</span><span class="wsi">Rest</span></div>`});
+    lines.sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:0);
+  }
+  const sess=lines.map(l=>l.html).join("");
   const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>'
                  // §6o-B — volume charged: the week's km intent is already run (even if the run count is short) — no more sessions are laid on the remaining days
                  :(w.volume_met?'<span class="wfz" title="You’ve already run this week’s planned km — the remaining days aren’t re-prescribed just to hit a run count. Rest is prescribed; an easy run is fine if you feel good.">✓ volume run — today optional</span>':''),
@@ -1573,6 +1595,11 @@ function weekHtml(w,p,today){
                  :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
                // §PRO9 — long-run progression cap (Aarhus injury lever); §3.1 — biomechanical (eq_km) load ease
                w.long_step_capped?`<span class="wfz" title="Long-run progression cap: this week's long run was held to +10% over your longest run of the last 4 weeks — the strongest single injury lever (a sharp long-run jump predicts injury more than mileage jumps). Freed volume went to easy runs; weekly load unchanged.">long-run held (+10%)</span>`:'',
+               // §REST — the day-spacing gate: the week wanted another run day but every open day
+               // would have chained a run streak, so the spacing held and the week is honestly lighter
+               // §REST2 — …and how much it cost, when the engine can measure it. A boolean says the
+               // spacing held; the km says what the week gave up for it, which is the number worth arguing with.
+               w.rest_gated?`<span class="wfz" title="Day-spacing guard: this week kept its run days instead of adding another — every open day would have chained too many running days in a row. The volume that won't fit on legal days is held back, not crammed into longer easy runs. Your rest days and the +10% long-run ceiling both stand.">held to rest days — spacing kept${w.rest_shed_km?' · −'+w.rest_shed_km+'km':''}</span>`:'',
                w.bio_capped?`<span class="wfz" title="Biomechanical load ease: this week's pace-weighted 'damage-equivalent' load (fast km count for more) jumped too far above your recent weeks, so the fast work was eased to easy — aerobic volume kept, only the high-damage fast km reduced. The biomechanical/tissue-damage axis (informed by John Davis), invisible to heart-rate load.">fast load eased</span>`:'',
                // §AV — laid around declared away days (private payload only: the public box strips av_dates)
                w.av_dates?`<span class="eased" title="Away days: the week is laid around the days you declared unavailable — runs relocated to the nearest legal day, spacing kept${w.av_shed?'; too few legal days remained, so '+w.av_shed+' run'+(w.av_shed>1?'s were':' was')+' shed and the load went with them (a travel week is lighter, never crammed)':''}.">✈ away ${w.av_dates.map(sessDate).join(', ')}${w.av_shed?' · −'+w.av_shed+' run'+(w.av_shed>1?'s':''):''}</span>`:'',

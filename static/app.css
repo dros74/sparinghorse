@@ -561,6 +561,8 @@
   .sline{font-family:var(--mono);font-size:10.5px;color:var(--muted);display:flex;
     align-items:baseline;gap:5px;flex-wrap:wrap}
   .sline.stoday{color:var(--text)}
+  /* §REST — an implicit rest day fills a week-row gap (rendered, never prescribed in the JSON) */
+  .sline.srest{opacity:.5;font-style:italic}
   /* a completed session is clickable → opens that run's tile + route map */
   .sline.sclick{cursor:pointer;border-radius:5px;padding:1px 4px;margin:0 -4px}
   .sline.sclick:hover{background:color-mix(in oklab,var(--accent),transparent 88%);color:var(--text)}
