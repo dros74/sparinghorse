@@ -6411,6 +6411,140 @@ def _stc_peak_acwr_floor():
                     "failures": fail or "none"})
 
 
+def _stc_plannable_peak():
+    """§H1b — THE HARD CAP MAY ONLY BOUND DAYS THE SEARCH CAN STILL PLACE.
+
+    §H1 rejects any week whose in-week PEAK ACWR passes ACWR_HARD, and §PRO20b charges TODAY'S
+    ACTUAL load into that same projection (it must — the rest of the week is bounded against it).
+    Put together on a day the athlete has already run hard, the peak stops being a function of the
+    search variable: on 2026-08-27 an evening run took the day to ACWR 1.338 and `_max_week_trimp`
+    read the SAME 1.339 at every candidate budget — 300, 150, 80, 40, 20, 10, 5, 1 and 0 — rejected
+    all of them, returned 0.0, and the straddle remainder was laid EMPTY. Saturday's 11.4 km and
+    Sunday's 13.5 km were deleted from a week whose own governor cleared it at 1.240, UNDER the soft
+    cap; the block lost 72 km and 2.7 points of race-day CTL. §REST2's shape exactly — a gate that
+    cannot pass sheds volume silently — and the reason it survived is that the veto looks like
+    caution from the outside.
+
+    The fix drops from the PEAK only the days `actual_floor` FIXES, so the teeth below have to
+    separate that from the two ways of getting it wrong. Switching the test off would also lay a
+    remainder (a), so (c) requires the remainder to keep SHRINKING as the spike grows, and (b)
+    requires every day still plannable to hold the cap. Laundering the published number would also
+    make the card look calm, so (e) requires it to keep saying 1.379."""
+    from datetime import date, timedelta
+    fail, detail = [], {}
+    z = {"easy_top": 410, "easy": 410, "threshold": 320, "interval": 280, "marathon": 350}
+    mon, today = date(2026, 8, 3), date(2026, 8, 6)     # Monday-anchored week; today = Thursday (3)
+    shape = [{"wk": 1, "km": 58, "runs": 5, "long": 13, "strides": 0, "quality": [],
+              "intent": "Base", "role": "build"}]
+
+    def straddle(today_trimp):
+        """The live 2026-08-27 shape: four days run (35.1 km), a seed at end-of-yesterday that is
+        already fatigued (CTL 68 / ATL 82), and today's ACTUAL as the spike."""
+        wks, _ = E.generate_block(shape, mon, 68.0, 82.0, 410.0, zones=z, today=today,
+                                  week_actuals=(4, 35.1), regime="assertive",
+                                  soft_ctl_floor=E.ACWR_SOFT_CTL_FLOOR, recent_longs=[12.3],
+                                  today_trimp=today_trimp)
+        return wks[0]
+
+    # (a) ⭐ THE FOUNDING CASE — today is over the hard cap and the week still has days left in it.
+    w = straddle(150.0)
+    ahead = [x for x in w["sessions"] if x["date"] > today.isoformat()
+             and (x.get("kind") or "") != "rest"]
+    detail["founding"] = {"peak_acwr": w.get("peak_acwr"), "km_ahead": w.get("km_ahead"),
+                          "runs_ahead": w.get("runs_ahead"),
+                          "sessions": [(x["date"], x["kind"], x["km"]) for x in w["sessions"]]}
+    if not (w.get("peak_acwr") or 0) > E.ACWR_HARD:
+        fail.append(f"FIXTURE VACUOUS — today does not breach the hard cap (peak "
+                    f"{w.get('peak_acwr')} ≤ {E.ACWR_HARD}), so nothing here tests the veto")
+    if not ahead:
+        fail.append("a breach on an already-run day deleted the whole remainder — the veto is back "
+                    "(the live 2026-08-27 week lost Sat 11.4 km + Sun 13.5 km this way)")
+    if (w.get("km_ahead") or 0) <= 0:
+        fail.append(f"km_ahead {w.get('km_ahead')} — the week publishes nothing left to run")
+
+    # (b) THE BRAKE IS INTACT WHERE IT BELONGS. Today stops voting on itself; every day the search
+    # can still place is still bounded, and today's real load still reaches them through the curve.
+    seed_ctl, seed_atl = 68.0, 82.0
+    dt_ahead = {x["date"]: (x.get("trimp") or 0.0) for x in w["sessions"]
+                if x["date"] >= today.isoformat()}
+    curve = E.project_forward({**dt_ahead, today.isoformat(): 150.0},
+                              seed_ctl, seed_atl, today.isoformat())
+    fwd = [(p["date"], p["acwr"]) for p in curve if p["date"] > today.isoformat() and p["acwr"]]
+    detail["plannable_days"] = fwd
+    for d, a in fwd:
+        if a > E.ACWR_HARD:
+            fail.append(f"a day the plan DID place breached the hard cap: {d} at {a} "
+                        f"> {E.ACWR_HARD} — §H1 has been switched off, not narrowed")
+
+    # (c) ⭐ MONOTONE TIGHTENING — the anti-vacuity that (a) alone cannot give. Deleting the peak
+    # test would also lay a remainder here; what it would NOT do is keep shrinking it as the spike
+    # grows. A harder day today must buy a smaller rest of the week, never a larger one.
+    ladder = [(tt, straddle(tt)) for tt in (150.0, 190.0, 220.0)]
+    seq = [(tt, x.get("peak_acwr"), x.get("km_ahead")) for tt, x in ladder]
+    detail["ladder"] = seq
+    for (t0, p0, k0), (t1, p1, k1) in zip(seq, seq[1:]):
+        if not (p1 or 0) > (p0 or 0):
+            fail.append(f"FIXTURE VACUOUS — {t1} TRIMP did not read a higher peak than {t0} "
+                        f"({p1} vs {p0}); the ladder tests nothing")
+        if (k1 or 0) > (k0 or 0):
+            fail.append(f"a BIGGER spike bought a BIGGER remainder: {t0}→{t1} TRIMP moved km_ahead "
+                        f"{k0}→{k1}. The governor is not tightening, it is absent")
+
+    # (d) THE FLOOR DROPS A DAY ONLY WHERE IT BINDS. A day the plan still wants MORE of than the
+    # athlete has run is a genuine decision variable in its surplus, so it stays under the cap.
+    # Read straight off `_project_week`: pinned ⇒ the two readings differ, plannable ⇒ identical.
+    spike = {today.isoformat(): 300.0}
+    binds = E._project_week(seed_ctl, seed_atl, mon.isoformat(), {today.isoformat(): 10.0},
+                            roll_from=today.isoformat(), actual_floor=spike,
+                            peak_plannable_only=True)[3]
+    binds_raw = E._project_week(seed_ctl, seed_atl, mon.isoformat(), {today.isoformat(): 10.0},
+                                roll_from=today.isoformat(), actual_floor=spike)[3]
+    surplus = E._project_week(seed_ctl, seed_atl, mon.isoformat(), {today.isoformat(): 300.0},
+                              roll_from=today.isoformat(),
+                              actual_floor={today.isoformat(): 10.0},
+                              peak_plannable_only=True)[3]
+    surplus_raw = E._project_week(seed_ctl, seed_atl, mon.isoformat(), {today.isoformat(): 300.0},
+                                  roll_from=today.isoformat(),
+                                  actual_floor={today.isoformat(): 10.0})[3]
+    detail["binding"] = {"floor_binds": [binds_raw, binds], "plan_wants_more": [surplus_raw, surplus]}
+    if binds == binds_raw:
+        fail.append(f"a day FIXED by its actual is still voting on the peak ({binds}) — the veto "
+                    f"is unfixed")
+    if surplus != surplus_raw:
+        fail.append(f"a day the plan wants MORE of was dropped from the peak ({surplus} vs "
+                    f"{surplus_raw}) — the surplus is a decision variable and must stay capped")
+
+    # (e) THE CARD KEEPS THE HONEST NUMBER. The fix narrows what the SEARCH may be vetoed by; it
+    # must not launder what the week PUBLISHES. A 1.379 day reads 1.379 on the card.
+    raw = E.project_forward({today.isoformat(): 150.0}, seed_ctl, seed_atl,
+                            today.isoformat())[0]["acwr"]
+    detail["published"] = {"card_peak": w.get("peak_acwr"), "raw_today": raw}
+    if (w.get("peak_acwr") or 0) < raw - 1e-9:
+        fail.append(f"the week published peak_acwr {w.get('peak_acwr')} while today really ran "
+                    f"{raw} — the governor's private reading leaked onto the card")
+
+    # (f) INERT EVERYWHERE ELSE. With no `actual_floor` there is nothing to pin, so the flag cannot
+    # change a single number — this is what keeps every full-week path and both goldens untouched.
+    flat = {(mon + timedelta(days=i)).isoformat(): 60.0 for i in range(7)}
+    a_off = E._project_week(seed_ctl, seed_atl, mon.isoformat(), flat)
+    a_on = E._project_week(seed_ctl, seed_atl, mon.isoformat(), flat, peak_plannable_only=True)
+    detail["inert"] = {"off": a_off[2:5], "on": a_on[2:5]}
+    if a_off != a_on:
+        fail.append(f"the flag moved a week with no actual_floor: {a_off} vs {a_on}")
+
+    return _st("det", "plannable-peak",
+               "§H1b — the hard peak-ACWR cap bounds only the days the search can still place: an "
+               "already-run day over the cap no longer vetoes the whole remainder (the 2026-08-27 "
+               "week lost Sat+Sun to it), while a bigger spike still buys a smaller week, every "
+               "day the plan DOES place still holds ACWR_HARD, a day the plan wants more of stays "
+               "capped on its surplus, the card keeps the honest peak, and the reading is inert "
+               "wherever no actual is charged",
+               passed=not fail,
+               expect="remainder survives a breach · monotone tightening · plannable days ≤ "
+                      f"{E.ACWR_HARD} · surplus still capped · published peak raw · no-floor inert",
+               got={"failures": fail or "none"}, output=detail)
+
+
 def _stc_building_load_integrity():
     """A building phase (Base/Build/Peak) must never silently hand back a fitness-trivial 'long run'.
     From a HEALTHY post-re-base seed every non-down week delivers a real long run (≥ LONG_RUN_MIN_KM,
@@ -12757,7 +12891,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_health_sync(), lambda: _stc_sleep_sync(),
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
-                 lambda: _stc_peak_acwr_floor(), lambda: _stc_building_load_integrity(),
+                 lambda: _stc_peak_acwr_floor(), lambda: _stc_plannable_peak(), lambda: _stc_building_load_integrity(),
                  lambda: _stc_plan_seed(), lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
                  lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),

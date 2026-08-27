@@ -10,6 +10,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.44.11] - 2026-08-27
+
+### Fixed
+
+- **A day you had already run could veto the rest of your week (§H1b).** The evening of 2026-08-27
+  the athlete ran 12.3 km — roughly the 11.4 km the plan had asked for that morning — on the back of
+  a six-day streak. It cost 135 TRIMP against a 102 TRIMP prescription, and it took the day's ACWR to
+  **1.338**, past the 1.30 hard cap. The plan regenerated one minute later and deleted the rest of
+  the week: Saturday's 11.4 km easy and Sunday's 13.5 km long run, gone. The week fell from 59.1 km
+  to 35.1 km — exactly what had already been run, with nothing ahead of it — and because forward
+  volume is CTL-responsive, the dip propagated: **−72 km across the block**, race-day CTL 99.5 → 96.8.
+
+  The governor binary-searches the largest weekly load whose in-week **peak** ACWR stays under the
+  hard cap, and §PRO20b charges today's *actual* load into that same projection — it has to, or the
+  rest of the week is bounded against a week the athlete has already partly outrun. But a day already
+  run is not a candidate. With the spike inside the window the peak read the same 1.339 at **every**
+  budget the search tried — 300, 150, 80, 40, 20, 10, 5, 1 and 0 — so every one was rejected, the
+  search returned 0.0, and the remainder was laid empty. The engine was not judging Saturday too
+  hard; it was rejecting the whole window on the strength of a day it could not change. §REST2's
+  shape one release earlier: a gate that cannot pass, shedding volume in silence. It reads as caution
+  from the outside, which is why it took a surprised athlete to find it.
+
+  The measure of how wrong it was: **the prescription it deleted passes the engine's own governor.**
+  Saturday 11.4 + Sunday 13.5 peaks at ACWR 1.240 — under the *soft* cap, never mind the hard one.
+
+  The peak now bounds only the days the search can still place. A day is dropped from that reading
+  only where the actual **binds** (the athlete ran at least what the plan wanted); where the plan
+  still wants more of a day than was run, the surplus is a real decision variable and stays under the
+  cap. Nothing else moves — every plannable day is still bounded by §H1, today's real load still
+  reaches them through the curve, and the week card still publishes the honest 1.339. On the live
+  plan the same evening now lays 21.0 km ahead (Sat 7.5 + Sun 13.5) rather than 24.9 or nothing: the
+  overshoot is charged, the week tightens, it does not collapse. `det/plannable-peak` holds the
+  boundary from both sides — a bigger spike must buy a *smaller* remainder, never a larger one.
+
 ## [0.44.10] - 2026-08-27
 
 ### Fixed

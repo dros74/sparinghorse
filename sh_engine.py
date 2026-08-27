@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.44.10"
+ENGINE_VERSION = "0.44.11"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1866,7 +1866,8 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     return sessions, day_trimps
 
 
-def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor=None):
+def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor=None,
+                  peak_plannable_only=False):
     """Roll the projector across one full week (Mon–Sun). Returns
     (end_ctl, end_atl, eow_acwr, peak_acwr). The PRIMARY governor bound is END-OF-WEEK ACWR
     against the SOFT cap — the settled weekly state, the natural planning cadence — and normal
@@ -1886,14 +1887,31 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor
     against a real 93). Under-reading today's load makes the rest of the week look freer than it is,
     the same direction as the §PRO20 defect. A FLOOR, not a replacement: it can only ever RAISE
     projected load, so it can only ever tighten the governor, and it is unioned in (a day the plan
-    left out entirely still gets charged)."""
+    left out entirely still gets charged).
+
+    §H1b — `peak_plannable_only` (default False ⇒ byte-identical) drops from the PEAK the days whose
+    load is FIXED BY `actual_floor` — the days the caller cannot change. It exists because a
+    constraint evaluated on a day that is not a decision variable is not a constraint, it is a veto:
+    on 2026-08-27 an evening run took the day's ACWR to 1.338, `_max_week_trimp` searched a week whose
+    peak was that same 1.339 at EVERY candidate budget (measured at 300/150/80/40/20/10/5/1 and 0),
+    rejected all of them, returned 0.0, and the straddle remainder was laid EMPTY — Saturday's 11.4 km
+    and Sunday's 13.5 km deleted from a week the governor's own numbers cleared at 1.240, under the
+    SOFT cap. §REST2's shape exactly: a gate that cannot pass sheds volume silently.
+    A day is dropped only where the floor BINDS (actual ≥ laid). Where the plan still wants MORE of a
+    day than the athlete has run, the surplus IS the search variable and the day stays under the cap.
+    Nothing else moves: every plannable day is still bounded by §H1, and today's real load still
+    reaches those days through the curve — the spike propagates, it just stops voting on itself.
+    DISPLAY keeps the raw peak (the card must say 1.339), so only `_max_week_trimp` passes this."""
     from datetime import timedelta
     end = _date(week_start) + timedelta(days=6)
     start_iso = roll_from or week_start                 # where the roll begins (today for a partial week)
+    pinned = set()                                      # §H1b — days the floor FIXES (see the docstring)
     if actual_floor:
         day_trimps = dict(day_trimps or {})
         for _d, _t in actual_floor.items():
             if start_iso <= _d <= end.isoformat():      # only inside the rolled span
+                if (_t or 0.0) >= day_trimps.get(_d, 0.0):
+                    pinned.add(_d)                      # the floor BINDS ⇒ invariant in the search
                 day_trimps[_d] = max(day_trimps.get(_d, 0.0), _t or 0.0)
     curve = project_forward(day_trimps, ctl, atl, start_iso) if day_trimps else []
     last = max(_date(d) for d in day_trimps) if day_trimps else _date(start_iso) - timedelta(days=1)
@@ -1905,7 +1923,10 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor
                       "atl": round(aa, 2), "tsb": round(cc - aa, 2),
                       "acwr": round(aa / cc, 3) if cc else None})
         cur += timedelta(days=1)
-    peak = max((p["acwr"] for p in curve if p["acwr"]), default=None)
+    # §H1b — the peak bounds the days the caller can still place. `pinned` is empty unless a caller
+    # both passes `actual_floor` AND asks for the plannable reading, so every other path is untouched.
+    peak = max((p["acwr"] for p in curve
+                if p["acwr"] and not (peak_plannable_only and p["date"] in pinned)), default=None)
     eow = curve[-1]["acwr"] if curve else None
     # §PRO16 — the SHAPE-NEUTRAL acute:chronic reading. `eow` samples the ratio on the LAST day of
     # the week, which is the long-run day — the single biggest session there is. That placement alone
@@ -2004,8 +2025,13 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
                                      #                                                spacing gate too
         # §PRO20b — the search must charge today's ACTUAL load, or the allowance it hands back is
         # bounded against a week the athlete has already partly outrun. Floor-only ⇒ it can only tighten.
+        # §H1b — the PEAK is read over the days this search can still place. `actual_floor` charges
+        # today's real load into the curve either way (it must — the rest of the week is bounded
+        # against it), but a day already run cannot be a candidate, and a hard cap evaluated on one
+        # is unsatisfiable: it rejects every budget, including zero, and deletes the remainder.
         endctl, endatl, eow, peak, eow_flat, m_ctl = _project_week(
-            ctl, atl, start, dt, roll_from=roll_from, actual_floor=actual_floor)
+            ctl, atl, start, dt, roll_from=roll_from, actual_floor=actual_floor,
+            peak_plannable_only=True)
         # §PRO16 — judge the SOFT test on the SHAPE-NEUTRAL reading (mean acute / mean chronic across
         # the week) instead of the last-day sample, which is the long-run day and carries a structural
         # offset of ~+16% that is placement, not stress. The PEAK test below is untouched and stays on
