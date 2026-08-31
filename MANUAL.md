@@ -49,11 +49,21 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
   was prescribed (the effort monitor) read from that whole history, not
   from the road currently on screen. The plan document answers "where am I going", not "where have
   I been" — the drift scorecard and the prediction ledger answer that.
-- **Safety is a hard ceiling, not a suggestion.** Every planned week is bounded by a hard ACWR cap
-  (acute:chronic workload ratio) of **1.30**, with **1.25** the conservative planning target the
-  post-illness rebuild sticks to. On the normal (assertive) build the week rides between the two, and
-  further injury brakes beyond ACWR engage (long-run-jump cap, a biomechanical load lens, a tissue
-  limiter). The plan follows your *measured* form — nothing is unlocked by adherence bookkeeping.
+- **Safety is a governed ceiling — and the governed number is not the one on the card.** Every
+  planned week is sized against a **1.25** ceiling, and that bound is never broken. But the ratio the
+  governor decides on is a *shape-neutral* one — the week's mean acute load over its mean chronic
+  load, with the chronic denominator floored at low CTL — because the last-day sample lands on the
+  long run and carries a structural offset that is placement, not stress. The **ACWR shown on a week
+  card is that last-day sample**, so it reads higher, and on a hard building week it can print above
+  1.30 while the governed number sits at 1.25. Both numbers are published: the card shows the
+  reading, and each week also carries the governor's own decision variable beside it.
+  The in-week *peak* is bounded at **1.30** — except on the assertive build once the biomechanical
+  governors have a baseline to work from, where the damage-axis bounds (no session's equivalent-km
+  may jump past its step, no week's past the weekly ceiling) deliberately replace the per-day ratio
+  as the acute brake: injuries are biomechanical rather than physiological, and the per-day ratio was
+  measuring *where in the week we sampled* as much as what was run. Further brakes engage regardless
+  (long-run-jump cap, tissue limiter, chronic-growth cap). The plan follows your *measured* form —
+  nothing is unlocked by adherence bookkeeping.
 
 You operate it by keeping your data synced and your objectives current. The engine does the rest; the AI
 layer (optional) only narrates and parses — it never overrides the deterministic safety logic.
@@ -171,6 +181,15 @@ Objectives have a **priority**:
 The standard case: one continuous build whose **final taper week lands on race day** (the calendar is exact
 — a race that is not a whole number of weeks out still tapers onto the correct day, not a few days short).
 
+### Moving a race
+
+Race dates change. Edit the date **in place** on the objective row — the plan re-periodizes onto the new
+day and the race keeps everything attached to it: its founding road, its **prediction ledger**, and (once
+run) its result. Do *not* add the new date and remove the old one; that is two races, not a moved one, and
+the engine will treat it as a goal change. A race can move by up to 45 days and still be recognised as the
+same race — beyond that it is a different one, which is what keeps next year's edition of an annual from
+inheriting this year's history. A race that has already been run or removed cannot be moved.
+
 ### Several A-races (a chain)
 
 Set two or more A-races and the engine **chains** them into one continuous build: an intermediate peak and
@@ -250,8 +269,11 @@ plots the whole ledger, so the projection's own track record is visible rather t
 ### Current shape
 VO₂max, **CTL** (chronic load ≈ your fitness, a slow ~42-day average), **ATL** (acute load ≈ recent fatigue,
 a fast ~7-day average), and **ACWR** (ATL ÷ CTL — how hard recent load is relative to your base). ACWR near
-1.0 is balanced; the plan holds every week under a hard **1.30** ceiling — targeting **1.25** on the
-conservative rebuild, riding toward 1.30 on the assertive build.
+1.0 is balanced. The plan *sizes* every week against **1.25**, but it does so on a shape-neutral
+reading of the ratio, not the one printed here: this tile and the week cards show the raw end-of-week
+sample, which lands on the long-run day and reads high by roughly a sixth. A card above 1.30 is
+therefore normal on a building week and does not mean a ceiling was broken — the governed number is
+published beside it if you want to check.
 
 ### The plan
 A phase bar (Re-base → Base → Build → Peak → Taper, plus any chain bridges) over a "weeks to race day" count.
@@ -298,6 +320,11 @@ projection**.
   your shape moving; both are honest, and both are on the record. Once the race is run, the outcome is
   scored against the prediction standing before it (in the band or not, plus a proper log score) and
   the reckoning names the engine's call.
+- The **fitness chart** carries a line about the engine rather than about you: *how far the CTL
+  projection has run from what actually happened*, as a median over every week that has been scored,
+  at the horizon it was scored at, with the number of weeks it rests on. Positive means you came out
+  **fitter** than projected — the model under-predicted you. It is a reading, not a lever: nothing in
+  the plan acts on it, and a test enforces that.
 - For a **multi-A** build the scorecard breaks out **each peak's** founding→now projection and trend, and
   the headline names the **next peak** still ahead.
 - Once a race **passes**, the scorecard stops projecting and **reckons**: the fitness you actually arrived
@@ -506,7 +533,8 @@ a different screen, not looking at a broken guide.
 - **Weekly:** check the plan drift scorecard. "Ahead on fitness, behind on volume" tells you which lever to
   pull.
 - **When you change a goal:** add/remove/re-prioritize in the Objectives panel and regenerate. The drift
-  baseline re-anchors to the new goal and self-heals as plans for it accrue.
+  baseline re-anchors to the new goal and self-heals as plans for it accrue. **Moving** a race is not a goal
+  change — edit its date in place and the whole history follows it (§5, *Moving a race*).
 
 ---
 
@@ -644,8 +672,9 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 - **CTL** — Chronic Training Load. A slow (~42-day) average of training load; the app's proxy for *fitness*.
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.
-- **ACWR** — Acute:Chronic Workload Ratio (ATL ÷ CTL). A widely-used (and contested) training-load lever;
-  the plan holds every week under a hard **1.30** ceiling, targeting **1.25** on the conservative rebuild.
+- **ACWR** — Acute:Chronic Workload Ratio (ATL ÷ CTL). A widely-used (and contested) training-load lever.
+  The plan sizes every week against **1.25** on a shape-neutral reading of it; the number displayed is the
+  raw end-of-week sample, which reads higher and may print above 1.30 without a ceiling having moved.
 - **TRIMP** — TRaining IMPulse. A single number for a session's load (intensity × duration), the input to CTL/ATL.
 - **VO₂max** — Aerobic ceiling, read from Runalyze; drives the prescribed pace zones (Daniels VDOT).
 - **LT1** — Aerobic-threshold *pace* (≈ 80 % of 5 k pace), derived from your current fitness so it *moves* as

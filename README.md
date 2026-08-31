@@ -200,9 +200,15 @@ from the governors, not a setting you can flip. In assertive the engine further 
 how you're actually absorbing load — riding the full ceiling while your measured fitness tracks the
 projection, easing automatically when you fall behind.
 
-### The ACWR ceiling — useful, and *not trusted alone*
-Every week is bounded so projected **ACWR** (acute:chronic workload ratio — this week's load vs. your rolling
-chronic load) stays under a hard **1.30** ceiling, with **1.25** as the planning target that leaves margin.
+### The ACWR ceiling — useful, *not trusted alone*, and read two ways
+Every week is sized so its projected **ACWR** (acute:chronic workload ratio — this week's load vs. your
+rolling chronic load) stays under **1.25**. That bound holds absolutely, but it is applied to a
+*shape-neutral* reading — the week's mean acute over mean chronic, chronic floored at low CTL — rather
+than to the last-day sample, which falls on the long run and is inflated by placement rather than by
+stress. The per-week number the UI prints is that last-day sample, so it reads higher and can exceed
+1.30 on a building week with nothing having been breached; the governed value is published alongside
+it. The in-week peak is held to **1.30**, except where the biomechanical governors are in force on the
+assertive build — there the damage-axis bounds take over as the acute brake by design (see below).
 1.30 sits at the top of Gabbett's widely-cited training-load "sweet spot." It's also a **contested** metric —
 it can be unstable when your chronic load is low — so the engine treats it as one guardrail among several,
 never the whole safety story.

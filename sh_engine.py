@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.44.11"
+ENGINE_VERSION = "0.47.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -626,7 +626,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
         {"phase": "Build — specific", "weeks": build, "kind": "build", "key": "build", "race": lbl0, "role": role0},
         {"phase": f"Peak → {lbl0}", "weeks": peak0, "kind": "peak", "key": "peak", "race": lbl0, "role": role0},
         {"phase": f"Taper → {lbl0}", "weeks": taper0, "kind": "taper", "key": "taper", "race": lbl0, "role": role0,
-         "type": r0.get("type")},   # §TT — the taper needs to know WHICH race it freshens for
+         "type": r0.get("type"), "date": r0.get("date")},   # §TT — the taper needs to know WHICH
+         # race it freshens for; §RACE — and WHEN, so the race itself can be laid on the calendar
     ]
     for k in range(1, len(chain)):
         rk, prev = chain[k], chain[k - 1]
@@ -641,7 +642,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
             {"phase": f"Bridge → {lblk}", "weeks": bridgek, "kind": "bridge", "key": f"bridge{k}", "race": lblk, "role": rolek},
             {"phase": f"Peak → {lblk}", "weeks": peakk, "kind": "peak", "key": f"peak{k}", "race": lblk, "role": rolek},
             {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek,
-             "type": rk.get("type")},   # §TT — per-segment: each taper sharpens at ITS race's pace
+             "type": rk.get("type"), "date": rk.get("date")},   # §TT/§RACE — per-segment: each
+             # taper sharpens at ITS race's pace, and lays ITS race on ITS day
         ]
     return [p for p in phases if p["weeks"] > 0], weeks_until(chain[-1]["date"], today)
 
@@ -1374,6 +1376,47 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
     sess = _session_from_reps(date, "long_mp", zone, zpace, reps, note)
     sess["component"] = spec.get("component") or COMPONENT_BY_KIND["long_mp"]   # §T2 component tag
     return sess
+
+
+def _place_race(sessions, day_trimps, race, week_start):
+    """§RACE — put the RACE on race day, and charge what it actually costs.
+
+    The engine knew a race as a phase label, a week ROLE ("race week") and a row in `objectives` —
+    never as a SESSION. `taper_shape`'s last week is laid like any other taper week, so race day drew
+    whatever the distributor happened to put in that slot: on a live 2026-12-06 marathon plan, a 9.0 km
+    "long easy run" on marathon morning. Two costs, and the second is the worse one. The race was
+    missing from the calendar the athlete actually reads — and its LOAD was missing from the
+    projection, so race week published CTL/ATL/ACWR for a ~30 km week that was never going to happen
+    (42.195 km at marathon pace is ~435 TRIMP, more than the rest of the week put together).
+
+    Placed AFTER the governor has sized the week, and deliberately so. Race day is a FIXED day: the
+    distance and the pace are given, and no search can trade them away. §H1b's lesson exactly — a
+    constraint evaluated on a day the search cannot change is not a constraint, it is a veto; charging
+    435 TRIMP into the budget search would drive the taper's easy running toward zero and hand back
+    the same silent-shedding failure §REST2 and §H1b each cost a release. So the governor still bounds
+    the TRAINING it controls, and the race is then laid on top of it and told the truth about.
+
+    Whatever the lay had put on race day is REPLACED, never added to — one race day, one session.
+    The week-span guard is not a formality: the race belongs to ONE week of a multi-week taper block,
+    and without it the same race is laid into every week the block generates."""
+    if not race:
+        return sessions, day_trimps
+    from datetime import timedelta
+    _ws = _date(week_start) if isinstance(week_start, str) else week_start
+    d = race["date"]
+    if not (_ws <= _date(d) <= _ws + timedelta(days=6)):
+        return sessions, day_trimps
+    kept = [x for x in sessions if x.get("date") != d]
+    shed = sum(x.get("trimp", 0.0) for x in sessions if x.get("date") == d)
+    minutes = int(round(race["km"] * race["pace_sec"] / 60.0))
+    trimp = est_trimp(minutes, race["zone"])
+    kept.append({"date": d, "kind": "race", "km": round(race["km"], 1), "minutes": minutes,
+                 "trimp": trimp, "pace_zone": f"{fmt_pace(race['pace_sec'])}/km {race['zone']}",
+                 "note": race["label"], "race": True})
+    kept.sort(key=lambda x: x["date"])
+    dt = dict(day_trimps)
+    dt[d] = round(dt.get(d, 0.0) - shed + trimp, 1)
+    return kept, dt
 
 
 def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
@@ -2802,7 +2845,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
                    recent_eq=None, week_actual_long=None, week_actual_eq=None, blocked=None,
-                   recent_session_eq=None, today_trimp=None, pinned_past=None, prev_tail=0):
+                   recent_session_eq=None, today_trimp=None, pinned_past=None, prev_tail=0,
+                   race=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
     bounding each week's *ramp* so projected end-of-week ACWR stays under the soft cap, and carries
@@ -3272,6 +3316,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                         ladder=assertive, prev_tail=prev_tail)   # §PRO24/§REST
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
+        _race_seed = (ctl, atl)   # §RACE — the seed to re-publish from once the race is laid
         ctl_n, atl_n, eow, peak, eow_flat, m_ctl_n = _project_week(ctl, atl, wk_start, dt,
                                                                    actual_floor=act_floor)   # §PRO20b
         # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
@@ -3354,6 +3399,36 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         clipped = (not assertive) and chosen < intent_trimp - 1
         if clipped:
             clipped_any = True
+        # §RACE — the race is laid LAST, after every governing and re-governing path has finished
+        # with the week. It cannot be laid earlier: its ~435 TRIMP takes peak ACWR past
+        # H1_RESCUE_ACWR, which fires §H1's quality→easy rescue, and the rescue RE-LAYS the week —
+        # discarding the race and re-riding the assertive ceiling (measured: race week 30.1 km →
+        # 76.3 km, race gone). Those gates exist to reshape the days the plan CONTROLS; race day is
+        # not one of them. §H1b's lesson a third time — a fixed day must not drive a gate that
+        # rewrites the negotiable ones.
+        # The published projection is then re-rolled from the same seed WITH the race in it, so the
+        # week's ACWR *and CTL* describe the week that will actually be run — and `ctl, atl` carry
+        # THAT forward, because the athlete does. The first cut re-rolled the reading and threw the
+        # fitness away (`_rc, _ra` computed and discarded): race week published a `proj_ctl` 13 points
+        # under the week it had just laid, and `end_ctl`/`end_atl` — the seed the NEXT block starts
+        # from — described a taper with no race in it. On a single-A road that is only a lie on a
+        # chart; on a §6q chain it is a governor input, and the bridge after an intermediate A-race
+        # was being sized off a fatigue number that omitted a marathon (measured on the multi-A
+        # golden: end_atl 48.3 where the race-inclusive value is 75.1). Laying a session and not
+        # carrying its load is the same class of error §PRO20b and §101 each cost a release.
+        #
+        # What does NOT move is the GOVERNOR's own reading. `proj_acwr_soft` is the decision variable
+        # the soft test compared against the ride cap (§PRO23), and the search decided before the race
+        # existed — so it keeps the pre-race pair, and a reader checking "was this week held under the
+        # cap?" still gets the number the cap was applied to. Publishing the post-race reading there
+        # would make the one field whose job is to be checkable un-checkable on the one week that
+        # matters. Same reasoning for `prog_ridden` below, which reads `atl_n`/`ctl_n`.
+        _gov_eow, _gov_flat = eow, eow_flat      # §PRO23 — what the governor actually compared
+        _sess_r, _dt_r = _place_race(sessions, dt, race, wk_start)
+        if _sess_r is not sessions:
+            sessions, dt = _sess_r, _dt_r
+            ctl, atl, eow, peak, eow_flat, _ = _project_week(_race_seed[0], _race_seed[1],
+                                                             wk_start, dt, actual_floor=act_floor)
         week = {**wk, "start": wk_start, "sessions": sessions,
                 # §PRO9 — honest count (the cap can add easy days to hold volume). §CARD — non-rest
                 # only: _apply_adjustment turns a 0×-eased day into a `rest` session, which stays in
@@ -3367,8 +3442,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # shape-neutral one; NEITHER is what the soft test compared against the ride cap once
                 # §PRO8's floor engages, because that divides by the week's MEAN CTL. Readers that
                 # guessed with `proj_ctl` over-read it by ~5% on a steep low-CTL week.
-                "proj_acwr_soft": (None if eow_flat is None and eow is None else
-                                   round(_eow_soft(eow, eow_flat, m_ctl_n, ctl_n, atl_n,
+                # §RACE — `_gov_*` is `eow`/`eow_flat` on every week but a race week, where it is
+                # the pre-race pair: this field must equal what the SEARCH compared, never the
+                # honesty re-roll laid on top of it.
+                "proj_acwr_soft": (None if _gov_flat is None and _gov_eow is None else
+                                   round(_eow_soft(_gov_eow, _gov_flat, m_ctl_n, ctl_n, atl_n,
                                                    assertive, soft_ctl_floor) or 0.0, 4)),
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
                 # §PRO25 — publish the intent the week was actually GOVERNED to, not the skeleton's
@@ -4293,15 +4371,69 @@ def _ft_cold_start(db, today=None):
     return best
 
 
-def _ft_prediction_score(db, race_date_iso, race_type, actual_s):
+GOAL_MOVE_DAYS = 45   # §GM — a race that shifts less than this is the SAME race, moved
+
+
+def _same_race(a, b):
+    """§GM — do two objective dicts name the same race? THE founding-road matching rule, in one
+    place, because every consumer that reads a goal's plan history back has to agree on it: the §6b
+    anchor, the §FT4 prediction ledger and the §TR settlement all ask `plans` "which of these were
+    built for THIS race", and where they disagree a plan can found a road it is never scored against.
+
+    The rule used to be the calendar cell — same date, same type — and it broke the day a race MOVED.
+    Correcting a goal marathon from the 7th to the 6th meant add-then-remove (no edit path existed yet);
+    the next regeneration banked a plan under the new date, and every prediction the engine had ever
+    made for that race stopped matching its own ledger. Nothing was deleted — 126 plans still held the
+    line the runner had watched accumulate for months — but a one-day correction read as a new goal
+    and emptied the chart. It is not a new goal. Identity is the RACE, not the day it lands on.
+
+    `POST /api/objectives/<id>/date` is the other half of that fix and moves a race without standing
+    up a new row at all. This rule still has to hold, because it is what joins a MOVE to the plans
+    banked before it — and to the history of anyone who reached for add-then-remove before the edit
+    path existed.
+
+    So: same type, same label, and near enough in time that it cannot be the next edition of an
+    annual (`GOAL_MOVE_DAYS`, well inside the ~180 d a spring/autumn pair of the same name would
+    sit apart). With no label on both sides there is nothing left to hold identity but the date, so
+    the old exact rule stands. Everything else is a different race and keeps its own road — swapping
+    the objective still resets the baseline (§6b), which is the behaviour that was always wanted.
+
+    ⚠ A field that is ABSENT is not a field that DISAGREES, and this rule tightened the predicate the
+    §6b anchor asks — so an absence had to be handled or the fix would have cost what it was written
+    to save. `plan["objective"]` gained its `type` on 2026-06-25; the 24 plans banked before that
+    carry a label and a date and no type at all. The old date-only anchor matched them; comparing
+    `"" != "marathon"` would not, and the founding road would have silently started six days late
+    (measured on the live record: the anchor moved from 2026-06-19 to 2026-06-25). Same reasoning as
+    the label branch below — a field only splits two races when BOTH sides state it."""
+    if not (a and b):
+        return False
+    ta, tb = (a.get("type") or "").lower(), (b.get("type") or "").lower()
+    if ta and tb and ta != tb:
+        return False
+    la, lb = (a.get("label") or "").strip().lower(), (b.get("label") or "").strip().lower()
+    if not (la and lb):
+        return bool(a.get("date")) and a.get("date") == b.get("date")
+    if la != lb:
+        return False
+    if a.get("date") == b.get("date"):
+        return bool(a.get("date"))
+    try:
+        return abs((_date(a["date"]) - _date(b["date"])).days) <= GOAL_MOVE_DAYS
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _ft_prediction_score(db, race_date_iso, race_type, actual_s, race_label=None):
     """§FT4 — settle the LAST pre-race prediction for this race against the clock. Finds the most
-    recent saved plan generated strictly before race day whose ANCHOR is this race (same date +
-    type — the founding-road matching rule) and carries a finish_time, then scores it: P50 log
-    error always; when the plan carried a §FT3 band, also in_band + the Gaussian log score
-    (a PROPER score — an over-tight band is punished exactly like an over-wide one, so the band
-    can't cheat its way to looking calibrated). None when no scorable plan exists."""
+    recent saved plan generated strictly before race day whose ANCHOR is this race (`_same_race` —
+    the founding-road matching rule, so a race that MOVED still settles against the predictions made
+    for it) and carries a finish_time, then scores it: P50 log error always; when the plan carried a
+    §FT3 band, also in_band + the Gaussian log score (a PROPER score — an over-tight band is punished
+    exactly like an over-wide one, so the band can't cheat its way to looking calibrated). None when
+    no scorable plan exists."""
     if not (actual_s and race_date_iso):
         return None
+    race = {"date": race_date_iso, "type": race_type, "label": race_label}
     for r in db.execute("SELECT id, for_date, plan FROM plans WHERE for_date < ? ORDER BY id DESC",
                         (race_date_iso,)).fetchall():
         try:
@@ -4310,8 +4442,7 @@ def _ft_prediction_score(db, race_date_iso, race_type, actual_s):
             continue
         o = p.get("objective") or {}
         ft = (p.get("feasibility") or {}).get("finish_time") or {}
-        if (o.get("date") != race_date_iso or (o.get("type") or "").lower() != (race_type or "").lower()
-                or not ft.get("seconds")):
+        if not _same_race(o, race) or not ft.get("seconds"):
             continue
         out = score_finish(ft, actual_s)      # §TR owns the maths — one scorer, two callers
         if out:
@@ -4505,7 +4636,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                   week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                   consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
                   recent_eq=None, db=None, pace_zones=None, blocked=None, recent_session_eq=None,
-                  today_trimp=None, prev_tail=0):
+                  today_trimp=None, prev_tail=0, race=None):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
     start date), so a mid-block regeneration never rewrites weeks already lived. Today-onward weeks
@@ -4524,7 +4655,30 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
         if wstart + timedelta(days=6) < today:               # fully elapsed → freeze
             prior_w = prior_by_start.get(wstart.isoformat())
             if prior_w:
-                frozen.append({**prior_w, "elapsed": True, "frozen": True})
+                # §P1 — a week frozen out of a plan saved BEFORE the role/phase fields existed carries
+                # neither, and the freeze would carry that gap forward for the life of the block: each
+                # regeneration re-freezes from the last, so a pre-§P1 week never heals and its role
+                # stays encoded in the human `intent` sentence indefinitely. On the live plan that is
+                # four base weeks, one of them a DOWN week whose down-ness only survives because
+                # something still parses "Down week — …". Stamp it as it is carried.
+                #
+                # Neutral by construction: the value stamped is exactly what `_week_role` already
+                # returns for this week, so every reader gets the answer it gets today — from a field
+                # instead of a parse. The phase is stamped only where the fallback actually KNOWS one
+                # (it answers None for a legacy base week), because inventing "base" here would move
+                # `_long_share_cap` off its block-wide default, and P1 is a no-behaviour-change step.
+                healed = {**prior_w, "elapsed": True, "frozen": True}
+                if not healed.get("role") and prior_w.get("intent"):
+                    # …and ONLY where there is a sentence to read. `_week_role` answers "build" for
+                    # an empty week, and stamping that default would be inventing a decision for a
+                    # week the engine knows nothing about (det/freeze-continuity's sentinel week is
+                    # exactly that shape). No intent ⇒ nothing is claimed, and every reader keeps the
+                    # default it already had.
+                    healed["role"] = _week_role(prior_w)
+                    ph = _week_phase(prior_w)
+                    if ph:
+                        healed["phase"] = ph
+                frozen.append(healed)
             else:
                 missing.append(wk)
         else:
@@ -4553,7 +4707,8 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                                         consec_hard=consec_hard, last_nondown=last_nondown,
                                         soft_ctl_floor=soft_ctl_floor, recent_longs=recent_longs,
                                         recent_eq=recent_eq, blocked=blocked,
-                                        recent_session_eq=recent_session_eq, prev_tail=prev_tail)
+                                        recent_session_eq=recent_session_eq, prev_tail=prev_tail,
+                                        race=race)   # §RACE
         backfilled = [{**w, "elapsed": True, "frozen": False} for w in mweeks]
         end_ctl, end_atl, generated_any = mbound["end_ctl"], mbound["end_atl"], True
         consec_hard, last_nondown = mbound["consec_hard"], mbound["last_nondown"]
@@ -4614,7 +4769,8 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                                         today_trimp=today_trimp,                     # §PRO20b today's actual
                                         pinned_past=pinned_past,                     # §PAST — lived days
                                         blocked=blocked,                             # §AV — away days
-                                        prev_tail=prev_tail)                         # §REST — seam into wk 1
+                                        prev_tail=prev_tail,                         # §REST — seam into wk 1
+                                        race=race)                                   # §RACE — race day
         fresh = [{**w, "elapsed": False, "frozen": False} for w in fweeks]
         end_ctl, end_atl, generated_any = fbound["end_ctl"], fbound["end_atl"], True
         consec_hard, last_nondown = fbound["consec_hard"], fbound["last_nondown"]
@@ -4823,7 +4979,7 @@ def generate_plan(db, force_regime=None, today=None):
     # re-base is always caution, so it never receives it.
     soft_floor = ACWR_SOFT_CTL_FLOOR if regime == "assertive" else None
     def _gen_phase(key, phase_start, shape_, zones_, regime_="caution", ride_cap_=ACWR_SOFT,
-                   soft_floor_=None):
+                   soft_floor_=None, race_=None):
         seed = (live["ctl"], live["atl"])
         weeks_, ec, ea, gen, ch, ln, rl, req, rsq, pt = _split_freeze(shape_, phase_start, seed, zones["easy_top"],
                                                              adj_dir, zones_, prior_all, today, week_actuals,
@@ -4837,7 +4993,8 @@ def generate_plan(db, force_regime=None, today=None):
                                                              # weeks anchor the caps on ACTUALS, not plan
                                                              today_trimp=today_trimp,  # §PRO20b
                                                              blocked=av_blocked,       # §AV — away days
-                                                             prev_tail=live["prev_tail"])   # §REST
+                                                             prev_tail=live["prev_tail"],   # §REST
+                                                             race=race_)                    # §RACE
         if gen:
             live["ctl"], live["atl"], live["started"] = ec, ea, True
         live["consec_hard"], live["last_nondown"] = ch, ln   # §PRO6 carry across phases
@@ -4951,7 +5108,25 @@ def generate_plan(db, force_regime=None, today=None):
             # (§FORM1 2026-08-18 — the §6e earned volume lift and 6th-run advance are gone with the
             # banked-streak machinery: volume responsiveness is §PRO5's ride, frequency spreads are
             # §PRO9's. Nothing is unlocked by adherence bookkeeping.)
-            block, end_ctl = _gen_phase(key, cur_start, sh, zones, regime, ride_cap, soft_floor)
+            # §RACE — a taper ends ON its race, so that block lays the race itself. The pace is the
+            # race's own zone (§TT's mapping: a marathon is run at MP, everything shorter at
+            # threshold), and the distance is the standard one — both known before the lay, unlike
+            # `feasibility`'s projected finish time, which is computed from the finished plan.
+            # A `custom`-distance race lays no race session: RACE_KM has no distance for it, and
+            # inventing one would prescribe a day the athlete never agreed to. The type selector
+            # offers 5k/10k/half/marathon/custom and defaults to marathon, so this is a choice the
+            # athlete made, not a silent gap — but it IS why a custom A-race still draws whatever the
+            # distributor puts on race day, and det/race-session uses exactly that as its race-less
+            # control. Giving `custom` a distance field is the fix if it ever needs one.
+            _race = None
+            if kind == "taper" and ph.get("date") and (ph.get("type") or "").lower() in RACE_KM:
+                _rt = (ph.get("type") or "").lower()
+                _rz = "marathon" if _rt == "marathon" else "threshold"
+                _race = {"date": str(ph["date"])[:10], "km": RACE_KM[_rt], "zone": _rz,
+                         "pace_sec": zones[_rz], "label": ph.get("race") or "Race day",
+                         "type": _rt}
+            block, end_ctl = _gen_phase(key, cur_start, sh, zones, regime, ride_cap, soft_floor,
+                                        race_=_race)
             plan[key] = block
             cur_start = cur_start + timedelta(weeks=n_wk)
             # §PRO4 — chain the next phase off the volume this phase actually REACHED. In caution that's

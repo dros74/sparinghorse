@@ -328,6 +328,7 @@
       "weeks": 1
     },
     {
+      "date": "2026-07-13",
       "key": "taper",
       "kind": "taper",
       "phase": "Taper \u2192 Golden Half",
@@ -376,8 +377,8 @@
       "economy"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 21.8,
-    "end_ctl": 40.5,
+    "end_atl": 31.1,
+    "end_ctl": 47.7,
     "start": "2026-07-06",
     "weeks": [
       {
@@ -518,36 +519,37 @@
         "adjusted": false,
         "clipped": false,
         "elapsed": false,
-        "eq_km": 18.2,
+        "eq_km": 36.3,
         "frozen": false,
         "intent": "Race week \u2014 freshen up, stay loose",
         "intent_km": 18.0,
         "intent_runs": 1,
-        "km": 3.0,
+        "km": 21.1,
         "long": 5,
-        "peak_acwr": 0.7,
+        "peak_acwr": 1.476,
         "phase": "taper",
-        "proj_acwr": 0.54,
-        "proj_acwr_flat": 0.547,
+        "proj_acwr": 0.651,
+        "proj_acwr_flat": 0.949,
         "proj_acwr_soft": 0.5338,
-        "proj_ctl": 40.5,
+        "proj_ctl": 47.7,
         "quality": [],
         "role": "race",
         "runs": 1,
         "sessions": [
           {
             "date": "2026-07-13",
-            "kind": "easy",
-            "km": 3.0,
-            "minutes": 15,
-            "note": "easy run",
-            "pace_zone": "5:02/km easy",
-            "trimp": 19.3
+            "kind": "race",
+            "km": 21.1,
+            "minutes": 87,
+            "note": "Golden Half",
+            "pace_zone": "4:07/km threshold",
+            "race": true,
+            "trimp": 226.2
           }
         ],
         "start": "2026-07-13",
         "strides": 0,
-        "trimp_total": 19.3,
+        "trimp_total": 226.2,
         "wk": 2
       }
     ]

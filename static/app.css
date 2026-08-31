@@ -571,6 +571,9 @@
   /* §W1 — structured-workout instruction card (Today tile: always open; week rows: click the
      session label to expand). Rides inside the flex .sline, wrapping onto its own full row. */
   .strid{color:var(--accent);border-bottom:1px dotted var(--muted);cursor:help}
+  /* §RACE — race day earns the accent on its own line. Same affordance as .strid (dotted underline
+     = there is more in the tooltip), heavier weight because this row is the point of the block. */
+  .racemk{color:var(--accent);font-weight:600;border-bottom:1px dotted var(--muted);cursor:help}
   .wsi.wsx{cursor:pointer;border-bottom:1px dotted var(--muted)}
   .wsi.wsx:hover,.wsi.wsx:focus{color:var(--text)}   /* UX-9: the ring stays — :focus-visible draws it */
   .wsxc{display:inline-block;font-size:8px;opacity:.7;transition:transform .12s}
@@ -710,6 +713,15 @@
   .prseg:hover:not(.on){background:var(--surface);color:var(--text)}
   .prseg.on{background:var(--accent);color:var(--onacc);cursor:default}
   .obj .od{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:auto}
+  /* §GM — the date is an editor, not a label. It reads as the rest of the line until you reach for
+     it, so the row still scans as "A · Goal Marathon · 2026-12-06 · marathon · finish" — the
+     affordance is the hover/focus, not a control competing with the remove button for attention. */
+  .obj .odate{font-family:var(--mono);font-size:11px;color:var(--muted);background:none;
+    border:1px solid transparent;border-radius:5px;padding:1px 3px;margin:-1px -3px;cursor:pointer}
+  .obj .odate:hover{border-color:var(--line);color:var(--text)}
+  .obj .odate:focus{border-color:var(--accent);color:var(--text);background:var(--surface-2)}
+  /* no outline:none here — the global :focus-visible ring is the keyboard affordance (det/keyboard-reach) */
+  .obj .odate:disabled{opacity:.5;cursor:progress}
   .obj .x{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:6px;
     padding:2px 8px;font-size:11px;background:none}
   .obj .x:hover{color:var(--danger);border-color:var(--danger)}

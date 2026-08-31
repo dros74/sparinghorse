@@ -2610,6 +2610,7 @@
       "weeks": 2
     },
     {
+      "date": "2026-10-20",
       "key": "taper",
       "kind": "taper",
       "phase": "Taper \u2192 Demo Marathon",
@@ -2658,8 +2659,8 @@
       "economy"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 42.0,
-    "end_ctl": 60.6,
+    "end_atl": 59.4,
+    "end_ctl": 71.3,
     "start": "2026-10-05",
     "weeks": [
       {
@@ -3114,19 +3115,19 @@
         "adjusted": false,
         "clipped": false,
         "elapsed": false,
-        "eq_km": 37.0,
+        "eq_km": 72.2,
         "frozen": false,
         "intent": "Race week \u2014 freshen up, stay loose",
         "intent_km": 37.0,
         "intent_runs": 2,
-        "km": 13.0,
+        "km": 48.2,
         "long": 11,
-        "peak_acwr": 0.764,
+        "peak_acwr": 1.52,
         "phase": "taper",
-        "proj_acwr": 0.693,
-        "proj_acwr_flat": 0.642,
+        "proj_acwr": 0.832,
+        "proj_acwr_flat": 1.015,
         "proj_acwr_soft": 0.642,
-        "proj_ctl": 60.6,
+        "proj_ctl": 71.3,
         "quality": [],
         "role": "race",
         "runs": 2,
@@ -3142,17 +3143,18 @@
           },
           {
             "date": "2026-10-20",
-            "kind": "easy",
-            "km": 7.0,
-            "minutes": 35,
-            "note": "easy run",
-            "pace_zone": "5:02/km easy",
-            "trimp": 45.2
+            "kind": "race",
+            "km": 42.2,
+            "minutes": 188,
+            "note": "Demo Marathon",
+            "pace_zone": "4:28/km marathon",
+            "race": true,
+            "trimp": 338.4
           }
         ],
         "start": "2026-10-19",
         "strides": 0,
-        "trimp_total": 84.8,
+        "trimp_total": 378.0,
         "wk": 3
       }
     ]

@@ -62,7 +62,7 @@ document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.we
           <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:10px;font-weight:400">— this week's load against your base</span></div>
           <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
           <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
-          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine keeps every planned week under a 1.30 ceiling (1.25 is its planning target). It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
+          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine sizes every planned week against 1.25 — but on a shape-neutral reading of the ratio, not the raw sample shown here, which reads higher and may print above 1.30 with nothing breached; the governed number is published beside it. Race week is the deliberate outlier: it carries the race itself, which is fixed. It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
           <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
         </div>
         <!-- §3.3 / 0.32.0 — the durability tracker. PRIVATE-only (decoupling is HR-adjacent): app.js
@@ -202,6 +202,6 @@ document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.we
     __MOBNAV_RUNS__
   </nav>
 
-<script>window.SH={readonly:__SH_READONLY__,privateUrl:__SH_PRIVATE_URL__};</script>
+<script>window.SH={readonly:__SH_READONLY__,privateUrl:__SH_PRIVATE_URL__,staleHours:__SH_STALE_HOURS__};</script>
 <script nonce="__SH_NONCE__" src="/static/app.js?v=__SH_VER__"></script>
 </body></html>

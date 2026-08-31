@@ -10,6 +10,200 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.47.0] - 2026-08-31
+
+### Added
+
+- **Race day is a session on the calendar, and it reads like one (§RACE).** The engine knew a race
+  as a phase label, a week role and a row in `objectives` — never as a *session*. `taper_shape`'s
+  last week was laid like any other taper week, so race day drew whatever the distributor put in
+  that slot: a 9.0 km "long easy run" on marathon morning. The `race` session kind landed in
+  0.45.0's tree without a changelog entry, a log section or a test; this release documents it, locks
+  it, and finishes the half that never shipped.
+
+  A race is laid on its own day at its standard distance and its own pace (a marathon at marathon
+  pace, everything shorter at threshold), **replacing** whatever the week had put there — one race
+  day, one session. It is laid **last**, after every governing and re-governing path has finished
+  with the week, because race day is a fixed day: charging ~340 TRIMP into the budget search would
+  take peak ACWR past the §H1 rescue threshold, and the rescue *re-lays the week* — discarding the
+  race and re-riding the assertive ceiling. A constraint on a day the search cannot change is not a
+  constraint, it is a veto, and this is the third release to learn it (§REST2, §H1b, now §RACE).
+
+  The surface half was missing entirely. The card called it a **"race run"**, and — worse — a race
+  carries no `reps`, so it took the plain-run branch and printed the week's *easy* pace, labelled
+  "easy", for a marathon. It now reads the race's own pace ("Race pace 4:28 /km marathon"), and the
+  week listing marks the row with the race's name instead of a bare distance indistinguishable from
+  a long run.
+
+### Fixed
+
+- **The race was laid on the calendar and its load dropped on the floor (§RACE).** The projection
+  was re-rolled with the race in it and then thrown away: the reading (ACWR) was kept, the fitness
+  (CTL/ATL) was not. Race week published a `proj_ctl` **7 points under** the week it had just laid
+  on the single-A fixture and **14 under** on the multi-A one,
+  and `end_ctl`/`end_atl` — the seed the *next* block starts from — described a taper with no race
+  in it. On a single-A road that is a lie on a chart. On a §6q chain it is a **governor input**: the
+  bridge block after an intermediate A-race was being sized off a fatigue number that omitted a
+  marathon (measured on the multi-A fixture: `end_atl` 42.3 where the race-inclusive value is 60.2).
+  Laying a session and not carrying its load is the shape §PRO20b and §101 each cost a release.
+
+  It also fed the instrument 0.46.0 had just shipped: every week's `proj_ctl` is scored into
+  `track_record`, so race week was posting a guaranteed under-prediction into the very ledger
+  §SYM-A reads back as "the model under-predicts".
+
+  **The race still does not predict itself.** §PRO7b reads race-day fitness as the peak carried
+  *into* the taper, not the taper's own end, so charging the race leaves the projection for that
+  race untouched — verified across every fixture: nine single-A scenarios unchanged, and only the
+  chain moves (95 → 97), where the first race's load legitimately feeds the twelve weeks before the
+  second.
+
+- **The governor's decision variable was a number from neither world (§PRO23/§RACE).**
+  `proj_acwr_soft` exists so the value a week *publishes* cannot drift from the value the search
+  *decided on*. On race week it was being computed from the post-race numerator over the pre-race
+  denominator — a hybrid that is neither. It now keeps the governor's own pre-race reading, so a
+  reader checking "was this week held under the cap?" gets the number the cap was applied to, on the
+  one week where the published reading and the governed one legitimately diverge.
+
+- **A race that predates a field is still the same race (§GM).** 0.45.0 replaced the founding-road
+  rule with `_same_race`, which asks for the same type — and `plan["objective"]` only gained its
+  `type` partway through a block. On the live record that is **24 of 126 banked plans**, and they are
+  the *oldest* ones: read as a distance mismatch, the plans that founded the road stopped founding
+  it and the §6b anchor moved six days later (2026-06-19 → 06-25). An **absent** field is not a
+  **disagreeing** one, which is how the label branch beside it already worked. Tightening the
+  question a road is measured by can cost the road; this one now checks both directions.
+
+- **The ACWR ceiling claim, in the two places it is actually read.** The 2026-08-30 docs pass
+  corrected the manual and the README — every planned week is *sized* against 1.25 on a shape-neutral reading, and the
+  raw sample shown on a card reads about a sixth high — and left the old promise ("under the 1.30
+  ceiling, and volume is trimmed when a week would breach it") in the week-card tooltip and the ACWR
+  tile. §RACE then made it plainly false: race week publishes a raw sample well past 1.30 and
+  nothing trims it, because a fixed race is not a day the governor may negotiate. Both surfaces now
+  match the manual, and the copy gate fails if the old wording returns.
+
+## [0.46.2] - 2026-08-31
+
+### Fixed
+
+- **API errors now keep the API's JSON contract.** A missing `/api/*` route or a supported route
+  called with the wrong method used to fall through to Flask's HTML 404/405 page, even though
+  unhandled API failures already returned `{ok:false,error}`. HTTP errors now preserve their status
+  and headers while using the same JSON envelope; ordinary page errors remain HTML.
+
+- **The nightly scheduler has one freshness boundary and one whole-job lock.** The readiness card
+  and boot catch-up called data stale after 26 hours while public `/healthz` waited 36, so the app
+  and its uptime signal could disagree for ten hours. One server constant now feeds all three
+  surfaces, including the browser bootstrap. A boot catch-up landing with the scheduled wake also
+  used to serialize only its sync and then run the re-plan, scoring, watch push and backup twice;
+  the second complete pass now exits while the first is in flight.
+
+## [0.46.1] - 2026-08-30
+
+### Fixed
+
+- **A week frozen out of a pre-§P1 plan never healed, so its role stayed encoded in display copy
+  (§P1).** §P1 promoted the periodization role from a sentence to a field: every shaper stamps
+  `role` and `phase`, seven governors read the field, and rewording a human `intent` line can no
+  longer move a decision. One path was missed. §6f Step E carries a fully-elapsed week **verbatim**
+  out of the last saved plan, and a week banked before the field existed carried neither — so it came
+  back unstamped on the next regeneration, and the one after, indefinitely: each regenerate re-freezes
+  from the one before, and the gap propagates for the life of the block.
+
+  On the live plan that was **4 of 19 weeks** — the whole base block — and one of them was a **down
+  week** whose down-ness survived only because `_week_role` still parses `"Down week — absorb the
+  block"`. `_is_down` is what the banking gates and the earned lift share, so the exact class of
+  dependency §P1 was written to remove was still live, on a plan generated today.
+
+  The freeze now stamps the week as it carries it, **only where there is a sentence to read**.
+  Neutral by construction twice over: the value stamped is precisely what `_week_role` already returns
+  for that week, so every reader gets the answer it got before — from a field instead of a parse; and a
+  week carrying no `intent` at all is left alone, because `_week_role` answers `"build"` for an empty
+  week and stamping that default would invent a decision rather than record one. `phase` is stamped
+  only where the fallback actually knows one (it answers `None` for a legacy base week); inventing
+  `"base"` there would move `_long_share_cap` off its block-wide default, and this is a
+  no-behaviour-change step.
+
+  `det/week-role` grows a limb over the freeze path itself, which nothing had covered: a plan is
+  saved with the fields stripped, regenerated four weeks on, and every frozen week must come back
+  stamped, agreeing with its own sentence, with the rest of the week untouched — `km`, `runs` and the
+  `_ahead` counters excepted, which an elapsed week recomputes against what was actually run. Reverting
+  the healing in source turns the limb red on all four weeks.
+
+## [0.46.0] - 2026-08-30
+
+### Added
+
+- **The engine publishes a number about itself: how its own fitness forecast has scored (§SYM-A).**
+  `track_record` has been scoring the weekly CTL projection since 0.37.0 — writing down what each
+  plan projected, what actually happened, and never rewriting it. Nothing read it back. The drift
+  view compared *this plan* with reality while the question one level up — *how well does the
+  projection driving it actually predict?* — sat unasked in a table.
+
+  `_tr_ctl_bias` rolls those rows into one published reading: signed **median** error in CTL points
+  **and** percent, the horizon it was measured at, and the **n** it rests on. On the live record it
+  reads **under-predicted by a median 40.5 % (16.84 CTL) at 28 days, over 4 scored weeks** — and the
+  drift view's fitness chart now says so in a sentence, under the projection it scores.
+
+  Median rather than the mean the §TR panel already published: at n = 4 one badly-covered week moves
+  a mean by more than the signal, and on the live record the two differ (18.14 vs 16.84). Percent as
+  well as points because a 16-point miss at CTL 40 and at CTL 100 are not the same statement. The
+  `n` is printed *inside* the sentence rather than under it, because at these counts the count is
+  half the claim — a median over three weeks is a hint, not a finding.
+
+  **Read-only, and tested as such.** Nothing in the engine consumes it: `det/ctl-forecast-bias`
+  generates a plan against an empty track record and against one screaming a 60 % under-prediction
+  and requires the two plans to be byte-identical. This is the ordering ENGINE_SYMMETRY_PROPOSAL §5
+  asks for — ship the instrument before anything that acts on it — and the day someone wires this
+  into the periodizer that det goes red and says which promise broke. The same det holds the median
+  against a fixture where mean and median disagree 5×, both signs, the ±`TR_CTL_CLOSE` "level" band,
+  a published lead **span** when horizons are mixed, a shape (not `None`) at n = 0, agreement between
+  the drift view and the §TR panel, and classification in the public allowlist so §82's silent-drop
+  cannot repeat. No new calibration constant: the "level" band reuses `TR_CTL_CLOSE`.
+
+## [0.45.0] - 2026-08-30
+
+### Fixed
+
+- **Correcting a race date by one day emptied two months of the prediction ledger (§GM).** The
+  goal marathon moved from 2026-12-07 to the 6th. There is no edit-date endpoint, so that meant
+  adding the 6th and removing the 7th; the next regeneration banked a plan under the new date; and
+  the §FT4 prediction ledger — **58 days of forecasts, 5:23:33 down to 3:59:02, watched accumulate
+  since June** — collapsed to a single point.
+
+  Nothing had been deleted. All **126** banked plans still held every number they ever had. They had
+  stopped matching the *question*, which was `objective.date == the current goal` — a string
+  equality, and a one-day correction changes the string. The §6b founding-road anchor asked it too,
+  so the whole drift scorecard reset to "just sealed, no drift yet" at the same moment. Worse and
+  quieter: `_ft_prediction_score` and `_tr_race_plans` ask the same question with `type` added, so
+  come December the engine would have settled the race against **no** prediction at all and written
+  no §TR row — a forecast made, a race run, and no score, with nothing on any chart to say so.
+
+  The rule was right about the case it was written for. A runner who *swaps* races must not measure
+  the new one against the old one's road, and that is why the baseline resets on a goal change. But
+  it encoded goal identity as the calendar cell the race sits on, and a race that moves is not a
+  different race. `_same_race` (`sh_engine.py`) now owns the matching rule in one place — same type,
+  same label, within `GOAL_MOVE_DAYS` (45 d, far inside the ~180 d that would separate a spring and
+  autumn edition of one name, and nowhere near an annual's 365) — and the anchor, the ledger, the
+  settlement and the §TR candidate scan all read through it. With no label on both sides there is
+  nothing but the date left to hold identity, so the old exact rule stands there.
+
+  On the live DB the ledger comes back at **58 points**, unbroken from 2026-06-30. `det/goal-moved`
+  holds it from both sides: reverting to the exact-date rule reproduces the collapse to one point,
+  and a rule that matches everything trips the anti-vacuity limb where a genuinely different race
+  must still reset the baseline.
+
+### Added
+
+- **`POST /api/objectives/<id>/date` — move a race, and the objectives row keeps its identity
+  (§GM).** The fix above makes the *plan history* survive an add-then-remove, but the objective
+  itself does not: add-then-remove retires the row every plan was built against and stands a new one
+  in its place, so the race loses its id, its `created_at` and — once run — the outcome and §FT4
+  prediction score written onto it. There was no edit path, which is the only reason anyone was
+  doing that. Now the date on an objective row is an inline editor: change it and the plan
+  re-periodizes onto the new day with the row intact. Only an `upcoming` race can move — a resolved
+  one is a matter of record, pinned to the day it was actually run, and re-dating it would point its
+  result at a day nobody raced (409). Junk dates are rejected at the door like the add path's, and
+  the write and its re-plan land together or not at all (`replan`).
+
 ## [0.44.11] - 2026-08-27
 
 ### Fixed

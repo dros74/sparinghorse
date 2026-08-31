@@ -65,7 +65,7 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     FT2_SHRINK_K, FT3_SIGMA_RACE_COLD, FT3_SIGMA_RACE_FLOOR, FT3_Z, FT5_PACE_SANE, FT5_RACE_TOL,
     FT5_SEED_TRAIL_DAYS, FT_ANCHOR_TRAIL_DAYS, FT_DUR_GAIN, FT_DUR_TAU, FT_LADDER_L,
     FT_LADDER_REF, FT_LADDER_RHO, FT_LADDER_TRAIL_DAYS, FT_MARA_TOL, FT_MIN_CTL, FT_SHRINK_K,
-    FT_TILT_REF_VDOT, FT_VO2_MIN_KM, FULL_PEAK_ROLES, H1_RESCUE_ACWR, HARD_ZONES,
+    FT_TILT_REF_VDOT, FT_VO2_MIN_KM, FULL_PEAK_ROLES, GOAL_MOVE_DAYS, H1_RESCUE_ACWR, HARD_ZONES,
     LONG_RUN_EASY_FRAC, LONG_RUN_MAX_FRAC, LONG_RUN_MAX_FRAC_BY_PHASE, LONG_RUN_MIN_KM,
     LONG_RUN_MIN_RATIO, _long_share_cap,
     LONG_RUN_STEP_CAP, LONG_RUN_STEP_WINDOW, LT1_5K_FRAC, MARATHON_PACE_FRAC, MESO_MAX_HARD,
@@ -86,11 +86,11 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     _ft_speed_state, _ft_state_at, _ft_transfer_correction, _ft_vo2_from_race, _ft_vo2_series,
     _ft_weekly_response_pairs, _ft_weekly_series, _full_peak, _hard_share, _is_down, _is_taper, _week_role, _week_phase,
     _laid_sessions, _mark_load_integrity, _max_streak, _max_week_trimp, _monday, _mp_prog,
-    _now_iso, _phase_builds, _plan_all_weeks, _plan_span, _prior_weeks_all,
+    _now_iso, _phase_builds, _place_race, _plan_all_weeks, _plan_span, _prior_weeks_all,
     _prior_weeks_by_start, _project_finish_time, _project_week, _qblock, _race_seconds,
     _prescribed_at_start, _rebase_start, _recent_eq_km, _recent_long_runs, _recent_session_eq,
     _recovery_weeks,
-    _resolve_setting, _run_days, _run_eq_km, _seg_taper, _session_eq_km, _session_from_reps,
+    _resolve_setting, _run_days, _run_eq_km, _same_race, _seg_taper, _session_eq_km, _session_from_reps,
     _session_groups, _sj_col, _split_freeze, _trim_post_race, _v_at_vo2max, _vo2_at_v,
     _week_eq_km, _week_long_km, _zones_asof, active_adjustment, active_medical_halt, base_shape,
     build_shape, daily_trimp_series, diff_plans, dropped_ids, est_trimp, feasibility,
@@ -137,6 +137,7 @@ USER_AGENT = (
 )
 PAGE_DELAY = 0.6  # seconds between paginated activity requests (WAF politeness)
 AUTO_SYNC_THROTTLE = 600  # seconds — opportunistic page-load sync no-ops if synced this recently
+SCHED_STALE_HOURS = 26    # one boundary for boot catch-up, /healthz and the readiness freshness chip
 
 # ── TECH-4 — the runtime config is ONE IMMUTABLE SNAPSHOT ───────────────────────────────────
 # The window-settable values used to live in nine module globals that `apply_settings_overrides` and
@@ -4100,16 +4101,64 @@ def score_ctl_week(predicted, actual):
             "close": abs(err) <= TR_CTL_CLOSE}
 
 
+def _tr_ctl_bias(rows):
+    """§SYM-A — read the track record BACK: does the weekly CTL forecast carry a persistent BIAS,
+    and how big is it? One published number derived from the scored `ctl_week` rows, and the first
+    thing in this engine that measures the engine rather than the athlete.
+
+    MEDIAN, not the mean `track_record` already publishes, because n is small and one badly-covered
+    week — a holiday, a sync gap, an injury — moves a mean of four by more than the signal being
+    measured. PERCENT as well as points, because a 16-point miss at CTL 40 and the same miss at CTL
+    100 are not the same statement, and comparing horizons and eras is the whole use of this number.
+
+    Signed the way `score_ctl_week` signs it: POSITIVE means the athlete came out FITTER than the
+    plan projected, i.e. the model UNDER-predicted. `direction` says that in a word so no reader
+    re-derives the sign, and `n` travels with it because at these counts **the n is half the claim**
+    — a median over three weeks is a hint, not a finding, and a payload that hides n invites the
+    reader to forget which they are holding. `lead_days` is the median horizon, with `lead_span` so a
+    set mixing 28- and 56-day forecasts cannot quietly read as one horizon.
+
+    READ-ONLY, deliberately. Nothing in the engine consumes this: it is the instrument the symmetry
+    proposal's later steps need in order to be arguable at all, and shipping the instrument before
+    anything that acts on it is the point of the ordering. `n = 0` returns the shape with nulls
+    rather than None, so a caller never has to branch on whether the engine has an opinion yet."""
+    def _median(xs):
+        xs = sorted(xs)
+        if not xs:
+            return None
+        mid = len(xs) // 2
+        return xs[mid] if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2.0
+
+    scored = [r for r in rows if r.get("err") is not None and r.get("predicted")]
+    errs = [r["err"] for r in scored]
+    pcts = [100.0 * r["err"] / r["predicted"] for r in scored]
+    leads = [r["lead_days"] for r in scored if r.get("lead_days") is not None]
+    med = _median(errs)
+    return {"n": len(scored),
+            "median_err": None if med is None else round(med, 2),
+            "median_err_pct": (None if not pcts else round(_median(pcts), 1)),
+            "lead_days": (None if not leads else int(round(_median(leads)))),
+            "lead_span": ([min(leads), max(leads)] if leads else None),
+            # `close_within` is the same tolerance the close_rate uses — a miss inside it is not a
+            # direction, it is the measurement noise the tolerance was chosen to describe.
+            "direction": ("unknown" if med is None else
+                          "under" if med > TR_CTL_CLOSE else
+                          "over" if med < -TR_CTL_CLOSE else "level"),
+            "close_within": TR_CTL_CLOSE}
+
+
 def _tr_plan_weeks(plan):
     """{Monday ISO: proj_ctl} for every week a saved plan projected."""
     return {w["start"]: w["proj_ctl"] for w in _plan_all_weeks(plan)
             if w.get("start") and w.get("proj_ctl") is not None}
 
 
-def _tr_race_plans(db, race_date_iso, race_type):
+def _tr_race_plans(db, race_date_iso, race_type, race_label=None):
     """Every saved plan generated before this race whose ANCHOR is this race and which carried a
     finish time, newest first: (plan_id, for_date, finish_time dict). The founding-road matching
-    rule — same date AND same type — is the one `_ft_prediction_score` already uses."""
+    rule is `_same_race` (§GM) — the one `_ft_prediction_score` already uses, so a race that moved
+    is still scored against the plans built for it."""
+    race = {"date": race_date_iso, "type": race_type, "label": race_label}
     out = []
     for r in db.execute("SELECT id, for_date, plan FROM plans WHERE for_date < ? ORDER BY id DESC",
                         (race_date_iso,)).fetchall():
@@ -4119,8 +4168,7 @@ def _tr_race_plans(db, race_date_iso, race_type):
             continue
         o = p.get("objective") or {}
         ft = (p.get("feasibility") or {}).get("finish_time") or {}
-        if (o.get("date") == race_date_iso
-                and (o.get("type") or "").lower() == (race_type or "").lower() and ft.get("seconds")):
+        if _same_race(o, race) and ft.get("seconds"):
             out.append((r["id"], r["for_date"], ft))
     return out
 
@@ -4199,7 +4247,7 @@ def track_record_scan(db, today=None):
         if not actual_s:
             continue
         key = f"{o['date']}|{(o['type'] or '').lower()}"
-        cands = _tr_race_plans(db, o["date"], o["type"])
+        cands = _tr_race_plans(db, o["date"], o["type"], o["label"])
         if not cands:
             continue
         base = {"label": o["label"], "date": o["date"], "type": o["type"]}
@@ -4303,6 +4351,10 @@ def track_record(db):
                    "close_rate": (round(sum(1 for e in errs if abs(e) <= TR_CTL_CLOSE) / len(errs), 3)
                                   if errs else None),
                    "close_within": TR_CTL_CLOSE,
+                   # §SYM-A — the same errors read as a MEDIAN, in points and percent, with the
+                   # horizon and the n. `bias` above is the mean; at n≈4 they can disagree, and when
+                   # they do the median is the one to quote.
+                   "forecast_bias": _tr_ctl_bias(ctl),
                    # §TR-A — the split. `bias` above is the fused number; these two say WHICH half
                    # moved. A median ran_ratio well over 1.0 means the plans were small and the
                    # projector was reading them correctly — a prescription finding, not a physics one.
@@ -4444,7 +4496,7 @@ def resolve_passed_races(db, today=None):
                        "dnf_km": (round(act["distance"], 1) if race_status == "dnf" else None)}
             # §FT4 — score the engine's final pre-race prediction against the clock, into the
             # permanent record (the outcome JSON): the product's bet settles when the race does.
-            pred = _ft_prediction_score(db, o["date"], o["type"], actual_s)
+            pred = _ft_prediction_score(db, o["date"], o["type"], actual_s, o["label"])
             if pred:
                 outcome["prediction"] = pred
         db.execute("UPDATE objectives SET status=?, outcome=?, resolved_at=? WHERE id=?",
@@ -4454,13 +4506,14 @@ def resolve_passed_races(db, today=None):
     # §FT4 backfill — races that resolved BEFORE the scoring hook existed get their prediction
     # settled retroactively (idempotent: only rows still missing one; the ledger was always there,
     # the score just hadn't been read out of it).
-    for o in db.execute("SELECT id, date, type, outcome FROM objectives WHERE status='done'").fetchall():
+    for o in db.execute("SELECT id, date, type, label, outcome FROM objectives "
+                        "WHERE status='done'").fetchall():
         try:
             oc = json.loads(o["outcome"] or "{}")
         except (ValueError, TypeError):
             continue
         if oc.get("status") == "finished" and oc.get("actual_seconds") and "prediction" not in oc:
-            pred = _ft_prediction_score(db, o["date"], o["type"], oc["actual_seconds"])
+            pred = _ft_prediction_score(db, o["date"], o["type"], oc["actual_seconds"], o["label"])
             if pred:
                 oc["prediction"] = pred
                 db.execute("UPDATE objectives SET outcome=? WHERE id=?", (json.dumps(oc), o["id"]))
@@ -5679,10 +5732,16 @@ def _readonly_guard():
 
 @app.errorhandler(Exception)
 def _unhandled_json_500(e):
-    """Blanket last resort (TECH-9): /api/* and /healthz answer JSON {ok:false,error} 500, pages get a
-    quiet HTML 500 — and NEITHER leaks the exception (the public box serves strangers; the traceback
-    always lands in the server log instead). Flask's own HTTPException (404/405/…) keeps its answer."""
+    """Blanket last resort (TECH-9): /api/* and /healthz always answer JSON {ok:false,error}, pages
+    keep HTML — and NEITHER leaks an unhandled exception (the public box serves strangers; the
+    traceback always lands in the server log instead). Preserve Flask's status and headers for its
+    own HTTP errors while replacing their HTML body on API paths."""
     if isinstance(e, HTTPException):
+        if request.path.startswith("/api/") or request.path == "/healthz":
+            response = e.get_response()
+            response.data = json.dumps({"ok": False, "error": str(e.description)})
+            response.content_type = "application/json"
+            return response
         return e
     app.logger.exception("unhandled %s %s", request.method, request.path)
     if request.path.startswith("/api/") or request.path == "/healthz":
@@ -5812,7 +5871,8 @@ _PV_QUALITY = {"attach": True, "component": True, "frac": True, "kind": True, "l
 _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "component": True,
                "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
                "minutes": True, "missed": True, "note": True, "optional": True,
-               "pace_zone": True, "reps": _PV_REPS, "rest_gated": True, "rest_shed_km": True,
+               "pace_zone": True, "race": True,   # §RACE — race day, already public via objectives
+               "reps": _PV_REPS, "rest_gated": True, "rest_shed_km": True,
                "runs": True, "strides": True, "trimp": True,
                # `unplanned` = a run on a day the plan places no session. It carries `km: None`
                # (there IS no prescription), and the card reads the FLAG to know that — so
@@ -5877,7 +5937,8 @@ _PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ct
             "ok": True,
             "pace_zones": {"easy": True, "easy_top": True, "interval": True, "lt1": True,
                            "marathon": True, "p5k": True, "threshold": True},
-            "phases": {"key": True, "kind": True, "phase": True, "race": True, "role": True,
+            "phases": {"date": True,   # §RACE — the race's own date; public already via objectives
+                       "key": True, "kind": True, "phase": True, "race": True, "role": True,
                        "type": True, "weeks": True},
             "prog": {"note": True, "ramp": True},
             "regime": {"mode": True, "reason": True},
@@ -5953,6 +6014,12 @@ _PV_DRIFT = {"anchor": {"created_at": True, "for_date": True, "is_current": True
              "finish_drift": {"at_ctl": True, "at_evo2": True, "date": True, "hi": True,
                               "hms": True, "lo": True, "p50": True},
              "ok": True, "outcome": {"ctl": True, "date": True, "verdict": True},
+             # §SYM-A — how the engine's own CTL forecast has scored. Published for the same reason
+             # the §TR panel is: calibration is the claim the public box exists to make, and a model
+             # that shows its own error is making a stronger one than a model that does not.
+             "ctl_forecast_bias": {"close_within": True, "direction": True, "lead_days": True,
+                                   "lead_span": True, "median_err": True, "median_err_pct": True,
+                                   "n": True},
              "race": {"date": True, "label": True, "weeks_away": True},
              "scorecard": {"chain": True, "fitness": {"founding": True, "gap": True, "now": True,
                                                       "state": True},
@@ -6004,6 +6071,10 @@ _PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True
 # carries measured fitness, the plan carries `proj_ctl`).
 _PV_TRACK = {"ok": True,
              "ctl": {"n": True, "mae": True, "bias": True, "close_rate": True, "close_within": True,
+                     # §SYM-A — the median reading of the same errors the mean above already publishes
+                     "forecast_bias": {"n": True, "median_err": True, "median_err_pct": True,
+                                       "lead_days": True, "lead_span": True, "direction": True,
+                                       "close_within": True},
                      # §TR-A — the ratio is what carries the calibration claim; the raw laid/ran km
                      # for a named past week are training volume, and stay on the private box.
                      "prescription": {"n": True, "median_ran_ratio": True, "over_run": True,
@@ -6105,7 +6176,7 @@ def healthz():
                llm=llm_available(), readonly=READONLY, consecutive_failures=fails)
     if READONLY:
         out.update(sync_ok=bool(last_ok),
-                   sync_stale=(not last_ok) or _seconds_since(last_ok) > 36 * 3600)
+                   sync_stale=(not last_ok) or _seconds_since(last_ok) > SCHED_STALE_HOURS * 3600)
         return jsonify(public_view("healthz", out))    # §PV — the booleans are the whole allowlist
     out.update(last_sync=last_sync, last_ok=last_ok)
     return jsonify(out)
@@ -6444,10 +6515,12 @@ def api_plandrift():
     current = json.loads(rows[-1]["plan"])
     cw = _plan_weeks(current)
     # Anchor = the EARLIEST plan BUILT FOR THE CURRENT GOAL that spans the full runway. Matching the
-    # goal (objective.date) — not just runway span — keeps the founding road honest when the runner
+    # goal (`_same_race`, §GM) — not just runway span — keeps the founding road honest when the runner
     # swaps or drops the objective: a plan built for a different race can't be the road we measure
     # this race against. So a goal change resets the baseline (anchor falls back to `current` →
-    # "just sealed, no drift yet") and self-heals as plans for the new goal accrue. (Older versions
+    # "just sealed, no drift yet") and self-heals as plans for the new goal accrue — but MOVING a
+    # race is not a goal change, and matching on the race rather than on its date is what keeps the
+    # road (and §FT4's ledger below) intact across a corrected date. (Older versions
     # persisted only the active block's weeks, so they can't anchor a cumulative road; the runway
     # span filters those out.) Race date bounds "full"; fall back to the current plan.
     obj = current.get("objective") or {}
@@ -6465,15 +6538,20 @@ def api_plandrift():
             "AND priority='A' AND date<=? AND date>=? "
             "ORDER BY date DESC LIMIT 1",
             (today.isoformat(), (today - timedelta(weeks=RECKON_WINDOW_WEEKS)).isoformat())).fetchone()
-        if past_a and any(((json.loads(r["plan"]).get("objective") or {}).get("date")) == past_a["date"]
+        if past_a and any(_same_race(json.loads(r["plan"]).get("objective") or {}, dict(past_a))
                           for r in rows):                 # only if a founding plan for it exists to anchor
             obj = dict(past_a)
     race_date = _date(obj["date"]) if obj.get("date") else None
-    cur_goal = obj.get("date")                       # tie the founding road to THIS goal (None = no race)
+    goal = obj if obj.get("date") else None          # tie the founding road to THIS race (None = no race)
+
+    def _this_goal(p):                               # §GM — the race, not the calendar cell it sits on
+        po = p.get("objective") or {}
+        return _same_race(po, goal) if goal else not po.get("date")   # race-less: the race-less plans
+
     anchor_row, anchor = rows[-1], current
     for r in rows:
         p = json.loads(r["plan"])
-        if ((p.get("objective") or {}).get("date")) != cur_goal:
+        if not _this_goal(p):
             continue                                 # a plan for a different/no goal isn't this road
         w = _plan_weeks(p)
         if w and (race_date is None or _date(w[-1]["start"]) >= race_date - timedelta(days=21)):
@@ -6555,7 +6633,7 @@ def api_plandrift():
     fin_byday = {}
     for r in rows:
         p = json.loads(r["plan"])
-        if ((p.get("objective") or {}).get("date")) != cur_goal:
+        if not _this_goal(p):
             continue
         ft = (p.get("feasibility") or {}).get("finish_time") or {}
         if not ft.get("seconds"):
@@ -6575,6 +6653,15 @@ def api_plandrift():
     #   a duplicate upload is inflating the snapshot the current plan seeds from (§6i caveat). —
     dup_count = len(find_duplicates(db))
     is_current = anchor_row["id"] == rows[-1]["id"]
+    # §SYM-A — the drift view compares THIS plan with reality; the forecast bias says how well the
+    # projection driving it has scored historically, which is the same question one level up. Read
+    # straight off `track_record` (not through the §TR panel, which also derives a prescription
+    # ratio per row against the plans table) — this needs the four columns and nothing else.
+    try:
+        ctl_bias = _tr_ctl_bias([dict(r) for r in db.execute(
+            "SELECT lead_days, predicted, actual, err FROM track_record WHERE kind='ctl_week'").fetchall()])
+    except sqlite3.OperationalError:
+        ctl_bias = _tr_ctl_bias([])      # the public box reads a copy; an empty record is honest
 
     def _at_today(series, key):
         v = None                                          # last weekly value with date <= today
@@ -6645,7 +6732,8 @@ def api_plandrift():
                        "beat": (None if (goal_s is None or actual_s is None) else actual_s <= goal_s)},
             # §FT4 — the engine's own bet, settled: the final pre-race prediction vs the clock
             # (same scorer resolve_passed_races persists into the outcome record).
-            "prediction": _ft_prediction_score(db, obj.get("date"), obj.get("type"), actual_s),
+            "prediction": _ft_prediction_score(db, obj.get("date"), obj.get("type"), actual_s,
+                                               obj.get("label")),
         }
 
     PHRASE = {                                            # completes "The rebuild is ___." — the two
@@ -6773,6 +6861,7 @@ def api_plandrift():
         effort={"initial": init_eff, "actual": actual_eff, "current": cur_eff},
         outcome=outcome,
         finish_drift=finish_drift,       # §FT4 — the prediction ledger series (P50 + band envelope)
+        ctl_forecast_bias=ctl_bias,      # §SYM-A — how the CTL forecast has scored, read back here
         scorecard=scorecard,
         counterfactual=counterfactual,
         duplicate_count=dup_count,
@@ -6853,6 +6942,37 @@ def api_objectives_priority(oid):
     db = get_db()
     return replan(db, lambda: db.execute(
         "UPDATE objectives SET priority=? WHERE id=?", (d["priority"], oid)))
+
+
+@app.post("/api/objectives/<int:oid>/date")
+def api_objectives_date(oid):
+    """§GM — MOVE a race to a new day and re-periodize. Until this existed there was no edit path, so
+    correcting a date meant add-then-remove — and that is not an edit. It retires the objective every
+    banked plan was built against and stands a NEW row in its place: the founding road survives
+    (`_same_race` matches the race, not the calendar cell it sits on) but the objective's own identity
+    does not, and its id, its `created_at` and — once run — the outcome and the §FT4 prediction score
+    written onto it all belong to the row that was removed. A race that moves is the same race. Moving
+    it keeps the row.
+
+    Only an `upcoming` race can move: a resolved one is a matter of record, pinned to the day it was
+    actually run, and re-dating it would re-point its result at a day nobody raced."""
+    d = body()
+    if not d.get("date"):
+        return jsonify(ok=False, error="need a date"), 400
+    try:                                   # same guard as the add path — reject junk HERE, not after
+        _date(str(d["date"]))              # it is in the table and poisoning every regeneration
+    except (ValueError, TypeError):
+        return jsonify(ok=False, error="date must be YYYY-MM-DD"), 400
+    db = get_db()
+    o = db.execute("SELECT status FROM objectives WHERE id=?", (oid,)).fetchone()
+    if o is None:
+        return jsonify(ok=False, error="no such objective"), 404
+    if o["status"] != "upcoming":
+        why = ("it is no longer on the calendar" if o["status"] == "removed" else
+               "its result is pinned to the day it was run")
+        return jsonify(ok=False, error=f"a {o['status']} race cannot be moved — {why}"), 409
+    return replan(db, lambda: db.execute(
+        "UPDATE objectives SET date=? WHERE id=?", (str(d["date"]), oid)))
 
 
 @app.post("/api/objectives/<int:oid>/remove")
@@ -7959,6 +8079,7 @@ def _render_app(page="dash"):
                if cfg.house_url else "")
     doc = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
+            .replace("__SH_STALE_HOURS__", str(SCHED_STALE_HOURS))
             # json.dumps escapes quotes/backslashes but NOT "/", so neutralise "</" → a value with
             # "</script>" (e.g. a raw env SH_PRIVATE_URL that bypassed validate_setting) can't close
             # the inline <script> and inject markup into the (public) page.
@@ -8030,6 +8151,7 @@ UI_SOURCE = INDEX_HTML + "\n" + APP_CSS + "\n" + APP_JS
 # and on the NAS (under waitress too, since it starts at import). Default 22:00 Luxembourg time
 # (late enough to catch the day's runs). Inert on the read-only/tokenless public container.
 _scheduler_started = False
+_nightly_lock = threading.Lock()  # scheduled wake + boot catch-up: one WHOLE pass, never two in series
 # The hour the nightly job fires, in SH_TZ. It must land AFTER the day's last run has been ingested
 # UPSTREAM, not merely after the run ends: the job syncs and then re-plans, so firing early re-plans
 # the current week from actuals it cannot see yet. §PRO20 took the SEED off this clock (it is
@@ -8091,6 +8213,23 @@ def _backup_rotate():
 
 
 def _nightly_job(kind="nightly"):
+    """Run at most one complete nightly pass.
+
+    `_sync_lock` protects only the Runalyze pull because manual/page-load syncs share it. A boot
+    catch-up and the scheduled wake can still arrive together; serializing just their pulls used to
+    let both continue through re-plan, scoring, guide push and same-day backup replacement. The loser
+    returns instead of queueing a duplicate full pass.
+    """
+    if not _nightly_lock.acquire(blocking=False):
+        print(f"[scheduler] {kind} skipped — another nightly pass is already running")
+        return {"ok": True, "skipped": True, "in_flight": True}
+    try:
+        return _nightly_job_once(kind)
+    finally:
+        _nightly_lock.release()
+
+
+def _nightly_job_once(kind="nightly"):
     """One full nightly pass — the scheduled run AND the boot catch-up share this: sync → daily
     re-plan → Suunto guides → rotated DB snapshot, with the outcome recorded in meta
     (sched:last_run / sched:last_ok / sched:fail_count) so /healthz and the catch-up can see it."""
@@ -8155,10 +8294,10 @@ def _nightly_job(kind="nightly"):
 
 def _sched_catchup_needed(db):
     """Boot check: is a nightly owed? True when no successful run is recorded, or the last success is
-    older than 26 h. 26, not 24: the nightly's own wall-clock jitter (a slow night, a restart inside
-    the trigger minute) must not fire a duplicate pass on every boot."""
+    older than SCHED_STALE_HOURS. 26 h, not 24: the nightly's own wall-clock jitter (a slow night, a
+    restart inside the trigger minute) must not fire a duplicate pass on every boot."""
     last_ok = get_meta(db, "sched:last_ok")
-    return (not last_ok) or _seconds_since(last_ok) > 26 * 3600
+    return (not last_ok) or _seconds_since(last_ok) > SCHED_STALE_HOURS * 3600
 
 
 def _scheduler_loop(hhmm):
@@ -8191,7 +8330,7 @@ def start_scheduler():
     _scheduler_started = True
     print(f"Sparing Horse → scheduled daily sync at {hhmm} {config().sync_tz.key}")
     # Boot catch-up (TECH-8): a container restart across the nightly minute used to skip the night
-    # silently. If no successful run is recorded in the last 26 h, run one pass now — in its own
+    # silently. If no successful run is recorded inside the shared stale threshold, run one pass now — in its own
     # thread, so boot never blocks on a Runalyze pull.
     try:
         db = connect_db()
@@ -8200,7 +8339,8 @@ def start_scheduler():
         finally:
             db.close()
         if owed:
-            print("[scheduler] no successful nightly in the last 26 h — running a catch-up pass now")
+            print(f"[scheduler] no successful nightly in the last {SCHED_STALE_HOURS} h — "
+                  "running a catch-up pass now")
             threading.Thread(target=_nightly_job, args=("catch-up",), daemon=True).start()
     except Exception as e:
         print(f"[scheduler] boot catch-up check failed: {e}")

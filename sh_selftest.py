@@ -1758,6 +1758,7 @@ def _stc_scheduler_health():
     standing, and writes no snapshot."""
     import sqlite3 as _sq
     import tempfile as _tf
+    import threading as _th
     from datetime import timezone as _tz, timedelta as _td
     out, ok = [], True
     # (a) healthz shape, both deploy modes
@@ -1780,6 +1781,32 @@ def _stc_scheduler_health():
             ok = ok and p
     finally:
         S.READONLY = saved_ro
+    # The public boolean, the private freshness chip and boot catch-up all describe the same
+    # stale/fresh boundary. The validation review found /healthz at 36 h while the other two used
+    # 26 h, so an uptime probe could call a feed fresh after the app had already called it stale and
+    # started a catch-up. Drive both sides of the shared threshold through the real endpoint.
+    stale_hours = getattr(S, "SCHED_STALE_HOURS", None)
+    p = stale_hours == 26
+    out.append({"case": "one named scheduler freshness threshold (26 h)",
+                "got": stale_hours, "passed": p}); ok = ok and p
+    if stale_hours is not None:
+        mem_health = _sq.connect(":memory:"); mem_health.row_factory = _sq.Row
+        mem_health.executescript(S.SCHEMA)
+        S.set_meta(mem_health, "sched:last_ok", S._now_iso()); mem_health.commit()
+        saved_get_db, saved_since, saved_ro = S.get_db, S._seconds_since, S.READONLY
+        try:
+            S.get_db = lambda: mem_health
+            S.READONLY = True
+            for age, want in ((25, False), (27, True)):
+                S._seconds_since = lambda _stamp, h=age: h * 3600
+                h = S.app.test_client().get("/healthz").get_json() or {}
+                got = h.get("sync_stale")
+                p = got is want
+                out.append({"case": f"public /healthz at {age} h ⇒ sync_stale={want}",
+                            "got": got, "passed": p}); ok = ok and p
+        finally:
+            S.get_db, S._seconds_since, S.READONLY = saved_get_db, saved_since, saved_ro
+            mem_health.close()
     # (b) the catch-up decision on an in-memory fixture
     mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
     mem.executescript(S.SCHEMA)
@@ -1829,6 +1856,29 @@ def _stc_scheduler_health():
              and "sparinghorse-backup-2020-01-02.db" not in names and baks[0].name in names)
         out.append({"case": "rotation keeps the newest 7 (oldest dropped)", "kept": names, "passed": p})
         ok = ok and p
+        # (d) A boot catch-up can be launched in the same minute as the scheduled thread wakes. The
+        # sync-only lock used to serialize the pulls but then let BOTH jobs re-plan, score, push and
+        # replace the same-day backup. A whole-job non-blocking lock makes the loser return instead.
+        entered, release = _th.Event(), _th.Event()
+        calls = {"sync": 0}
+        def held_sync(backfill=False):
+            calls["sync"] += 1
+            entered.set()
+            release.wait(5)
+            return {"ok": True, "activities": {"added": 0}, "stub": True}
+        S.run_sync = held_sync
+        first = _th.Thread(target=S._nightly_job, args=("catch-up",))
+        second = _th.Thread(target=S._nightly_job, args=("nightly",))
+        first.start(); entered.wait(5); second.start(); second.join(1)
+        loser_returned = not second.is_alive()
+        release.set(); first.join(5); second.join(5)
+        p = calls["sync"] == 1 and loser_returned and not first.is_alive() and not second.is_alive()
+        out.append({"case": "catch-up and scheduled nightly cannot overlap",
+                    "sync_calls": calls["sync"], "loser_returned": loser_returned,
+                    "passed": p}); ok = ok and p
+        db = S.connect_db()
+        last_ok_before_failure = S.get_meta(db, "sched:last_ok")
+        db.close()
         def boom(backfill=False):
             raise RuntimeError("runalyze down")
         S.run_sync = boom
@@ -1837,7 +1887,7 @@ def _stc_scheduler_health():
         db = S.connect_db()
         m2 = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM meta")}
         db.close()
-        p = (m2.get("sched:fail_count") == "2" and m2.get("sched:last_ok") == m.get("sched:last_ok")
+        p = (m2.get("sched:fail_count") == "2" and m2.get("sched:last_ok") == last_ok_before_failure
              and len(list(tmp.glob("sparinghorse-backup-*.db"))) == n_baks)
         out.append({"case": "failed nightly: fail_count increments, last_ok stands, no new snapshot",
                     "meta": m2, "passed": p}); ok = ok and p
@@ -2980,6 +3030,69 @@ def _stc_week_role():
         if not w.get("role") or not w.get("phase"):
             fails.append(f"published week {w.get('start')} carries no role/phase — readers must still guess")
             break
+    # (g) THE FREEZE HEALS A PRE-§P1 WEEK INSTEAD OF CARRYING THE GAP FORWARD. Every shaper stamps
+    # the field, but §6f Step E carries an ELAPSED week verbatim out of the last saved plan — so a
+    # week banked before the field existed came back unstamped on every regeneration after, forever
+    # (each regenerate re-freezes from the one before). On the live DB that was four base weeks, one
+    # of them a down week whose down-ness survived only because something still parsed "Down week —".
+    # Neutrality is the point: the stamped role must EQUAL the sentence parse, and nothing else about
+    # the frozen week may move — this is a no-behaviour-change step, and a freeze that edits a lived
+    # week is the §6f violation the freeze exists to prevent.
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    S.seed_synthetic_db(mem, end="2026-08-30")
+    today = S._date("2026-08-30")
+    mem.execute("DELETE FROM plans")
+    legacy = S.generate_plan(mem, today=today)
+    stripped = {}                                   # …as a plan JSON saved BEFORE §P1 existed
+    for k, v in legacy.items():
+        if isinstance(v, dict) and isinstance(v.get("weeks"), list):
+            v = {**v, "weeks": [{kk: vv for kk, vv in w.items() if kk not in ("role", "phase")}
+                                for w in v["weeks"]]}
+        stripped[k] = v
+    S.save_plan(mem, stripped)
+    prior = {w["start"]: w for v in stripped.values()
+             if isinstance(v, dict) and isinstance(v.get("weeks"), list)
+             for w in v["weeks"] if w.get("start")}
+    # Regenerate FOUR WEEKS ON, so the prior plan's opening weeks have fully elapsed and the
+    # regeneration actually reaches the freeze path. (Back-dating the prior plan instead does not
+    # work: the block start is derived from history, not from `today`, so it does not move.)
+    regen = S.generate_plan(mem, today=today + S.timedelta(weeks=4))
+    froze, checked = 0, 0
+    for v in regen.values():
+        if not (isinstance(v, dict) and isinstance(v.get("weeks"), list)):
+            continue
+        for w in v["weeks"]:
+            if not w.get("frozen"):
+                continue
+            froze += 1
+            was = prior.get(w.get("start"))
+            if not was:
+                continue
+            checked += 1
+            if not w.get("role"):
+                fails.append(f"(g) frozen week {w.get('start')} came back UNSTAMPED — a pre-§P1 week "
+                             f"never heals and its role stays encoded in display copy")
+            elif w["role"] != S._week_role(was.get("intent")):
+                fails.append(f"(g) freezing MOVED the role of {w.get('start')}: stamped "
+                             f"{w['role']!r}, its own sentence says {S._week_role(was.get('intent'))!r}")
+            # "Verbatim" means the PRESCRIPTION — intent, sessions, the projected numbers. `km`,
+            # `runs` and the two `_ahead` counters are recomputed for an elapsed week against what
+            # was actually run (that is what makes it an elapsed week), and the elapsed/frozen
+            # markers are stamped by the freeze itself. Everything else must survive untouched, and
+            # `role`/`phase` are what limb (g) is here to see ADDED.
+            RECOMPUTED = ("km", "runs", "km_ahead", "runs_ahead", "elapsed", "frozen", "role", "phase")
+            moved = {k: (was.get(k), w.get(k)) for k in was
+                     if k not in RECOMPUTED and was.get(k) != w.get(k)}
+            if moved:
+                fails.append(f"(g) the freeze REWROTE a lived week {w.get('start')}: {moved} — §6f E "
+                             f"says an elapsed week is carried verbatim")
+    if not checked:
+        fails.append("(g) FIXTURE VACUOUS — the regeneration froze no week that existed in the prior "
+                     "plan, so the healing path was never exercised")
+    mem.close()
+
     return _st("det", "week-role",
                "§P1 the week's periodization role + phase are published FIELDS: every shaper stamps "
                "them, they agree with the human sentence they replaced (so the pre-§P1 fallback stays "
@@ -2988,7 +3101,8 @@ def _stc_week_role():
                passed=not fails,
                expect="every shape week stamped + agreeing; predicates read the field; legacy falls back; copy edit is inert",
                got={"violations": fails or "none", "roles_seen": seen,
-                    "weeks_checked": sum(len(v) for v in shapes.values())})
+                    "weeks_checked": sum(len(v) for v in shapes.values()),
+                    "frozen_weeks_healed": checked})
 
 
 def _stc_intent_bar():
@@ -4200,6 +4314,226 @@ def _stc_race_day_landing():
                got={"violations": fails or "none"})
 
 
+def _stc_race_session():
+    """§RACE — race day is a SESSION on the calendar, and its load is CARRIED.
+
+    The engine knew a race as a phase label, a week role and a row in `objectives`, never as a
+    session, so `taper_shape`'s last week drew whatever the distributor put in that slot: a 9.0 km
+    "long easy run" on marathon morning, and a race week whose published CTL/ATL/ACWR described a
+    ~30 km week that was never going to happen. This holds the fix from both ends, because it broke
+    twice in development and each break is a limb here:
+
+      (b) ONE race, in ONE week. An early cut missed the week-span guard and laid the same race into
+          every week the taper block generated.
+      (c) The race SURVIVES the governor. Laid before it, the race's ~340 TRIMP takes peak ACWR past
+          H1_RESCUE_ACWR, §H1's quality→easy rescue fires, and the rescue RE-LAYS the week — race
+          discarded, assertive ceiling re-ridden (measured: 30.1 → 76.3 km, no race in it). Race day
+          is not a day the search may negotiate; §H1b's lesson, a third time.
+      (d) The load is CARRIED. The first shipped cut re-rolled the week's ACWR with the race in it and
+          threw the fitness away, so `proj_ctl` sat 13 points under the week it had just laid and
+          `end_ctl`/`end_atl` — the seed the NEXT block starts from — described a taper with no race.
+      (e) …but the GOVERNOR's own number does not move. `proj_acwr_soft` is the decision variable the
+          soft test compared (§PRO23); publishing the honesty re-roll there would make the one field
+          whose job is to be checkable un-checkable on the one week that matters.
+      (f) And the race must not predict ITSELF. §PRO7b reads race-day fitness as the peak carried
+          INTO the taper, so charging the race's load must leave a single-A projection untouched —
+          otherwise the engine counts the marathon toward the fitness it brings to the marathon."""
+    import sqlite3 as _sq
+    fail, today = [], S._date("2026-07-01")
+
+    # (a) the placement helper, on its own terms
+    ws = "2026-07-06"
+    base = [{"date": "2026-07-07", "kind": "easy", "km": 8.0, "trimp": 40.0},
+            {"date": "2026-07-11", "kind": "long", "km": 18.0, "trimp": 95.0}]
+    dt0 = {"2026-07-07": 40.0, "2026-07-11": 95.0}
+    race = {"date": "2026-07-11", "km": S.RACE_KM["marathon"], "zone": "marathon",
+            "pace_sec": 268, "label": "Goal Marathon", "type": "marathon"}
+    sess, dt = S._place_race(list(base), dict(dt0), race, ws)
+    on_day = [x for x in sess if x["date"] == "2026-07-11"]
+    if len(on_day) != 1 or not on_day[0].get("race"):
+        fail.append(f"(a) race day carries {len(on_day)} session(s) — it REPLACES the day's run, "
+                    f"never joins it: {[x.get('kind') for x in on_day]}")
+    if on_day and abs(on_day[0]["km"] - 42.2) > 0.05:
+        fail.append(f"(a) the race is not RACE_KM: {on_day[0]['km']}")
+    if on_day and abs(dt["2026-07-11"] - on_day[0]["trimp"]) > 0.05:
+        fail.append("(a) the day's TRIMP is not the race's — the replaced run's load lingered")
+    if [x["date"] for x in sess] != sorted(x["date"] for x in sess):
+        fail.append("(a) the session list came back out of date order")
+    # the week-span guard, and the no-race no-op, must return the SAME objects (the caller tests `is`)
+    far = dict(race, date="2026-07-20")
+    if S._place_race(base, dt0, far, ws)[0] is not base:
+        fail.append("(a) a race OUTSIDE this week was laid into it — the span guard is what stops "
+                    "one race being laid into every week of a multi-week taper block")
+    if S._place_race(base, dt0, None, ws)[0] is not base:
+        fail.append("(a) a week with no race did not come back untouched")
+
+    def plan_for(days_out, typ="marathon", regime=None):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)
+        S.seed_synthetic_db(mem, end="2026-06-30")
+        mem.execute("DELETE FROM plans")
+        mem.execute("DELETE FROM meta WHERE key='rebase_start'")
+        mem.execute("DELETE FROM objectives")
+        mem.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                    "VALUES (?,'Goal Race',?,'finish','A','upcoming','2026-01-01T00:00:00+00:00')",
+                    (typ, (today + S.timedelta(days=days_out)).isoformat()))
+        mem.commit()
+        p = S.generate_plan(mem, force_regime=regime, today=today)
+        mem.close()
+        return p
+
+    def all_weeks(p):
+        return [(k, w) for k, v in p.items() if isinstance(v, dict) and v.get("weeks")
+                for w in v["weeks"]]
+
+    # (b) ONE race, on race day, at the race's own distance and pace — and in exactly one week
+    for typ, want_km, want_zone in (("marathon", S.RACE_KM["marathon"], "marathon"),
+                                    ("half", S.RACE_KM["half"], "threshold"),
+                                    ("10k", S.RACE_KM["10k"], "threshold")):
+        p = plan_for(12, typ)
+        rd = (today + S.timedelta(days=12)).isoformat()
+        laid = [s for _k, w in all_weeks(p) for s in (w.get("sessions") or []) if s.get("race")]
+        if len(laid) != 1:
+            fail.append(f"(b) {typ}: {len(laid)} race sessions in the plan, want exactly 1 — the "
+                        f"week-span guard is what keeps a multi-week taper from laying it in each")
+            continue
+        r = laid[0]
+        if r["date"] != rd:
+            fail.append(f"(b) {typ}: the race is on {r['date']}, not race day {rd}")
+        if abs(r["km"] - round(want_km, 1)) > 0.05:
+            fail.append(f"(b) {typ}: laid {r['km']} km, want RACE_KM {round(want_km, 1)}")
+        if want_zone not in (r.get("pace_zone") or ""):
+            fail.append(f"(b) {typ}: paced {r.get('pace_zone')!r}, want the {want_zone} zone — a "
+                        f"marathon is run at MP and everything shorter at threshold (§TT)")
+        if r.get("kind") != "race":
+            fail.append(f"(b) {typ}: the session kind is {r.get('kind')!r}, not 'race'")
+
+    # (c) THE RACE CHANGES NOTHING THE GOVERNOR DECIDED. The claim the placement rests on is that a
+    #     fixed day is laid AFTER every governing and re-governing path, so it can neither be trimmed
+    #     by them nor drive them. Test it the only way that means anything: build the same plan with
+    #     the lay switched off and require the two to agree everywhere the governor owns — the
+    #     training laid, the intent it was sized to, and its own decision variable. An earlier cut
+    #     laid the race BEFORE the governor: its TRIMP took peak ACWR past H1_RESCUE_ACWR, §H1's
+    #     quality→easy rescue fired, and the rescue RE-LAID the week (30.1 → 76.3 km, race gone).
+    #     That would show up here as a difference in the sessions, not merely a missing race.
+    GOV = ("intent_km", "clipped", "proj_acwr_soft", "intent_runs")
+
+    def _noop_place(sessions, day_trimps, race, week_start):
+        return sessions, day_trimps          # returns the SAME objects: the caller's `is` test fails
+
+    for regime in ("caution", "assertive"):
+        laid_p = plan_for(12, "marathon", regime)
+        undo = _patch_globals(_place_race=_noop_place)
+        try:
+            bare_p = plan_for(12, "marathon", regime)
+        finally:
+            undo()
+        laid = [s for _k, w in all_weeks(laid_p) for s in (w.get("sessions") or []) if s.get("race")]
+        if len(laid) != 1:
+            fail.append(f"(c) {regime}: the race did not survive the governor ({len(laid)} laid)")
+        bare_race = [s for _k, w in all_weeks(bare_p) for s in (w.get("sessions") or []) if s.get("race")]
+        if bare_race:
+            fail.append(f"(c) {regime}: ANTI-VACUITY — the lay could not be switched off, so the "
+                        f"comparison below is a plan against itself")
+        A, B = all_weeks(laid_p), all_weeks(bare_p)
+        if len(A) != len(B):
+            fail.append(f"(c) {regime}: laying the race changed the plan's SHAPE ({len(A)} weeks "
+                        f"vs {len(B)}) — it may only occupy a day, never re-periodize the road")
+            continue
+        moved_projection = False
+        for (ka, wa), (_kb, wb) in zip(A, B):
+            rday = next((s["date"] for s in (wa.get("sessions") or []) if s.get("race")), None)
+            sa = [s for s in (wa.get("sessions") or []) if s["date"] != rday]
+            sb = [s for s in (wb.get("sessions") or []) if s["date"] != rday]
+            if sa != sb:
+                fail.append(f"(c) {regime}: week {wa['start']} was RE-LAID around the race — the "
+                            f"race must not reshape the days the plan controls (§H1b)")
+                break
+            for f in GOV:
+                if wa.get(f) != wb.get(f):
+                    fail.append(f"(c) {regime}: week {wa['start']} `{f}` moved with the race "
+                                f"({wb.get(f)} → {wa.get(f)}) — a governor-owned field. `intent_km` "
+                                f"moving means the race entered the BUDGET the search rides; "
+                                f"`proj_acwr_soft` moving means it entered the number that search is "
+                                f"judged by (§PRO23). Neither is a day the plan controls.")
+                    break
+            if rday and (wa.get("proj_ctl") != wb.get("proj_ctl")
+                         or wa.get("proj_acwr_flat") != wb.get("proj_acwr_flat")):
+                moved_projection = True      # …and the PUBLISHED reading must move, or nothing was charged
+        if not moved_projection:
+            fail.append(f"(c) {regime}: ANTI-VACUITY — the published projection did not move when "
+                        f"the race was laid, so 'the governed fields did not move' proves nothing")
+
+    # (d) the load is carried — into the week's header, its projection, and the block's end state
+    p = plan_for(12)
+    rd = (today + S.timedelta(days=12)).isoformat()
+    rwk = next((w for _k, w in all_weeks(p)
+                if any(s.get("race") for s in (w.get("sessions") or []))), None)
+    blk = next((v for _k, v in p.items() if isinstance(v, dict) and v.get("weeks")
+                and any(s.get("race") for w in v["weeks"] for s in (w.get("sessions") or []))), None)
+    if not (rwk and blk):
+        fail.append("(d) no race week to read")
+    else:
+        r = next(s for s in rwk["sessions"] if s.get("race"))
+        if abs(rwk["km"] - round(sum(s["km"] for s in rwk["sessions"]), 1)) > 0.05:
+            fail.append(f"(d) the week header does not count the race: km={rwk['km']}")
+        if rwk["trimp_total"] < r["trimp"]:
+            fail.append(f"(d) the week's load ({rwk['trimp_total']}) is under the race's own "
+                        f"({r['trimp']}) — the race was laid but never charged")
+        # The seed the NEXT block starts from and the week the athlete reads have to be the same
+        # claim. They were not: the re-roll published the reading and discarded the fitness.
+        if blk["end_ctl"] != rwk["proj_ctl"]:
+            fail.append(f"(d) the block's end_ctl {blk['end_ctl']} is not the race week's proj_ctl "
+                        f"{rwk['proj_ctl']} — the carried seed and the published week disagree")
+        # ANTI-VACUITY: the same plan with the race REMOVED must land on a lower end state, or (d)
+        # would pass on an engine that never charged the race at all.
+        p_none = plan_for(12, "custom")            # `custom` is not in RACE_KM ⇒ no race is laid
+        blk_n = next((v for _k, v in p_none.items() if isinstance(v, dict) and v.get("weeks")
+                      and v.get("start") == blk.get("start")), None)
+        if blk_n is None:
+            fail.append("(d) ANTI-VACUITY — no comparable race-less block to measure against")
+        elif not (blk["end_ctl"] > blk_n["end_ctl"] and blk["end_atl"] > blk_n["end_atl"]):
+            fail.append(f"(d) charging the race did not move the block's end state: with race "
+                        f"{blk['end_ctl']}/{blk['end_atl']}, without {blk_n['end_ctl']}/"
+                        f"{blk_n['end_atl']} — the load is laid on the calendar and dropped")
+
+    # (e) …and on race week the two readings must visibly DISAGREE. (c) proves the governed number
+    #     did not move; this says it is not merely a copy of the published one — a leak that made
+    #     `proj_acwr_soft` the post-race reading measured 1.0849 against a governed 0.5264, close
+    #     enough to `proj_acwr_flat` (1.113) to pass any eyeball and any threshold under the cap.
+    if rwk and rwk.get("proj_acwr_soft") is not None and rwk.get("proj_acwr_flat") is not None:
+        if abs(rwk["proj_acwr_soft"] - rwk["proj_acwr_flat"]) < 1e-6:
+            fail.append("(e) the governed and published readings are the same number on race week — "
+                        "the honesty re-roll leaked into the decision variable, or nothing was laid")
+
+    # (f) the race must not predict itself: §PRO7b reads the peak carried INTO the taper
+    with_race, without = plan_for(12), plan_for(12, "custom")
+    fw = (with_race.get("feasibility") or {}).get("projected_ctl")
+    fn = (without.get("feasibility") or {}).get("projected_ctl")
+    if fw != fn:
+        fail.append(f"(f) race-day fitness moved when the race was charged ({fn} → {fw}) — §PRO7b "
+                    f"reads the peak carried INTO the taper, or the marathon counts toward the "
+                    f"fitness the athlete brings to the marathon")
+
+    return _st("det", "race-session",
+               "§RACE — the race is a session: laid ON race day at RACE_KM and its own zone (MP for "
+               "a marathon, threshold below it), REPLACING the day's run, in exactly ONE week of the "
+               "taper block, surviving both regimes' governing and re-governing paths; its load is "
+               "carried into the week header, the projection and the block's end state (proven "
+               "against a race-less plan), while `proj_acwr_soft` keeps the governor's own pre-race "
+               "reading and the race never inflates the fitness predicted FOR it (§PRO7b)",
+               passed=not fail,
+               expect="one race, on the day, at its distance and pace · replaces, never adds · "
+                      "survives the governor · load carried · governed number unmoved · "
+                      "race-day projection unchanged",
+               got={"failures": fail or "none",
+                    "race_week": (None if not rwk else
+                                  {"km": rwk["km"], "runs": rwk["runs"],
+                                   "trimp_total": rwk["trimp_total"], "proj_ctl": rwk["proj_ctl"],
+                                   "proj_acwr_flat": rwk.get("proj_acwr_flat"),
+                                   "proj_acwr_soft": rwk.get("proj_acwr_soft")})})
+
+
 def _stc_race_lifecycle():
     """§RL — the objectives status machine actually transitions: a passed race with a matching run
     settles 'done' (outcome carries the result + goal comparison), a passed race with no run holds
@@ -4376,6 +4710,370 @@ def _stc_chain_drift():
                "_chain_drift: per-peak founding→now projection drift matched by date, ±0.5 trend, dup-suppressed, passed-flagged, next-peak, graceful pre-chain founding",
                passed=not fails, expect="per-peak gaps/trends + next peak + graceful degradation",
                got={"violations": fails or "none"})
+
+
+
+def _stc_goal_moved():
+    """§GM — a race that MOVES is the same race, and its history has to move with it.
+
+    2026-08-30: the goal marathon's date was corrected from the 7th to the 6th. There was no edit path,
+    so
+    that meant add-then-remove; the next regeneration banked a plan under the new date; and the §FT4
+    prediction ledger — two months of forecasts, 5:23 down to 3:59 — went to a single point. Nothing
+    had been deleted. 126 plans still held every number. They had simply stopped matching the
+    question, because the question was "which plans carry objective.date == today's goal" and a
+    one-day correction changes that string. The same equality governed the §6b founding-road anchor
+    and the §TR settlement, so the same edit would also have quietly failed to score the race
+    against the forecast the engine actually made for it.
+
+    (a) THE RULE. `_same_race` is the one matching rule all three read through: same type, same
+        label, within GOAL_MOVE_DAYS. Both directions matter — it must join a moved race, and it
+        must still SPLIT a genuinely different one, or "reset the baseline on a goal change" (the
+        §6b behaviour that was always wanted) quietly stops happening.
+    (b) THE LEDGER SURVIVES THE MOVE, through the real endpoint. With the anti-vacuity limb that
+        makes this a test: the SAME fixture, with the new plan built for a DIFFERENT race, must
+        still collapse to one point. Without that, a `_same_race` that returned True unconditionally
+        would pass (a).
+    (c) THE SETTLEMENT SURVIVES THE MOVE. `_ft_prediction_score` finds the last pre-race forecast
+        across the corrected date — the §TR half of the same bug, which no chart would have shown.
+    (d) THE EDIT PATH EXISTS, so none of the above is needed twice. Moving a race now keeps the ROW:
+        same id, same created_at, and — because a resolved race is refused — no way to re-point a
+        finished result at a day nobody raced."""
+    import sqlite3 as _sq
+    fail, today = [], S._date("2026-08-30")
+    OLD, NEW = "2026-12-07", "2026-12-06"
+
+    # (a) the rule, both directions
+    val = {"label": "Goal Marathon", "date": OLD, "type": "marathon"}
+    def other(**kw):
+        return dict(val, **kw)
+    cases = [
+        ("moved one day",        other(date=NEW),                                   True),
+        ("unmoved",              other(),                                           True),
+        ("moved a fortnight",    other(date="2026-11-23"),                          True),
+        ("next year's edition",  other(date="2027-12-06"),                          False),
+        ("just past the window", other(date=(S._date(OLD) + S.timedelta(days=S.GOAL_MOVE_DAYS + 1)).isoformat()), False),
+        ("a different race",     other(label="Berlin Marathon"),                    False),
+        ("a different distance", other(type="half", label="Goal Half"),             False),
+        ("same day, other race", other(label="Goal Half", type="half", date=OLD),   False),
+        ("no label either side", {"date": OLD, "type": "marathon"},                 True),
+        ("no label, moved",      {"date": NEW, "type": "marathon"},                 False),
+        ("no race at all",       {"date": None, "type": None},                      False),
+        # An ABSENT field is not a DISAGREEING one. `plan["objective"]` gained its `type` partway
+        # through the block, so the oldest banked plans carry a label and a date and no type — and a
+        # rule that reads "" as a distance mismatch drops exactly the plans that FOUND the road.
+        # Limb (b2) below prices that in weeks; these two say it at the predicate.
+        ("no type, moved",       {"label": "Goal Marathon", "date": NEW},           True),
+        ("no type, other race",  {"label": "Berlin Marathon", "date": NEW},         False),
+    ]
+    for name, b, want in cases:
+        got = S._same_race(val, b)
+        if got is not want:
+            fail.append(f"(a) {name}: _same_race={got}, want {want}")
+        if S._same_race(b, val) is not got:                 # the rule has to be symmetric or the
+            fail.append(f"(a) {name}: asymmetric — the anchor and the ledger would disagree")
+    if S._same_race({}, val) or S._same_race(val, None):
+        fail.append("(a) an empty objective matched a race")
+
+    # — a plan banked for `goal`, minimal but real enough for _plan_weeks and the §FT4 read —
+    def bank(mem, for_date, goal, secs, label="Goal Marathon", typed=True):
+        wk, d = [], S._monday(today - S.timedelta(weeks=8))
+        while d <= S._date(goal):
+            wk.append({"start": d.isoformat(), "km": 50.0, "trimp_total": 400.0,
+                       "sessions": [{"date": d.isoformat(), "trimp": 60.0}]})
+            d += S.timedelta(days=7)
+        # `typed=False` is the shape of a plan banked before `plan["objective"]` carried a type at
+        # all — the key is ABSENT, not empty, which is how the live record's oldest plans read.
+        objective = {"label": label, "date": goal, "target": "finish", "priority": "A"}
+        if typed:
+            objective["type"] = "marathon"
+        mem.execute("INSERT INTO plans (created_at, for_date, plan) VALUES (?,?,?)",
+                    (for_date + "T08:00:00+00:00", for_date, S.json.dumps(
+                        {"ok": True, "mode": "race", "block": {"weeks": wk},
+                         "objective": objective,
+                         "feasibility": {"projected_ctl": 60.0, "verdict": "finish",
+                                         "finish_time": {"seconds": secs, "hms": S._fmt_hms(secs),
+                                                         "band": {"lo_seconds": secs - 600,
+                                                                  "hi_seconds": secs + 600}}}})))
+
+    def fixture(new_goal, new_label="Goal Marathon"):
+        """Three plans for the race as it stood, then the regeneration that follows the move."""
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)
+        for i, secs in enumerate((15000, 14800, 14600)):
+            bank(mem, (today - S.timedelta(days=21 - 7 * i)).isoformat(), OLD, secs)
+        bank(mem, today.isoformat(), new_goal, 14400, new_label)
+        mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                    "VALUES('marathon',?,?,'finish','A','upcoming',?)",
+                    (new_label, new_goal, S._now_iso()))
+        mem.commit()
+        return mem
+
+    def ledger(mem):
+        undo = _patch_globals(get_db=(lambda: mem))
+        try:
+            with S.app.test_request_context("/api/plandrift"):
+                return (S.api_plandrift().get_json() or {})
+        finally:
+            undo()
+
+    # (b) the move keeps the road AND the ledger; a different race still resets both
+    moved = fixture(NEW)
+    d_moved = ledger(moved)
+    pts = [x["hms"] for x in (d_moved.get("finish_drift") or [])]
+    if not d_moved.get("ok"):
+        fail.append(f"(b) plandrift failed on the moved fixture: {d_moved.get('error')}")
+    if len(pts) != 4:
+        fail.append(f"(b) the ledger lost the move: {len(pts)} point(s) {pts} — want all 4, the "
+                    f"three banked for the {OLD} date plus the regen for {NEW}")
+    swapped = fixture(NEW, "Berlin Marathon")
+    d_swap = ledger(swapped)
+    swap_pts = [x["hms"] for x in (d_swap.get("finish_drift") or [])]
+    if len(swap_pts) != 1:
+        fail.append(f"(b) ANTI-VACUITY — a DIFFERENT race kept {len(swap_pts)} points {swap_pts}; "
+                    f"a real goal swap must still reset the baseline (§6b), or (a) proves nothing")
+
+    # (b2) …and the rule must not cost what it was written to save. `_same_race` TIGHTENED the
+    # question the §6b anchor asks — the old one was the date alone — so any field it now consults
+    # can drop a plan the anchor used to reach. `plan["objective"]` gained its `type` partway through
+    # the live block, and the plans banked before that carry none: read as a distance mismatch, the
+    # FOUNDING plans stop founding the road and it silently starts later than it did (measured on the
+    # live record: 24 of 126 plans, the anchor moving 2026-06-19 → 06-25). The anchor is the earliest
+    # plan for this race that spans the runway, so the typeless one must still be it.
+    aged = _sq.connect(":memory:"); aged.row_factory = _sq.Row
+    aged.executescript(S.SCHEMA)
+    early = (today - S.timedelta(days=35)).isoformat()
+    bank(aged, early, OLD, 15600, typed=False)             # banked FIRST — the anchor scan reads by id
+    for i, secs in enumerate((15000, 14800, 14600)):
+        bank(aged, (today - S.timedelta(days=21 - 7 * i)).isoformat(), OLD, secs)
+    bank(aged, today.isoformat(), NEW, 14400)              # the regeneration after the move
+    aged.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                 "VALUES('marathon','Goal Marathon',?,'finish','A','upcoming',?)", (NEW, S._now_iso()))
+    aged.commit()
+    d_aged = ledger(aged)
+    anchored = ((d_aged.get("anchor") or {}).get("for_date"))
+    if anchored != early:
+        fail.append(f"(b2) the founding road started at {anchored}, not {early} — a plan banked "
+                    f"before `objective.type` existed is the same race, and an ABSENT field must "
+                    f"not read as a disagreeing one")
+    if len([x["hms"] for x in (d_aged.get("finish_drift") or [])]) != 5:
+        fail.append("(b2) the typeless plan dropped out of the §FT4 ledger as well")
+    aged.close()
+
+    # (c) the §TR settlement reads the same rule: the last forecast before a MOVED race still scores
+    got = S._ft_prediction_score(moved, NEW, "marathon", 14700, "Goal Marathon")
+    if not (got and got["p50_seconds"] == 14400):
+        fail.append(f"(c) the moved race did not settle against its own last forecast: {got}")
+    if S._ft_prediction_score(moved, NEW, "marathon", 14700, "Berlin Marathon") is not None:
+        fail.append("(c) a race settled against ANOTHER race's forecast — the rule is too loose")
+    cands = S._tr_race_plans(moved, NEW, "marathon", "Goal Marathon")
+    if len(cands) != 4:                       # every plan predates race day; all four are the race's
+        fail.append(f"(c) _tr_race_plans found {len(cands)} candidate plans for the moved race, want 4")
+    moved.close(); swapped.close()
+
+    # (d) the edit path: a move keeps the ROW, and a resolved race refuses to move
+    mem = fixture(NEW)
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at,outcome) "
+                "VALUES('10k','Run Past','2026-07-01','finish','B','done',?,'{}')", (S._now_iso(),))
+    mem.commit()
+    live = mem.execute("SELECT id, created_at FROM objectives WHERE status='upcoming'").fetchone()
+    undo = _patch_globals(get_db=(lambda: mem), regenerate=(lambda db, **kw: {"ok": True, "diff": None}),
+                          plan_baseline=(lambda db: None))
+    try:
+        c = S.app.test_client()
+        for payload, want in (({}, 400), ({"date": "the 6th"}, 400), ({"date": "2026-12-05"}, 200)):
+            r = c.post(f"/api/objectives/{live['id']}/date", json=payload)
+            if r.status_code != want:
+                fail.append(f"(d) POST /date {payload} answered {r.status_code}, want {want}: "
+                            f"{(r.get_json() or {}).get('error')}")
+        row = mem.execute("SELECT id, date, created_at FROM objectives WHERE id=?", (live["id"],)).fetchone()
+        if row["date"] != "2026-12-05":
+            fail.append(f"(d) the move did not land: date={row['date']}")
+        if row["created_at"] != live["created_at"]:
+            fail.append("(d) the move rewrote created_at — it stood a new race up instead of moving one")
+        if mem.execute("SELECT COUNT(*) FROM objectives").fetchone()[0] != 2:
+            fail.append("(d) the move changed the row COUNT — that is add-then-remove wearing an edit's name")
+        done = mem.execute("SELECT id FROM objectives WHERE status='done'").fetchone()
+        r = c.post(f"/api/objectives/{done['id']}/date", json={"date": "2026-07-08"})
+        if r.status_code != 409:
+            fail.append(f"(d) a DONE race was allowed to move ({r.status_code}) — its result would "
+                        f"then point at a day nobody raced")
+        if c.post("/api/objectives/99999/date", json={"date": "2026-12-05"}).status_code != 404:
+            fail.append("(d) a move against a missing objective did not 404")
+    finally:
+        undo()
+        mem.close()
+
+    return _st("det", "goal-moved",
+               "§GM — a corrected race date is the SAME race: `_same_race` (type + label + "
+               f"{S.GOAL_MOVE_DAYS} d) joins a race that moved and still splits a different one, an "
+               "ABSENT type or label never splits one (the oldest banked plans predate the field, and "
+               "the §6b anchor must still reach them), the §FT4 ledger and the founding road survive "
+               "the move through the real endpoint, the §TR settlement scores the moved race against "
+               "its own last forecast, and /api/objectives/<id>/date MOVES the row rather than "
+               "replacing it",
+               passed=not fail,
+               expect="moved race joins · different race resets · ledger keeps all 4 points · "
+                      "typeless founding plan still anchors · settlement lands · edit keeps "
+                      "id+created_at · resolved race refused",
+               got={"failures": fail or "none", "ledger_after_move": pts,
+                    "ledger_after_swap": swap_pts})
+
+
+
+def _stc_ctl_forecast_bias():
+    """§SYM-A — the engine reads its own track record back, and publishes a number about ITSELF.
+
+    ENGINE_SYMMETRY_PROPOSAL §5 A: roll the scored `ctl_week` rows into one signed median error,
+    in points and percent, carrying the horizon it was measured at and the n it rests on. On the
+    live record it reads *under-predicted by a median 40.5% at 28 days, n=4* — the reading the
+    proposal says would have told the owner, before 2026-08-23, exactly what his legs told him.
+
+    (a) THE MATHS. Median, not the mean `track_record` already publishes — on a fixture where the
+        two DISAGREE, because a fixture where they agree tests nothing. Even n averages the middle
+        pair; percent is taken per row and then medianed, not derived from the aggregate (those are
+        different numbers whenever the CTL base moves, which is always).
+    (b) THE SIGN. Positive = the athlete came out FITTER than projected = the model UNDER-predicted,
+        the same convention `score_ctl_week` writes. A sign error here would invert the one sentence
+        the whole item exists to print.
+    (c) LEVEL IS NOT A DIRECTION. A median miss inside `TR_CTL_CLOSE` reads "level" — the tolerance
+        exists to describe measurement noise, and noise with a sign is still noise.
+    (d) THE HORIZON IS NOT LAUNDERED. Rows mixing 28- and 56-day leads must publish the SPAN, so a
+        set of two horizons cannot render as a confident single one.
+    (e) EMPTY IS A SHAPE. n=0 returns the keys with nulls and direction "unknown", never None — a
+        caller must not have to branch on whether the engine has an opinion yet.
+    (f) IT IS THE INSTRUMENT, NOT A GOVERNOR. The proposal's ordering depends on this: A ships
+        BEFORE anything that acts on it. So the tooth is a real one — generate a plan against an
+        empty track record, then against a record screaming a 60% under-prediction, and the plan
+        must come out **byte-identical**. The day someone wires this into the periodizer, this det
+        goes red and says so.
+    (g) IT REACHES BOTH SURFACES, AND SURVIVES THE PUBLIC BOX. The drift view and the §TR panel must
+        agree (one function, two callers), and every field must be CLASSIFIED in `_PV_DRIFT` — §82's
+        lesson, where a new field was dropped silently by an allowlist nobody had told about it."""
+    import sqlite3 as _sq
+    fail = []
+    row = lambda pred, act, lead=28: {"lead_days": lead, "predicted": pred, "actual": act,
+                                      "err": round(act - pred, 2)}
+
+    # (a) mean 10.0, median 2.0 — they disagree by 5x, so "which one shipped" is answerable
+    skewed = [row(50.0, 51.0), row(50.0, 52.0), row(50.0, 53.0), row(50.0, 84.0)]
+    b = S._tr_ctl_bias(skewed)
+    mean = sum(r["err"] for r in skewed) / len(skewed)
+    if b["median_err"] != 2.5:
+        fail.append(f"(a) median_err={b['median_err']}, want 2.5 (the middle PAIR averaged; mean is {mean})")
+    if abs(b["median_err"] - mean) < 1e-9:
+        fail.append("(a) FIXTURE VACUOUS — the mean and the median agree here, so nothing is tested")
+    # percent per row, then medianed: the base moves, so this is not median_err/median_predicted
+    pct = S._tr_ctl_bias([row(50.0, 55.0), row(10.0, 12.0)])          # +10.0% and +20.0% → 15.0
+    if pct["median_err_pct"] != 15.0:
+        fail.append(f"(a) median_err_pct={pct['median_err_pct']}, want 15.0 (per-row pct, then median)")
+    if S._tr_ctl_bias([row(50.0, 60.0)])["median_err"] != 10.0:
+        fail.append("(a) odd n did not take the middle value")
+
+    # (b) the sign, both ways
+    under, over = S._tr_ctl_bias([row(40.0, 60.0)]), S._tr_ctl_bias([row(60.0, 40.0)])
+    if under["direction"] != "under" or under["median_err"] <= 0:
+        fail.append(f"(b) fitter-than-projected did not read 'under': {under['direction']} / {under['median_err']}")
+    if over["direction"] != "over" or over["median_err"] >= 0:
+        fail.append(f"(b) less-fit-than-projected did not read 'over': {over['direction']} / {over['median_err']}")
+
+    # (c) inside the tolerance is not a direction; just outside it is
+    inside = S._tr_ctl_bias([row(50.0, 50.0 + S.TR_CTL_CLOSE - 0.1)])
+    outside = S._tr_ctl_bias([row(50.0, 50.0 + S.TR_CTL_CLOSE + 0.1)])
+    if inside["direction"] != "level":
+        fail.append(f"(c) a miss inside ±{S.TR_CTL_CLOSE} CTL read as a direction: {inside['direction']}")
+    if outside["direction"] != "under":
+        fail.append(f"(c) a miss outside ±{S.TR_CTL_CLOSE} CTL did not read as a direction: {outside['direction']}")
+
+    # (d) two horizons publish a span, not one confident number
+    mixed = S._tr_ctl_bias([row(50.0, 60.0, 28), row(50.0, 62.0, 56)])
+    if mixed["lead_span"] != [28, 56]:
+        fail.append(f"(d) mixed horizons published lead_span={mixed['lead_span']}, want [28, 56]")
+    if S._tr_ctl_bias([row(50.0, 60.0, 28)])["lead_span"] != [28, 28]:
+        fail.append("(d) a single horizon lost its span")
+
+    # (e) empty is a shape
+    empty = S._tr_ctl_bias([])
+    if empty is None or empty.get("n") != 0 or empty.get("direction") != "unknown":
+        fail.append(f"(e) the empty record is not a shape: {empty}")
+    for k in ("median_err", "median_err_pct", "lead_days", "lead_span"):
+        if k not in empty or empty[k] is not None:
+            fail.append(f"(e) empty payload lost/filled {k}: {empty.get(k, '<missing>')}")
+    # a row with no score at all must not be counted as one
+    if S._tr_ctl_bias([{"lead_days": 28, "predicted": 50.0, "actual": None, "err": None}])["n"] != 0:
+        fail.append("(e) an unscored row was counted")
+
+    # (f) THE INSTRUMENT IS NOT A GOVERNOR — the same plan, with and without a screaming record
+    def _plan_with(tr_rows):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)
+        S.seed_synthetic_db(mem, end="2026-08-30")
+        mem.execute("DELETE FROM plans")
+        for i, r in enumerate(tr_rows):
+            mem.execute("INSERT INTO track_record(kind,key,scored_at,lead_days,predicted,actual,err,"
+                        "in_band,payload) VALUES('ctl_week',?,?,?,?,?,?,NULL,'{}')",
+                        (f"2026-0{i+1}-05", S._now_iso(), r["lead_days"], r["predicted"],
+                         r["actual"], r["err"]))
+        mem.commit()
+        p = S.generate_plan(mem, today=S._date("2026-08-30"))
+        mem.close()
+        return {k: v for k, v in p.items() if k not in GOLDEN_VOLATILE}
+    blind = _plan_with([])
+    screaming = _plan_with([row(40.0, 64.0), row(42.0, 67.0), row(44.0, 70.0), row(46.0, 74.0)])
+    if S.json.dumps(blind, sort_keys=True, default=str) != S.json.dumps(screaming, sort_keys=True, default=str):
+        fail.append("(f) the plan MOVED when the track record did — §SYM-A is read-only by design, "
+                    "and the proposal's whole ordering (A before B and C) rests on it")
+    if S._tr_ctl_bias([row(40.0, 64.0)])["direction"] != "under":
+        fail.append("(f) FIXTURE VACUOUS — the 'screaming' record does not actually read as biased")
+
+    # (g) both surfaces agree, and the public box has been told about every field
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    S.seed_synthetic_db(mem, end="2026-08-30")
+    for i, r in enumerate([row(40.0, 60.0), row(42.0, 63.0), row(44.0, 67.0)]):
+        mem.execute("INSERT INTO track_record(kind,key,scored_at,lead_days,predicted,actual,err,"
+                    "in_band,payload) VALUES('ctl_week',?,?,?,?,?,?,NULL,'{}')",
+                    (f"2026-0{i+1}-05", S._now_iso(), r["lead_days"], r["predicted"], r["actual"], r["err"]))
+    mem.commit()
+    undo = _patch_globals(get_db=(lambda: mem))
+    try:
+        with S.app.test_request_context("/api/plandrift"):
+            drift = S.api_plandrift().get_json() or {}
+        panel = S.track_record(mem)
+    finally:
+        undo()
+    on_drift = drift.get("ctl_forecast_bias")
+    on_panel = (panel.get("ctl") or {}).get("forecast_bias")
+    if not on_drift or on_drift.get("n") != 3:
+        fail.append(f"(g) the drift view does not carry the bias: {on_drift}")
+    if on_drift != on_panel:
+        fail.append(f"(g) the two surfaces disagree — drift {on_drift} vs panel {on_panel}")
+    spec = S._PV_DRIFT.get("ctl_forecast_bias")
+    if not isinstance(spec, dict):
+        fail.append("(g) ctl_forecast_bias is not classified in _PV_DRIFT — the public box would "
+                    "drop it silently, which is exactly what §82 shipped")
+    else:
+        unclassified = sorted(k for k in (on_drift or {}) if k not in spec)
+        if unclassified:
+            fail.append(f"(g) fields the public allowlist has never been told about: {unclassified}")
+        pub = S.public_view("drift", drift).get("ctl_forecast_bias")
+        if pub != on_drift:
+            fail.append(f"(g) the public box altered the bias: {pub}")
+    mem.close()
+
+    return _st("det", "ctl-forecast-bias",
+               "§SYM-A — the scored `ctl_week` rows read back as one published number: signed MEDIAN "
+               "error (not the mean, proven on a fixture where they differ) in points and percent, "
+               "positive = the model under-predicted, level inside "
+               f"±{S.TR_CTL_CLOSE} CTL, a lead SPAN when horizons are mixed, a shape (not None) at "
+               "n=0 — carried identically by the drift view and the §TR panel, classified for the "
+               "public box, and PROVABLY read-only: the same DB plans identically with and without it",
+               passed=not fail,
+               expect="median≠mean · sign correct · level ≠ direction · span published · empty is a "
+                      "shape · plan unchanged · both surfaces agree · every field allowlisted",
+               got={"failures": fail or "none", "skewed_fixture": {"mean": mean, "median": b["median_err"]},
+                    "live_shape": on_drift})
+
 
 
 def _stc_multi_a_plan():
@@ -5051,11 +5749,34 @@ def _stc_track_record():
                              for p in spec_paths} - set(S._PV_WITHHELD))
     if unclassified:
         fails.append(f"track-record fields classified as neither published nor withheld: {unclassified}")
-    leaked = S.json.dumps(pub)
-    for banned in ("p50_hms", "err_pct", "log_score", "lo_hms", "hi_hms", "plan_id"):
-        if banned in leaked:
+    # The withheld names, matched as KEYS anywhere in the payload rather than as substrings of the
+    # serialized document. Substring matching read `ctl.forecast_bias.median_err_pct` (§SYM-A, a
+    # MEDIAN over the weekly CTL checkpoints) as a leak of the race half's `err_pct`, which it is
+    # not: the CTL block publishes `predicted` and `actual` side by side two limbs below — this det
+    # REQUIRES it to — so a percentage over those is derivable from what is already public and
+    # discloses nothing. The race result is what is withheld, and an exact-key scan still catches it
+    # at any depth. A newly-invented name that smuggles the same value out under a different key is
+    # caught by the `unclassified` limb above, which fails anything not in `_PV_TRACK`.
+    BANNED = ("p50_hms", "err_pct", "log_score", "lo_hms", "hi_hms", "plan_id")
+
+    def _keys(o, out):
+        if isinstance(o, list):
+            for v in o:
+                _keys(v, out)
+        elif isinstance(o, dict):
+            for k, v in o.items():
+                out.add(k); _keys(v, out)
+        return out
+    pub_keys = _keys(pub, set())
+    for banned in BANNED:
+        if banned in pub_keys:
             fails.append(f"the public track record leaks `{banned}` — with the prediction beside its "
                          f"error the RESULT is one multiplication away, and a race result is withheld")
+    # ANTI-VACUITY: the scan above only means something if it still bites. Hand it a payload that
+    # really does carry the race half's error and watch it find it at depth.
+    if not any(b in _keys({"races": [{"key": "x", "payload": {"err_pct": 1.2}}]}, set()) for b in BANNED):
+        fails.append("the withheld-name scan no longer detects a real `err_pct` — the privacy gate "
+                     "has stopped biting and every leak below it would report clean")
     if not pub.get("races") or pub["races"][0].get("in_band") is None:
         fails.append("the public view dropped the calibration it exists to publish (in_band)")
     ctl_pub = S.public_view("track_record", S.track_record(mem))     # the fixture that HAS weeks
@@ -5100,7 +5821,7 @@ def _stc_calibration_inventory():
                    expect="run on a checkout", got={"engine_science": "absent"})
     # Plumbing: rate limits, cache lifetimes, schema versions, HTTP headers. Nothing here shapes a
     # prescription or a projection, so nothing here is calibration.
-    PLUMBING = {"PAGE_DELAY", "AUTO_SYNC_THROTTLE", "PROFILE_VERSION", "STRUCT_VERSION",
+    PLUMBING = {"PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
                 "MAX_WEATHER_CITIES", "SUUNTO_ACTIVITY_RUNNING", "WEATHER_TTL", "EXPORT_FORMAT",
                 "_EXPLAIN_CACHE_MAX"}
     text = doc.read_text(encoding="utf-8")
@@ -10211,7 +10932,19 @@ def _stc_error_shape():
     r = c.get("/api/run-metrics?days=30&limit=5")
     if r.status_code != 200:
         fails.append(f"(a) valid run_metrics args answered {r.status_code} — want 200")
-    # (b) the blanket handler, driven by raising views
+    # (b) Flask's own HTTP errors on API paths use the same JSON envelope. Before this follow-up,
+    # the blanket handler passed HTTPException through untouched, so a typo or wrong method served
+    # an HTML page to a JSON client.
+    for method, path, want in (("get", "/api/definitely-not-a-route", 404),
+                               ("post", "/api/plan", 405)):
+        r = getattr(c, method)(path)
+        payload = r.get_json(silent=True)
+        if (r.status_code != want or not is_json(r) or not isinstance(payload, dict)
+                or payload.get("ok") is not False or not payload.get("error")):
+            fails.append(f"(b) {method.upper()} {path} answered {r.status_code} "
+                         f"{'json' if is_json(r) else 'non-json'} {payload!r} — want JSON "
+                         f"{{ok:false,error}} {want}")
+    # (c) the blanket handler, driven by raising views
     def boom():
         raise RuntimeError("selftest: simulated unhandled view failure")
     saved = {ep: S.app.view_functions[ep] for ep in ("healthz", "index")}
@@ -10222,24 +10955,24 @@ def _stc_error_shape():
         r = c.get("/healthz")
         body = r.get_data()
         if r.status_code != 500 or not is_json(r) or (r.get_json() or {}).get("ok") is not False:
-            fails.append(f"(b) a raising /healthz answered {r.status_code} "
+            fails.append(f"(c) a raising /healthz answered {r.status_code} "
                          f"{'json' if is_json(r) else 'non-json'} — want JSON {{ok:false}} 500")
         if b"Traceback" in body or b"simulated unhandled" in body:
-            fails.append("(b) the JSON 500 leaks the exception")
+            fails.append("(c) the JSON 500 leaks the exception")
         r = c.get("/")
         body = r.get_data()
         ct = r.headers.get("Content-Type") or ""
         if r.status_code != 500 or "text/html" not in ct:
-            fails.append(f"(b) a raising page answered {r.status_code} {ct} — want HTML 500")
+            fails.append(f"(c) a raising page answered {r.status_code} {ct} — want HTML 500")
         if b"Traceback" in body or b"simulated unhandled" in body:
-            fails.append("(b) the HTML 500 leaks the exception")
+            fails.append("(c) the HTML 500 leaks the exception")
     finally:
         S.app.view_functions.update(saved)
         S.app.logger.disabled = False
     return _st("det", "error-shape",
-               "blanket error handler: JSON {ok:false} 500 for /api/* + /healthz, quiet HTML 500 for "
-               "pages, no traceback either way; run_metrics numeric args bounded (garbage ⇒ JSON 400)",
-               passed=not fails, expect="JSON 400 on junk args · JSON 500 for API · HTML 500 for pages · no leaks",
+               "error envelope: JSON {ok:false,error} for API 404/405/500, quiet HTML 500 for pages, "
+               "no traceback either way; run_metrics numeric args bounded (garbage ⇒ JSON 400)",
+               passed=not fails, expect="JSON 400 on junk args · JSON 404/405/500 for API · HTML 500 for pages · no leaks",
                got={"violations": fails or "none"})
 
 
@@ -10445,8 +11178,25 @@ def _stc_copy_posture(db):
             fails.append(f"(c) SPA still says {phrase!r}")
     if f"hard cap {S.ACWR_HARD:.2f}" not in S.UI_SOURCE:
         fails.append(f"(c) regime badge does not print the hard cap as ACWR_HARD={S.ACWR_HARD:.2f}")
-    if f"under a {S.ACWR_HARD:.2f} ceiling ({S.ACWR_SOFT:.2f} is its planning target)" not in S.UI_SOURCE:
-        fails.append("(c) the ACWR tile's ceiling/target literals drifted from ACWR_HARD/ACWR_SOFT")
+    # The SIZING bound is ACWR_SOFT and it is applied to the shape-neutral reading; ACWR_HARD is
+    # where the RAW sample stops being remarkable. Both surfaces that quote a number have to say it
+    # that way round, and both literals stay tied to their constants. This replaced a claim that the
+    # engine "keeps every planned week under a 1.30 ceiling and trims volume when a week would
+    # breach it" — which the docs corrected in 0.44.12 while these two surfaces kept it, and which
+    # §RACE then made visibly false: race week publishes a raw sample well past ACWR_HARD, and it is
+    # not trimmed, because a fixed race is not a day the governor may negotiate.
+    for _where, _src in (("the ACWR tile", S.INDEX_HTML), ("the week-card badge", S.APP_JS)):
+        if f"against {S.ACWR_SOFT:.2f}" not in _src:
+            fails.append(f"(c) {_where} does not state the SIZING bound as ACWR_SOFT="
+                         f"{S.ACWR_SOFT:.2f} — the governed number is the claim it can defend")
+        if f"above {S.ACWR_HARD:.2f}" not in _src:
+            fails.append(f"(c) {_where} does not say a raw sample above ACWR_HARD="
+                         f"{S.ACWR_HARD:.2f} is normal — that is what the card actually prints")
+    for _stale in ("under a " + f"{S.ACWR_HARD:.2f}" + " ceiling",
+                   "under the " + f"{S.ACWR_HARD:.2f}" + " ceiling"):
+        if _stale in S.UI_SOURCE:
+            fails.append(f"(c) the corrected ceiling claim regressed: SPA still says {_stale!r}, "
+                         f"which race week alone disproves")
     # (e) §43 EXTENDED TO THE PUBLISHED SOURCE. (a)/(b) have policed the PRODUCT COPY since 0.27.0 —
     # "the owner's clinical history ships to every self-hoster otherwise" — but the mirror publishes
     # the source and the docs too, and nobody had ever looked there. On 2026-08-26 that came back:
@@ -12283,8 +13033,11 @@ def _stc_ui_dialogs():
     if "SH_READONLY || !SYNC_LAST" not in js:
         fails.append("(b) the freshness chip is not gated to the private box — a public age leaks the "
                      "household's sync routine, which TECH-8's booleans-only /healthz exists to prevent")
-    if "hrs > 26" not in js:
-        fails.append("(b) the chip's staleness threshold is not the nightly's 26 h")
+    if "SH_STALE_HOURS" not in js or "hrs > SH_STALE_HOURS" not in js:
+        fails.append("(b) the chip does not read the server-injected scheduler staleness threshold")
+    doc = S.app.test_client().get("/").get_data(as_text=True)
+    if f"staleHours:{S.SCHED_STALE_HOURS}" not in doc or "__SH_STALE_HOURS__" in doc:
+        fails.append("(b) the page bootstrap does not carry the resolved scheduler staleness threshold")
     if ".weather.stale" in S.APP_CSS:
         fails.append("(b) the dead .weather.stale rule is still in the stylesheet")
     return _st("det", "ui-dialogs",
@@ -12877,8 +13630,10 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(), lambda: _stc_copy_posture(db),
                  lambda: _stc_multi_a_chain(),
                  lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
+                 lambda: _stc_race_session(),   # §RACE
                  lambda: _stc_race_lifecycle(), lambda: _stc_backup_export(),
-                 lambda: _stc_chain_drift(), lambda: _stc_multi_a_plan(),
+                 lambda: _stc_chain_drift(), lambda: _stc_goal_moved(),
+                 lambda: _stc_ctl_forecast_bias(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),

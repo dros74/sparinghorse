@@ -2647,6 +2647,7 @@
       "weeks": 3
     },
     {
+      "date": "2026-11-17",
       "key": "taper",
       "kind": "taper",
       "phase": "Taper \u2192 Cold-Start Marathon",
@@ -2690,8 +2691,8 @@
       "economy"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 38.0,
-    "end_ctl": 54.4,
+    "end_atl": 60.6,
+    "end_ctl": 68.3,
     "start": "2026-11-02",
     "weeks": [
       {
@@ -3128,19 +3129,19 @@
         "adjusted": false,
         "clipped": false,
         "elapsed": false,
-        "eq_km": 27.1,
+        "eq_km": 64.3,
         "frozen": false,
         "intent": "Race week \u2014 freshen up, stay loose",
         "intent_km": 27.0,
         "intent_runs": 2,
-        "km": 9.5,
+        "km": 46.7,
         "long": 8,
-        "peak_acwr": 0.77,
+        "peak_acwr": 1.792,
         "phase": "taper",
-        "proj_acwr": 0.699,
-        "proj_acwr_flat": 0.648,
+        "proj_acwr": 0.886,
+        "proj_acwr_flat": 1.154,
         "proj_acwr_soft": 0.648,
-        "proj_ctl": 54.4,
+        "proj_ctl": 68.3,
         "quality": [],
         "role": "race",
         "runs": 2,
@@ -3156,17 +3157,18 @@
           },
           {
             "date": "2026-11-17",
-            "kind": "easy",
-            "km": 5.0,
-            "minutes": 31,
-            "note": "easy run",
-            "pace_zone": "6:15/km easy",
-            "trimp": 40.9
+            "kind": "race",
+            "km": 42.2,
+            "minutes": 234,
+            "note": "Cold-Start Marathon",
+            "pace_zone": "5:33/km marathon",
+            "race": true,
+            "trimp": 421.2
           }
         ],
         "start": "2026-11-16",
         "strides": 0,
-        "trimp_total": 76.8,
+        "trimp_total": 457.1,
         "wk": 3
       }
     ]

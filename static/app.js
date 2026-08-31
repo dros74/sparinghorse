@@ -2,6 +2,7 @@
 // in on the nonce'd window.SH bootstrap the shell writes (TECH-11).
 const SH_READONLY = !!(window.SH && window.SH.readonly);   // public read-only mode
 const SH_PRIVATE_URL = (window.SH && window.SH.privateUrl) || "";   // public→private console link
+const SH_STALE_HOURS = (window.SH && window.SH.staleHours) || 26;    // scheduler + /healthz source of truth
 const SH_PAGE = document.body.dataset.page || "dash";   // §RB — "dash" (status) or "runs" (explorer)
 const $ = s => document.querySelector(s);
 const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
@@ -748,7 +749,7 @@ async function toggleIgnore(id, on){
 // re-base at all), so the week tag names its actual phase (same caution-era family as the log fix).
 const PHASEN={rebase:"re-base", base:"Base", build:"Build", peak:"Peak", taper:"Taper"};
 const KINDT={easy:"Easy run", long:"Long run", long_mp:"Long run · MP finish",
-             interval:"Interval session", tempo:"Tempo run"};
+             interval:"Interval session", tempo:"Tempo run", race:"Race day"};   // §RACE
 function plannedSession(s, easyPace){
   if(!s) return `<div class="planned muted" style="font-size:13px">${SH_READONLY
       ? "No active plan."   /* the public box has no Generate button to point at (UX-11) */
@@ -765,6 +766,15 @@ function plannedSession(s, easyPace){
     <div class="mrow"><span class="ttl">${s.optional?"Optional — week complete":"Rest day"}</span><span class="muted" style="font-size:13px">${esc(s.note)}</span></div></div>`;
   const act=s.actual||{};
   const q=s.reps&&s.reps.length;
+  // §RACE — race day carries the RACE's pace, and the engine publishes it as `pace_zone`
+  // ("4:28/km marathon"). The easy-pace metric below reads `easyPace`, so before this the card
+  // prescribed the marathon at the week's easy pace and labelled it "easy" — a misprescription on
+  // the one day of the block that cannot be re-run. A race has no `reps`, so it took the plain-run
+  // branch and nothing flagged it.
+  const pz=(s.pace_zone||"").match(/^(\S+)\/km\s+(.+)$/);
+  const paceMetric = s.race
+    ? metric("Race pace", pz?esc(pz[1]):"—", pz?`/km ${esc(pz[2])}`:"/km")
+    : metric("Pace", (s.easy_pace||easyPace||"").replace("/km",""), "/km easy");
   const kick=`Today's session · ${PHASEN[s.pk]||"plan"} week ${s.week}`+
     (s.done?` · <span style="color:var(--ok);font-weight:600">done ✓</span>`:"");
   const actLine=s.done
@@ -779,7 +789,7 @@ function plannedSession(s, easyPace){
       <span class="ttl">${KINDT[s.kind]||esc(s.kind)+" run"}</span>
       ${metric("Distance", s.km, "km")}
       ${metric("Duration", `~${s.minutes}`, "min")}
-      ${q?"":metric("Pace", (s.easy_pace||easyPace||"").replace("/km",""), "/km easy")}
+      ${q?"":paceMetric}
       ${metric("Target load", s.trimp!=null?Math.round(s.trimp):"—", "TRIMP")}
     </div>
     ${actLine}
@@ -796,7 +806,7 @@ function wxFootHtml(){
 // UX-4 — how old is the data behind this verdict? The readiness card was happy to render a confident
 // green off a sync that failed two nights ago, and the only hint was a timestamp in the page footer
 // nobody scrolls to. The chip reads `last_sync` from /healthz (which TECH-8 records) and turns amber
-// past 26 h — the same staleness the nightly catch-up uses, so the number on screen and the number
+// past the server-provided boundary — the same staleness the nightly catch-up uses, so the number on screen and the number
 // the scheduler acts on cannot disagree.
 // PRIVATE ONLY. The public box deliberately answers /healthz with booleans and no timestamps, so a
 // stranger cannot learn when the household syncs; printing an age here would hand it straight back.
@@ -811,7 +821,7 @@ function paintFreshness(){
             : hrs < 48 ? `${Math.round(hrs)} h ago`
             : `${Math.round(hrs/24)} days ago`;
   el.textContent = `synced ${age}`;
-  el.classList.toggle("stale", hrs > 26);
+  el.classList.toggle("stale", hrs > SH_STALE_HOURS);
   el.title = `Last successful sync: ${then.toLocaleString()}`;
 }
 function statusCard(a, foot, wx){
@@ -1054,7 +1064,7 @@ function acBadge(a){
   if(a==null) return "";
   const cls = a<=1.18 ? "lo" : "mid";
   return `<span class="acbadge ${cls}">ACWR →${a.toFixed(2)}</span>`+
-    qhint("Projected acute:chronic load at this week's end — rolled forward from today's fitness if you run the plan. The engine plans every week under the 1.30 ceiling and trims volume when a week would breach it; a taper or down week reads low on purpose.");
+    qhint("Projected acute:chronic load at this week's end — rolled forward from today's fitness if you run the plan. The engine sizes every planned week against 1.25, but it applies that bound to a shape-neutral reading of the ratio; this number is the raw end-of-week sample, which lands on the long-run day and reads higher — so above 1.30 on a hard building week is normal, not a ceiling that moved. The governed number is published beside it. A taper or down week reads low on purpose, and race week reads high on purpose: it carries the race itself, a fixed distance at a fixed pace that the governor sizes the training around rather than trimming.");
 }
 // House-styled confirmation for destructive actions — spells out the consequences before anything is
 // removed. opts: {title, intro, lines:[…consequences], alt, confirmLabel}. Returns a Promise<bool>
@@ -1220,7 +1230,8 @@ function objManager(p){
     return `<div class="obj ${isAnchor?'anchor':''}">
       ${priBadge(o)}
       <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:10px">· anchor</span>':''}</span>
-      <span class="od">${esc(o.date)} · ${esc(o.type)} · ${esc(o.target)}</span>
+      <span class="od"><input type="date" class="odate" data-oid="${o.id}" value="${esc(o.date)}"
+        aria-label="date of ${esc(o.label)}" title="Move this race — the plan re-periodizes around the new day"> · ${esc(o.type)} · ${esc(o.target)}</span>
       <button class="x" data-oid="${o.id}">remove</button>
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;
   if(SH_READONLY) return `<div class="objs">${rows}</div>`;   // public: list only, no controls
@@ -1328,6 +1339,22 @@ function wireObjActions(){
     if(!body.date){ await notice({title:"Pick a date", intro:"A race needs a day before it can be planned for."}); return; }
     const r=await fetch("/api/objectives",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const p=await r.json(); LASTDIFF=p.diff; await refreshPlan(p);
+  });
+  // §GM — move a race to a new day. This is an EDIT, not add-then-remove: the objective keeps its
+  // row (and with it its id, its history and, once run, its result), and the banked plans keep
+  // pointing at the same race, so the founding road and the §FT4 prediction ledger survive the move.
+  document.querySelectorAll(".obj .odate").forEach(inp=>{
+    const was=inp.value;
+    inp.addEventListener("change", async ()=>{
+      if(!inp.value || inp.value===was){ inp.value=was; return; }
+      inp.disabled=true;
+      const r=await fetch(`/api/objectives/${inp.dataset.oid}/date`,{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({date:inp.value})});
+      const p=await r.json();
+      if(!p.ok){ inp.value=was; inp.disabled=false;
+        await notice({title:"Could not move the race", intro:p.error||"unknown", tone:"danger"}); return; }
+      LASTDIFF=p.diff; await refreshPlan(p);
+    });
   });
   document.querySelectorAll(".obj .x").forEach(btn=>btn.addEventListener("click", async ()=>{
     const r=await fetch(`/api/objectives/${btn.dataset.oid}/remove`,{method:"POST"});
@@ -1544,6 +1571,10 @@ function sessSummary(s){
   // so fall back to that until the nightly re-plan refreshes the JSON.
   const st = s.strides || +(((s.note||"").match(/(\d+)×4–6 strides/)||[])[1]||0);
   if(st) return `${s.km}k <span class="strid" title="Finish this run with ${st} × 4–6 strides: ~20-second relaxed-fast accelerations with full walk-back recovery. A neuromuscular touch-up, not a workout — it adds no training load.">+ ${st}× strides</span>`;
+  // §RACE — the race is a session now, and it must READ as one. Without this the row printed a bare
+  // distance, indistinguishable from a long run, on the day the whole block points at; the flag is
+  // published for exactly this (§PV `sessions[].race`) and nothing was reading it.
+  if(s.race) return `${s.km}k <span class="racemk" title="${esc(s.note||"Race day")} — the race itself, at ${esc(s.pace_zone||"race pace")}. A fixed prescription: the distance and the pace are the race's, so the governor sizes the training around it rather than trimming it.">· race day</span>`;
   return `${s.km}k`;
 }
 // One plan week (used for every phase but the re-base, which carries the journal/actuals overlay).
@@ -2230,6 +2261,25 @@ function scorecardHTML(sc, r){
       scoreRow(r&&r.label?r.label:"Race day", raceMain, raceSub, raceCls)+
     `</div>${chainHTML}<div class="sc-verdict">${esc(sc.headline)}${wks}</div></div>`;
 }
+// §SYM-A — the CTL projection's own track record, read back onto the chart that draws it. The
+// engine has never before shown a number about ITSELF here; this one says how far the projection
+// has actually run from what happened. The `n` is printed inside the sentence rather than under it
+// on purpose — a median over three weeks is a hint, not a finding, and the count is half the claim.
+function ctlBiasHTML(b){
+  if(!b) return "";
+  if(!b.n) return `<p class="note">No weekly fitness forecast has settled yet — once one does, this line says how far it ran from what happened.</p>`;
+  const at = (b.lead_span && b.lead_span[0]!==b.lead_span[1])
+    ? `${b.lead_span[0]}–${b.lead_span[1]} days out` : `${b.lead_days} days out`;
+  const hint = qhint(
+    `Every week the engine projects your CTL forward, that projection is scored against the fitness you actually reached, and the score is written down and never rewritten. `+
+    `This is the median of those scores — median rather than average because at this many weeks a single odd one moves an average more than the signal does. `+
+    `Positive means you came out FITTER than projected: the model under-predicted you. It is a reading, not a lever — nothing in the plan acts on it.`);
+  if(b.direction==="level")
+    return `<p class="note">At ${at}, the fitness projection has run <b style="color:var(--ok)">level</b> with what happened — median miss inside ±${b.close_within} CTL, over <b>${b.n}</b> scored week${b.n>1?"s":""}. ${hint}</p>`;
+  const dir = b.direction==="under" ? "under-predicted" : "over-predicted";
+  return `<p class="note">At ${at}, this model has <b style="color:var(--warn)">${dir}</b> your CTL by a median `+
+    `<b>${Math.abs(b.median_err_pct)}%</b> (${Math.abs(b.median_err)} CTL), over <b>${b.n}</b> scored week${b.n>1?"s":""}. ${hint}</p>`;
+}
 // §6m — effort discipline: HR-led "are the athlete's easy days actually easy?" Judged by heart rate (terrain
 // & heat already live in HR), TE corroborates, GAP shown as terrain-fair pace.
 const EFFP = s => s ? `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}` : "—";
@@ -2419,6 +2469,7 @@ async function loadDrift(){
       <span id="lg-eff">${driftLegend(effLines)}</span><div id="drift-eff"></div></div>
     <div class="driftblock"><h3>Fitness trajectory · CTL</h3>
       <p class="note">What the original plan projected your fitness would do, against your real reconstructed CTL continued by today's projection. The engine's true currency — distance is the volume view, this is the fitness view.</p>
+      ${ctlBiasHTML(d.ctl_forecast_bias)}
       <span id="lg-ctl">${driftLegend(ctlLines)}</span><div id="drift-ctl"></div></div>
     <div class="driftblock"><h3 id="h-out">Projected race-day fitness</h3>
       <p class="note" id="note-out">The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?</p>
