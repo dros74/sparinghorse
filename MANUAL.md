@@ -607,6 +607,22 @@ The **Settings** window (private container only) is where you configure the app 
   easy ceiling. Re-test rather than re-typing the same value (re-saving the same number deliberately does
   not re-freshen it). Empty = derive from your runs (the default).
 
+- **Long run day** and **Rest days, most wanted first** — the shape of your training week. By default
+  the plan rests midweek and runs long on Sunday; these two settings hand that decision to you.
+  **Long run day** is a single weekday (`sat`, `wednesday`, …) and it anchors the week: hard sessions
+  keep a clear day either side of it, and your easy runs are sized by how far they sit from it.
+  **Rest days** is a *ranked* list, most-wanted-off first — `fri,mon,wed`. It is a ranking rather than
+  a fixed set of days because your run count changes as the block builds: a six-run week leaves only
+  one rest day, a four-run week leaves three. The plan takes rest days off the top of your list until
+  the week has enough, so one answer covers every week. If your ranking runs out, the house layout
+  fills the rest.
+  Leave either empty for the default. Both apply to the **next plan you generate** — an existing plan
+  keeps the shape it was built with until you regenerate.
+  Two things worth knowing. Your long-run day is never spent as a rest day, so naming it in both boxes
+  is harmless. And the plan will not overrule you to keep its usual spacing: if you ask to rest
+  Saturday and Sunday, you get a five-day run streak, because that is what you asked for — it only
+  declines to make a week *denser* than your own choice already makes it.
+
 ### The 30-minute field test (LTHR)
 
 The canonical no-lab way to measure LTHR (Friel):

@@ -10,6 +10,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.49.0] - 2026-08-31
+
+### Added
+
+- **The training week is the athlete's shape now, not the table's (§DAYPREF).** Two new Settings
+  fields: **Long run day** (a weekday) and **Rest days, most wanted first** (a ranked list). Empty
+  keeps today's behaviour exactly.
+
+  Rest days are a **ranking** rather than a fixed set because a plan's run count moves inside a
+  single block — the reference 19-week block lays 4-, 5- **and** 6-run weeks, and §REST2 can re-lay a
+  week up mid-plan to buy back volume. "Rest Monday and Friday" is therefore *undefined* at six runs,
+  where only one rest day exists, and underspecified at four, where a third has to go somewhere. One
+  ranking answers every frequency: take rest days off the top until the week has its quota, and when
+  the ranking runs out, fall back to the house layout's own rest days for that frequency — so a
+  partial ranking degrades toward the default shape rather than an arbitrary one.
+
+### Changed
+
+- **The long run stopped being "whatever ends the week".** `long_idx = n - 1` was never a decision;
+  it was the layout table restated. Every entry in `RUN_DAY_LAYOUTS` ended on Sunday, so *last slot*,
+  *the long run* and *Sunday* were one fact wearing one hat, and the comment on the table said so:
+  "every layout ENDS on Sunday … because a week never ends on a rest, two consecutive weeks can't
+  strand a double rest at the boundary". Letting the athlete name the day pulls those apart, and the
+  seam rule that was riding along on the coincidence is now stated in its own right —
+  `_max_rest_streak` measures rest clumping **around the week boundary** (a layout resting Sunday
+  whose next week rests Monday is one two-day gap the athlete lives, not two one-day gaps), held
+  under `REST_CLUMP_MAX`.
+
+- **Three defects the decoupling exposed, none of which could fire while the long run was on Sunday.**
+  Each is now a det tooth that was seen to fail on a revert:
+  1. **The hard-gap distance was signed.** `days[n-1] - days[s]` was safe only while the long run
+     ended the week. With a Wednesday long run, *every later day* reads negative, "< 2", and is
+     refused — the week walks off the end of its slots and carries **no quality session at all**.
+     Distance has no sign; the gap rule never cared which side of the long run a day sat on.
+  2. **The guard was not running on the plain path.** It was gated on `av_blocked is not None`,
+     because a template day set was trusted and an §AV-relaid one was not. A *derived* set is no more
+     vetted than a relaid one — and before this, a Wednesday long run took its interval on **Tuesday,
+     the day before it**, because slot 1 is Tuesday and Sunday used to be four days away.
+  3. **`AV_MAX_STREAK` was judging a layout the athlete had vetted** — §REST2's pathology, one
+     governor over. Someone who asks for Saturday and Sunday off at five runs has *already* chosen a
+     five-day streak; measuring their spread day or their §AV relocation against 3 refuses every
+     candidate, so the week sheds the volume instead of laying it. The ceiling is now what their own
+     layout already spends (`_streak_ceiling`), and the §REST2 re-lay gate skips the within-week
+     streak test for a derived layout while keeping the cross-week seam bound, which is about the
+     week boundary rather than the shape they asked for.
+
+  Where a preference and the engine's spacing genuinely cannot both hold, **the athlete's ranking
+  wins and the plan says what it did** — the same ruling the run-day streak already follows. The
+  engine only declines to make a week *denser* than the athlete's own choice already makes it.
+
+- **§AV: a blocked long-run day goes to the nearest surviving day**, ties breaking to the later one
+  (the week banks its easy days in front of its long run), instead of to whatever ends the week.
+
+- `det/day-preference` and `det/long-run-day` are new. Between them they lock byte-identity with no
+  preference set, the ranking answering a frequency a fixed pair cannot, the long-run day never being
+  spent as a rest day, seam-aware clumping under its ceiling across **13,440 derived layouts** — with
+  the ranking-wins escape hatch proven *reachable*, at two runs a week where clumping is arithmetic —
+  and all three defects above. Eight reverts were each seen to fail on their own tooth; the first
+  draft of the weekend-off case passed two of them and was rebuilt on a fixture that separates the
+  re-lay from the append.
+
 ## [0.48.0] - 2026-08-31
 
 ### Changed

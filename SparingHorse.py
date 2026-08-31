@@ -57,7 +57,7 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     BASE_DOWN_EVERY, BASE_DOWN_FRAC, BASE_LONG_FRAC, BASE_RUNS, BASE_TEMPO_FRAC,
     BASE_TEMPO_FROM_WEEK, BASE_TEMPO_ZONE, BASE_WEEKLY_RAMP, BIO_EQ_STEP, BIO_EQ_WINDOW,
     BUILD_DOWN_EVERY, BUILD_DOWN_FRAC, BUILD_INTERVAL_FRAC, BUILD_LONG_FRAC, BUILD_MP_FRAC,
-    BUILD_WEEKLY_RAMP, COMPONENT_BY_KIND, CTL_RAMP_MAX, DAVIS_BASE_VO2_FRAC,
+    BUILD_WEEKLY_RAMP, COMPONENT_BY_KIND, CTL_RAMP_MAX, DAVIS_BASE_VO2_FRAC, DAY_NAMES,
     DAVIS_BASE_VO2_REP_MIN, DAVIS_BUILD_MP_END, DAVIS_BUILD_MP_START, DAVIS_INT_FRAC,
     DAVIS_PEAK_MP_END, DAVIS_PEAK_MP_START, EASY_LADDER_FLOOR, EASY_LADDER_STEP, EASY_PACE_FRAC,
     EASY_TRIMP_PER_MIN, ENGINE_VERSION, EQ_KM_FACTOR, FADE_CAP, FADE_PER_CTL, FT10_DISP_A0,
@@ -76,9 +76,10 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     RESPONSE_MIN, RESPONSE_ONTRACK, RUN_DAY_LAYOUTS, RUN_FAMILY_SQL,
     RUN_MIN_KM, SESSION_EQ_STEP, SETTINGS_BY_KEY, SETTINGS_SPEC, SJ_MAX_GAP_MIN, SJ_PART_MIN_S,
     TAPER_BOTTOM, TAPER_LONG_FRAC, TAPER_SHARP_FRAC, TAPER_TOP, TAU_ATL, TAU_CTL,
-    TRIMP_PER_MIN, WEEK_TRIMP_SEARCH_MAX, trimp_per_min,
+    TRIMP_PER_MIN, WEEK_TRIMP_SEARCH_MAX, set_day_preferences, trimp_per_min,
     V5K_VVO2MAX_FRAC, _actual_week_caps, _adj_directive, _adj_fingerprint, _adj_summary,
     _apply_adjustment, _athlete_age, _av_blocked_dates, _av_run_days, _build_long_mp,
+    _parse_day,
     _build_quality, _card_truth_elapsed, _current_week_actuals, _date, _derive_block_start,
     _distribute_week, _eow_soft, _eq_factor, _ewma_step, _fmt_hms, _ft_band, _ft_base_time,
     _ft_cold_start, _ft_correction, _ft_daniels_time, _ft_dispersion, _ft_endurance,
@@ -1710,6 +1711,23 @@ def validate_setting(key, value):
         v = value.strip()
         if not v.isdigit() or not (10 <= int(v) <= 100):
             return False, "a whole number of years, 10–100 (or empty for no prior)"
+    # §DAYPREF — the engine's own parsers are deliberately FORGIVING (a stored typo must never stop
+    # a plan being laid), so this is the layer that refuses one out loud, while the human is still
+    # looking at the box they typed it into. Name the days back so the error teaches the format.
+    _days = ", ".join(DAY_NAMES)
+    if key == "long_run_day" and value.strip():
+        if _parse_day(value) is None:
+            return False, f"a weekday — one of {_days} (or empty for the default, sun)"
+        if len(value.split()) > 1 or "," in value:
+            return False, "one day only — the long run has a single home in the week"
+    if key == "rest_day_rank" and value.strip():
+        parts = value.replace(",", " ").split()
+        bad = [w for w in parts if _parse_day(w) is None]
+        if bad:
+            return False, f"{bad[0]!r} is not a weekday — use {_days}, most wanted rest first"
+        seen = [_parse_day(w) for w in parts]
+        if len(set(seen)) != len(seen):
+            return False, "each day can appear only once — this is a ranking, not a tally"
     return True, None
 
 
@@ -1743,6 +1761,17 @@ def apply_settings_overrides(db):
     )
     with _weather_lock:            # cities may have changed → drop the cached bundle so the next
         _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
+    # §DAYPREF — the week shape lives in the ENGINE, not in `config()`: `_run_days` is called deep
+    # inside the week lay, far below anything holding a db handle, so the preference is published as
+    # an engine module global (the pattern SETTINGS_SPEC's own contract describes — "the effective
+    # value lives in the same module global each read-site already uses"). Both halves go in ONE
+    # call, and `set_day_preferences` swaps them as ONE tuple, so a regeneration racing a save can
+    # never lay a week from the new long-run day and the old rest ranking.
+    # ⚠ This changes only how the NEXT plan is laid. A plan already generated keeps the shape it was
+    # generated with until the athlete regenerates — the same staleness §FT7 already labels.
+    set_day_preferences(
+        _resolve_setting(db, SETTINGS_BY_KEY["long_run_day"])[0],
+        _resolve_setting(db, SETTINGS_BY_KEY["rest_day_rank"])[0])
     # §TZ — the SAME zone owns the engine's calendar day, not just the nightly job's wall clock. This
     # is the authoritative apply: the import-time bootstrap only sees the env var, and the stored
     # setting overrides it. Applying it here also means a tz changed in the Settings window moves

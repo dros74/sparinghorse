@@ -8693,6 +8693,261 @@ def _stc_clock_couple():
                     "failures": fail or "none"})
 
 
+def _stc_day_preference():
+    """§DAYPREF — the athlete's own week shape, DERIVED rather than read out of RUN_DAY_LAYOUTS.
+    Rest-day placement and the long run's weekday are per-athlete facts (a shift worker rests Tuesday
+    and Wednesday; a parent runs long on Saturday), so the table became the DEFAULT and the athlete
+    got two settings. Locks:
+    (a) NOTHING SET ⇒ BYTE-IDENTICAL — `_run_days` is the house layout at every frequency and the
+        long run is the last slot. §DAYPREF is opt-in or it is a regression in every plan ever laid;
+    (b) A RANKING ANSWERS A FREQUENCY A FIXED PAIR CANNOT. This is the whole reason rest days are a
+        ranking and not two more settings: my own 19-week block lays 4-, 5- AND 6-run weeks, and at
+        six runs only ONE rest day exists, so "rest Monday and Friday" has no answer. Ranked, it
+        does — Friday is kept and Monday yields, because that is the order given;
+    (c) the long-run day is never spent as a rest day, even when the ranking names it first;
+    (d) a PARTIAL ranking degrades toward the HOUSE rest days, not toward an arbitrary set;
+    (e) rest clumping is measured ACROSS THE WEEK SEAM and held under `_rest_clump_ceiling` for
+        every one of 13,440 derived layouts. This is the rule the old table only got as a SIDE
+        EFFECT of ending every layout on Sunday ("a week never ends on a rest" — the 2026-06-22
+        cross-week seam); with the long run free to leave Sunday it has to be stated outright. The
+        escape hatch is SEEN, not assumed: at two runs a week five days are rest and clumping is
+        arithmetic, so that is exactly where the second pass lets the ranking win;
+    (f) the parsers take what a person types and the validator refuses what they mistype — and
+        Monday, offset 0 and falsy, still reads as a preference."""
+    import itertools
+    D = E.DAY_NAMES
+    nm = lambda ds: [D[d] for d in ds]
+    fail, swept = [], 0
+    try:
+        # (a) — the control. Every existing plan depends on this line.
+        E.set_day_preferences(None, None)
+        if E._has_day_pref():
+            fail.append("_has_day_pref() is True with nothing set")
+        for n, tpl in E.RUN_DAY_LAYOUTS.items():
+            if list(E._run_days(n)) != list(tpl):
+                fail.append(f"no preference: _run_days({n}) = {list(E._run_days(n))} != house {list(tpl)}")
+            if E._long_slot(list(tpl)) != len(tpl) - 1:
+                fail.append(f"no preference: long slot at n={n} is not the last slot")
+
+        # (b) — HIS ASK, and the frequency that proves the ranking earns its shape.
+        E.set_day_preferences("sun", "fri,mon")
+        for n, want in ((5, [1, 2, 3, 5, 6]),        # Tue,Wed,Thu,Sat,Sun — rest Mon+Fri, the ask
+                        (6, [0, 1, 2, 3, 5, 6])):    # one rest exists: Friday keeps it, Monday yields
+            got = list(E._run_days(n))
+            if got != want:
+                fail.append(f"rest Mon+Fri at n={n}: laid {nm(got)}, expected {nm(want)}")
+        if not E._has_day_pref():
+            fail.append("_has_day_pref() is False with a preference set")
+
+        # (c) — the perverse input: the ranking asks to rest the day the long run is on.
+        E.set_day_preferences("sun", "sun,fri,mon")
+        for n in range(1, 7):
+            if 6 not in list(E._run_days(n)):
+                fail.append(f"the long-run day was spent as a rest day at n={n}")
+        if list(E._run_days(5)) != [1, 2, 3, 5, 6]:
+            fail.append("naming the long day in the ranking changed the layout — it must be skipped, "
+                        f"not obeyed: {nm(list(E._run_days(5)))}")
+
+        # (d) — one day named, nothing else said: the rest of the week keeps the house shape.
+        E.set_day_preferences(None, "mon")
+        got = set(E._rest_days(E._run_days(5)))
+        house = set(E._rest_days(E.RUN_DAY_LAYOUTS[5]))
+        if 0 not in got:
+            fail.append(f"a named rest day was not honoured: rest {nm(sorted(got))}")
+        if not (got - {0}) <= house:
+            fail.append(f"a partial ranking drifted off the house shape: rest {nm(sorted(got))} "
+                        f"vs house {nm(sorted(house))}")
+
+        # (e) — the seam. A layout resting Sunday whose next week rests Monday is ONE two-day gap the
+        # athlete lives, not two one-day gaps; a measure that cannot see that is the 2026-06-22 bug
+        # waiting to come back through a door the long run no longer holds shut.
+        if E._max_rest_streak([0, 1, 2, 3, 4]) != 2:      # runs Mon–Fri ⇒ Sat+Sun off
+            fail.append("_max_rest_streak does not count a plain two-day weekend gap")
+        if E._max_rest_streak([1, 2, 3, 4, 5]) != 2:      # Sun off, then Mon off — ACROSS the seam
+            fail.append("_max_rest_streak missed a rest streak that spans the week seam")
+        if E._max_rest_streak([0, 1, 3, 5, 6]) != 1:      # the house 5-run layout: no gap at all
+            fail.append("_max_rest_streak invented a gap in the house layout")
+        for rank in itertools.permutations(range(7), 4):
+            for ld in (None, 0, 2, 6):
+                E.set_day_preferences(D[ld] if ld is not None else None,
+                                      ",".join(D[d] for d in rank))
+                for n in range(3, 7):                    # every frequency the templates actually lay
+                    days = list(E._run_days(n)); swept += 1
+                    if len(days) != n or len(set(days)) != n:
+                        fail.append(f"derived layout is not {n} distinct days: {days}")
+                    if ld is not None and ld not in days:
+                        fail.append(f"long day {D[ld]} not laid at n={n}: {nm(days)}")
+                    clump, ceil = E._max_rest_streak(days), E._rest_clump_ceiling(n)
+                    if clump > ceil:
+                        fail.append(f"rest clumping {clump} > ceiling {ceil} at n={n}, "
+                                    f"ranking {nm(rank)}, long {ld}: {nm(days)}")
+        # …and the second pass IS reachable — at two runs a week, where it should be and only there.
+        E.set_day_preferences("mon", "tue,thu,fri")   # long Monday, and the free days ranked away
+        if E._max_rest_streak(list(E._run_days(2))) <= E._rest_clump_ceiling(2):
+            fail.append("the ranking-outranks-the-ceiling pass is unreachable — case (e) is vacuous")
+
+        # (f) — the parsers.
+        for text, want in (("sat", 5), ("SATURDAY", 5), ("  Sun ", 6), ("mon", 0),
+                           ("sa", None), ("", None), (None, None), ("funday", None)):
+            if E._parse_day(text) != want:
+                fail.append(f"_parse_day({text!r}) = {E._parse_day(text)}, expected {want}")
+        for text, want in (("fri,mon", (4, 0)), ("fri mon", (4, 0)), ("FRI, Monday", (4, 0)),
+                           ("fri,fri,mon", (4, 0)), ("fri,zzz,mon", (4, 0)), ("", ())):
+            if E._parse_day_rank(text) != want:
+                fail.append(f"_parse_day_rank({text!r}) = {E._parse_day_rank(text)}, expected {want}")
+        # Monday is offset 0. `any(day_preferences())` would read that as "nothing set" and quietly
+        # ignore the one athlete who asked for a Monday long run — hence `_has_day_pref`.
+        E.set_day_preferences("mon", "")
+        if not E._has_day_pref():
+            fail.append("a Monday long run reads as no preference at all — the falsy-zero bug")
+        # and the validator refuses out loud what the parser forgives silently
+        for key, val, ok in (("long_run_day", "sat", True), ("long_run_day", "xyz", False),
+                             ("long_run_day", "sat,sun", False), ("rest_day_rank", "fri,mon", True),
+                             ("rest_day_rank", "fri,fri", False), ("rest_day_rank", "fri,nope", False),
+                             ("rest_day_rank", "", True), ("long_run_day", "", True)):
+            if S.validate_setting(key, val)[0] is not ok:
+                fail.append(f"validate_setting({key}, {val!r}) did not answer {ok}")
+    finally:
+        E.set_day_preferences(None, None)               # never leak a preference into another det
+    return _st("det", "day-preference",
+               "§DAYPREF rest days and the long-run day are the ATHLETE's, not the house table's: "
+               "nothing set is byte-identical to the vetted layouts; a RANKED rest preference answers "
+               "every frequency a plan lays (at 6 runs only one rest day exists — a fixed pair has no "
+               "answer, the ranking does); the long day is never spent as a rest even when the ranking "
+               "names it; a partial ranking degrades toward the house shape; and seam-aware rest "
+               "clumping holds under its ceiling across 13,440 derived layouts, with the "
+               "ranking-wins pass proven reachable exactly where clumping is arithmetic",
+               passed=not fail,
+               expect="no preference ⇒ the house table; every derived layout honours the long day and the clump ceiling",
+               got={"layouts_swept": swept, "failures": fail or "none"})
+
+
+def _stc_long_run_day():
+    """§DAYPREF — the long run on the day the athlete NAMED, and what had to come apart for it.
+    `long_idx = n - 1` was not a choice, it was a restatement of the layout table: every layout ended
+    Sunday, so "last slot", "the long run" and "Sunday" were one fact wearing one hat. Locks:
+    (a) a preferred long day CARRIES the long run and it is still the week's longest run;
+    (b) ⭐ THE ABSOLUTE-DISTANCE TOOTH. The hard-gap guard compared `days[n-1] - days[s]` SIGNED,
+        which was safe only while the long run ended the week. With a Wednesday long run every later
+        day reads negative, "< 2", and is refused — the week carries NO quality at all;
+    (c) ⭐ AND THE GUARD HAS TO RUN AT ALL. It was gated on `av_blocked is not None` because a
+        template day set was trusted; a DERIVED one is no more vetted than an §AV-relaid one. Before
+        this, a Wednesday long run took its interval on TUESDAY, the day before it;
+    (d) §REST2's lesson, one governor over: an athlete who rests Saturday and Sunday has already
+        chosen a five-day streak, so judging their spread day against AV_MAX_STREAK refuses every
+        candidate and SHEDS the volume. Two separate teeth, because two separate mechanisms hold it
+        and either alone hid the other in the first draft of this det: the week RE-LAYS off the
+        ranking (so it gives up its LOWEST-ranked rest day, where a spacing-picked append would take
+        the highest) and holds the no-preference control's volume; and §AV RELOCATES a blocked run
+        on such a layout rather than shedding it;
+    (e) §AV: when availability blocks the preferred long day the long run goes to the NEAREST
+        surviving day (ties to the later one — the week banks its easy days in front of the long
+        run), never to whatever happens to end the week;
+    (f) no preference ⇒ Sunday, byte-identical."""
+    from datetime import date
+    D = E.DAY_NAMES
+    easy = 360.0
+    zones = {"easy": 360.0, "marathon": 330.0, "threshold": 300.0, "interval": 270.0}
+    bs = date(2026, 8, 3)                                # a Monday
+    wk = {"wk": 1, "km": 60, "runs": 5, "long": 22, "strides": 0,
+          "quality": [{"kind": "interval", "zone": "interval", "frac": 0.12,
+                       "reps": 5, "rep_min": 3.0, "jog_min": 2.0}]}
+    tr = 60.0 * (easy / 60.0) * E.EASY_TRIMP_PER_MIN
+    fail, seen = [], {}
+
+    def lay(**kw):
+        ss, _ = E._distribute_week(wk, bs, tr, easy, zones, **kw)
+        off = lambda s: (E._date(s["date"]) - bs).days
+        longs = [off(s) for s in ss if str(s.get("kind") or "").startswith("long")]
+        qual = [off(s) for s in ss if s.get("kind") not in ("easy", "long", "rest")]
+        return ss, longs, qual
+
+    try:
+        # (f) — the control, first, so a later leak can't fake it.
+        E.set_day_preferences(None, None)
+        _, c_long, c_qual = lay()
+        if c_long != [6]:
+            fail.append(f"no preference: the long run left Sunday — {[D[d] for d in c_long]}")
+        seen["control"] = {"long": [D[d] for d in c_long], "quality": [D[d] for d in c_qual]}
+
+        # (a)(b)(c) — the long run mid-week, on BOTH paths. `av_blocked=None` is the plain lay: the
+        # path that used to skip the hard-gap guard entirely.
+        E.set_day_preferences("wed", "sat,sun")
+        for tag, kw in (("plain", {}), ("av", {"av_blocked": []})):
+            ss, longs, qual = lay(**kw)
+            if longs != [2]:
+                fail.append(f"{tag}: long run not on Wednesday — {[D[d] for d in longs]}")
+            if not qual:
+                fail.append(f"{tag}: the week carries no quality at all — the signed-distance bug")
+            for q in qual:
+                if abs(q - 2) < 2:
+                    fail.append(f"{tag}: hard session on {D[q]}, adjacent to the Wednesday long run")
+            lk = max((s.get("km") or 0.0) for s in ss if str(s.get("kind") or "").startswith("long"))
+            ek = max((s.get("km") or 0.0) for s in ss if s.get("kind") == "easy")
+            if lk < ek:
+                fail.append(f"{tag}: the labelled long run ({lk}) is not the week's longest ({ek})")
+            seen[tag] = {"long": [D[d] for d in longs], "quality": [D[d] for d in qual]}
+
+        # (d) — the weekend-off athlete, whose own layout spends a five-day streak BY CONSTRUCTION:
+        # they asked for Saturday and Sunday off at five runs. A rule written for an arbitrary loose
+        # day is now judging a layout they vetted, which is precisely §REST2's pathology.
+        pwk = {"wk": 1, "km": 35, "runs": 5, "long": 12, "strides": 0, "quality": []}
+        ptr = 35.0 * (easy / 60.0) * E.EASY_TRIMP_PER_MIN
+        E.set_day_preferences(None, None)
+        c_s, _ = E._distribute_week(pwk, bs, ptr, easy, zones, long_km_cap=5.5)
+        c_km = round(sum(s.get("km") or 0.0 for s in c_s), 1)
+        # ⭐ Sunday is ranked ABOVE Saturday here deliberately, and that is what makes this tooth
+        # bite: Sunday is exactly the day a spacing-picked APPEND reaches for (it is the lower-streak
+        # candidate), so "which rest day did the week give up" is what separates a RE-LAY from an
+        # append. A re-lay derives the 6-run layout from the ranking and drops the LOWEST-ranked rest
+        # day; the append takes the day they wanted most. Ranked the other way round the two agree
+        # and the assertion proves nothing — which is what the first version of this det did.
+        E.set_day_preferences("fri", "sun,sat")
+        p_s, _ = E._distribute_week(pwk, bs, ptr, easy, zones, long_km_cap=5.5)
+        p_days = sorted((E._date(s["date"]) - bs).days for s in p_s)
+        p_km = round(sum(s.get("km") or 0.0 for s in p_s), 1)
+        if len(p_days) <= pwk["runs"]:
+            fail.append(f"the spread never re-laid for a preference athlete: {[D[d] for d in p_days]} "
+                        f"— AV_MAX_STREAK judged their own layout and the week shed (§REST2's bug)")
+        if 6 in p_days:
+            fail.append(f"the week gave up SUNDAY, its top-ranked rest day: {[D[d] for d in p_days]} "
+                        f"— a spacing-picked append, not a re-lay off the ranking")
+        if p_km < c_km - 0.05:
+            fail.append(f"a preference cost volume: {p_km} km vs the control's {c_km} km")
+        # …and the same ceiling governs §AV's relocation. Blocking Monday must MOVE that run to
+        # Sunday — a streak of 4, under the 5 this athlete already spends — not shed it.
+        avd, shed = E._av_run_days(5, [0])
+        if shed or list(avd) != [1, 2, 3, 4, 6]:
+            fail.append(f"§AV shed a run instead of relocating it on a preference layout: "
+                        f"{[D[d] for d in avd]} shed={shed} — AV_MAX_STREAK judging a vetted layout")
+        seen["weekend_off"] = {"days": [D[d] for d in p_days], "km": p_km, "control_km": c_km,
+                               "av_block_mon": [D[d] for d in avd], "av_shed": shed}
+
+        # (e) — availability takes the named day away.
+        E.set_day_preferences("wed", "sat,sun")
+        for blocked, want in (([2], 3), ([2, 3], 1), ([2, 1], 3)):
+            avd, _shed = E._av_run_days(5, blocked)
+            got = avd[E._long_slot(avd)]
+            if got != want:
+                fail.append(f"§AV blocked {[D[b] for b in blocked]}: long run went to {D[got]}, "
+                            f"expected the nearest surviving day {D[want]}")
+        seen["av_blocked"] = "long run → nearest surviving day, ties to the later one"
+    finally:
+        E.set_day_preferences(None, None)
+    return _st("det", "long-run-day",
+               "§DAYPREF the long run sits on the day the athlete named, and the three things "
+               "`long_idx = n - 1` was silently also saying now hold on their own: the hard-gap "
+               "distance is ABSOLUTE (signed, a mid-week long run refuses every later day and the "
+               "week carries no quality), the guard runs for a DERIVED day set and not only an §AV "
+               "one (without it a Wednesday long run takes its interval on Tuesday), and a "
+               "preference layout is judged by its own spacing — a weekend-off athlete re-lays and "
+               "holds the control's volume instead of shedding it, giving up their LOWEST-ranked "
+               "rest day; §AV hands a blocked long run to the nearest surviving day",
+               passed=not fail,
+               expect="long run on the named day; quality ≥2 days clear either side; no volume shed for having a preference",
+               got={"laid": seen, "failures": fail or "none"})
+
+
 def _stc_easy_ladder():
     """§PRO24 — the easy days of an assertive week are a LADDER, not five copies of one number, and the
     shape may never take a LOAD decision. Six teeth.
@@ -14021,6 +14276,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
                  lambda: _stc_long_run_step(), lambda: _stc_long_run_identity(), lambda: _stc_eq_km(), lambda: _stc_eq_stable(),
                  lambda: _stc_clock_couple(), lambda: _stc_easy_ladder(),
+                 lambda: _stc_day_preference(), lambda: _stc_long_run_day(),
                  lambda: _stc_trimp_price(), lambda: _stc_week_trimp_bound(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),

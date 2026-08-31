@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.48.0"
+ENGINE_VERSION = "0.49.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -137,6 +137,16 @@ SETTINGS_SPEC = [
     {"key": "athlete_age", "env": "SH_ATHLETE_AGE", "label": "Age (years)", "kind": "line",
      "help": "Used only as a cold-start PRIOR before real data exists (HRmax ≈ 208 − 0.7×age, "
              "Tanaka); measured heart-rate data takes over as it lands. Empty = no prior."},
+    {"key": "long_run_day", "env": "SH_LONG_RUN_DAY", "label": "Long run day", "kind": "line",
+     "help": "The weekday your long run should fall on — mon, tue, wed, thu, fri, sat or sun. "
+             "Empty = the house default, Sunday. This day anchors the week: hard sessions keep a "
+             "clear day either side of it, and the easy runs are sized by how far they sit from it."},
+    {"key": "rest_day_rank", "env": "SH_REST_DAY_RANK", "label": "Rest days, most wanted first",
+     "kind": "line",
+     "help": "Your rest days as a RANKED list, e.g. 'fri,mon,wed'. A plan's run count changes week "
+             "to week — six runs leaves one rest day, four leaves three — so a ranking is what "
+             "lets the plan honour you at every frequency: it takes rest days off the top of your "
+             "list until the week has enough. Empty = the house layouts."},
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
 
@@ -819,17 +829,218 @@ RUN_DAY_LAYOUTS = {
 }
 
 
-def _run_days(n):
-    """Day-of-week slots for n weekly runs, spread to avoid 3 consecutive run days, with the long run
-    on the last slot — always Sunday (offset 6), so a week never ends on a rest. Falls back to an
-    even spread (which also spans 0..6, hence ends on Sunday)."""
+# ── §DAYPREF — the athlete's own week shape ──────────────────────────────────
+# RUN_DAY_LAYOUTS above is the HOUSE default, not a law. Which days are rest and which day carries
+# the long run are per-athlete facts — a shift worker rests Tuesday and Wednesday, a parent runs long
+# on Saturday — and this app is meant to serve any runner, so they belong to the athlete rather than
+# to a constant. Two settings express it, and the split between them is deliberate:
+#
+#  · `long_run_day` is a SINGLE day and it is HARD. The long run anchors the week: the quality walk
+#    keeps a clear day either side of it, §PRO24's easy ladder orders the short runs by their
+#    distance from it, and §PRO9 caps it on its own. It is the one day the athlete names outright.
+#
+#  · `rest_day_rank` is a RANKED list and it is SOFT. It has to be: the run count MOVES inside a
+#    single plan (my own 19-week block lays 4-, 5- and 6-run weeks, and §REST2 can re-lay a week UP
+#    mid-plan to buy back volume), so "rest Monday and Friday" is UNDEFINED at six runs — only one
+#    rest day exists — and underspecified at four, where a third must be placed somewhere. One
+#    ranking answers every frequency: take rest days off the top of the list until the week has its
+#    quota. A fixed pair of days cannot, which is why this is a ranking and not two more settings.
+#
+# ⚠ NOTHING SET ⇒ BYTE-IDENTICAL. Both default to empty and every path below then returns the house
+# table exactly as before. That is what keeps the ten goldens, and every plan already generated, still.
+DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")   # 0=Mon … 6=Sun, the week-offset basis
+
+REST_CLUMP_MAX = 2   # §DAYPREF — the most consecutive REST days a derived layout may create. Two is
+#                      an ordinary training pattern (a weekend off, a mid-week double rest); three
+#                      starts to be a layoff, and at four runs or more nothing forces one. It is a
+#                      ceiling on CLUMPING, not on the ranking: at low frequencies rest days
+#                      outnumber run days and a long gap is arithmetic, so the effective ceiling is
+#                      the larger of this and what the house layout at that frequency already lives
+#                      with (`_rest_clump_ceiling`). The ranking still outranks it — see
+#                      `_derive_run_days`' second pass.
+
+# The effective preference, published as ONE tuple so no read can catch it half-applied — the same
+# TECH-4 discipline `_config_swap` uses app-side, and it matters here for the same reason: a long-run
+# day paired with the previous ranking would lay a week neither setting describes. Seeded from the
+# environment at import; `set_day_preferences` overlays the stored setting at startup and after every
+# save, exactly as SETTINGS_SPEC's contract describes.
+_DAY_PREF = (None, ())
+
+
+def _parse_day(text):
+    """A weekday name → its week offset (0=Mon … 6=Sun), or None if it names no day. Accepts any
+    prefix from three letters up ('sat', 'saturday'), case- and space-insensitive, so the setting
+    reads the way a person writes it. Deliberately NOT numeric: '1' is Monday to half the world and
+    Tuesday to the other half, and this value decides which days the athlete runs."""
+    t = (text or "").strip().lower()
+    if len(t) < 3:
+        return None
+    for i, nm in enumerate(DAY_NAMES):
+        if t.startswith(nm):
+            return i
+    return None
+
+
+def _parse_day_rank(text):
+    """A comma- or space-separated ranked day list → a tuple of offsets, most-wanted-rest FIRST.
+    Unparseable entries are dropped and a repeated day keeps its FIRST (highest) rank — a ranking is
+    a preference, so a typo should cost that one day its place in the queue, never wedge plan
+    generation. `validate_setting` is what refuses the typo out loud on the way IN; this stays
+    forgiving so a value already stored can never stop the engine laying a week."""
+    out = []
+    for part in (text or "").replace(",", " ").split():
+        d = _parse_day(part)
+        if d is not None and d not in out:
+            out.append(d)
+    return tuple(out)
+
+
+def day_preferences():
+    """The effective (long_run_day, rest_day_rank) in ONE read, so the two can never disagree."""
+    return _DAY_PREF
+
+
+def set_day_preferences(long_day_text, rest_rank_text):
+    """Publish the athlete's week shape as one atomic swap. Called at import from the environment,
+    and by the app's `apply_settings_overrides` at startup and after every settings save."""
+    global _DAY_PREF
+    _DAY_PREF = (_parse_day(long_day_text), _parse_day_rank(rest_rank_text))
+
+
+def _has_day_pref():
+    """Whether the athlete has expressed ANY week-shape preference. ⚠ Not `any(day_preferences())`:
+    Monday is offset 0, which is falsy, and that reading would silently ignore the one athlete who
+    asked for a Monday long run."""
+    long_day, rest_rank = day_preferences()
+    return long_day is not None or bool(rest_rank)
+
+
+set_day_preferences(os.environ.get("SH_LONG_RUN_DAY"), os.environ.get("SH_REST_DAY_RANK"))
+
+
+def _rest_days(days):
+    """The week offsets a laid week does NOT run."""
+    return [d for d in range(7) if d not in set(days)]
+
+
+def _max_rest_streak(days):
+    """Longest run of consecutive REST days in a laid week, measured AROUND THE WEEK SEAM — the week
+    repeats, so a layout that rests Sunday and then rests Monday is a two-day gap the athlete
+    actually lives, not two separate one-day gaps.
+
+    ⭐ This is the rule the house table used to encode as a SIDE EFFECT. Every layout ended on Sunday,
+    and the comment on RUN_DAY_LAYOUTS says why: "because a week never ends on a rest, two consecutive
+    weeks can't strand a double rest at the boundary — fixes the 2026-06-22 cross-week seam". Once the
+    long run is free to leave Sunday that side effect is gone, so the constraint has to be stated in
+    its own right rather than inherited from where the long run happened to sit."""
+    rest = set(_rest_days(days))
+    if not rest:
+        return 0
+    if len(rest) == 7:
+        return 7
+    best = cur = 0
+    for d in list(range(7)) * 2:          # twice round the week, so the seam is measured like a gap
+        cur = cur + 1 if d in rest else 0
+        best = max(best, cur)
+    return min(best, len(rest))
+
+
+def _rest_clump_ceiling(n):
+    """How clumped a derived layout's rest days may get at `n` runs/week: the larger of
+    REST_CLUMP_MAX and what the HOUSE layout at that frequency already lives with. Self-calibrating
+    on purpose — at two runs a week five days are rest and a three-day gap is arithmetic, so a flat
+    constant would refuse every legal layout and the athlete's preference would fall back to the
+    table without ever saying so. Whatever the default already does is, by definition, allowed."""
+    house = RUN_DAY_LAYOUTS.get(n)
+    return max(REST_CLUMP_MAX, _max_rest_streak(house) if house else 0)
+
+
+def _derive_run_days(n, long_day, rest_rank):
+    """§DAYPREF — the run-day layout for `n` runs BUILT from the athlete's preference instead of read
+    out of RUN_DAY_LAYOUTS.
+
+    Rest days come off the top of `rest_rank`, skipping any candidate that would (a) rest the
+    long-run day or (b) push the seam-aware rest clumping past `_rest_clump_ceiling(n)`. When the
+    ranking runs out, the HOUSE layout's own rest days for this frequency fill the remainder, and
+    only then any day still free — so a partial ranking ("just keep Friday off") degrades toward the
+    default shape rather than toward an arbitrary one.
+
+    ⭐ THE RANKING OUTRANKS THE CLUMP CEILING when the two cannot both hold (the second pass). The
+    athlete named these days; a preference the engine quietly overrules is worse than a gap it can
+    describe. Same ruling as the run-day streak below — their choice, their streak.
+
+    The greedy accumulation is sound because adding a rest day can only lengthen the rest streak,
+    never shorten it, so checking each candidate as it lands is equivalent to checking the finished
+    set — and where greed paints itself into a corner, the second pass is what gets out."""
     if n <= 0:
         return []
+    if n >= 7:
+        return list(range(7))
+    quota = 7 - n
+    ceiling = _rest_clump_ceiling(n)
+    house_rests = _rest_days(RUN_DAY_LAYOUTS.get(n) or [])
+    order = (list(rest_rank)
+             + [d for d in house_rests if d not in rest_rank]
+             + [d for d in range(7) if d not in rest_rank and d not in house_rests])
+    rests = []
+    for allow_clump in (False, True):     # pass 1 honours the ceiling; pass 2 is the athlete's word
+        for d in order:
+            if len(rests) >= quota:
+                break
+            if d in rests or d == long_day:      # the long run's day is never a rest day
+                continue
+            if not allow_clump:
+                cand = set(rests) | {d}
+                if _max_rest_streak([x for x in range(7) if x not in cand]) > ceiling:
+                    continue
+            rests.append(d)
+        if len(rests) >= quota:
+            break
+    return sorted(d for d in range(7) if d not in set(rests))
+
+
+def _run_days(n):
+    """Day-of-week slots for n weekly runs. With no §DAYPREF preference set this is the vetted house
+    layout, unchanged: spread to avoid 3 consecutive run days, with the long run on the last slot and
+    every layout ending Sunday, so a week never ends on a rest. With a preference set it is the
+    athlete's own derived layout. Falls back to an even spread (which also spans 0..6, hence ends on
+    Sunday) for a frequency the table does not name."""
+    if n <= 0:
+        return []
+    if _has_day_pref():
+        return _derive_run_days(n, *day_preferences())
     if n in RUN_DAY_LAYOUTS:
         return RUN_DAY_LAYOUTS[n]
     if n == 1:
         return [6]
     return sorted({round(i * 6 / (n - 1)) for i in range(n)})
+
+
+def _long_slot(days):
+    """Which SLOT of a laid week carries the long run.
+
+    Default (no preference) is the LAST slot — every house layout ends Sunday, so that is the Sunday
+    long run, and this path stays byte-identical to the `long_idx = n - 1` it replaces.
+
+    With a preferred long day set, it is that day's slot. If the day is not in this week's set — §AV
+    blocked it, §JR shed it, or a low-frequency week never reaches it — the NEAREST laid day takes
+    the long run instead, because "my long run is Wednesday" is better served by Tuesday or Thursday
+    than by whatever happens to end the week. A tie — the preferred day blocked with a free day
+    either side — breaks to the LATER one, which is both deterministic and the right answer: the
+    long run is the week's biggest session and the house default puts it at the END of the week
+    precisely so the easy days bank in front of it. Sliding Wednesday's long run back to Tuesday
+    would make it the week's second day; Thursday keeps the shape the athlete asked for.
+
+    ⚠ Call this BEFORE §PRO9's spread appends extra easy days: `days` is not re-sorted after an
+    append, so a slot index is only meaningful against the day set the week was laid on."""
+    if not days:
+        return 0
+    long_day, _ = day_preferences()
+    if long_day is None:
+        return len(days) - 1
+    if long_day in days:
+        return days.index(long_day)
+    return min(range(len(days)), key=lambda i: (abs(days[i] - long_day), -days[i]))
 
 
 AV_MAX_STREAK = 3   # §AV — a relocation may never create a run-streak longer than this (the n=6
@@ -874,6 +1085,26 @@ def _max_streak(days):
     return best
 
 
+def _streak_ceiling(base):
+    """The longest run-streak an §AV relocation or a §PRO9 spread day may CREATE.
+
+    Normally AV_MAX_STREAK: an arbitrary day dropped into a week can chain anything, which is the
+    whole reason that constant exists.
+
+    §DAYPREF changes what "arbitrary" means. An athlete who asked to rest Saturday and Sunday has
+    ALREADY chosen a five-day streak — it is arithmetic, not an accident — and judging their added
+    day against 3 refuses EVERY candidate, so the run is shed instead of moved. That is §REST2's
+    pathology exactly, one governor over: a rule written for a loose day applied to a whole layout
+    the athlete vetted. So their own layout sets the floor, and the rule keeps its real meaning —
+    a relocation may not make the week DENSER THAN THEY ASKED FOR.
+
+    ⚠ With no preference set this returns AV_MAX_STREAK unchanged, so every existing path is
+    byte-identical. It is deliberately gated on the preference rather than on `max()` alone: the
+    7-run layout has a streak of 7, and a bare `max()` would quietly hand every athlete that
+    ceiling on any week the templates ever laid at seven runs."""
+    return max(AV_MAX_STREAK, _max_streak(base)) if _has_day_pref() else AV_MAX_STREAK
+
+
 def _week_run_tail(sessions, week_start_iso):
     """§REST — the count of consecutive RUN days ENDING a laid week (offset 6 = its last day),
     e.g. 3 for a week laid […, 4, 5, 6] and 0 for one that rests on its final day. This is the
@@ -901,7 +1132,11 @@ def _av_run_days(n, blocked_offsets):
     relocation that would force a streak > AV_MAX_STREAK (or has no free day at all) is SHED
     (reduce-only: §AV may move or remove load, never cram it). The sorted result's last slot is the
     long run — "long = last available day" generalizes the template's fixed Sunday. Returns
-    (days, shed_count); blocked days that were rest anyway return the template untouched."""
+    (days, shed_count); blocked days that were rest anyway return the template untouched.
+    ⚠ §DAYPREF — this no longer decides WHICH day is the long run; `_long_slot` does, reading the
+    day set this returns. With no preference the answer is the same one this used to state ("long =
+    last available day", generalising the template's fixed Sunday); with a preferred long day that
+    availability blocked, the nearest surviving day takes it rather than whatever ends the week."""
     base = _run_days(n)
     blocked = set(blocked_offsets or ())
     if not blocked & set(base):
@@ -912,7 +1147,7 @@ def _av_run_days(n, blocked_offsets):
         if not cands:
             continue                                   # nowhere to go — shed
         best = min(cands, key=lambda c: (_max_streak(sorted(days + [c])), abs(c - b), c))
-        if _max_streak(sorted(days + [best])) > AV_MAX_STREAK:
+        if _max_streak(sorted(days + [best])) > _streak_ceiling(base):   # §DAYPREF
             continue                                   # any placement over-densifies — shed
         days.append(best)
         days.sort()
@@ -1535,7 +1770,14 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     from datetime import timedelta
     days = (list(days_override) if days_override is not None
             else list(_run_days(_relay_runs or wk["runs"])))
-    n = len(days)                                        # last slot = the long run
+    n = len(days)
+    # §DAYPREF — WHICH SLOT IS THE LONG RUN. This used to be `n - 1` computed further down, which was
+    # the same statement the layout table made ("every layout ENDS on Sunday"): last slot = long run =
+    # Sunday, all one fact. With the long day now an athlete preference the three come apart, so the
+    # slot is resolved ONCE here, before anything reads it — the quality walk below needs it, and
+    # §PRO9's spread appends to `days` without re-sorting, so a slot index taken later would be
+    # measured against a different list. No preference ⇒ `_long_slot` returns n - 1 exactly as before.
+    long_idx = _long_slot(days)
     quality = (wk.get("quality") or []) if zones else []
     mid_q = [q for q in quality if q.get("attach") != "long"]
     long_q = next((q for q in quality if q.get("attach") == "long"), None)
@@ -1545,17 +1787,31 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # straddle remainder to keep a still-ahead quality session on its own laid day (slot 0 is
     # allowed there: mid-week the athlete isn't on a "first run back").
     if q_days is not None:
-        pins = [days.index(d) for d in q_days if d in days and d != days[n - 1]]
+        pins = [days.index(d) for d in q_days if d in days and d != days[long_idx]]
         q_slots = pins[:len(mid_q)]
         mid_q = mid_q[:len(q_slots)]
     else:
         q_slots, s = [], 1
         for _q in mid_q:
-            if av_blocked is not None:                   # §AV — hard-gap guard on re-laid day sets
-                while s <= n - 2 and ((days[n - 1] - days[s]) < 2
-                                      or (q_slots and (days[s] - days[q_slots[-1]]) < 2)):
-                    s += 1
-            if s <= n - 2:
+            # §DAYPREF — three things `s <= n - 2` + `av_blocked is not None` used to say implicitly:
+            #  · "not the long slot" is now `s != long_idx`, because the long run is no longer last;
+            #  · the hard-gap distance is ABSOLUTE. A quality day can now fall AFTER the long run,
+            #    where the old signed `days[n-1] - days[s]` would go negative, read as "< 2" and
+            #    correctly refuse — but with the long run mid-week that same reading refuses EVERY
+            #    later day too, and the week ends up carrying no quality at all. Distance has no
+            #    sign; the gap rule never cared which side of the long run a day sat on.
+            #  · the guard now runs for a PREFERENCE layout as well as an §AV one. Its own reason
+            #    (above) is that "an §AV re-laid day set isn't a vetted template" — and neither is a
+            #    derived one. The plain path was safe only because every template put the long run
+            #    on Sunday and slot 1 on Tuesday, four days apart by construction; with a Wednesday
+            #    long run, slot 1 IS Tuesday and the week seats an interval the day before its long
+            #    run (measured on this fixture before the fix). Byte-identical with no preference set.
+            while s < n and (s == long_idx
+                             or ((av_blocked is not None or _has_day_pref())
+                                 and (abs(days[long_idx] - days[s]) < 2
+                                      or (q_slots and (days[s] - days[q_slots[-1]]) < 2)))):
+                s += 1
+            if s < n and s != long_idx:
                 q_slots.append(s); s += 1
     mid_q = mid_q[:len(q_slots)]
     q_by_slot = dict(zip(q_slots, mid_q))
@@ -1574,8 +1830,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
 
     # easy + long runs over the remaining slots — long gets the weighted share (capped so a single
     # day can't spike fatigue); strides ride the first easy run, as in the re-base.
-    easy_slots = [i for i in range(n) if i not in q_by_slot]
-    long_idx = n - 1
+    easy_slots = [i for i in range(n) if i not in q_by_slot]   # long_idx resolved above (§DAYPREF)
     # re-base is the pure-easy (zones=None) block — keep its original conservative long-run cap so the
     # post-illness restart stays byte-identical; the recalibrated cap applies to the marathon-prep phases.
     long_cap = _long_share_cap(wk, zones)      # §PRO26
@@ -1707,7 +1962,16 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             #  · RELAY_MAX_RUNS — never the 7-day layout, which has no rest day at all (§REST's
             #    founding pathology, the 2026-07-16 week);
             #  · AV_MAX_STREAK on the re-laid week itself — the layout must earn its own spacing,
-            #    not inherit permission from being a template (it also rejects n=7 independently);
+            #    not inherit permission from being a template (it also rejects n=7 independently).
+            #    ⚠ §DAYPREF — SKIPPED when the athlete has set a week shape of their own, and this is
+            #    §REST2's own lesson applied to §REST2's own gate: AV_MAX_STREAK is the right rule
+            #    for an ARBITRARY day and the wrong rule for a whole VETTED layout, and a derived
+            #    layout IS the vetted layout for that athlete. Judging it here re-creates exactly the
+            #    unsatisfiable gate §REST2 was written to fix — at six runs there is ONE rest day, so
+            #    an athlete who rests Friday runs Mon–Thu, a streak of 4, and the week would SHED the
+            #    volume the spread exists to hold rather than lay the day it asked for. Their choice,
+            #    their streak. The seam bound below still applies: that one is about the week
+            #    BOUNDARY, which is not the shape they asked for and not theirs to widen;
             #  · RELAY_MAX_SEAM_STREAK across the seam — six-in-seven means one rest day, so the
             #    seam is 5–6 by construction at that frequency; past that the re-lay is refused and
             #    the §REST gate below takes over (the week sheds, honestly flagged).
@@ -1722,7 +1986,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                 _seam = _max_streak(sorted(_tpl + [-(_i + 1) for _i in range(prev_tail or 0)]))
                 if (len(_tpl) == len(days) + 1
                         and not (set(_tpl) & set(av_blocked or ()))
-                        and _max_streak(_tpl) <= AV_MAX_STREAK
+                        and (_has_day_pref() or _max_streak(_tpl) <= AV_MAX_STREAK)
                         and _seam <= RELAY_MAX_SEAM_STREAK):
                     return _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones,
                                             days_override=None, long_km_cap=long_km_cap,
@@ -1753,8 +2017,10 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             _fixed = sorted(set(days) | set(fixed_days or ())
                             | {-(_i + 1) for _i in range(prev_tail or 0)})
             _gate_blocked = False
+            _streak_cap = _streak_ceiling(_fixed)        # §DAYPREF — AV_MAX_STREAK, or what the
+            #                                              athlete's own layout already spends
             while n_short < need_short and len(days) < 7 and free:
-                _legal = [c for c in free if _max_streak(_fixed + [c]) <= AV_MAX_STREAK]
+                _legal = [c for c in free if _max_streak(_fixed + [c]) <= _streak_cap]
                 if not _legal:
                     _gate_blocked = True                 # every add would over-densify — stop
                     break
