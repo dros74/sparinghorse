@@ -34,8 +34,8 @@
   },
   "rebase": {
     "clipped_by_acwr": false,
-    "end_atl": 43.5,
-    "end_ctl": 55.7,
+    "end_atl": 52.7,
+    "end_ctl": 66.4,
     "full_len": 6,
     "start": "2026-06-29",
     "weeks": []
@@ -45,8 +45,8 @@
     "reason": "no symptom or medical event in 56 days \u2014 the plan follows your measured form"
   },
   "shape": {
-    "atl": 43.4775,
-    "ctl": 55.72186046511628,
+    "atl": 52.6725,
+    "ctl": 66.36279069767441,
     "effective_vo2max": 53.6,
     "seed": {
       "bridged_days": 1,
@@ -58,7 +58,7 @@
     "basis": "no prior projection yet \u2014 riding the full ceiling",
     "factor": 1.0,
     "projected": null,
-    "realized": 55.7,
+    "realized": 66.4,
     "ride_cap": 1.25
   },
   "tune_ups": []

@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.47.0"
+ENGINE_VERSION = "0.48.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -476,7 +476,61 @@ ACWR_SOFT_CTL_FLOOR = 45.0
 PROG_RAMP = 0.06           # ≥6%/wk over the last realised non-down load — the classic conservative
 #                            progression band (the athlete's absorbed-but-unproductive June ramp ran ~26%/wk;
 #                            eVO₂ stayed flat — that audit is why this is 6, not 10)
-EASY_TRIMP_PER_MIN = 1.3   # calibrated from my easy runs (HR≤135 → ~1.1–1.5/min)
+# §TP — THE TRIMP PRICE LADDER: what one minute in each zone COSTS, in TRIMP. The engine solves in
+# TRIMP space (the governors bound load) and pays out in KILOMETRES, so this table is the exchange
+# rate between the two. Every prescribed km in the plan is priced through it, and nothing else.
+#
+# It is not a free parameter. Runalyze's `activities.trimp` — the number the whole measured side of
+# this engine runs on — IS Banister TRIMP, and I fitted it: over 1,037 of the athlete's runs with HR,
+# `TRIMP/min = HRr·k·e^(b·HRr)`, `HRr = (HR − rest)/(max − rest)`, fits with RMSE 0.068 TRIMP/min
+# (median abs error 0.033) at rest 44.2, HRmax 189.1, k 0.6374, b 1.9255 — i.e. the textbook male
+# coefficients (0.64, 1.92) and this athlete's own HR envelope. So a per-minute literal here is an
+# implicit claim about HEART RATE, and can be checked against what the athlete actually shows.
+#
+# The old ladder (easy 1.3 · long 1.4 · marathon 1.8 · threshold 2.6 · interval 3.2) inverts to
+# claimed average HRs of 134 / 137 / 148 / 164 / 174. Measured against that, two independent ways —
+# (a) 914 min of §RD segment decodes since 2026-08-01, duration-weighted, and (b) an HR-vs-pace
+# regression (n=29 runs ≥4 km since 2026-07-20, HR = 58.0 + 9.72·km/h) evaluated at the plan's own
+# zone paces and run back through the Banister fit — the ladder was RIGHT AT THE TOP AND WRONG AT THE
+# BOTTOM:
+#     easy       claimed HR 134   measured 143–144   1.3 → 1.65   (26% low)
+#     marathon   claimed HR 148   measured 150–154   1.8 → 2.10   (17% low)
+#     threshold  claimed HR 164   measured 160–162   2.6 → 2.55   (already right)
+#     interval   claimed HR 174   measured 168–173   3.2 → 3.10   (already right)
+# The original comment said it: "calibrated from my easy runs (HR≤135 → ~1.1–1.5/min)". That is a
+# band the athlete has left — easy is now run at 141–147. For 1.3/min to be TRUE, easy would have to be
+# run at ~7:40/km — 51 s/km slower than the plan prescribes.
+# ⛔ This is why the "just scale the whole ladder" fix is WRONG and was not taken: uniform ×1.246
+# would have put threshold at 3.24 and interval at 3.99, breaking the two rungs that were accurate.
+#
+# WHAT IT COST, measured on the live plan (2026-08-31, plan 119's own week): the week prescribed
+# 54.0 km / 367 min against a 494-TRIMP budget for work that actually costs 629 — and the athlete ran
+# it (+8.7% km, +32 min) for 647 TRIMP. Of the +153 TRIMP overshoot, +135 (88%) was this table and
+# +18 (12%) was the overrun. Realised peak ACWR 1.377 against a plan projecting 1.205. ONE table, BOTH
+# symptoms: the §SYM-A ledger's 36–57%-low CTL forecast, and realised ACWR landing above the ceiling
+# the week was sized to respect. Across the remaining block the old price under-charged by +24.4%;
+# this one is +1.7%.
+# ⚠ It prices the PLAN only. `daily_trimp_series` sums Runalyze's MEASURED trimp, so CTL/ATL history,
+# the drift charts and the §SYM-A ledger never touch this table — correcting it cannot rewrite history.
+# ⚠ CALIBRATED ON ONE ATHLETE'S HR ENVELOPE. The rungs are Banister evaluated at that athlete's zone
+# HRs; another
+# runner's HRmax/HRrest give a different table. The general form is to fit (rest, max, k, b) per athlete
+# from their own `activities` and evaluate at each zone's HR anchor — 4 free parameters over 1,037 rows.
+# Not built: this release fixes the price, it does not yet derive it. [[acwr-peak-veto-and-easy-trimp-calibration]]
+# ⚠ THE `long` RUNG IS CURRENTLY UNREACHABLE FROM THE PLAN PATH, and that is a pre-existing fact this
+# release names rather than changes. `_distribute_week` slices ONE easy budget across the week and lays
+# every plain run — the long run included — at `EASY_TRIMP_PER_MIN`; the long run is simply the biggest
+# slice, carrying `kind="long"` and no `zone`. Instrumented: over a real assertive block `trimp_per_min`
+# is asked only for "easy" and "threshold", never "long". So this rung prices nothing today. It is set
+# to the athlete's MEASURED long-run cost anyway (cardiac drift over the trailing corpus: runs >80 min
+# sit +2.1 bpm above their own pace-predicted HR, ≈ +4% on the rung — 1.65 → 1.72; the old ladder's
+# 1.4-over-1.3 implied +7.7%, which the drift data does not support) so that the day something does
+# reach for it, it gets a number that was measured rather than inherited. Wiring the long run onto its
+# own rung is a REAL change — it would shorten long runs ~4% and it touches every km↔TRIMP conversion,
+# all of which are denominated in the single easy rate — and it is not in this release.
+# det/trimp-price holds both halves: the rung's value, and the fact that the plain path uses `easy`.
+TRIMP_PER_MIN = {"easy": 1.65, "long": 1.72, "marathon": 2.10, "threshold": 2.55, "interval": 3.10}
+EASY_TRIMP_PER_MIN = TRIMP_PER_MIN["easy"]   # the km↔TRIMP exchange rate (21 readers); ONE source of truth
 EASY_PACE_FRAC = 0.72      # fraction of vVO2max for easy running (top of the easy zone; sits just under LT1)
 
 # §3.4 — LT1 (aerobic threshold) as the PACE-anchored easy bar (ENGINE_SCIENCE.md §3.4 + the §6.3 decision:
@@ -533,11 +587,23 @@ def fmt_pace(sec):
     return f"{int(sec // 60)}:{int(sec % 60):02d}" if sec else "—"
 
 
+def trimp_per_min(zone="easy"):
+    """§TP — the UNROUNDED price of one minute in `zone`; unknown zones fall back to easy.
+
+    ⚠ Every call site that wants a RATE must use this and never `est_trimp(1, zone)`. `est_trimp`
+    rounds its RESULT to 0.1 — which is right for a session's TRIMP and wrong for a per-minute rate.
+    It was invisible while every rung was a 1-decimal literal (`est_trimp(1, "easy")` == 1.3 exactly),
+    and the moment §TP's measured rungs carried two decimals it started shaving them: easy 1.65 → 1.6
+    (−3%), threshold 2.55 → 2.5 (−2%). Four call sites read the rate that way — `_qblock`'s per-rep
+    TRIMP, `_build_quality`, `_build_long_mp` and §PRO15's long-run aim — so the quality sessions and
+    the long-MP base would have been priced 2–3% under the very table this release exists to correct."""
+    return TRIMP_PER_MIN.get(zone, EASY_TRIMP_PER_MIN)
+
+
 def est_trimp(minutes, zone="easy"):
-    """Estimate a session's TRIMP from duration + intensity zone (calibrated from my data)."""
-    per_min = {"easy": EASY_TRIMP_PER_MIN, "marathon": 1.8, "threshold": 2.6,
-               "interval": 3.2, "long": 1.4}.get(zone, EASY_TRIMP_PER_MIN)
-    return round(minutes * per_min, 1)
+    """§TP — a session's TRIMP from duration + intensity zone, priced through TRIMP_PER_MIN. The one
+    funnel: every load the engine PRESCRIBES is costed here, and an unknown zone falls back to easy."""
+    return round(minutes * TRIMP_PER_MIN.get(zone, EASY_TRIMP_PER_MIN), 1)
 
 
 def weeks_until(d, today=None):
@@ -875,6 +941,25 @@ BASE_DOWN_EVERY = 4        # every 4th week is a down week (3 build : 1 recovery
 # OPTIONAL governor arg (default None ⇒ today's exact behaviour) so caution stays byte-identical and
 # only the assertive regime (§PRO2) passes it. NEVER raises the allowance — a pure additional ceiling.
 CTL_RAMP_MAX = 5.0         # max CTL points/week the plan may add (the assertive-regime tissue backstop)
+# §TP2 — the weekly-load search's UPPER BOUND, and the reason it is a named constant now. This is the
+# `hi` of `_max_week_trimp`'s binary search, and for its whole life it was the literal 700.0 sitting
+# inside the function. That is not a policy, it is a search range — but a search that returns `lo`
+# CANNOT report an allowance above its own `hi`, so a week whose real governed allowance exceeded 700
+# was silently clipped to 700 and nothing anywhere said so. It had become THE volume governor: on the
+# live 2026-08-31 plan every build and peak week pinned at 700–701 TRIMP, and the 73.4 km/wk plateau
+# read as the plan's prescribed volume was just 700 ÷ (easy pace × the §TP price). Not
+# ACWR (whose per-day test §PRO17 deliberately stands down on assertive weeks in favour of the
+# biomechanical bounds), not CTL_RAMP_MAX, not §3.1 — a literal in a search range. Removing the ACWR
+# and ramp ceilings entirely left the plateau EXACTLY where it was; that is what identified it.
+# ⭐ THE TEST THAT MAKES RAISING IT SAFE, and the only reason it is 1000: a real governor must take
+# over. It does. At `hi` = 850 and at 900 the block is IDENTICAL (816.5 km, max week 835 TRIMP)
+# because CTL_RAMP_MAX binds first — projected CTL climbs exactly +5.0/wk through the peak phase.
+# The bound stops deciding and a constant calibrated against the athlete's own 239 weekly samples
+# starts. 1000 is set clear of that hand-over so this is a search range again and never a ceiling;
+# det/week-trimp-bound holds it there by proving the same block comes out at 1000 and at 2000.
+# ⚠ A future reader raising the real governors must re-check this: the day CTL_RAMP_MAX or the ACWR
+# ceiling permits more than 1000 TRIMP/week, this literal is silently governing again.
+WEEK_TRIMP_SEARCH_MAX = 1000.0   # `hi` for the weekly-load binary search — a RANGE, never a ceiling
 # §52 (2026-07-29) — CALIBRATED AT LAST, conditioned on CTL level, because §PRO17 made this the PRIMARY
 # governor on late build weeks and it had never been checked against anything. 239 weekly samples over
 # 4.7 years. The naive read is misleading: raw p90 gain is +8.94/wk, which would suggest 5.0 is timid.
@@ -1315,7 +1400,7 @@ def _qblock(effort, zname, minutes, pace, detail):
     just: work TRIMP ≤ cap, everything else is the easy share."""
     return {"effort": effort, "zone": zname, "minutes": minutes,
             "km": round(minutes * 60 / pace, 1) if pace else 0.0,
-            "trimp": round(minutes * est_trimp(1, zname), 1),
+            "trimp": round(minutes * trimp_per_min(zname), 1),
             "pace_zone": f"{fmt_pace(pace)}/km {zname}", "detail": detail}
 
 
@@ -1336,7 +1421,7 @@ def _build_quality(spec, work_trimp, start_date, dow, zones, easy_pace_sec):
     from datetime import timedelta
     zone = spec["zone"]
     zpace = (zones or {}).get(zone) or easy_pace_sec
-    per_min_zone = est_trimp(1, zone) or EASY_TRIMP_PER_MIN
+    per_min_zone = trimp_per_min(zone)
     work_min = max(1, round(work_trimp / per_min_zone))
     reps = [_qblock("warmup", "easy", QUALITY_WU_MIN, easy_pace_sec, "easy warm-up")]
     if spec.get("structure") == "intervals":
@@ -1367,7 +1452,7 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
     work, so the polarized accounting (work ≤ cap) treats this like any other quality session."""
     zone = spec["zone"]                                   # "marathon"
     zpace = (zones or {}).get(zone) or easy_pace_sec
-    per_min_zone = est_trimp(1, zone) or EASY_TRIMP_PER_MIN
+    per_min_zone = trimp_per_min(zone)
     base_min = max(1, round(easy_trimp / EASY_TRIMP_PER_MIN))
     mp_min = max(1, round(work_trimp / per_min_zone))
     reps = [_qblock("easy_base", "easy", base_min, easy_pace_sec, "easy aerobic base"),
@@ -1500,7 +1585,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # of the easy base — so both convert to a base target by subtracting the MP km. Computed once.
     mp_km = 0.0
     if long_q:
-        _per = est_trimp(1, long_q["zone"]) or EASY_TRIMP_PER_MIN
+        _per = trimp_per_min(long_q["zone"])
         _zp = (zones or {}).get(long_q["zone"]) or easy_pace_sec
         mp_km = round(max(1, round(mp_work / _per)) * 60 / _zp, 1)
     # §PRO15 — the long run is sized off the WEEK, not off what is left of it. `long_w` is a SHARE
@@ -2043,14 +2128,15 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
     much of it is safe. None ⇒ byte-identical (the soft test clips freely).
     §REST — the HELD bound: once the spacing gate holds volume instead of spreading it, a charge
     above what the week can LAY stops changing the laid week — the projection freezes, no test ever
-    binds, and the search would run away to the 700 ceiling and call it the week's intent (measured:
-    a 49-km-capable week governed to `allowed` = 700, `intent_km` ≈ 90 — a fiction). The allowance
+    binds, and the search would run away to WEEK_TRIMP_SEARCH_MAX and call it the week's intent
+    (measured at the old bound: a 49-km-capable week governed to `allowed` = 700, `intent_km` ≈ 90 —
+    a fiction; §TP2 raised the bound, which makes this gate matter MORE, not less). The allowance
     is the largest charge the week keeps ABSORBING and passes: a mid whose 10%-cheaper counterfactual
     lays (nearly) the same week is fiction and is rejected like any other breach. Marginal form, not
     absolute — the §JR collapse, the quality fixed floor and proportional sheds all decouple held
     from charge legitimately and are governed elsewhere. Evaluated only where the gate is active —
     caution has no `cap_short_trimp`, so its lays never gate ⇒ byte-identical."""
-    lo, hi = 0.0, 700.0
+    lo, hi = 0.0, WEEK_TRIMP_SEARCH_MAX
     for _ in range(34):
         mid = (lo + hi) / 2
         # §PRO17 — the search must evaluate the SAME distribution the week will actually be laid
@@ -2148,7 +2234,8 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         # its only solution near zero and the search starves the block again (golden/away-week:
         # 4.5 km weeks re-seeding every trailing window). The marginal form asks the right question:
         # would charging 10% less lay (nearly) the same week? Then this charge is fiction — the
-        # projection has frozen, no other test will ever bind, and the search would run to 700 and
+        # projection has frozen, no other test will ever bind, and the search would run to the
+            # §TP2 bound and
         # call it intent. Evaluated only when the gate is active in the lay; caution never reaches
         # it (no cap ⇒ no gate ⇒ no spread ⇒ byte-identical).
         held_bad = False
@@ -2805,7 +2892,23 @@ def _mark_load_integrity(w, zones):
             w["fatigue_capped"] = True
         return w
     longs = [s for s in w.get("sessions", []) if s.get("kind") == "long"]
-    if longs and (longs[0].get("km") or 0) < LONG_RUN_MIN_KM:
+    easies = [s for s in w.get("sessions", []) if s.get("kind") == "easy"]
+    # ⚠ ORDER MATTERS, AND IT USED TO BE THE WRONG WAY ROUND. Two different weeks arrive here with a
+    # long run under LONG_RUN_MIN_KM, and they need opposite explanations: one where FATIGUE crushed a
+    # long run the week could otherwise have carried (the shakeout — the ACWR ceiling took it), and one
+    # where the WEEK IS SIMPLY SMALL and nothing in it stands out (a re-base week of three 3 km runs).
+    # The absolute test fired first and returned, so the second week was told "long run held back by
+    # recent fatigue (ACWR ceiling)" — a cause that had nothing to do with it — and never got the
+    # `long_flat` flag that says what actually happened. Latent as long as no fixture laid a week that
+    # small; §TP's honest price reaches it (re-base wk6 fell 14.4 → 8.8 km, three 2.9 km runs), and
+    # det/long-run-identity's cases (d)/(e) are written for exactly this pair.
+    # The FLAT reading wins wherever it applies: "nothing here is meaningfully longer than anything
+    # else" describes the week whether or not the long also happens to be under the floor, while
+    # blaming fatigue is a claim about CAUSE that a flat week gives no evidence for.
+    _long_km = (longs[0].get("km") or 0.0) if longs else 0.0
+    _easy_km = max((s.get("km") or 0.0) for s in easies) if easies else 0.0
+    _flat = bool(longs and easies and _easy_km and _long_km < LONG_RUN_MIN_RATIO * _easy_km)
+    if longs and _long_km < LONG_RUN_MIN_KM and not _flat:
         s = longs[0]
         s["kind"] = "easy"
         s.pop("component", None)   # §T2 — a shakeout builds no component; don't claim economy
@@ -2814,17 +2917,13 @@ def _mark_load_integrity(w, zones):
         if zones is not None:                  # building phase (re-base is the pure-easy zones=None block)
             w["fatigue_capped"] = True
         return w
-    easies = [s for s in w.get("sessions", []) if s.get("kind") == "easy"]
-    if longs and easies:
-        long_km = longs[0].get("km") or 0.0
-        easy_km = max((s.get("km") or 0.0) for s in easies)
-        if easy_km and long_km < LONG_RUN_MIN_RATIO * easy_km:
-            s = longs[0]
-            s["kind"] = "easy"
-            s.pop("component", None)           # §T2 — no long run, so no economy component to claim
-            s["note"] = ("easy run — no long run this week: at this week's volume and run count "
-                         "no session comes out meaningfully longer than the others")
-            w["long_flat"] = True
+    if _flat:
+        s = longs[0]
+        s["kind"] = "easy"
+        s.pop("component", None)               # §T2 — no long run, so no economy component to claim
+        s["note"] = ("easy run — no long run this week: at this week's volume and run count "
+                     "no session comes out meaningfully longer than the others")
+        w["long_flat"] = True
     return w
 
 

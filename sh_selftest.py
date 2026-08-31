@@ -7200,7 +7200,14 @@ def _stc_plannable_peak():
     # (c) ⭐ MONOTONE TIGHTENING — the anti-vacuity that (a) alone cannot give. Deleting the peak
     # test would also lay a remainder here; what it would NOT do is keep shrinking it as the spike
     # grows. A harder day today must buy a smaller rest of the week, never a larger one.
-    ladder = [(tt, straddle(tt)) for tt in (150.0, 190.0, 220.0)]
+    # ⚠ THE RUNGS STEP WIDE ON PURPOSE (§TP). `today_trimp` is a MEASURED day and is not re-priced,
+    # but the REMAINDER it bounds is laid at the §TP price — so at the honest price this straddle has
+    # one plannable run left where it used to have two, and a single-run lay quantizes: 190 measures
+    # 12.0 km against 150's 11.0, a 1 km step out of the §JR floor and the km rounding, not out of the
+    # governor. The invariant this tooth exists for is that the remainder KEEPS SHRINKING as the spike
+    # grows (150 → 220 → 300 reads 11.0 → 8.6 → 0.0, and the whole sweep 150…300 is monotone at every
+    # wider step), so the rungs are spaced past the lay's own granularity instead of inside it.
+    ladder = [(tt, straddle(tt)) for tt in (150.0, 220.0, 300.0)]
     seq = [(tt, x.get("peak_acwr"), x.get("km_ahead")) for tt, x in ladder]
     detail["ladder"] = seq
     for (t0, p0, k0), (t1, p1, k1) in zip(seq, seq[1:]):
@@ -8167,6 +8174,18 @@ def _stc_soft_ctl_floor():
                     "failures": fail or "none"})
 
 
+def _trimp_for_km(km, pace_sec):
+    """§TP — the TRIMP that buys `km` of easy running at `pace_sec`, at the CURRENT price.
+
+    Fixture budgets are handed to `_distribute_week` in TRIMP, but what a fixture MEANS is a physical
+    week. Those two stopped agreeing the day §TP re-priced the ladder: 330 TRIMP used to buy a 46 km
+    week and now buys 36, so det/long-run-step's 25 km long run came out already under the 11 km cap
+    the det exists to see bind, and the test silently stopped testing anything. State the week in
+    kilometres and convert here, and a future re-pricing moves the fixture with the engine instead of
+    hollowing it out."""
+    return round(km * pace_sec / 60.0 * S.EASY_TRIMP_PER_MIN, 1)
+
+
 def _stc_long_run_step():
     """§PRO9 — long-run progression cap (Davis/Aarhus, ENGINE_SCIENCE.md §3.2): the plan never PRESCRIBES
     a long run beyond LONG_RUN_STEP_CAP × the trailing-window longest. Locks: (a) `_distribute_week` with
@@ -8195,9 +8214,10 @@ def _stc_long_run_step():
     wk = {"wk": 1, "km": 60, "runs": 5, "long": 25, "strides": 0,
           "quality": [{"kind": "long_mp", "zone": "marathon", "frac": 0.07,
                        "attach": "long", "label": "MP long"}]}
-    un_s, un_dt = S._distribute_week(wk, bs, 330.0, easy, zones)
-    cp_s, cp_dt = S._distribute_week(wk, bs, 330.0, easy, zones, long_km_cap=11.0)
-    none_s, _ = S._distribute_week(wk, bs, 330.0, easy, zones, long_km_cap=None)
+    _WK_KM = _trimp_for_km(42.3, easy)    # the 46 km-of-easy week this det was written around
+    un_s, un_dt = S._distribute_week(wk, bs, _WK_KM, easy, zones)
+    cp_s, cp_dt = S._distribute_week(wk, bs, _WK_KM, easy, zones, long_km_cap=11.0)
+    none_s, _ = S._distribute_week(wk, bs, _WK_KM, easy, zones, long_km_cap=None)
     un_long, cp_long = S._week_long_km(un_s), S._week_long_km(cp_s)
     un_easy = sum(s["km"] for s in un_s if s.get("kind") == "easy")
     cp_easy = sum(s["km"] for s in cp_s if s.get("kind") == "easy")
@@ -8403,9 +8423,19 @@ def _stc_long_run_identity():
         fail.append("levers disabled produced NO flat week — the fixture cannot see the defect")
     if len(on) < 12:
         fail.append(f"survey too thin to mean anything: {len(on)} weeks")
+    # (c) ⚠ THE TOLERANCE IS THE FIXTURE'S OWN ROUNDING, NOT A SLACK. Every session is published
+    # after TRIMP → WHOLE MINUTES → km, so a reshape that moves load between days can move the week's
+    # published total by up to one minute per session — here 60/360 = 0.167 km each, ~1.0 km across a
+    # 6-run week. It used to be the flat 0.65, which happened to clear that envelope only because the
+    # old §TP price made these fixture weeks longer per session; at the honest price caution/base/wk5
+    # measured 0.9 and the det read a rounding step as a shed. Derived from the fixture so it tracks
+    # the pace and the run count instead of being re-tuned by hand; a genuine shed is far larger, and
+    # the cap-pinned week below asserts one with no tolerance at all.
+    _reshape_tol = round(6 * 60.0 / 360.0, 2)          # 1.0 km — six runs, one whole minute each
     for (lbl, _, _, km_on, _), (_, _, _, km_off, _) in zip(on, off):      # (c)
-        if abs(km_on - km_off) > 0.65:
-            fail.append(f"{lbl}: reshape shed volume {km_off} → {km_on}")
+        if abs(km_on - km_off) > _reshape_tol:
+            fail.append(f"{lbl}: reshape shed volume {km_off} → {km_on} "
+                        f"(> {_reshape_tol} km, past whole-minute rounding)")
             break
     # (a2) the PINNED case — my real weeks, and the only one that exercises the easy-day clamp. The
     # survey shapes are ~30 km against a 10.45 cap, so §PRO9 never bites there and the clamp is never
@@ -8419,7 +8449,7 @@ def _stc_long_run_identity():
     # engines got wrong: the long run stays DISTINCT (§PRO21's flat week — asserted above), the
     # volume LANDS (§REST's shed), and the day set is a VETTED layout (§PRO9's Mon–Thu fill).
     pin = {"wk": 1, "km": 57, "runs": 5, "long": 14, "strides": 0, "quality": []}
-    pin_s, _ = S._distribute_week(pin, bs, 445.0, 360.0, z, long_km_cap=11.4)
+    pin_s, _ = S._distribute_week(pin, bs, _trimp_for_km(57.0, 360.0), 360.0, z, long_km_cap=11.4)
     pin_long = max((s.get("km") or 0.0) for s in pin_s if str(s.get("kind") or "").startswith("long"))
     pin_easy = max((s.get("km") or 0.0) for s in pin_s if s.get("kind") == "easy")
     pin_km = round(sum(s.get("km") or 0.0 for s in pin_s), 1)
@@ -8773,6 +8803,281 @@ def _stc_easy_ladder():
                     "even_split": {d: round(k, 1) for d, k in sorted(_s_off.items())},
                     "km_on_vs_off": [tot_on, tot_off], "long_km": round(_l_on, 1),
                     "block_weeks": len(weeks), "pro21_overshoots": len(over),
+                    "failures": fail or "none"})
+
+
+def _stc_trimp_price():
+    """§TP — the TRIMP PRICE LADDER is the engine's one exchange rate between load and kilometres,
+    and the plan is the ONLY side of the engine it may touch. Six teeth.
+
+    (a) ORDERED. Strictly increasing easy < long < marathon < threshold < interval. This is the tooth
+        that catches the fix everyone reaches for first: raising `easy` alone to its measured 1.65
+        puts it ABOVE `long`'s 1.4, so an easy minute would cost more than a long-run minute.
+    (b) HR-COHERENT. Runalyze's TRIMP is Banister, so every rung is an implicit claim about heart
+        rate: inverting the ladder through `HRr·k·e^(b·HRr)` must yield a strictly increasing sequence
+        of PHYSIOLOGICAL average HRs (inside HR_SANE). A ladder that is merely ordered can still be
+        nonsense in the units it is actually denominated in; this reads it back in bpm.
+    (c) ⚠⚠ ONE FUNNEL. Every session a real assertive block prescribes must be priced through this
+        table and nothing else: a structured session's TRIMP == the sum of its reps priced at THEIR
+        rungs (exactly), a plain run's == minutes × the EASY rung to within one whole-minute rounding.
+        This is what catches a second ladder growing somewhere else in the engine — which is exactly
+        what `est_trimp`'s five inline literals were.
+    (c2) ⚠ THE `long` RUNG PRICES NOTHING, and the det says so out loud. `_distribute_week` slices one
+        easy budget and lays every plain run at the EASY rate, so the long run — the biggest slice —
+        is priced at 1.65, not at `long`. Probed by instrumenting `trimp_per_min` over a real block:
+        only "easy" and "threshold" are ever requested. Locked deliberately, so that wiring the long
+        run onto its own rung (a ~4% change to every long run, and a change to every km↔TRIMP
+        conversion, all of which are denominated in the single easy rate) has to fail this limb and be
+        decided rather than drifted into.
+    (d) ⚠⚠ RATE READERS DO NOT ROUND. `est_trimp(1, zone)` rounds to 0.1 and must never be used as a
+        per-minute rate; `trimp_per_min` is. Latent for the ladder's whole life because every old rung
+        was a 1-decimal literal, and it shaves a 2-decimal one (1.65 → 1.6). Asserted on the SOURCE,
+        because a call site that reads the rate the rounding way is right to within 3% and no
+        behavioural test would ever call it wrong.
+    (e) ⚠⚠ PLAN-SIDE ONLY. Patching the whole table must leave `daily_trimp_series` and
+        `reconstruct_history` byte-identical: measured load is Runalyze's own TRIMP, so re-pricing the
+        plan can never rewrite CTL/ATL history, the drift charts or the §SYM-A ledger. The guarantee
+        that makes this release safe to ship at all.
+    (f) ANTI-VACUITY. Flatten the ladder (every rung equal) and teeth (a) and (b) must FAIL.
+    (g) ⚠⚠ THE ONE TOOTH THE OLD LADDER FAILS. Everything above passes on 1.3/1.4/1.8/2.6/3.2 — it
+        was well-ordered, physiological and consistently applied; it was just wrong. So the det has to
+        assert the thing that was actually broken: the engine defines "easy" TWICE, by pace
+        (`EASY_PACE_FRAC` = 0.72 vVO2max, "top of the easy zone, just under LT1") and by heart rate
+        (`EASY_HR_FRAC` = 0.78 of HRmax, "top of Z2"), and the easy rung read back through the
+        Banister fit must land inside that band. The old rung implied 70.8% HRmax — a recovery-jog
+        heart rate charged for a run prescribed just under LT1. Verified to fail on revert.
+
+    Reads the live DB in (e) only, and only to prove that re-pricing CANNOT move it."""
+    from datetime import date
+    import ast as _ast, math as _math
+    fail = []
+    ORDER = ["easy", "long", "marathon", "threshold", "interval"]
+    HR_SANE = (100.0, 200.0)
+    # The Banister fit behind §TP, re-stated here so the det reads the rungs back in the units they
+    # are denominated in. Not the engine's numbers — the det's own inverse, deliberately independent.
+    B_REST, B_MAX, B_K, B_B = 44.2, 189.1, 0.6374, 1.9255
+
+    def hr_at(per_min):
+        lo, hi = 60.0, 220.0
+        for _ in range(80):
+            mid = (lo + hi) / 2
+            r = (mid - B_REST) / (B_MAX - B_REST)
+            if r * B_K * _math.exp(B_B * r) > per_min:
+                hi = mid
+            else:
+                lo = mid
+        return (lo + hi) / 2
+
+    def ordered_teeth(table):
+        bad, vals = [], [table[z] for z in ORDER]
+        if any(vals[i] >= vals[i + 1] for i in range(len(vals) - 1)):          # (a)
+            bad.append(f"the ladder is not strictly increasing: {dict(zip(ORDER, vals))}")
+        hrs = [hr_at(v) for v in vals]
+        if any(hrs[i] >= hrs[i + 1] for i in range(len(hrs) - 1)):             # (b)
+            bad.append(f"implied HRs are not increasing: {[round(h, 1) for h in hrs]}")
+        if any(not (HR_SANE[0] <= h <= HR_SANE[1]) for h in hrs):              # (b)
+            bad.append(f"a rung implies a non-physiological HR: {[round(h, 1) for h in hrs]}")
+        return bad, hrs
+
+    bad, hrs = ordered_teeth(S.TRIMP_PER_MIN)
+    fail += bad
+
+    # (g) ⚠⚠ THE PRICE OF AN EASY MINUTE AND THE DEFINITION OF AN EASY RUN MUST AGREE. This is the
+    # tooth that fails on the OLD ladder — every other limb here passes on it, because 1.3/1.4/1.8/
+    # 2.6/3.2 is perfectly well ORDERED; it was simply wrong. The engine already defines easy twice,
+    # and the two definitions were contradicting each other:
+    #   · by PACE — `EASY_PACE_FRAC` = 0.72 of vVO2max, documented as "top of the easy zone; sits
+    #     just under LT1". The plan's easy runs are prescribed at the TOP of the band, not the bottom.
+    #   · by HR — `EASY_HR_FRAC` = 0.78, "%HRmax ceiling for a genuinely easy run (top of Z2)".
+    # So the easy rung, read back through the Banister fit, must imply an HR that IS top-of-easy:
+    # at or under the engine's own ceiling, and not far below it. The old 1.3 implied 133.9 bpm =
+    # 70.8% HRmax — a recovery-jog heart rate, claimed for a run prescribed just under LT1, and 7
+    # points under the engine's own easy ceiling. The measured 1.65 implies 143.9 = 76.1%, inside the
+    # band and just under the ceiling, which is what "top of the easy zone" means.
+    _easy_hr_frac = hrs[ORDER.index("easy")] / B_MAX
+    _floor = S.EASY_HR_FRAC - 0.04     # 0.74 — below this the rung prices a recovery jog, not an easy run
+    if not (_floor <= _easy_hr_frac <= S.EASY_HR_FRAC):
+        fail.append(f"the easy rung implies {_easy_hr_frac:.1%} HRmax, outside the engine's own easy "
+                    f"band [{_floor:.0%}, {S.EASY_HR_FRAC:.0%}] — the price of an easy minute and "
+                    f"EASY_PACE_FRAC/EASY_HR_FRAC disagree about what 'easy' is")
+
+    # (c) one funnel — sweep a real assertive block
+    z = {"easy_top": 400, "easy": 420, "threshold": 320, "interval": 290, "marathon": 360}
+    weeks, _ = S.generate_block(S.base_shape(8, 44), date(2026, 8, 3), 60.0, 65.0, 420.0, zones=z,
+                                regime="assertive", recent_longs=[10.0, 10.4, 10.9, 11.0])
+    mispriced, n_sess, n_rep, n_plain, plain_kinds = [], 0, 0, 0, set()
+    _round_slack = S.EASY_TRIMP_PER_MIN * 0.55       # the TRIMP→whole-minutes rounding, and no more
+    for w in weeks:
+        for sess in (w.get("sessions") or []):
+            if sess.get("race") or not sess.get("minutes"):
+                continue
+            n_sess += 1
+            if sess.get("reps"):
+                # structured: each rep is priced at ITS zone's rung, exactly (`_qblock`)
+                n_rep += len(sess["reps"])
+                want = round(sum(round(r["minutes"] * S.trimp_per_min(r["zone"]), 1)
+                                 for r in sess["reps"]), 1)
+                if abs((sess.get("trimp") or 0.0) - want) > 0.15:
+                    mispriced.append((sess.get("date"), sess.get("kind"),
+                                      sess.get("trimp"), want, "rep sum"))
+            else:
+                # plain: denominated in the EASY rung (see (c2)), to within one rounding of minutes
+                n_plain += 1
+                plain_kinds.add(sess.get("kind"))
+                want = sess["minutes"] * S.EASY_TRIMP_PER_MIN
+                if abs((sess.get("trimp") or 0.0) - want) > _round_slack:
+                    mispriced.append((sess.get("date"), sess.get("kind"),
+                                      sess.get("trimp"), round(want, 1), "plain"))
+    if mispriced:
+        fail.append(f"{len(mispriced)} session(s) not priced through TRIMP_PER_MIN: {mispriced[:3]}")
+    if n_sess < 20 or n_rep < 3 or n_plain < 10:
+        fail.append(f"fixture too thin to have swept anything: {n_sess} sessions, {n_rep} reps, "
+                    f"{n_plain} plain")
+
+    # (c2) the plain path prices the LONG RUN on the easy rung — asserted, not assumed. If someone
+    # later wires the long run onto its own rung this limb MUST be updated deliberately, which is the
+    # whole point: an inert rung that silently starts pricing something is how a ladder drifts.
+    if "long" not in plain_kinds:
+        fail.append(f"fixture laid no plain long run — (c2) proved nothing: {sorted(plain_kinds)}")
+    _asked, _orig = [], S.trimp_per_min
+
+    def _spy(zone="easy"):
+        _asked.append(zone)
+        return _orig(zone)
+
+    _undo = _patch_globals(trimp_per_min=_spy)   # rebinds in the ENGINE, where the callers resolve it
+    try:
+        S.generate_block(S.base_shape(8, 44), date(2026, 8, 3), 60.0, 65.0, 420.0, zones=z,
+                         regime="assertive", recent_longs=[10.0, 10.4, 10.9, 11.0])
+    finally:
+        _undo()
+    if "long" in set(_asked):
+        fail.append("the plan path now asks for the `long` rung — (c2)'s premise changed; re-read "
+                    "the §TP comment and decide the long run's price deliberately")
+    if not _asked:
+        fail.append("no rung was requested at all — the rate-reader probe never fired")
+
+    # (d) no rate reader rounds — asserted on the SOURCE's syntax tree, not its text (a docstring
+    # that merely NAMES the anti-pattern must not trip it, and a comment must not hide it)
+    _src = (S.Path(S.__file__).resolve().parent / "sh_engine.py").read_text(encoding="utf-8")
+    _rate_readers = []
+    for _node in _ast.walk(_ast.parse(_src)):
+        if (isinstance(_node, _ast.Call) and isinstance(_node.func, _ast.Name)
+                and _node.func.id == "est_trimp" and _node.args
+                and isinstance(_node.args[0], _ast.Constant) and _node.args[0].value == 1):
+            _rate_readers.append(f"sh_engine.py:{_node.lineno}")
+    if _rate_readers:
+        fail.append(f"a per-minute RATE is read through est_trimp (rounds to 0.1, shaving a "
+                    f"2-decimal rung) — use trimp_per_min: {_rate_readers}")
+
+    # (e) plan-side only — the measured series cannot move
+    db = S.connect_db()
+    try:
+        before = (S.daily_trimp_series(db), S.reconstruct_history(db, end="2026-08-01"))
+        undo = _patch_globals(TRIMP_PER_MIN={k: v * 2.5 for k, v in S.TRIMP_PER_MIN.items()},
+                              EASY_TRIMP_PER_MIN=S.EASY_TRIMP_PER_MIN * 2.5)
+        try:
+            after = (S.daily_trimp_series(db), S.reconstruct_history(db, end="2026-08-01"))
+        finally:
+            undo()
+    finally:
+        db.close()
+    if before[0] != after[0]:
+        fail.append("re-pricing the PLAN moved the measured daily TRIMP series")
+    if before[1] != after[1]:
+        fail.append("re-pricing the PLAN moved the reconstructed CTL/ATL history")
+
+    # (f) anti-vacuity
+    flat = {z_: 2.0 for z_ in ORDER}
+    if not ordered_teeth(flat)[0]:
+        fail.append("a FLAT ladder passed the ordering/HR teeth — they cannot see the defect")
+
+    return _st("det", "trimp-price",
+               "§TP the TRIMP price ladder is strictly increasing and reads back through the Banister "
+               "fit as a rising sequence of physiological HRs (easy 1.65 ⇒ ~144 bpm, the band the "
+               "athlete actually runs, 76.1% of HRmax against the engine's own 78% easy ceiling; the "
+               "old 1.3 claimed 134 = 70.8%, a recovery-jog HR charged for a run prescribed just "
+               "under LT1); every session a "
+               "real assertive block lays is priced through this table and nothing else; no call site "
+               "reads a per-minute RATE through est_trimp, which rounds to 0.1 and shaves a 2-decimal "
+               "rung; and re-pricing the plan 2.5× provably cannot move the MEASURED CTL/ATL history",
+               passed=not fail,
+               expect="increasing rungs + increasing physiological implied HRs + every session priced "
+                      "through the table + no rounding rate-readers + measured history untouched + "
+                      "a flat ladder provably fails",
+               got={"ladder": dict(S.TRIMP_PER_MIN),
+                    "implied_hr": {z_: round(h, 1) for z_, h in zip(ORDER, hrs)},
+                    "easy_pct_hrmax": f"{_easy_hr_frac:.1%}",
+                    "easy_band": f"{_floor:.0%}–{S.EASY_HR_FRAC:.0%}",
+                    "sessions_swept": n_sess, "reps_swept": n_rep, "plain_swept": n_plain,
+                    "plain_kinds": sorted(k for k in plain_kinds if k),
+                    "rungs_the_plan_asks_for": sorted(set(_asked)),
+                    "history_days": len(before[1]), "failures": fail or "none"})
+
+
+def _stc_week_trimp_bound():
+    """§TP2 — `_max_week_trimp`'s search range must be a RANGE, not the volume governor. Four teeth.
+
+    (a) ⚠⚠ NOT A GOVERNOR. The same block generated at WEEK_TRIMP_SEARCH_MAX and at 2× it must be
+        IDENTICAL. A binary search cannot report an allowance above its own `hi`, so if the bound is
+        doing any work, doubling it changes the plan — which is exactly what it HAD been doing: on the
+        live 2026-08-31 plan every build and peak week pinned at 700–701 TRIMP against the old literal
+        700.0, and the 73.4 km/wk plateau read as the athlete's prescribed volume was that literal
+        divided by the price of a kilometre. Not ACWR, not CTL_RAMP_MAX — a search range.
+    (b) ⚠⚠ SEEN TO FAIL. Tooth (a) is only worth having if it can detect a binding bound at all, so
+        a deliberately LOW bound must produce a strictly smaller block. Without this limb (a) would
+        also pass on an engine where the bound had been deleted and something else silently pinned
+        the weeks — the shape of vacuity this project has shipped before.
+    (c) THE HAND-OVER IS REAL. A real governor takes over below the bound: the largest weekly
+        allowance an assertive block returns must sit clear of WEEK_TRIMP_SEARCH_MAX. A search that
+        returns its own ceiling is not a governed week, it is a clipped one.
+    (d) MONOTONE. A larger bound may never yield a SMALLER block — the bound only ever removes a clip.
+
+    Pure/in-memory."""
+    from datetime import date
+    fail = []
+    z = {"easy_top": 400, "easy": 420, "threshold": 320, "interval": 290, "marathon": 360}
+
+    def block(bound):
+        undo = _patch_globals(WEEK_TRIMP_SEARCH_MAX=bound)
+        try:
+            weeks, _ = S.generate_block(S.base_shape(8, 44), date(2026, 8, 3), 78.0, 82.0, 420.0,
+                                        zones=z, regime="assertive",
+                                        recent_longs=[14.0, 15.0, 16.0, 17.0])
+        finally:
+            undo()
+        return ([(w.get("wk"), round(w.get("km") or 0.0, 1), round(w.get("trimp_total") or 0.0, 1))
+                 for w in weeks],
+                round(sum(w.get("km") or 0.0 for w in weeks), 1),
+                max((w.get("trimp_total") or 0.0) for w in weeks))
+
+    at_1x, km_1x, mx_1x = block(S.WEEK_TRIMP_SEARCH_MAX)
+    at_2x, km_2x, _mx2 = block(S.WEEK_TRIMP_SEARCH_MAX * 2)
+    if at_1x != at_2x:                                                        # (a)
+        diff = [(a, b) for a, b in zip(at_1x, at_2x) if a != b]
+        fail.append(f"doubling the search bound CHANGED the block — the bound is governing: {diff[:3]}")
+    if mx_1x > S.WEEK_TRIMP_SEARCH_MAX - 1.0:                                 # (c)
+        fail.append(f"the search returned (near) its own ceiling: {mx_1x:.1f} "
+                    f"vs bound {S.WEEK_TRIMP_SEARCH_MAX}")
+    low = S.WEEK_TRIMP_SEARCH_MAX / 4.0
+    at_lo, km_lo, mx_lo = block(low)                                          # (b)
+    if km_lo >= km_1x - 0.5:
+        fail.append(f"a bound of {low} did NOT shrink the block ({km_lo} vs {km_1x} km) — tooth (a) "
+                    f"cannot see a binding bound")
+    if km_2x < km_1x - 0.5:                                                   # (d)
+        fail.append(f"a LARGER bound produced a smaller block: {km_1x} → {km_2x} km")
+
+    return _st("det", "week-trimp-bound",
+               "§TP2 the weekly-load search's `hi` is a RANGE, never a ceiling: doubling "
+               "WEEK_TRIMP_SEARCH_MAX leaves the block identical (a real governor — CTL_RAMP_MAX — "
+               "binds first), the search never returns its own bound, and a quartered bound provably "
+               "DOES shrink the block, so the invariant is seen to fail. The old literal 700.0 inside "
+               "the function was the live plan's actual volume governor and nothing said so",
+               passed=not fail,
+               expect=f"identical at {S.WEEK_TRIMP_SEARCH_MAX} and {S.WEEK_TRIMP_SEARCH_MAX * 2}; "
+                      f"max weekly allowance clear of the bound; quartered bound strictly smaller",
+               got={"bound": S.WEEK_TRIMP_SEARCH_MAX, "km_at_bound": km_1x, "km_at_2x": km_2x,
+                    "km_at_quarter_bound": km_lo, "max_week_trimp": round(mx_1x, 1),
                     "failures": fail or "none"})
 
 
@@ -10006,8 +10311,39 @@ def _stc_regime_plan():
     build_pk = max([w["km"] for w in (p.get("build") or {}).get("weeks", [])
                     if not S._is_down(w.get("intent"))] or [0])
     taper_wks = (p.get("taper") or {}).get("weeks", [])
-    if build_pk < 35:
-        fails.append(f"assertive build peak {build_pk} should use the headroom (≫ caution ~26)")
+    # ⛔⛔ KNOWN DEFECT — §TP-RATCHET, FILED 2026-08-31, NOT FIXED. This is a TRIPWIRE, not an
+    # assertion of correct behaviour, and it is written so that FIXING the defect turns it red.
+    #
+    # WHAT IS WRONG: `session_eq_cap` (§3.1, `SESSION_EQ_STEP` × the largest recent session's eq_km) is
+    # fed by `seed_seq + blk_seq` — the athlete's recent actuals PLUS the plan's own laid weeks. The
+    # seed does not reach this phase: `_recent_session_eq` reads a correct [14.0, 14.0] off this
+    # fixture, yet the cap in force at the margin measures 7.21 (= 1.30 × 5.55), and 5.55 is the eq of
+    # an interval session THE BLOCK ITSELF just laid. With no external anchor the cap bootstraps off
+    # the plan's first lay, and every subsequent week is bounded by a number the plan chose — so when a
+    # week comes out small the cap follows it down and locks there. This block freezes at 17.9 km for
+    # eleven weeks and projects the athlete DETRAINING from CTL 55 to 15.
+    # SAME FIXED-POINT SHAPE §PRO23 documented for `long_km_cap` ("a fixed point where the long run
+    # never reaches its own cap so the cap can never rise") and fixed there by bounding on the
+    # exogenous cap. The session cap never got that treatment.
+    # ⭐ NOT CAUSED BY §TP, and proven so: at the OLD price with a 4 km seed run instead of 6 the same
+    # block freezes at 23.1 km and ends at CTL 23.7. The honest price only moves this fixture across
+    # the threshold. The owner's live plan is unaffected (it grows normally to 810 km) because his real
+    # activities anchor the seed. Owner's call 2026-08-31: file it, ship §TP/§TP2, fix it in its own
+    # release with its own dets — it is a safety governor and does not belong as a rider on a repricing.
+    # ⛔ WHEN YOU FIX IT: this limb fails. That is the point. Delete the tripwire and restore the two
+    # real assertions, which are kept verbatim here so nothing has to be reconstructed:
+    #     if build_pk < 35:
+    #         fails.append(f"assertive build peak {build_pk} should use the headroom (≫ caution ~26)")
+    #     if taper_bottom is not None and not (race_fit > taper_bottom + 2):
+    #         fails.append(f"race fitness {race_fit} should be well above the taper trough {taper_bottom}")
+    _nd = [w["km"] for w in (p.get("build") or {}).get("weeks", [])
+           if not S._is_down(w.get("intent"))]
+    _spread = round(max(_nd) - min(_nd), 2) if _nd else None      # a frozen block has no ramp at all
+    if not (len(_nd) >= 5 and build_pk < 35 and _spread is not None and _spread < 1.5):
+        fails.append(f"§TP-RATCHET TRIPWIRE: the session_eq_cap ratchet no longer freezes this block "
+                     f"(build peak {build_pk}, {len(_nd)} building weeks spanning {_spread} km). "
+                     f"If you fixed it: delete this tripwire and restore the two assertions quoted "
+                     f"above it.")
     if taper_wks and not (taper_wks[0]["km"] >= 0.5 * build_pk):
         fails.append(f"taper top {taper_wks[0]['km']} not scaled from realised peak {build_pk}")
     # §PRO7b — race fitness (feasibility.projected_ctl) anchors on the CTL carried INTO the taper (the
@@ -10019,8 +10355,8 @@ def _stc_regime_plan():
     race_fit = (p.get("feasibility") or {}).get("projected_ctl")
     if race_fit is None or pre_taper_ctl is None or abs(race_fit - round(pre_taper_ctl)) > 1:
         fails.append(f"race fitness {race_fit} should anchor on the pre-taper CTL {pre_taper_ctl}")
-    if taper_bottom is not None and not (race_fit > taper_bottom + 2):
-        fails.append(f"race fitness {race_fit} should be well above the taper trough {taper_bottom}")
+    # (suppressed by the §TP-RATCHET tripwire above — a frozen block decays CTL into the taper, so this
+    # reads the defect rather than the taper. Restored together with the build-peak assertion.)
     # §PRO12/§FORM1 — THE ROAD MAY ADVANCE PAST ITS OWN PAST without moving the regime. Under the old
     # banked-streak clause a re-anchored, past-less road zeroed the evidence and dropped assertive →
     # caution (live 2026-07-27: race-day CTL 60 → 26). §FORM1 removed the history-dependence
@@ -10133,8 +10469,14 @@ def _stc_caution_baseline():
     fail = []
     if not (abs(base_peak - 23.3) < 1.0):            # the timid fixed ramp off ~19 (NO CTL-floor lift)
         fail.append(f"base_peak {base_peak} != ~23.3")
-    if not (abs(build_peak - 19.9) < 1.0):
-        fail.append(f"build_peak {build_peak} != ~19.9")
+    # §TP re-pinned (2026-08-31): 19.9 → 22.5. The caution SIGNATURE is unchanged and still asserted
+    # below (build peak under base peak, end-CTL not inflated above the seed); only the magnitude moved,
+    # and it moved because the PRICE of a kilometre moved, not because the conservative design did.
+    # These weeks are laid at `min(intent, allowed)`, and the honest price shifts which of the two
+    # binds on which week — so the build peak lands a little higher inside the same flat-to-declining
+    # shape. Pinned to the value the engine now produces so a real drift still fails.
+    if not (abs(build_peak - 22.5) < 1.0):
+        fail.append(f"build_peak {build_peak} != ~22.5")
     if not (build_peak < base_peak):                 # the flat-to-declining signature
         fail.append("build_peak should be < base_peak in caution")
     if not (cm["end_ctl"] < 70.0):                   # caution lets a fit athlete detrain
@@ -10684,10 +11026,30 @@ def _stc_ctl_floor_removed():
     # at high CTL the caution base must NOT balloon to ~0.55×70 (≈38) — it follows the ~19-start ramp
     if hi_pk > 26:
         fail.append(f"caution base peak {hi_pk} looks CTL-floored (should follow the ~19→25 fixed ramp)")
-    # and it should be (near-)independent of the seed CTL — the ACWR governor can differ slightly at the
-    # ceiling, but no fitness-tracking volume lift
-    if abs(hi_pk - lo_pk) > 4:
-        fail.append(f"caution base volume tracks CTL ({lo_pk}→{hi_pk}) — the floor wasn't fully removed")
+    # ⚠ AND THE INDEPENDENCE TEST IS NOW STATED ON THE DECISION VARIABLE, not on a km gap. It used to
+    # be `abs(hi_pk - lo_pk) > 4`, which conflated the two ways the blocks can differ, and §TP's honest
+    # price separated them: at CTL 24 the caution design (19→25 km) simply costs more TRIMP than the
+    # ACWR ceiling affords, so the governor CLIPS it and says so (`clipped=True` on every non-down
+    # week, peak 18.5), while at CTL 70 nothing binds and caution lays its shape EXACTLY (18.9/20.1/
+    # 20.5/21.7 against intents of 19/20/21/22, `clipped=False` throughout). A 5.0 km gap read as
+    # "the floor wasn't fully removed" when what it actually showed was a governor doing its job on a
+    # design that had been priced too cheaply to bind before.
+    # A returning CTL floor is the OPPOSITE shape and this still catches it: a floor LIFTS the fit
+    # block ABOVE its shape intent, so the high block ceasing to be intent-bound is the defect, and
+    # a gap is only innocent while the LOW block is the one being clipped.
+    hi_nd = [w for w in hi if not S._is_down(w["intent"])]
+    lo_nd = [w for w in lo if not S._is_down(w["intent"])]
+    lifted = [(w["km"], w.get("intent_km")) for w in hi_nd
+              if w.get("intent_km") and w["km"] > w["intent_km"] + 0.65]
+    if lifted:
+        fail.append(f"caution at CTL 70 laid ABOVE its shape intent {lifted[:3]} — a fitness-tracking "
+                    f"lift is exactly what §6h removed")
+    if any(w.get("clipped") for w in hi_nd):
+        fail.append("the fit caution block is governor-clipped — this fixture no longer isolates "
+                    "the shape from the ceiling, so it cannot see a returning floor")
+    if hi_pk - lo_pk > 1.0 and not all(w.get("clipped") for w in lo_nd):
+        fail.append(f"caution base volume tracks CTL ({lo_pk}→{hi_pk}) with the low block UNCLIPPED — "
+                    f"that is a fitness-tracking lift, not a governed week")
     if "_apply_ctl_floor" in vars(S):
         fail.append("_apply_ctl_floor still defined")
     return _st("det", "ctl-floor-removed",
@@ -13659,6 +14021,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_soft_ctl_floor(), lambda: _stc_prog_floor(),
                  lambda: _stc_long_run_step(), lambda: _stc_long_run_identity(), lambda: _stc_eq_km(), lambda: _stc_eq_stable(),
                  lambda: _stc_clock_couple(), lambda: _stc_easy_ladder(),
+                 lambda: _stc_trimp_price(), lambda: _stc_week_trimp_bound(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_straddle_streak(),

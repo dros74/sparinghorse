@@ -6,17 +6,17 @@
     "verdict": "maintain"
   },
   "mode": "maintenance",
-  "note": "Easy pace ~5:03/km \u2014 if your easy runs are habitually faster than this they're really threshold effort; the re-base deliberately runs slower to build the aerobic base. (See the Effort-discipline panel for how your actual easy runs measure up.)",
+  "note": "Easy pace ~5:02/km \u2014 if your easy runs are habitually faster than this they're really threshold effort; the re-base deliberately runs slower to build the aerobic base. (See the Effort-discipline panel for how your actual easy runs measure up.)",
   "objective": null,
   "ok": true,
   "pace_zones": {
     "easy": "5:11/km",
-    "easy_top": "5:03/km",
-    "interval": "3:45/km",
-    "lt1": "4:47/km",
-    "marathon": "4:29/km",
+    "easy_top": "5:02/km",
+    "interval": "3:44/km",
+    "lt1": "4:46/km",
+    "marathon": "4:28/km",
     "p5k": "3:49/km",
-    "threshold": "4:08/km"
+    "threshold": "4:07/km"
   },
   "phases": [
     {
@@ -34,8 +34,8 @@
   },
   "rebase": {
     "clipped_by_acwr": false,
-    "end_atl": 68.2,
-    "end_ctl": 71.0,
+    "end_atl": 81.6,
+    "end_ctl": 84.2,
     "full_len": 6,
     "start": "2026-06-29",
     "weeks": []
@@ -45,9 +45,9 @@
     "reason": "no symptom or medical event in 56 days \u2014 the plan follows your measured form"
   },
   "shape": {
-    "atl": 68.25,
-    "ctl": 71.03488372093024,
-    "effective_vo2max": 53.5,
+    "atl": 81.5775,
+    "ctl": 84.22162790697675,
+    "effective_vo2max": 53.6,
     "seed": {
       "bridged_days": 1,
       "fallback": null,
@@ -58,7 +58,7 @@
     "basis": "no prior projection yet \u2014 riding the full ceiling",
     "factor": 1.0,
     "projected": null,
-    "realized": 71.0,
+    "realized": 84.2,
     "ride_cap": 1.25
   },
   "tune_ups": []

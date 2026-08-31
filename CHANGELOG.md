@@ -10,6 +10,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.48.0] - 2026-08-31
+
+### Changed
+
+- **A kilometre now costs what it costs (§TP).** The engine solves in TRIMP and pays out in
+  kilometres, and `est_trimp`'s five inline literals were the exchange rate between the two. They were
+  wrong at the bottom. Runalyze's `activities.trimp` is Banister TRIMP — fitted over 1,037 of the
+  athlete's own runs with HR, `TRIMP/min = HRr·k·e^(b·HRr)` reproduces it with RMSE **0.068/min** —
+  so every rung is a checkable claim about heart rate. The old ladder claimed easy running costs
+  134 bpm; measured two independent ways (914 min of §RD segment decodes since 08-01, and an
+  HR-vs-pace regression read at the plan's own zone paces) it costs **143–144**.
+
+  `easy 1.3 → 1.65 · long 1.4 → 1.72 · marathon 1.8 → 2.10`, with `threshold 2.6 → 2.55` and
+  `interval 3.2 → 3.10` barely moving — they were already inside 3%. **The ladder was right at the
+  top and wrong at the bottom**, which is why a uniform rescale (the obvious fix) was rejected: it
+  would have put threshold at 3.24 and interval at 3.99 and broken the two accurate rungs.
+
+  What it cost, measured on the live plan: the week of 2026-08-24 prescribed 54.0 km / 367 min
+  against a **494**-TRIMP budget for work that actually costs **629**. The athlete ran it (+8.7% km,
+  +32 min) for 647 TRIMP. Of the +153 overshoot, **+135 (88%) was this table** and +18 (12%) was the
+  overrun — a realised peak ACWR of 1.377 against a plan projecting 1.205. One table, both known
+  symptoms: the §SYM-A ledger's 36–57%-low CTL forecast, and realised ACWR landing above the ceiling
+  the week was sized to respect. Across the remaining block the old price under-charged by **+24.4%**;
+  the new one by +1.7%.
+
+  Also new: `trimp_per_min()`, because four call sites read the per-minute RATE through
+  `est_trimp(1, zone)` — which rounds its result to 0.1. Invisible while every rung was a 1-decimal
+  literal, and it silently shaves a 2-decimal one (1.65 → 1.6). `det/trimp-price` asserts that on the
+  syntax tree, so a call site that is merely right to within 3% still fails.
+
+- **The weekly-load search had a hard ceiling nobody chose (§TP2).** `_max_week_trimp` binary-searched
+  `lo, hi = 0.0, 700.0`. A search cannot report an allowance above its own `hi`, so any week whose
+  real governed allowance exceeded 700 was clipped to 700 in silence — and it had become **the live
+  plan's volume governor**: every build and peak week pinned at 700–701 TRIMP, and the 73.4 km/wk
+  plateau was that literal divided by the price of a kilometre. Not ACWR (whose per-day test §PRO17
+  already stands down on assertive weeks), not `CTL_RAMP_MAX`, not §3.1. Removing the ACWR and ramp
+  ceilings entirely left the plateau exactly where it was; that is what identified it.
+
+  Now `WEEK_TRIMP_SEARCH_MAX = 1000.0`, named, documented and set clear of the hand-over, so a
+  calibrated constant decides the ceiling instead of a search range. **No safety constant changed:**
+  `ACWR_SOFT`/`ACWR_HARD` stay 1.25/1.30 and `CTL_RAMP_MAX` stays 5.0, and it is `CTL_RAMP_MAX` that
+  now binds — at `hi` 850 and at 900 the block is identical, with projected CTL climbing exactly
+  +5.0/wk through the peak phase. `det/week-trimp-bound` holds it there.
+
+  Together, on the live plan: **810.2 km over the remaining block (was 917.1), peak week 70.8 km
+  (was 73.4), longest run 30.9 km, projected race CTL 111 against the §SYM-A ledger's independent
+  estimate of 114** — the first time the engine's two opinions about race-day fitness agree (it
+  projected 100 against that 114 before). Predicted finish 4:05:10.
+
+### Fixed
+
+- **A small week was told its long run was crushed by fatigue.** `_mark_load_integrity` tested the
+  absolute floor (`LONG_RUN_MIN_KM`) before the flat test and returned, so a week that is simply
+  *small* — a re-base week of three 3 km runs — was labelled "shakeout — long run held back by recent
+  fatigue (ACWR ceiling)", a cause it had no evidence for, and never got the `long_flat` flag that
+  says what actually happened. The flat reading now wins wherever it applies: "nothing here is
+  meaningfully longer than anything else" describes the week whether or not the long run is also under
+  the floor, while blaming fatigue is a claim about cause. Latent until §TP's honest price reached it
+  (re-base wk6 fell 14.4 → 8.8 km); `det/long-run-identity` cases (d)/(e) were already written for it.
+
+### Known defects
+
+- **§TP-RATCHET — `session_eq_cap` bootstraps off the plan's own lay (filed, not fixed).** §3.1's
+  per-session biomechanical cap is `SESSION_EQ_STEP × ` the largest recent session's eq_km, fed by
+  `seed_seq + blk_seq`. The seed does not reach the phase: `_recent_session_eq` reads a correct
+  `[14.0, 14.0]` off `det/regime-plan`'s fixture while the cap in force measures **7.21** (= 1.30 ×
+  5.55, the eq of an interval session the block itself just laid). With no external anchor the cap
+  follows the plan down and locks, and that fixture's block freezes at 17.9 km for eleven weeks while
+  projecting the athlete detraining from CTL 55 to 15. Neutralising `SESSION_EQ_STEP` restores a
+  healthy ramp (build peak 68.8 km, spanning 22.1 km).
+
+  Same fixed-point shape §PRO23 documented for `long_km_cap` and fixed there by bounding on the
+  exogenous cap; the session cap never got that treatment. **Not caused by this release** — at the OLD
+  price with a 4 km seed run the same block freezes at 23.1 km — and **not present in the live plan**,
+  whose real activities anchor the seed. It is a safety governor and gets its own release, its own
+  dets and its own seen-to-fail proof rather than riding on a repricing. `det/regime-plan` carries a
+  TRIPWIRE that goes RED the day it is fixed, with the two real assertions quoted verbatim beside it.
+
 ## [0.47.0] - 2026-08-31
 
 ### Added

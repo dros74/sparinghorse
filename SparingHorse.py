@@ -76,6 +76,7 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     RESPONSE_MIN, RESPONSE_ONTRACK, RUN_DAY_LAYOUTS, RUN_FAMILY_SQL,
     RUN_MIN_KM, SESSION_EQ_STEP, SETTINGS_BY_KEY, SETTINGS_SPEC, SJ_MAX_GAP_MIN, SJ_PART_MIN_S,
     TAPER_BOTTOM, TAPER_LONG_FRAC, TAPER_SHARP_FRAC, TAPER_TOP, TAU_ATL, TAU_CTL,
+    TRIMP_PER_MIN, WEEK_TRIMP_SEARCH_MAX, trimp_per_min,
     V5K_VVO2MAX_FRAC, _actual_week_caps, _adj_directive, _adj_fingerprint, _adj_summary,
     _apply_adjustment, _athlete_age, _av_blocked_dates, _av_run_days, _build_long_mp,
     _build_quality, _card_truth_elapsed, _current_week_actuals, _date, _derive_block_start,
