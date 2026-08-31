@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.50.0] - 2026-08-31
+
+### Changed
+
+- **Down weeks were too deep — but not for the reason the source first suggested (§DELOAD).**
+  `BUILD_DOWN_FRAC` **0.75 → 0.80**.
+
+  The complaint was "three down weeks in the build phase". Checked against Davis, **three was right
+  and the cadence was right**: down weeks belong every three to four weeks, and the Breeze plan (peak
+  65–80 km/wk, goal times 3:15–4:30 — this athlete's tier) deloads at weeks **4, 8 and 12**, three in
+  an eighteen-week plan. This engine already laid three, exactly four weeks apart.
+
+  The depth was the problem. Davis's prose says "a 20–30% drop in mileage" and 0.75 honoured that
+  sentence, but the published plans cut far less — Breeze 65 −9/−8/−11%, Breeze 80 −15/−15/−15%,
+  Wind 90 −16/−17/−20%. That argued for 0.87, a 13% cut.
+
+  ⛔ **0.87 is wrong, and `det/meso-rephase` is what caught it.** A percentage drop in a Davis plan
+  and a percentage drop here are **not the same quantity**. Those plans are mileage prescriptions;
+  this engine governs each week by ACWR against a chronic load that is still climbing, so cutting 13%
+  off the mileage barely moves the ratio. The down week's `proj_acwr` by value:
+
+  | `BUILD_DOWN_FRAC` | 0.75 | 0.78 | 0.80 | 0.82 | 0.84 | 0.87 |
+  |---|---|---|---|---|---|---|
+  | down-week `proj_acwr` | 1.139 | 1.166 | **1.184** | 1.202 | 1.217 | 1.238 |
+
+  `NEAR_CEILING_ACWR` is 1.20, so from 0.82 up **the down week stops being a trough at all**. At 0.87
+  it sits at 1.238 — a *higher* ratio than two of the building weeks around it — and §PRO6's
+  guarantee degrades from 3 consecutive near-ceiling weeks to 6. A deload that does not deload is
+  worse than no deload, because the safety net believes it happened.
+
+  **0.80 is the deepest cut that still produces a real trough** (1.184 < 1.20), and it is the bottom
+  of Davis's own stated 20–30% band. On the live 19-week block the two forward down weeks move from
+  −24%/−22% to **−19%/−17%**, block volume 997 → **1012 km**, projected race CTL 109 → **111**,
+  finish 4:05:49 → **4:05:17**.
+
+  ⚠ **The cadence is deliberately untouched, and §PRO6 is what keeps it right.** Disabling
+  `MESO_MAX_HARD` gives two down weeks unevenly placed; with it, three exactly four weeks apart. The
+  forced deload is holding the plan *on* the book, not off it.
+
+  ⛔ `BASE_DOWN_FRAC` is deliberately NOT moved — it shapes the base phase's pre-governor skeleton,
+  while every down week's governed target, scheduled or forced and in any phase, comes from
+  `BUILD_DOWN_FRAC` in `generate_block`. Moving both would change the same number twice.
+
 ## [0.49.0] - 2026-08-31
 
 ### Added

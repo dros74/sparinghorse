@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.49.0"
+ENGINE_VERSION = "0.50.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1477,7 +1477,41 @@ BUILD_WEEKLY_RAMP = 0.045  # §PRO10 (2026-07-23, my call) — raised 0.02→0.0
 #                            grow together for an athlete whose trailing history dwarfs the athlete's chronic
 #                            load. Intent only — the governor still clips what the ceiling won't allow.
 BUILD_DOWN_EVERY = 4
-BUILD_DOWN_FRAC = 0.75
+BUILD_DOWN_FRAC = 0.80   # §DELOAD (2026-08-31, 0.75 → 0.80). The CADENCE was never the problem; the
+#                          DEPTH was — but not by as much as Davis's own tables suggest, and the
+#                          reason is worth stating because it is a general trap.
+#                          Davis's prose says "down weeks every three to four weeks featuring a 20-30%
+#                          drop in mileage"; the PLANS cut far less — Breeze 65 −9/−8/−11%, Breeze 80
+#                          −15/−15/−15%, Wind 90 −16/−17/−20%. Breeze is this athlete's tier (peak
+#                          65-80 km/wk, goal 3:15-4:30), so 0.87 (a 13% cut) looked like the honest
+#                          read of the source.
+#                          ⛔ IT IS NOT, AND det/meso-rephase IS WHAT CAUGHT IT. A percentage drop in
+#                          Davis's plans and a percentage drop HERE are not the same quantity. Those
+#                          plans are mileage prescriptions; this engine governs each week by ACWR
+#                          against a chronic load that is still climbing, so cutting 13% off the
+#                          mileage barely moves the ratio. Measured on the det's own fixture, the down
+#                          week's proj_acwr by frac: 0.75 → 1.139 · 0.78 → 1.166 · 0.80 → 1.184 ·
+#                          0.82 → 1.202 · 0.84 → 1.217 · 0.87 → 1.238. NEAR_CEILING_ACWR is 1.20, so
+#                          from 0.82 up the "down week" stops being a trough at all — at 0.87 it sits
+#                          at 1.238, a HIGHER ratio than two of the building weeks around it, and the
+#                          §PRO6 guarantee goes from 3 consecutive near-ceiling weeks to 6. A deload
+#                          that does not deload is worse than no deload, because the net believes it
+#                          happened.
+#                          0.80 is the deepest cut that still produces a real trough (1.184 < 1.20),
+#                          and it is the bottom of Davis's own stated 20-30% band. On the live block
+#                          it moves the two forward down weeks from −24%/−22% to −19%/−17% — most of
+#                          the softening that was asked for, with the safety net intact.
+#                          ⚠ THE CADENCE IS UNTOUCHED AND DELIBERATELY SO. Breeze deloads at weeks 4,
+#                          8 and 12 — three in eighteen, four apart — and this plan already lays three,
+#                          four apart. §PRO6's forced deload is what makes that true (disable
+#                          MESO_MAX_HARD and the spacing breaks to two), so it is the mechanism keeping
+#                          us ON the book, not off it. The complaint that prompted this was "3 rest
+#                          weeks in the build phase": three was right, and at −24% they behaved like
+#                          rest weeks rather than the cutbacks Davis prescribes.
+#                          ⛔ BASE_DOWN_FRAC is deliberately NOT moved: it shapes the base phase's
+#                          pre-governor SKELETON, while every down week's governed target — scheduled
+#                          or forced, in any phase — comes from BUILD_DOWN_FRAC (see generate_block).
+#                          Moving both would change the same number twice.
 BUILD_LONG_FRAC = 0.28       # §PRO18 — Daniels/Hansons band (was 0.45, raised from 0.34 2026-06-20).
                              # The long run is still the cornerstone; it is now a smaller SHARE of a
                              # much larger week, which is the whole point (see LONG_RUN_MAX_FRAC).
