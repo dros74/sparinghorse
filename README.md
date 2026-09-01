@@ -134,7 +134,13 @@ caches only the shell and never the API.
 The demo exists because the honest problem with showing this project to anyone is that a screenshot doesn't
 demonstrate an engine — you have to be able to push it and see it push back.
 
-    mkdir -p demo && docker compose up -d sparinghorse-demo
+    mkdir -p demo && docker compose up -d --build sparinghorse-demo
+
+(On a host where Docker needs root — a Synology NAS, for instance — that is
+`mkdir -p demo && sudo docker compose up -d --build sparinghorse-demo`. Keep the `mkdir` un-sudo'd so
+the volume belongs to you, and note that Compose reads `.env` for the *whole* file whatever service
+you name: if `.env` is root-owned, a non-root `docker compose` fails with a permission error before
+it looks at any service.)
 
 It carries **no credentials**: no Runalyze token, no Claude key, and no secrets-store mount. On top of that,
 `_demo_guard` refuses four families of request, each for its own reason:
