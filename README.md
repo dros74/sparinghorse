@@ -127,20 +127,22 @@ caches only the shell and never the API.
   training shape + plan can be public; medical/HR detail stays private.
 - **`sparinghorse-demo`** — `SH_DEMO=1`, the **full private console over a synthetic athlete**. Not the same
   thing as the read-only view: this one lets a stranger regenerate the plan, post a check-in, move the race
-  and watch the engine actually respond. It seeds itself into its **own** database (`./demo`, never the real
-  one) on first boot and restores it hourly, so whatever a visitor leaves behind is temporary.
+  and watch the engine actually respond. It seeds itself into its **own** database (a named volume, never the real one) on first boot and restores it hourly, so whatever a visitor leaves behind is temporary.
 
 ### Running a public demo
 The demo exists because the honest problem with showing this project to anyone is that a screenshot doesn't
 demonstrate an engine — you have to be able to push it and see it push back.
 
-    mkdir -p demo && docker compose up -d --build sparinghorse-demo
+    docker compose up -d --build sparinghorse-demo
 
-(On a host where Docker needs root — a Synology NAS, for instance — that is
-`mkdir -p demo && sudo docker compose up -d --build sparinghorse-demo`. Keep the `mkdir` un-sudo'd so
-the volume belongs to you, and note that Compose reads `.env` for the *whole* file whatever service
-you name: if `.env` is root-owned, a non-root `docker compose` fails with a permission error before
-it looks at any service.)
+It uses a **named volume**, so there is nothing to create first — the demo's database is synthetic,
+seeded on first boot and restored hourly, so no host directory needs to exist, be backed up, or be
+inspected.
+
+(On a host where Docker needs root — a Synology NAS, for instance — prefix the compose command with
+`sudo`. Note also that Compose reads `.env` for the *whole* file whatever service you name: if `.env`
+is root-owned, a non-root `docker compose` fails with a permission error before it looks at any
+service at all.)
 
 It carries **no credentials**: no Runalyze token, no Claude key, and no secrets-store mount. On top of that,
 `_demo_guard` refuses four families of request, each for its own reason:

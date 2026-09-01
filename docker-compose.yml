@@ -120,11 +120,21 @@ services:
       # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY / SH_SECRETS_DB / SH_HOUSE_* here —
       # a demo carries no credentials and does not advertise the owner's other sites.
     volumes:
-      - ./demo:/data        # its own database; never the real one
+      # A NAMED VOLUME, not a bind mount, and deliberately: Docker creates it on first use, whereas a
+      # missing bind-mount source is a hard failure on some hosts ("Bind mount failed: … does not
+      # exist" on Synology) — so `./demo:/data` turned a one-line deploy into a mkdir-in-the-right-
+      # directory puzzle. Nothing is lost by it: this database is synthetic, seeded on first boot and
+      # restored hourly, so there is no host file anyone needs to keep, back up or inspect. It is also
+      # one more reason the demo cannot reach the real data — it has no path into ./data at all.
+      # Wipe it, if ever needed, with:  docker compose down && docker volume rm sparinghorse_demo-data
+      - demo-data:/data
     networks:
       - edge
     # Reached by the tunnel via service name (http://sparinghorse-demo:8770) over `edge`.
     # Host-local debug only: ports: ["127.0.0.1:8772:8770"]
+
+volumes:
+  demo-data:      # the demo's synthetic database — disposable by design (see the service above)
 
 # Shared network for the Cloudflare tunnel to reach both instances by service name. cloudflared
 # (its own stack, currently on the default `bridge`) must join this same network — see the deploy
