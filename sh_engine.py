@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.51.0"
+ENGINE_VERSION = "0.52.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1456,14 +1456,38 @@ BASE_TEMPO_FROM_WEEK = 3   # no tempo in the first 2 Base weeks (ease into quali
 # because a single .10 touch self-tripped the §3.1 brake during a steep volume rebuild. Two 0.05
 # sessions are gentler per BOUT than one 0.10 (the session ceiling is per-bout) but cost the WEEK
 # ceiling the same, so the week-eq headroom is the thing to watch, and it is measured per release.
+# §PROG — the Kenyan-style progression run. Zones and shares follow Davis's own description of a
+# 12 km run: about a third easing up from slower-than-easy, half cruising at 80–88% 5k, the closing
+# sixth at 92–95% 5k. This engine's marathon zone reads 85.2% of 5k SPEED and its threshold zone
+# 92.5%, so the two bands map onto priced zones exactly — no new zone, no new price.
+PROG_ZONES = ("easy", "marathon", "threshold")
+PROG_SHARES = (0.34, 0.50, 0.16)   # of the session's WORK minutes, in order
+# Sized against Davis Table 7.12 ("guidelines for biggest general phase workouts based on peak
+# mileage"): at 65–80 km/wk — this engine's Breeze tier — the Kenyan progression run is 11–13 km.
+# Table 7.14 files it as Group A, every 7–14 days at lower mileage, which is why the rotation can
+# afford one every other quality week without crowding the metabolically unsustainable work.
+PROG_FRAC = 0.18           # → ~10 km of running at the top of a general phase that peaks near
+#                            60 km/wk — proportionate to Davis's 11–13 km at a 65–80 km/wk peak —
+#                            and it scales with weekly
+#                            volume, which is the Table 7.13 progression rule ("add 1–2 km to total
+#                            distance") arriving for free rather than as a second constant.
+#                            ⚠ Held at .18, not .20, so a progression week's TOTAL structured slice
+#                            stays at .24 — inside the 0.25 sanity bound det/components already
+#                            enforces. Sizing the session to fit the existing bound is the right way
+#                            round; raising a bound to fit a new session is how bounds stop meaning
+#                            anything. Only ~20% of this run is HARD (the closing threshold third),
+#                            so a progression week asks just .096 of weekly TRIMP in HARD_ZONES.
 BASE_THR_FRAC = 0.06       # §MIX — the eq-neutral swap for one DAVIS_BASE_VO2_FRAC interval slot
 BASE_VO2_LONG_REP_MIN = 3  # §MIX — Breeze's general phase runs 1.5/2/3/5-min reps; alternate 2 and 3
 BASE_QUALITY_CYCLE = (     # §MIX — (slot A, slot B) per quality-week ordinal; deterministic, 4-week
     ("vo2_short", "vo2_long"),
-    ("vo2_short", "threshold"),
+    ("progression", "threshold"),
     ("vo2_long", "vo2_short"),
-    ("threshold", "vo2_long"),
-)
+    ("threshold", "progression"),
+)                          # §PROG — 4 VO₂ : 2 threshold : 2 progression = 50/25/25, against
+#                            Breeze's own general-phase 12 : 5 : 5 ≈ 55/23/23. The pairing in the
+#                            second row is Breeze's week 2 exactly: a progression run and a strong
+#                            run at 85% 5k in the same week.
 
 
 def _base_quality_spec(name):
@@ -1472,6 +1496,13 @@ def _base_quality_spec(name):
     if name == "threshold":
         return {"kind": "tempo", "zone": BASE_TEMPO_ZONE, "frac": BASE_THR_FRAC,
                 "structure": "continuous", "label": "cruise tempo", "component": "ssmax"}
+    if name == "progression":
+        # §PROG — high-end aerobic, not a hard session: only its closing threshold third counts
+        # toward HARD_ZONES, which is why it can sit beside a VO₂ or a tempo week without the
+        # week's hard share moving much. Component is `ssmax` — Davis puts it in the same
+        # high-end-aerobic family as strong runs and cruise intervals.
+        return {"kind": "progression", "zone": PROG_ZONES[1], "frac": PROG_FRAC,
+                "structure": "progression", "label": "progression run", "component": "ssmax"}
     rep_min = BASE_VO2_LONG_REP_MIN if name == "vo2_long" else DAVIS_BASE_VO2_REP_MIN
     return {"kind": "interval", "zone": "interval", "frac": DAVIS_BASE_VO2_FRAC,
             "structure": "intervals", "rep_min": rep_min, "rec_min": 2,
@@ -1764,6 +1795,45 @@ def _build_quality(spec, work_trimp, start_date, dow, zones, easy_pace_sec):
     zpace = (zones or {}).get(zone) or easy_pace_sec
     per_min_zone = trimp_per_min(zone)
     work_min = max(1, round(work_trimp / per_min_zone))
+    if spec.get("structure") == "progression":
+        # §PROG — the Kenyan-style progression run, as Davis defines it. The run opens slower than
+        # an easy run, climbs over the first three or four kilometres — Davis: "smoothly and
+        # continuously … into moderate, steady, and strong paces" — holds 80–88% of 5k pace until two
+        # kilometres to go, then lifts to "92% or even 95% 5k pace" for the last couple of minutes.
+        # The athlete should finish "exhilarated, not exhausted".
+        # ⭐ THE ZONES ALREADY ENCODE THOSE PERCENTAGES — nothing had to be invented. Read as a share
+        # of 5k SPEED, this engine's marathon zone is 85.2% 5k, sitting in the middle of the 80–88%
+        # cruise band, and its threshold zone is 92.5%, exactly the closing 92–95%. So the run is
+        # easy → marathon → threshold, and the shares follow the book's own 12 km description: about
+        # a third easing up, half cruising, the last sixth quick.
+        # NO WARM-UP BLOCK: the easy ramp IS the warm-up, which is the whole point of the session —
+        # bracketing it with a separate one would misdescribe it. The cool-down stays, because the
+        # book's example reads "12 km Kenyan-style progression run + 2 km easy cool-down".
+        # ⚠ Only the closing threshold segment is HARD. `_hard_share` counts work reps whose zone is
+        # in HARD_ZONES, so the easy and marathon thirds are correctly not high-intensity — which is
+        # exactly why Davis files this as a Group A high-end aerobic session and lets a lower-mileage
+        # athlete run one every 7–14 days.
+        rates = [trimp_per_min(z) for z in PROG_ZONES]
+        avg_rate = sum(s * r for s, r in zip(PROG_SHARES, rates))
+        total_min = max(len(PROG_ZONES), round(work_trimp / avg_rate)) if avg_rate else 0
+        reps = []
+        for z, share, detail in zip(PROG_ZONES, PROG_SHARES,
+                                    ("settle in — start slower than easy", "cruise, fast and relaxed",
+                                     "close it down — fast finish")):
+            zp = (zones or {}).get(z) or easy_pace_sec
+            reps.append(_qblock("work", z, max(1, round(total_min * share)), zp, detail))
+        reps.append(_qblock("cooldown", "easy", QUALITY_CD_MIN, easy_pace_sec, "easy cool-down"))
+        km = sum(r["km"] for r in reps)
+        date = (start_date + timedelta(days=dow)).isoformat()
+        note = (f"{spec.get('label', spec['kind'])} — {round(km, 1)}km building easy → marathon → "
+                f"threshold, then {QUALITY_CD_MIN}min easy cd. Start slower than feels right; "
+                f"finish exhilarated, not exhausted")
+        sess = _session_from_reps(date, spec["kind"], PROG_ZONES[1], (zones or {}).get(PROG_ZONES[1])
+                                  or easy_pace_sec, reps, note)
+        comp = spec.get("component") or COMPONENT_BY_KIND.get(spec["kind"])
+        if comp:
+            sess["component"] = comp
+        return sess
     reps = [_qblock("warmup", "easy", QUALITY_WU_MIN, easy_pace_sec, "easy warm-up")]
     if spec.get("structure") == "intervals":
         rep_min, rec_min = spec.get("rep_min", 3), spec.get("rec_min", 2)

@@ -10,6 +10,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.52.0] - 2026-09-01
+
+### Added
+
+- **The Kenyan-style progression run (§PROG).** The engine had two structures — `intervals` and
+  `continuous` — and no way to express a run that ramps across zones, so the session Davis uses six
+  times in Breeze and calls *"unparalleled for building efficiency and relaxation at fast paces"*
+  could not be prescribed at all. It now can.
+
+  The run opens slower than an easy run, climbs over the first three or four kilometres, holds
+  80–88% of 5k pace until two kilometres to go, then lifts to 92–95% for the last couple of
+  minutes. There is **no warm-up block** — the easy ramp *is* the warm-up, which is the whole point
+  of the session — and a cool-down follows, as in the book's own "12 km Kenyan-style progression
+  run + 2 km easy cool-down".
+
+  ⭐ **The zones already encoded those percentages; nothing had to be invented.** Read as a share of
+  5k *speed*, this engine's marathon zone is **85.2% 5k** — the middle of the 80–88% cruise band —
+  and its threshold zone is **92.5%**, exactly the closing 92–95%. So the run is
+  easy → marathon → threshold on zones that were already priced, with shares .34/.50/.16 taken from
+  the book's own 12 km description.
+
+  A rendered example, at a week near the middle of the 65–80 km/wk tier:
+
+  | segment | zone | | |
+  |---|---|---|---|
+  | settle in — start slower than easy | easy | 21 min | 3.0 km |
+  | cruise, fast and relaxed | marathon | 31 min | 5.1 km |
+  | close it down — fast finish | threshold | 10 min | 1.8 km |
+  | easy cool-down | easy | 10 min | 1.4 km |
+
+  ⚠ **Only the closing segment is hard.** `_hard_share` counts work reps whose zone is in
+  `HARD_ZONES`, so the easy and marathon thirds correctly do not register — which is exactly why
+  Davis files this as a Group A high-end aerobic session and lets a lower-mileage athlete run one
+  every 7–14 days. A progression week asks **0.096** of weekly TRIMP in hard zones.
+
+  `PROG_FRAC` = **0.18** is calibrated on the midpoint of the tier Table 7.12 is about (~72 km/wk),
+  where it lays **11.8 km** inside that table's 11–13 km band; it reads 10.9 km at 65 km/wk and 13.2
+  at 80. Held at .18 rather than .20 so a progression week's total structured slice stays inside the
+  **0.25 sanity bound `det/components` already enforces** — sizing the session to fit an existing
+  bound is the right way round; raising a bound to fit a new session is how bounds stop meaning
+  anything.
+
+- **The general-phase pool is three families now**, and the rotation runs 4 VO₂ : 2 threshold : 2
+  progression = 50/25/25, against Breeze's own general-phase 12 : 5 : 5 ≈ 55/23/23. The second row
+  of the cycle pairs a progression run with a cruise tempo, which is Breeze's week 2 exactly.
+
+- **`det/progression-run`** — the run climbs, carries no warm-up block, holds its third/half/sixth
+  shape (read off the laid minutes, not the constants), puts only its closing segment in
+  `HARD_ZONES`, lands in the 11–13 km band at the tier midpoint, and scales with weekly volume.
+  ⚠ The zone mapping is asserted as a claim about **pace** rather than a pair of names: the cruise
+  zone must read inside 80–88% of 5k and the finish inside 92–95%, so a future zone recalibration
+  fails this rather than silently changing what the session is. Four reverts each seen to fail.
+
+### Known gaps
+
+- The taper's sharpening sessions are still labelled "tempo" and resolve to the **marathon** zone,
+  contributing 0% to a 20% hard cap. Davis names a progression run as a good default for the final
+  lead-in, so the structure to fix it now exists — but changing what lands ten days before a race
+  is its own decision and is not bundled here.
+
 ## [0.51.0] - 2026-09-01
 
 ### Added

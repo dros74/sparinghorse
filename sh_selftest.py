@@ -10554,6 +10554,90 @@ def _stc_straddle_caps():
                got={**got, "failures": fail or "none"})
 
 
+def _stc_progression_run():
+    """§PROG — the Kenyan-style progression run is built the way Davis describes it.
+
+    The engine had two structures, `intervals` and `continuous`, and no way to express a run that
+    ramps across zones — so the one session Davis uses six times in Breeze, and calls "unparalleled
+    for building efficiency and relaxation at fast paces", could not be prescribed at all.
+
+    Five teeth, each a sentence from the book turned into an assertion:
+    (a) IT CLIMBS. Zones strictly increase in speed, easy → marathon → threshold, in that order.
+    (b) NO WARM-UP BLOCK. The easy ramp IS the warm-up ("starts out extremely easy"); a session that
+        bracketed it with a separate warm-up would be describing a different workout. A cool-down
+        does follow, as in the book's own "12 km … + 2 km easy cool-down".
+    (c) THE SHAPE. About a third easing up, half cruising, the last sixth quick — checked on the
+        laid MINUTES, not on the constants, so a change to how the split is computed is caught.
+    (d) ONLY THE FINISH IS HARD. `_hard_share` counts work reps in HARD_ZONES, so the easy and
+        marathon thirds must not register — which is what lets a progression run sit in the pool
+        without spending the week's hard budget, and why Davis files it as high-end aerobic.
+    (e) THE SIZE. At the midpoint of the 65–80 km/wk tier Table 7.12 is about, it lands inside
+        that table's 11–13 km band, and it SCALES with weekly volume (Table 7.13's "add 1–2 km").
+    ⚠ The zone mapping is asserted as a claim about PACE, not a hard-coded pair of names: read as a
+    share of 5k speed the marathon zone must land inside the book's 80–88% cruise band and the
+    threshold zone inside its 92–95% finish. If a zone pace is ever recalibrated, this fails."""
+    from datetime import date
+    zones = {"easy": 421, "lt1": 388, "marathon": 364, "threshold": 335, "interval": 304, "p5k": 310}
+    spec = E._base_quality_spec("progression")
+    fail = []
+    # ⚠ SIZED AT THE TIER THE TABLE IS ABOUT. Davis's 11–13 km is the biggest general-phase
+    # progression run for a 65–80 km/wk PEAK, quoted as one band for the whole tier, while a
+    # fraction of weekly TRIMP necessarily scales inside it. `PROG_FRAC` is therefore calibrated on
+    # the tier's MIDPOINT — ~72 km/wk, ≈834 TRIMP at these zone paces — where it lays 11.8 km. It
+    # reads 10.9 km at 65 km/wk and 13.2 at 80, which is the band's own slope. Testing this at a
+    # 60 km week (a general phase still climbing) would assert the athlete is at peak mileage.
+    TIER_MID_TRIMP = 834.0
+    sess = E._build_quality(spec, TIER_MID_TRIMP * spec["frac"], date(2026, 9, 7), 1, zones,
+                            zones["easy"])
+    work = [r for r in sess["reps"] if r["effort"] == "work"]
+    # (a) it climbs
+    paces = [zones[r["zone"]] for r in work]
+    if [r["zone"] for r in work] != list(E.PROG_ZONES) or paces != sorted(paces, reverse=True):
+        fail.append(f"the run does not climb: {[(r['zone'], zones[r['zone']]) for r in work]}")
+    # (b) no warm-up, one cool-down
+    if any(r["effort"] == "warmup" for r in sess["reps"]):
+        fail.append("a progression run was given a warm-up block — the easy ramp IS the warm-up")
+    if sum(1 for r in sess["reps"] if r["effort"] == "cooldown") != 1:
+        fail.append("a progression run must finish with exactly one easy cool-down")
+    # (c) the shape, read off the laid minutes
+    tot = sum(r["minutes"] for r in work)
+    got_shares = [r["minutes"] / tot for r in work]
+    if any(abs(g - s) > 0.05 for g, s in zip(got_shares, E.PROG_SHARES)):
+        fail.append(f"the laid shape drifted from {E.PROG_SHARES}: {[round(g, 2) for g in got_shares]}")
+    # (d) only the closing third is hard
+    hard = sum(r["trimp"] for r in work if r["zone"] in S.HARD_ZONES)
+    if [r["zone"] for r in work if r["zone"] in S.HARD_ZONES] != [E.PROG_ZONES[-1]]:
+        fail.append("more than the closing segment counted as hard")
+    hard_share = hard / sess["trimp"]
+    if not 0.10 < hard_share < 0.35:
+        fail.append(f"the hard share of the run is {hard_share:.2f} — expected a closing third only")
+    # (e) the size, and that it scales
+    work_km = sum(r["km"] for r in work)
+    if not 10.0 <= work_km <= 13.0:
+        fail.append(f"at the tier midpoint the run lays {work_km:.1f} km (want the 11–13 band)")
+    small = E._build_quality(spec, 600.0 * spec["frac"], date(2026, 9, 7), 1, zones, zones["easy"])
+    small_km = sum(r["km"] for r in small["reps"] if r["effort"] == "work")
+    if not small_km < work_km - 1.0:
+        fail.append(f"the run does not scale with weekly volume: {small_km:.1f} vs {work_km:.1f} km")
+    # the zone mapping, as a claim about pace rather than about names
+    pct = {z: 100.0 * zones["p5k"] / zones[z] for z in E.PROG_ZONES}
+    if not 80.0 <= pct["marathon"] <= 88.0:
+        fail.append(f"the cruise zone reads {pct['marathon']:.1f}% 5k, outside the book's 80–88%")
+    if not 92.0 <= pct["threshold"] <= 95.0:
+        fail.append(f"the finish zone reads {pct['threshold']:.1f}% 5k, outside the book's 92–95%")
+    return _st("det", "progression-run",
+               "§PROG the Kenyan-style progression run climbs easy → marathon → threshold with no "
+               "warm-up block (the ramp is the warm-up), a third/half/sixth shape, only its closing "
+               "segment in HARD_ZONES, and a size inside Davis's 11–13 km band that scales with "
+               "weekly volume — with the two work zones verified as % of 5k pace, not by name",
+               passed=not fail,
+               expect="climbs · no warm-up · .34/.50/.16 · closing segment alone is hard · 11–13 km",
+               got={"laid": [f"{r['zone']} {r['minutes']}min {r['km']}km" for r in sess["reps"]],
+                    "work_km": round(work_km, 1), "hard_share_of_session": round(hard_share, 3),
+                    "zone_pct_of_5k": {z: round(v, 1) for z, v in pct.items()},
+                    "failures": fail or "none"})
+
+
 def _stc_quality_mix():
     """§MIX — THE GENERAL PHASE STOPS PRESCRIBING THE SAME WEEK TWICE.
 
@@ -10577,7 +10661,7 @@ def _stc_quality_mix():
     fails = {}
     shape = S.base_shape(14, 45, davis=True)
     qweeks = [w for w in shape if w["quality"]]
-    pool = {"interval", "tempo"}
+    pool = {"interval", "tempo", "progression"}
     # (a) two sessions, both from the pool
     bad = [w["wk"] for w in qweeks if len(w["quality"]) != 2]
     if bad:
@@ -10602,6 +10686,8 @@ def _stc_quality_mix():
     # (c) threshold replaces an interval — never a third session, and eq-neutral
     if any(sum(1 for q in w["quality"] if q["kind"] == "tempo") > 1 for w in qweeks):
         fails["replaces"] = "a week carried two threshold sessions — the swap became an addition"
+    if any(sum(1 for q in w["quality"] if q["kind"] == "progression") > 1 for w in qweeks):
+        fails["replaces"] = "a week carried two progression runs — the swap became an addition"
     _eq_per_trimp = lambda z, pace: (60.0 / pace) * S.EQ_KM_FACTOR[z] / S.trimp_per_min(z)
     thr_cost = S.BASE_THR_FRAC * _eq_per_trimp("threshold", 335)
     int_cost = S.DAVIS_BASE_VO2_FRAC * _eq_per_trimp("interval", 304)
@@ -10613,7 +10699,18 @@ def _stc_quality_mix():
     if dup:
         fails["monotony"] = f"consecutive quality weeks carry an identical pair: weeks {dup}"
     # the hard share the shape ASKS for stays under the phase cap
-    hard_frac = max((sum(q["frac"] for q in w["quality"]) for w in qweeks), default=0.0)
+    # ⚠ HARD is not the same as STRUCTURED. A progression run is mostly easy and marathon running —
+    # only its closing threshold third lands in HARD_ZONES — so summing raw `frac` over the week's
+    # quality specs answers "how much of the week is structured", not "how much is hard", and reads
+    # 0.26 where the true hard share is 0.096. Weight each spec by the share of its own work TRIMP
+    # that falls in a hard zone, which is what PHASE_HARD_CAP is actually a cap on.
+    def _hard_frac_of(q):
+        if q.get("structure") != "progression":
+            return q["frac"] if q["zone"] in S.HARD_ZONES else 0.0
+        parts = [sh * S.trimp_per_min(z) for z, sh in zip(E.PROG_ZONES, E.PROG_SHARES)]
+        hard = sum(pt for z, pt in zip(E.PROG_ZONES, parts) if z in S.HARD_ZONES)
+        return q["frac"] * hard / sum(parts)
+    hard_frac = max((sum(_hard_frac_of(q) for q in w["quality"]) for w in qweeks), default=0.0)
     if hard_frac > S.PHASE_HARD_CAP["base"]:
         fails["hard_cap"] = f"base asks {hard_frac:.3f} of weekly TRIMP hard, cap {S.PHASE_HARD_CAP['base']}"
     # caution untouched — one continuous cruise tempo, as before
@@ -11172,10 +11269,10 @@ def _stc_components():
             # assert the single VO₂ touch, which was the whole defect: one structure, every week,
             # on the same weekday, and the threshold zone never prescribed at all.
             fails.append(f"davis base wk{w['wk']} should carry two quality sessions: {q}")
-        elif any(s["kind"] not in ("interval", "tempo") for s in q):
+        elif any(s["kind"] not in ("interval", "tempo", "progression") for s in q):
             fails.append(f"davis base wk{w['wk']} drew outside the general-phase pool: {q}")
-        elif any(s["frac"] != (S.BASE_THR_FRAC if s["kind"] == "tempo" else S.DAVIS_BASE_VO2_FRAC)
-                 for s in q):
+        elif any(s["frac"] != {"tempo": S.BASE_THR_FRAC, "progression": E.PROG_FRAC}.get(
+                     s["kind"], S.DAVIS_BASE_VO2_FRAC) for s in q):
             fails.append(f"davis base wk{w['wk']} quality frac drifted: {q}")
     db_shape = S.build_shape(7, 24, davis=True)
     mp_fracs = [q["frac"] for w in db_shape if not S._is_down(w["intent"])
@@ -14591,6 +14688,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_straddle_streak(), lambda: _stc_straddle_caps(),
                  lambda: _stc_straddle_remainder(), lambda: _stc_quality_mix(),
+                 lambda: _stc_progression_run(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),

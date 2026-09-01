@@ -305,18 +305,16 @@
         "phase": "base",
         "proj_acwr": 1.801,
         "proj_acwr_flat": 1.56,
-        "proj_acwr_soft": 0.6768,
+        "proj_acwr_soft": 0.6814,
         "proj_ctl": 21.4,
         "quality": [
           {
-            "component": "vo2max",
-            "frac": 0.05,
-            "kind": "interval",
-            "label": "short VO\u2082 touch",
-            "rec_min": 2,
-            "rep_min": 2,
-            "structure": "intervals",
-            "zone": "interval"
+            "component": "ssmax",
+            "frac": 0.18,
+            "kind": "progression",
+            "label": "progression run",
+            "structure": "progression",
+            "zone": "marathon"
           },
           {
             "component": "ssmax",
@@ -491,7 +489,7 @@
         "phase": "base",
         "proj_acwr": 1.588,
         "proj_acwr_flat": 1.432,
-        "proj_acwr_soft": 0.9277,
+        "proj_acwr_soft": 0.9372,
         "proj_ctl": 31.4,
         "quality": [
           {
@@ -503,14 +501,12 @@
             "zone": "threshold"
           },
           {
-            "component": "vo2max",
-            "frac": 0.05,
-            "kind": "interval",
-            "label": "VO\u2082 reps (3min)",
-            "rec_min": 2,
-            "rep_min": 3,
-            "structure": "intervals",
-            "zone": "interval"
+            "component": "ssmax",
+            "frac": 0.18,
+            "kind": "progression",
+            "label": "progression run",
+            "structure": "progression",
+            "zone": "marathon"
           }
         ],
         "role": "build",
