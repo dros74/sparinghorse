@@ -10,6 +10,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.50.2] - 2026-09-01
+
+### Fixed
+
+- **The search that decides what is actually prescribed had the same omission (§STRAD2).** 0.50.1
+  gave the straddling week's *intent* search the §3.1 biomechanical ceilings. The search that fixes
+  the **remainder** — the sessions the athlete is really told to run — still went out without them,
+  so `_bio_on` stayed False there too and `_peak_governs` re-armed the per-day peak ACWR brake
+  §PRO17 stood down. Measured on a deployed 0.50.1 plan: that call answered **409.1 TRIMP** — the
+  very number the intent search returned before 0.50.1 — where the ceilings give **589.0**. The
+  week's intent was an honest 56.6 km and the remainder was held to 35.6, so the card showed
+  **47.6 km against the previous week's 58.7** and read as an unexplained 11 km drop in a week that
+  is not a down week. Nothing had decided the week should be small. It now lays 56.0 km.
+
+  **The week ceiling is charged against what the week has already cost.** `week_eq_cap` bounds a
+  whole week; the remainder is only the days that are left, so passing the full ceiling would have
+  been slack by construction — it would arm `_bio_on`, and so stand the peak brake down, while
+  constraining nothing. The remainder gets the ceiling minus the eq_km the elapsed days really cost.
+  Floored a hair above zero rather than at zero: both ceilings are tested for *truthiness*, so a
+  0.0 would silently disarm the very ceiling it expresses. One of the ten golden scenarios reaches
+  that floor, so the guard is not hypothetical.
+
+- **A ceiling enforced on a week nobody runs is not a ceiling (§STRAD3).** The remainder lay passes
+  `free_from` (place only today-onward days) and `long_km_aim`; the search did not — so it bounded a
+  **four-session** week while the lay produced a **three-session** one. Latent for as long as the eq
+  ceilings were absent from this call. The moment §STRAD2 made them the binder it became visible: a
+  searched 22.70 eq-km passed a 22.88 budget that the laid 23.10 then breached. `_max_week_trimp`
+  now forwards both to its own distribution (default None ⇒ byte-identical for every other caller),
+  restoring §PRO17's rule that the search evaluates the week that will actually be laid.
+
+- **`det/straddle-remainder`** — the laid remainder must fit what is left of the week's damage
+  budget, swept at 30%, 60% and 85% of it already spent, and no bout may pass the session ceiling.
+  Before §STRAD2 the 85% case laid 17.70 eq-km into an 8.19 budget. Reverting the week ceiling, the
+  spent-budget charge, or §STRAD3 each fails it on its own.
+
+- **`det/cap-truth-anchor` now asserts the §PRO9 cap instead of a run that happens to sit under it.**
+  It read the window off the laid long run, a number three governors compete for — and it broke
+  twice in one day as §STRAD and §STRAD2 each handed a correctly-applied ceiling the binding seat.
+  It reads `long_km_cap` itself now: 9.24 with the straddling week's real 8.4 km anchoring it, 5.56
+  without.
+
+### Known gaps
+
+- The deload road still re-phases with the regeneration day. 0.50.1 and this release fix the
+  straddling week's **volume** (day-invariant now); its projected end-of-week ACWR still decays as
+  the week empties (1.240 → 1.093 across one week, measured with the plan followed), and §PRO6
+  compares that partial reading against a threshold written for full weeks. Judging the straddling
+  week on a full-week-equivalent ratio is the remaining piece and moves a safety governor's
+  decision variable, so it is deliberately not bundled here.
+- `det/straddle-remainder` does not cover `session_eq_cap` on the remainder path: on a remainder the
+  biggest bout is the long run and `long_km_cap` already bounds it, so the session ceiling is
+  currently masked. It is passed for parity; no tooth is watching it.
+
 ## [0.50.1] - 2026-09-01
 
 ### Fixed

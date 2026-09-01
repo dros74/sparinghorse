@@ -10554,6 +10554,93 @@ def _stc_straddle_caps():
                got={**got, "failures": fail or "none"})
 
 
+def _stc_straddle_remainder():
+    """§STRAD2/§STRAD3 — THE REMAINDER IS BOUND BY WHAT THE WEEK HAS ALREADY COST.
+
+    §STRAD gave the straddling week's INTENT search the §3.1 ceilings. The search that fixes the
+    REMAINDER — the sessions the athlete is actually told to run — still went out without them, so
+    `_bio_on` stayed False there and `_peak_governs` re-armed the per-day peak ACWR brake §PRO17
+    stood down. Measured on my deployed 0.50.1 plan (week 08-31): that call answered 409.1 TRIMP
+    where the ceilings give 589.0, the week's honest 56.6 km intent was held to 47.6 laid, and the
+    card read as an unexplained 11 km drop from the week before in a week that is not a down week.
+
+    THE CEILING IS CHARGED AGAINST WHAT IS ALREADY SPENT. `week_eq_cap` bounds a WHOLE week; the
+    remainder is only the days that are left, so the budget it gets is the ceiling minus the eq_km
+    the elapsed days really cost. Swept across three spend levels, because the interesting case is
+    the one where the athlete has already used most of the week:
+      · 30% spent — a normal mid-week regeneration, plenty of budget
+      · 60% spent — the budget is now the binding constraint rather than the ACWR ceiling
+      · 85% spent — nearly nothing left; the remainder must shrink to fit, not spend the ceiling twice
+    Before §STRAD2 the 85% case laid 17.70 eq-km into an 8.19 budget — a 116% overrun of the week's
+    remaining damage allowance.
+
+    §STRAD3 — and the ceiling has to be enforced on the week that will actually be RUN. The lay
+    passes `free_from` (place only today-onward days) and `long_km_aim`; the search did not, so it
+    bounded a four-session week while the lay produced a three-session one. Harmless while the eq
+    ceilings were absent from this call; the moment §STRAD2 made them the binder, a searched 22.70
+    eq-km passed a 22.88 budget that the laid 23.10 then breached. §PRO17's rule, and the reason
+    this det measures the LAID remainder and never the search's own answer.
+
+    ⚠ WHAT THIS DET DOES NOT COVER, stated rather than papered over. Reverting the week ceiling or
+    §STRAD3 fails it; reverting `session_eq_cap` alone does NOT. That is not a fixture I failed to
+    tune — on a remainder the biggest bout is the long run, and `long_km_cap` (which the lay has
+    always received) already bounds it, so the session ceiling is currently masked. Swept it at
+    three trailing-bout corpora (caps 14.95 / 13.26 / 12.35) and the laid bout tracked under the cap
+    with and without it. It is passed for parity and because the masking is a property of today's
+    distribution, not a guarantee — a quality bout that outgrew the long run would need it — but no
+    tooth here is watching it, and a future change to `long_km_cap` would remove the cover silently.
+    [[revert-tests-must-be-seen-to-fail]]"""
+    from datetime import date, timedelta
+    easy, bs = 425, date(2026, 8, 3)                       # Monday
+    today = bs + timedelta(days=3)                          # Thursday — three days already spent
+    zones = {"easy": 460, "easy_top": 425, "marathon": 360, "threshold": 330, "interval": 300}
+    shape = [{"wk": i, "km": 55, "runs": 5, "long": 15, "strides": 0, "intent": "Build — general"}
+             for i in (1, 2, 3)]
+    recent_eq, recent_seq = [40.0, 41.0, 42.0, 42.0], [12.0, 12.5, 13.0, 13.0]
+    week_cap = S.BIO_EQ_STEP * max(recent_eq)               # 54.60
+    sess_cap = S.SESSION_EQ_STEP * max(recent_seq)          # 16.90
+    fail, got = [], {}
+    for frac in (0.30, 0.60, 0.85):
+        spent = week_cap * frac
+        w, _ = S.generate_block([dict(x) for x in shape], bs, 76.0, 105.0, easy, zones=zones,
+                                today=today, regime="assertive", consec_hard=0, last_nondown=400.0,
+                                recent_longs=[14.0, 14.5, 15.0, 15.2],
+                                recent_eq=list(recent_eq), recent_session_eq=list(recent_seq),
+                                week_actuals=(3, spent / 1.25), week_actual_eq=spent,
+                                week_actual_long=10.0)
+        rem = [s for s in w[0]["sessions"] if s["date"] >= today.isoformat()]
+        rem_eq = S._week_eq_km(rem)
+        rem_sess = max((S._session_eq_km(x) for x in rem), default=0.0)
+        budget = week_cap - spent
+        got[f"{frac:.0%} spent"] = {"budget": round(budget, 2), "laid_remainder_eq": round(rem_eq, 2),
+                                    "biggest_bout_eq": round(rem_sess, 2)}
+        if rem_eq > budget + 1e-6:
+            fail.append(f"{frac:.0%} spent: laid remainder {rem_eq:.2f} eq-km over the "
+                        f"{budget:.2f} left of the week's ceiling")
+        if rem_sess > sess_cap + 1e-6:
+            fail.append(f"{frac:.0%} spent: laid a {rem_sess:.2f} eq-km bout over the "
+                        f"{sess_cap:.2f} session ceiling")
+    # caution passes no ceiling anywhere, so none of this reaches it
+    cw, _ = S.generate_block([dict(x) for x in shape], bs, 76.0, 105.0, easy, zones=zones,
+                             today=today, regime="caution", consec_hard=0, last_nondown=400.0,
+                             recent_longs=[14.0, 14.5, 15.0, 15.2], recent_eq=list(recent_eq),
+                             recent_session_eq=list(recent_seq),
+                             week_actuals=(3, 20.0), week_actual_eq=week_cap * 0.6,
+                             week_actual_long=10.0)
+    if cw[0].get("intent_km") != shape[0]["km"]:
+        fail.append(f"caution moved: intent {cw[0].get('intent_km')} (want the shape's {shape[0]['km']})")
+    return _st("det", "straddle-remainder",
+               "§STRAD2/§STRAD3 the straddling week's REMAINDER is searched with the §3.1 ceilings "
+               "charged against what the week has already cost — swept over 30/60/85% of the week's "
+               "damage budget already spent — and the search evaluates the day set the lay will "
+               "actually place, so the ceiling binds the week that gets run; caution untouched",
+               passed=not fail,
+               expect=f"laid remainder eq ≤ ({week_cap:.2f} − spent) and no bout over {sess_cap:.2f}, "
+                      f"at every spend level",
+               got={**got, "week_ceiling": round(week_cap, 2), "session_ceiling": round(sess_cap, 2),
+                    "failures": fail or "none"})
+
+
 def _stc_regime_plan():
     """§PRO3/§PRO4 INTEGRATION — generate_plan in the ASSERTIVE regime (in-memory DB; §FORM1:
     assertive is the clean-body default — the history exists to seed the governors, not to earn the
@@ -11290,11 +11377,33 @@ def _stc_cap_truth_anchor():
         fails.append(f"truth anchor ignored: wk4 long {long_t} still fiction-capped")
     if runs_t != 5:
         fails.append(f"§PRO9 day-padding on a truth-anchored week: {runs_t} runs (want 5)")
-    # (b) the straddling week (today mid-wk3): its logged 8.4 must reach wk4's window even though
-    # its elapsed planned days are tiny
-    _, long_s, _ = wk4(date(2026, 1, 22), m)
-    if not long_s > 6.7:                       # > any planned/remainder contribution; 9.2 when binding
-        fails.append(f"straddle actual missing from the window: wk4 long {long_s}")
+    # (b) the straddling week (today mid-wk3): its logged 8.4 must reach wk4's §PRO9 window even
+    # though its elapsed planned days are tiny.
+    # ⚠ THIS LIMB ASSERTS THE CAP, NOT A RUN THAT HAPPENS TO SIT UNDER IT. It used to read the
+    # window off wk4's laid long run (`> 6.7`), which is a number THREE governors compete for — the
+    # §PRO9 ladder, the §3.1 session ceiling and the §3.1 week ceiling. That made it break twice in
+    # one day for reasons having nothing to do with the truth anchor: §STRAD gave the straddling
+    # week's INTENT search the biomechanical ceilings it had never received, and §STRAD2 gave them
+    # to its REMAINDER search, and each time a correctly-applied ceiling took over as wk4's binder
+    # and the proxy moved. The cap itself is the decision variable this det is named for, so read
+    # it. [[governor-decision-variables]]
+    cap_seen = []
+    _orig_mwt = E._max_week_trimp
+    def _spy(ctl, atl, wk, start, *a, **kw):
+        if start == "2026-01-26" and kw.get("long_km_cap") is not None:
+            cap_seen.append(kw["long_km_cap"])
+        return _orig_mwt(ctl, atl, wk, start, *a, **kw)
+    E._max_week_trimp = _spy
+    try:
+        wk4(date(2026, 1, 22), m)
+    finally:
+        E._max_week_trimp = _orig_mwt
+    long_s = max(cap_seen) if cap_seen else None
+    # 1.1 × the straddling week's real 8.4 = 9.24. Without the anchor the window falls back to the
+    # 5.05 logged in wk2 (⇒ 5.56) or the frozen 3.9s (⇒ 4.29), so the threshold separates cleanly.
+    if long_s is None or not long_s > 6.7:
+        fails.append(f"straddle actual missing from the §PRO9 window: wk4 long_km_cap {long_s} "
+                     f"(want 1.1 × 8.4 = 9.24)")
     # det-fixture path (no db): the old planned-sessions semantics stand — window off the 3.9s
     _, long_f, _ = wk4(date(2026, 1, 26), None)
     if not long_f <= 4.4:
@@ -14391,6 +14500,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_straddle_streak(), lambda: _stc_straddle_caps(),
+                 lambda: _stc_straddle_remainder(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),

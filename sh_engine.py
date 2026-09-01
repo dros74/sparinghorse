@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.50.1"
+ENGINE_VERSION = "0.50.2"
 
 
 def _zones_asof(db, date_iso=None):
@@ -2405,7 +2405,8 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
                     days_override=None, ramp_max=None, soft_ctl_floor=None, av_blocked=None,
                     q_days=None, prog_floor=None, shape_neutral=False,
                     session_eq_cap=None, week_eq_cap=None, long_km_cap=None, actual_floor=None,
-                    ladder=False, fixed_days=None, prev_tail=0):
+                    ladder=False, fixed_days=None, prev_tail=0,
+                    free_from=None, long_km_aim=None):
     """Binary-search the largest weekly TRIMP whose END-OF-WEEK projected ACWR stays ≤ cap AND whose
     in-week PEAK ACWR stays ≤ ACWR_HARD (§H1). Distributes WITH the week's quality (via `zones`) so
     the bound is on the real, intensity-distributed week. The peak/hard bound only bites at low CTL,
@@ -2450,6 +2451,8 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
                                      q_days=q_days, long_km_cap=long_km_cap,
                                      ladder=ladder,         # §PRO24 — §PRO17's rule: search the week
                                      #                      that will actually be laid, ladder and all
+                                     free_from=free_from,      # §STRAD3 — …and only the days it may
+                                     long_km_aim=long_km_aim,  # place, at the long-run size it aims for
                                      fixed_days=fixed_days, prev_tail=prev_tail)   # §REST — and its
                                      #                                                spacing gate too
         # §PRO20b — the search must charge today's ACTUAL load, or the allowance it hands back is
@@ -3482,10 +3485,49 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                   and s["date"] >= today.isoformat()})
                 q_ahead = [o for o in q_ahead if o in rem] or None
                 use_zones = zones if q_ahead else None
+                # §STRAD2 — THE CALL THAT DECIDES WHAT IS ACTUALLY PRESCRIBED NEEDS THE CEILINGS TOO.
+                # §STRAD gave them to §PRO13's INTENT search above; this one — the search that fixes
+                # the remainder, i.e. the sessions the athlete is really told to run — still went out
+                # without them, so `_bio_on` stayed False here and `_peak_governs` re-armed the per-day
+                # peak ACWR brake §PRO17 stood down. Measured on my 2026-09-01 plan (0.50.1, week
+                # 08-31, already deployed): this call answered 409.1 TRIMP — the very number the intent
+                # search had returned before §STRAD — where the ceilings give 589.0. The week's intent
+                # was an honest 56.6 km and the remainder was held to 35.6, so the card showed 47.6 km
+                # against the previous week's 58.7 and read as an unexplained 11 km drop in a week that
+                # is not a down week. Nothing had decided the week should be small.
+                #
+                # ⚠ The WEEK ceiling is charged against what the week has ALREADY cost. `_bio_cap`
+                # bounds a whole week's eq_km; this search distributes only the days that are LEFT, so
+                # passing the full ceiling would be slack by construction — it would arm `_bio_on` (and
+                # so stand the peak brake down) while constraining nothing, which is a worse failure
+                # than the one being fixed. The remainder gets what the week has not spent.
+                # The session ceiling needs no such adjustment: it is per-bout, and a bout is a bout
+                # whether the week is whole or half run.
+                # ⚠ Floored strictly positive, never to 0.0: `_max_week_trimp` tests both ceilings for
+                # TRUTHINESS (`_bio_on = bool(session_eq_cap or week_eq_cap)`, `bio_bad = week_eq_cap
+                # and …`), so a 0.0 would silently disarm the very ceiling it is meant to express — the
+                # spent-budget case would quietly become the no-ceiling case. A hair above zero says
+                # "nothing left" and keeps the gate armed and readable.
+                _rem_eq_cap = (max(_bio_cap - (week_actual_eq or 0.0), 1e-3)
+                               if _bio_cap is not None else None)
                 allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, ACWR_SOFT,
                                           zones=use_zones, roll_from=today.isoformat(), days_override=rem,
                                           soft_ctl_floor=soft_ctl_floor, av_blocked=av_off,
                                           q_days=q_ahead, shape_neutral=assertive,
+                                          session_eq_cap=_session_eq_cap,   # §STRAD2 — per-bout, as-is
+                                          week_eq_cap=_rem_eq_cap,          # §STRAD2 — week ceiling less spent
+                                          long_km_cap=long_km_cap,          # §STRAD2 — §PRO17's rule:
+                                          #        search the distribution that will actually be laid
+                                          # §STRAD3 — …and that rule was only half kept here. The lay
+                                          # below passes `free_from` (place only today-onward days) and
+                                          # `long_km_aim`; the search did not, so it was bounding a
+                                          # FOUR-session week while the lay produced a THREE-session
+                                          # one. Latent for as long as the eq ceilings were absent from
+                                          # this call — with §STRAD2 they became the binder, and the
+                                          # searched distribution's 22.70 eq-km passed a 22.88 budget
+                                          # that the laid 23.10 then breached. A ceiling enforced on a
+                                          # week nobody runs is not a ceiling.
+                                          free_from=today_off, long_km_aim=long_km_aim,   # §STRAD3
                                           actual_floor=act_floor,   # §PRO24 — no ladder: a remainder
                                           fixed_days=elapsed_offs, prev_tail=prev_tail)   # §REST
                 # §AV — the denominator is the TEMPLATE's run count (== len(offsets) without §AV, so
