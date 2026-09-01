@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.52.0"
+ENGINE_VERSION = "0.52.1"
 
 
 def _zones_asof(db, date_iso=None):
@@ -2649,7 +2649,7 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
         # bound the acute day. Caution never passes these ⇒ it keeps the old test ⇒ byte-identical.
         _bio_on = bool(session_eq_cap or week_eq_cap)
         _peak_governs = not (shape_neutral and _bio_on)
-        _sess_eq = max((_session_eq_km(x) for x in _sess), default=0.0)
+        _sess_eq = max((_bout_eq_km(x) for x in _sess), default=0.0)   # §AARHUS — sustained bouts
         _wk_eq = _week_eq_km(_sess)
         bio_bad = ((session_eq_cap and _sess_eq > session_eq_cap + 1e-9)
                    or (week_eq_cap and _wk_eq > week_eq_cap + 1e-9))
@@ -2853,6 +2853,38 @@ def _session_eq_km(sess):
         return round(sum((r.get("km") or 0.0) * EQ_KM_FACTOR.get(r.get("zone"), 1.0) for r in reps), 2)
     z = sess.get("zone") or sess.get("kind") or "easy"
     return round((sess.get("km") or 0.0) * EQ_KM_FACTOR.get(z, 1.0), 2)
+
+
+def _bout_eq_km(sess):
+    """§3.1/§AARHUS — the damage-equivalent km of one session AS A SUSTAINED BOUT, for the per-session
+    ceiling only. Returns 0.0 for a structured INTERVAL session, which is why this exists.
+
+    WHAT THE CEILING IS FOR. §3.1's per-session step is the Aarhus finding — among novice 5k runners,
+    sharp jumps in the LONGEST RUN predicted injury while weekly-mileage jumps did not — "generalised
+    past the long run and expressed in damage rather than raw km". §PRO9 implements the same finding in
+    raw km. The generalisation reached too far: `EQ_KM_FACTOR` prices interval running at 3.5 against a
+    long run's 1.0, so a 5.8 km interval session scores eq 9.8 while the week's 7.0 km long run scores
+    7.0 — and the ceiling ends up governing the size of a short rep session rather than the long run
+    Aarhus actually measured.
+
+    MEASURED, on `det/regime-plan`'s block: the largest-eq bout was an INTERVAL session in 60 of 102
+    laid weeks (long 18, progression 12, tempo 8, race 4). Re-running the search's accept/reject test,
+    `session_eq` rejected at 52 of 102 margins — more than every other governor combined. And because
+    an interval session's size is a fixed share of the week, the chain closed on itself: the week grows
+    → the interval session grows with it → the session ceiling rejects → the week cannot grow. The
+    ceiling then re-derived itself from the bout it had just limited and LOCKED at 12.74 for fourteen
+    straight weeks, freezing the block and projecting the athlete detraining from CTL 55 to 15.
+
+    ⚠ INTERVAL WORK IS NOT MADE FREE. It still carries full 3.5-weight into `_week_eq_km`, so the §3.1
+    WEEK ceiling prices every rep exactly as before — the week's total damage budget is untouched. What
+    changes is only which bout the PER-SESSION step measures its jump against.
+    ⚠ THE ACTUALS SIDE NEEDS NO EQUIVALENT and deliberately has none. `_recent_session_eq` scores a
+    logged DAY by one interpolated factor from its whole-day grade-adjusted pace, not by rep zones, so
+    it never carries the 3.5 anchor: measured on my own data the seed reads [14.61, 13.54, 17.81,
+    13.93] against long runs of [11.3, 10.1, 12.3, 13.6] km — the long runs, at ~1.3 apiece. It is
+    already the largest sustained bout. Filtering there would be filtering something that is not there.
+    """
+    return 0.0 if (sess.get("kind") == "interval") else _session_eq_km(sess)
 
 
 def _week_eq_km(sessions):
@@ -3841,7 +3873,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             weeks.append(pweek)
             blk_longs.append(max(week_actual_long or 0.0, _week_long_km(rem_s)))
             blk_eqs.append(round((week_actual_eq or 0.0) + _week_eq_km(rem_s), 2))
-            blk_seq.append(max((_session_eq_km(x) for x in rem_s), default=0.0))   # §PRO17
+            blk_seq.append(max((_bout_eq_km(x) for x in rem_s), default=0.0))   # §PRO17/§AARHUS
             continue
         is_down = _is_down(wk)
         is_taper = _is_taper(wk)
@@ -4128,7 +4160,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         weeks.append(week)
         blk_longs.append(_week_long_km(sessions))
         blk_eqs.append(week["eq_km"])
-        blk_seq.append(max((_session_eq_km(x) for x in sessions), default=0.0))   # §PRO17
+        blk_seq.append(max((_bout_eq_km(x) for x in sessions), default=0.0))   # §PRO17/§AARHUS
     for w in weeks:                       # honesty pass — relabel governor-gutted long runs (§6f Step F)
         _mark_load_integrity(w, zones)
     # §PRO9/§3.1 carry-out — the trailing long-run + eq_km windows (seed + this block's weeks), tail-trimmed,

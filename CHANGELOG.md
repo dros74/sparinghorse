@@ -10,6 +10,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.52.1] - 2026-09-01
+
+### Fixed
+
+- **The per-session biomechanical ceiling was policing the wrong bout, and froze whole blocks
+  (§AARHUS).** §3.1's per-session step exists to implement one finding: among novice runners, sharp
+  jumps in the **longest run** predicted injury while weekly-mileage jumps did not. It was written as
+  that finding "generalised past the long run" onto the damage axis — and the generalisation reached
+  too far. `EQ_KM_FACTOR` prices interval running at **3.5** against a long run's **1.0**, so a 5.8 km
+  interval session scores **eq 9.8** while the same week's 7.0 km long run scores **7.0**. Across a
+  full block the largest-eq bout was an **interval session in 60 of 102 laid weeks** (long 18,
+  progression 12, tempo 8, race 4). The ceiling spent its time governing a short rep session.
+
+  That closed a loop. An interval session's size is a fixed share of the week, so: the week grows →
+  the interval session grows with it → the session ceiling rejects → the week cannot grow. The
+  ceiling then re-derived itself from the bout it had just limited and **locked at 12.74 for fourteen
+  straight weeks**. Re-running the search's own accept/reject test, `session_eq` rejected at **52 of
+  102 margins** — more than every other governor combined. The affected block froze at a 17.9 km
+  build peak and projected the athlete **detraining from CTL 55 to 15**.
+
+  Structured interval sessions are now exempt from the **per-session step**. The step measures
+  sustained bouts, which is what the source finding measured.
+
+  ⚠ **Narrowed, not made free.** Interval work still carries its full 3.5-weighted damage into the
+  §3.1 **week** ceiling, so the week's total damage budget is untouched. What changed is only which
+  bout the per-session step measures its jump against — and `det/session-step` now asserts both
+  halves, so relaxing it by the back door fails.
+
+  ⚠ **The actuals side needed no equivalent and deliberately has none.** `_recent_session_eq` scores
+  a logged *day* by one interpolated factor from its whole-day pace, never by rep zones, so it never
+  carried the 3.5 anchor: measured on real data the seed reads 14.61 / 13.54 / 17.81 / 13.93 against
+  long runs of 11.3 / 10.1 / 12.3 / 13.6 km — the long runs, at about 1.3 apiece. It was already the
+  largest sustained bout.
+
+  **Result on the frozen fixture:** build peak **17.9 → 61.8 km**, 8 building weeks spanning 30.9 km,
+  and the block carries its fitness into the taper instead of decaying into it. The `§TP-RATCHET`
+  tripwire that asserted the freeze went red exactly as written, and the two real assertions it was
+  holding — the build-peak headroom check and "race fitness well above the taper trough" — are
+  restored verbatim.
+
+  **On a real block the change is modest**, because real activities already anchor the seed: 1064 →
+  1099 km (+3.3%), peak weeks 71.1 / 73.7 / 75.9 km (inside the 65–80 km/wk tier the plan is
+  calibrated for), hard share unchanged at 11.5–12.4% against a 25% cap, no week eq-capped.
+
+- **`det/session-step`'s docstring stated the defect as the contract.** It read that
+  damage-equivalent km "lets the same rule cover an interval session, where the damage is not in the
+  distance" — which is exactly the generalisation that broke the governor. Rewritten, and its seed
+  tightened from 6.0 to 5.0: at 6.0 the cap (7.80) sat above the fixture's natural long-run bout
+  (7.36), so the binding assertion would have passed while proving nothing.
+
 ## [0.52.0] - 2026-09-01
 
 ### Added

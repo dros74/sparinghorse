@@ -3635,25 +3635,39 @@ def _stc_straddle_long():
 
 
 def _stc_session_step():
-    """§PRO17 — no prescribed session may jump past `SESSION_EQ_STEP` × the largest single session of
-    the trailing window, in eq_km (damage), not raw km. This is §PRO9 generalised past the long run:
-    the Aarhus cohort (5k+ runners) found that sharp increases in the LONGEST SINGLE RUN predicted
-    injury while weekly-mileage increases did not, and Davis's damage-equivalent km is the currency
-    that lets the same rule cover an interval session, where the damage is not in the distance.
-    Locks: the cap BINDS on a tight baseline; it only ever REDUCES; caution never sees it (the whole
-    biomechanical axis is assertive-only); and the regression — with no baseline the same fixture lays
-    a visibly bigger session. Pure."""
+    """§PRO17/§AARHUS — no prescribed SUSTAINED bout may jump past `SESSION_EQ_STEP` × the largest of
+    the trailing window, in eq_km (damage), not raw km.
+
+    ⚠ THE CONTRACT NARROWED, DELIBERATELY, AND THIS DOCSTRING USED TO STATE THE DEFECT. It read that
+    damage-equivalent km "lets the same rule cover an interval session, where the damage is not in the
+    distance" — and that generalisation is what broke the governor. `EQ_KM_FACTOR` prices interval
+    running at 3.5 against a long run's 1.0, so the largest-eq bout was an INTERVAL session in 60 of
+    102 laid weeks, and the ceiling spent its time governing a short rep session instead of the long
+    run. Because an interval session's size is a fixed share of the week, that closed a loop: the week
+    grows → the interval session grows → the ceiling rejects → the week cannot grow, and the ceiling
+    then re-derived itself from the bout it had just limited and locked, freezing a whole block.
+    Aarhus measured jumps in the LONGEST RUN. The step now measures those. See `_bout_eq_km`.
+
+    Locks: the cap BINDS on a tight baseline; it only ever REDUCES; interval work is EXEMPT from the
+    step but still fully priced into the WEEK ceiling, so it is narrowed and not made free; caution
+    never sees any of it; and the regression — with no baseline the same fixture lays a visibly bigger
+    bout, so the binding assertion cannot pass vacuously. Pure."""
     from datetime import date
     easy = 425
     zones = {"easy": 425.0, "marathon": 380.0, "threshold": 340.0, "interval": 305.0}
     bs = date(2026, 8, 3)
     shape = S.build_shape(6, 40)
     fail = []
-    seed = 6.0
+    # §AARHUS — seed 5.0 (was 6.0), because the step now measures SUSTAINED bouts and at 6.0 the
+    # cap (7.80) sat above the fixture's natural long-run bout (7.36), so the binding assertion
+    # would have passed while proving nothing. At 5.0 the cap is 6.50, the bout is held to 6.24,
+    # and the exempt interval session scores 9.7 — comfortably ABOVE the cap, so its exemption is
+    # load-bearing here rather than incidental. [[fixture-thinner-than-production]]
+    seed = 5.0
     cap = S.SESSION_EQ_STEP * seed
 
-    def biggest(weeks, i=0):
-        return max((S._session_eq_km(x) for x in weeks[i]["sessions"]), default=0.0)
+    def biggest(weeks, i=0):        # the largest SUSTAINED bout — what the step governs
+        return max((E._bout_eq_km(x) for x in weeks[i]["sessions"]), default=0.0)
 
     tight, bnd = S.generate_block(shape, bs, 50.0, 45.0, easy, zones=zones, regime="assertive",
                                 recent_longs=[6.0], recent_eq=[30.0], recent_session_eq=[seed])
@@ -3680,6 +3694,21 @@ def _stc_session_step():
         fail.append("caution changed when the session window was seeded (must be assertive-only)")
     if "recent_session_eq" not in bnd:
         fail.append("generate_block did not carry the session window out to the next phase")
+    # §AARHUS — NARROWED, NOT MADE FREE. The exempt interval session must still carry its full
+    # 3.5-weighted damage into the WEEK total, or the step would have been relaxed by the back door.
+    _iv = [x for x in tight[0]["sessions"] if x.get("kind") == "interval"]
+    if not _iv:
+        fail.append("fixture rot: week 1 lays no interval session, so the exemption is untested")
+    else:
+        _s_eq = S._session_eq_km(_iv[0])
+        if E._bout_eq_km(_iv[0]) != 0.0:
+            fail.append("an interval session was still measured as a sustained bout")
+        if _s_eq <= cap:
+            fail.append(f"fixture rot: the interval session ({_s_eq}) is under the cap ({round(cap,2)}) "
+                        f"anyway, so its exemption changes nothing here")
+        if _s_eq not in [round(S._session_eq_km(x), 2) for x in tight[0]["sessions"]] or \
+           S._week_eq_km(tight[0]["sessions"]) < _s_eq:
+            fail.append("the interval session's damage did not reach the week's eq total")
     return _st("det", "session-step",
                "§PRO17 per-session biomechanical step: no prescribed session's eq_km jumps past "
                "SESSION_EQ_STEP × the trailing largest (Aarhus generalised past the long run, in damage "
@@ -10925,39 +10954,13 @@ def _stc_regime_plan():
     build_pk = max([w["km"] for w in (p.get("build") or {}).get("weeks", [])
                     if not S._is_down(w.get("intent"))] or [0])
     taper_wks = (p.get("taper") or {}).get("weeks", [])
-    # ⛔⛔ KNOWN DEFECT — §TP-RATCHET, FILED 2026-08-31, NOT FIXED. This is a TRIPWIRE, not an
-    # assertion of correct behaviour, and it is written so that FIXING the defect turns it red.
-    #
-    # WHAT IS WRONG: `session_eq_cap` (§3.1, `SESSION_EQ_STEP` × the largest recent session's eq_km) is
-    # fed by `seed_seq + blk_seq` — the athlete's recent actuals PLUS the plan's own laid weeks. The
-    # seed does not reach this phase: `_recent_session_eq` reads a correct [14.0, 14.0] off this
-    # fixture, yet the cap in force at the margin measures 7.21 (= 1.30 × 5.55), and 5.55 is the eq of
-    # an interval session THE BLOCK ITSELF just laid. With no external anchor the cap bootstraps off
-    # the plan's first lay, and every subsequent week is bounded by a number the plan chose — so when a
-    # week comes out small the cap follows it down and locks there. This block freezes at 17.9 km for
-    # eleven weeks and projects the athlete DETRAINING from CTL 55 to 15.
-    # SAME FIXED-POINT SHAPE §PRO23 documented for `long_km_cap` ("a fixed point where the long run
-    # never reaches its own cap so the cap can never rise") and fixed there by bounding on the
-    # exogenous cap. The session cap never got that treatment.
-    # ⭐ NOT CAUSED BY §TP, and proven so: at the OLD price with a 4 km seed run instead of 6 the same
-    # block freezes at 23.1 km and ends at CTL 23.7. The honest price only moves this fixture across
-    # the threshold. The owner's live plan is unaffected (it grows normally to 810 km) because his real
-    # activities anchor the seed. Owner's call 2026-08-31: file it, ship §TP/§TP2, fix it in its own
-    # release with its own dets — it is a safety governor and does not belong as a rider on a repricing.
-    # ⛔ WHEN YOU FIX IT: this limb fails. That is the point. Delete the tripwire and restore the two
-    # real assertions, which are kept verbatim here so nothing has to be reconstructed:
-    #     if build_pk < 35:
-    #         fails.append(f"assertive build peak {build_pk} should use the headroom (≫ caution ~26)")
-    #     if taper_bottom is not None and not (race_fit > taper_bottom + 2):
-    #         fails.append(f"race fitness {race_fit} should be well above the taper trough {taper_bottom}")
-    _nd = [w["km"] for w in (p.get("build") or {}).get("weeks", [])
-           if not S._is_down(w.get("intent"))]
-    _spread = round(max(_nd) - min(_nd), 2) if _nd else None      # a frozen block has no ramp at all
-    if not (len(_nd) >= 5 and build_pk < 35 and _spread is not None and _spread < 1.5):
-        fails.append(f"§TP-RATCHET TRIPWIRE: the session_eq_cap ratchet no longer freezes this block "
-                     f"(build peak {build_pk}, {len(_nd)} building weeks spanning {_spread} km). "
-                     f"If you fixed it: delete this tripwire and restore the two assertions quoted "
-                     f"above it.")
+    # §AARHUS (was the §TP-RATCHET tripwire, 2026-08-31 → fixed 2026-09-01). The tripwire that stood
+    # here asserted this block WAS frozen — build peak 17.9 km for eleven weeks, CTL projected 55 → 15 —
+    # because §3.1's per-session ceiling re-derived itself from the bout it had just limited. Excluding
+    # structured interval sessions from the SESSION step (see `_bout_eq_km`) broke the fixed point, the
+    # tripwire went red exactly as it was written to, and these two assertions are restored verbatim.
+    if build_pk < 35:
+        fails.append(f"assertive build peak {build_pk} should use the headroom (≫ caution ~26)")
     if taper_wks and not (taper_wks[0]["km"] >= 0.5 * build_pk):
         fails.append(f"taper top {taper_wks[0]['km']} not scaled from realised peak {build_pk}")
     # §PRO7b — race fitness (feasibility.projected_ctl) anchors on the CTL carried INTO the taper (the
@@ -10969,8 +10972,10 @@ def _stc_regime_plan():
     race_fit = (p.get("feasibility") or {}).get("projected_ctl")
     if race_fit is None or pre_taper_ctl is None or abs(race_fit - round(pre_taper_ctl)) > 1:
         fails.append(f"race fitness {race_fit} should anchor on the pre-taper CTL {pre_taper_ctl}")
-    # (suppressed by the §TP-RATCHET tripwire above — a frozen block decays CTL into the taper, so this
-    # reads the defect rather than the taper. Restored together with the build-peak assertion.)
+    # §AARHUS — restored with the build-peak assertion above: a block that is no longer frozen carries
+    # its fitness INTO the taper, so the taper reads as freshening rather than as decay.
+    if taper_bottom is not None and not (race_fit > taper_bottom + 2):
+        fails.append(f"race fitness {race_fit} should be well above the taper trough {taper_bottom}")
     # §PRO12/§FORM1 — THE ROAD MAY ADVANCE PAST ITS OWN PAST without moving the regime. Under the old
     # banked-streak clause a re-anchored, past-less road zeroed the evidence and dropped assertive →
     # caution (live 2026-07-27: race-day CTL 60 → 26). §FORM1 removed the history-dependence
