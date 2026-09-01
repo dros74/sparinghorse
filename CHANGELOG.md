@@ -10,6 +10,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.54.0] - 2026-09-02
+
+### Added
+
+- **A tune-up race is a session now (§TT2).** `select_chain` has returned `tune_ups` — upcoming B/C
+  races that are deliberately kept OUT of the periodization chain — since §6q, and the plan has
+  reported them ever since as a legend line ("Tune-ups before the peak: …"). Nothing ever laid one.
+  Only a `taper` phase built a race spec, so a B/C race day drew whatever the distributor happened to
+  put there. On the default seed fixture that was a **14.4 km, 9x3min VO₂ interval session on the
+  morning of a tune-up 10k** — precisely the failure §RACE was written to fix for marathon morning,
+  fixed there and left standing for every other race the athlete enters.
+  Tune-ups are now laid wherever they fall, through the existing `_place_race` machinery: the race
+  replaces the day, is charged at `RACE_KM` and its own zone, and its load is carried into the week
+  header, the projection and the block's end state. The block is still never periodized toward it —
+  phases and the A-race chain are unchanged, which is what keeps a tune-up a tune-up.
+- **A tune-up clears its own run-up (`TUNEUP_CLEAR_DAYS = 2`).** The race *is* that week's hard
+  session; quality work inside the two days before it is dropped, row and TRIMP together. A workout
+  stacked into the run-up makes the result measure fatigue rather than fitness, which defeats the
+  only reason a B/C race is on the calendar. Quality further out survives, and **A-races are
+  untouched** — their taper already is the run-up.
+
+### Changed
+
+- Five golden plans move. The default seed fixture carries a B-priority "Tune-up 10k", so the
+  scenarios that use it now lay it. The only structural change is the race day itself; every other
+  changed day is a 0.2–0.4 km trim as the (slightly lighter) race load propagates through
+  `end_ctl`/`end_atl`. No session changed kind and no week gained or lost a run.
+- ⚠ A tune-up adds **ungoverned** load to whatever week it falls in — the race is laid after the
+  governor has sized the week, exactly as an A-race is. On the `caution` fixture that takes a
+  rebuild week from 20.2 km / TRIMP 166 to 26.4 km / TRIMP 239. This is the §RACE trade restated: the
+  governor bounds the training it controls, and a race the athlete has entered is told the truth
+  about rather than wished away.
+
 ## [0.53.2] - 2026-09-01
 
 ### Fixed

@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.53.2"
+ENGINE_VERSION = "0.54.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1874,6 +1874,36 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
     return sess
 
 
+# §TT2 — the session kinds that carry a week's HARD work. `_base_quality_spec` emits exactly these
+# three (tempo, progression, interval); easy/long/rest/race are everything else.
+# ⚠ §6o-QF's `q_ahead` at the remainder re-lay still tests the older ("tempo", "interval") pair and so
+# cannot see a progression run. Pre-existing, and deliberately NOT widened here: which weeks get zone
+# paces decides what is PRESCRIBED, and that is a training call, not a tidy-up.
+QUALITY_KINDS = ("tempo", "interval", "progression")
+
+# §TT2 — days before a TUNE-UP race whose quality work is cleared. The race IS that week's hard
+# session; a workout stacked into its run-up makes the result measure fatigue rather than fitness,
+# which defeats the only reason a B/C race is on the calendar at all. Two days, so a Friday race
+# clears Wednesday and Thursday. A-races are untouched — their taper already IS the run-up.
+TUNEUP_CLEAR_DAYS = 2
+
+
+def _race_spec(date_iso, rtype, zones, label, tune_up=False):
+    """§RACE/§TT2 — one race SESSION spec, shared by the A-race taper and by tune-ups so the two can
+    never drift apart. `zone` is §TT's mapping (a marathon at MP, everything shorter at threshold)
+    and the distance is the standard one — both known before the lay. A `custom` type returns None:
+    RACE_KM has no distance for it, and inventing one would prescribe a day nobody agreed to."""
+    rt = (rtype or "").lower()
+    if rt not in RACE_KM:
+        return None
+    rz = "marathon" if rt == "marathon" else "threshold"
+    spec = {"date": date_iso, "km": RACE_KM[rt], "zone": rz, "pace_sec": zones[rz],
+            "label": label, "type": rt}
+    if tune_up:
+        spec["tune_up"] = True
+    return spec
+
+
 def _place_race(sessions, day_trimps, race, week_start):
     """§RACE — put the RACE on race day, and charge what it actually costs.
 
@@ -1899,18 +1929,40 @@ def _place_race(sessions, day_trimps, race, week_start):
         return sessions, day_trimps
     from datetime import timedelta
     _ws = _date(week_start) if isinstance(week_start, str) else week_start
-    d = race["date"]
-    if not (_ws <= _date(d) <= _ws + timedelta(days=6)):
+    # §TT2 — `race` may be a LIST now that tune-ups share the slot with the A-race. One race day per
+    # week is still the rule, and the week-span guard below is what picks it, so no caller has to know
+    # which week a date lands in. Ties are broken A-race first, then by date: deterministic, and an
+    # A-race is never displaced by a tune-up that happens to share its week.
+    _cands = [race] if isinstance(race, dict) else [r for r in race if r]
+    _in_week = [r for r in _cands if _ws <= _date(r["date"]) <= _ws + timedelta(days=6)]
+    if not _in_week:
         return sessions, day_trimps
+    _in_week.sort(key=lambda r: (bool(r.get("tune_up")), _date(r["date"])))
+    race = _in_week[0]
+    d = race["date"]
     kept = [x for x in sessions if x.get("date") != d]
     shed = sum(x.get("trimp", 0.0) for x in sessions if x.get("date") == d)
+    # §TT2 — a TUNE-UP also clears the quality work in its run-up (TUNEUP_CLEAR_DAYS). An A-race does
+    # not need this and does not get it: its taper is already the run-up, and touching that path would
+    # move plans this change has no business moving.
+    cleared = []
+    if race.get("tune_up"):
+        _lo = _date(d) - timedelta(days=TUNEUP_CLEAR_DAYS)
+        cleared = [x for x in kept
+                   if x.get("kind") in QUALITY_KINDS and _lo <= _date(x["date"]) < _date(d)]
+        if cleared:
+            _drop = {id(x) for x in cleared}
+            kept = [x for x in kept if id(x) not in _drop]
     minutes = int(round(race["km"] * race["pace_sec"] / 60.0))
     trimp = est_trimp(minutes, race["zone"])
     kept.append({"date": d, "kind": "race", "km": round(race["km"], 1), "minutes": minutes,
                  "trimp": trimp, "pace_zone": f"{fmt_pace(race['pace_sec'])}/km {race['zone']}",
-                 "note": race["label"], "race": True})
+                 "note": race["label"], "race": True,
+                 **({"tune_up": True} if race.get("tune_up") else {})})
     kept.sort(key=lambda x: x["date"])
     dt = dict(day_trimps)
+    for x in cleared:                      # §TT2 — the cleared day must lose its LOAD, not just its row
+        dt[x["date"]] = round(dt.get(x["date"], 0.0) - x.get("trimp", 0.0), 1)
     dt[d] = round(dt.get(d, 0.0) - shed + trimp, 1)
     return kept, dt
 
@@ -5774,15 +5826,28 @@ def generate_plan(db, force_regime=None, today=None):
             # athlete made, not a silent gap — but it IS why a custom A-race still draws whatever the
             # distributor puts on race day, and det/race-session uses exactly that as its race-less
             # control. Giving `custom` a distance field is the fix if it ever needs one.
-            _race = None
-            if kind == "taper" and ph.get("date") and (ph.get("type") or "").lower() in RACE_KM:
-                _rt = (ph.get("type") or "").lower()
-                _rz = "marathon" if _rt == "marathon" else "threshold"
-                _race = {"date": str(ph["date"])[:10], "km": RACE_KM[_rt], "zone": _rz,
-                         "pace_sec": zones[_rz], "label": ph.get("race") or "Race day",
-                         "type": _rt}
+            _race = (_race_spec(str(ph["date"])[:10], ph.get("type"), zones,
+                                ph.get("race") or "Race day")
+                     if kind == "taper" and ph.get("date") else None)
+            # §TT2 — TUNE-UPS ARE LAID WHERE THEY FALL. `select_chain` deliberately keeps B/C races
+            # OUT of the chain, so no phase is ever periodized toward one — that is the whole point of
+            # a tune-up, and it stays true here. What was missing is the other half: since §6q they
+            # have been selected, reported and never laid, so the athlete read a legend line ("Tune-ups
+            # before the peak: …") for a day the plan quietly filled with something else. The A-race
+            # machinery already does the work — _place_race replaces the day, charges the real load,
+            # and the week's projection is re-rolled with it in — so a tune-up only has to REACH it.
+            _span_end = cur_start + timedelta(weeks=n_wk) - timedelta(days=1)
+            _tus = []
+            for _o in tune_ups:
+                _od = str(_o["date"])[:10]
+                if not (cur_start <= _date(_od) <= _span_end):
+                    continue
+                _ts = _race_spec(_od, _o.get("type"), zones, _o.get("label") or "Tune-up",
+                                 tune_up=True)
+                if _ts:
+                    _tus.append(_ts)
             block, end_ctl = _gen_phase(key, cur_start, sh, zones, regime, ride_cap, soft_floor,
-                                        race_=_race)
+                                        race_=(([_race] if _race else []) + _tus) or None)
             plan[key] = block
             cur_start = cur_start + timedelta(weeks=n_wk)
             # §PRO4 — chain the next phase off the volume this phase actually REACHED. In caution that's

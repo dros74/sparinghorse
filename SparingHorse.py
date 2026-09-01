@@ -71,7 +71,8 @@ from sh_engine import (   # noqa: F401 — re-exported for the app and the batte
     LONG_RUN_MIN_RATIO, _long_share_cap,
     LONG_RUN_STEP_CAP, LONG_RUN_STEP_WINDOW, LT1_5K_FRAC, MARATHON_PACE_FRAC, MESO_MAX_HARD,
     NEAR_CEILING_ACWR, PEAK_INTERVAL_FRAC, PEAK_LONG_FRAC, PEAK_MP_FRAC, PEAK_WEEKLY_RAMP,
-    PHASE_HARD_CAP, POLARIZED_EASY_MIN, PROG_RAMP, QUALITY_CD_MIN, QUALITY_WU_MIN, RACE_KM,
+    PHASE_HARD_CAP, POLARIZED_EASY_MIN, PROG_RAMP, QUALITY_CD_MIN, QUALITY_KINDS,
+    QUALITY_WU_MIN, RACE_KM, TUNEUP_CLEAR_DAYS,
     RACE_RECOVERY_DEFAULT, RACE_RECOVERY_WEEKS, REBASE_GAP_WEEKS, REBASE_LONG_CAP, REBASE_SHAPE,
     REGIME_CLEAR_DAYS, RELAY_MAX_RUNS, RELAY_MAX_SEAM_STREAK, REST_SHED_MIN_KM,
     RESPONSE_MIN, RESPONSE_ONTRACK, RUN_DAY_LAYOUTS, RUN_FAMILY_SQL,
@@ -5995,6 +5996,11 @@ _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "compo
                "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
                "minutes": True, "missed": True, "note": True, "optional": True,
                "pace_zone": True, "race": True,   # §RACE — race day, already public via objectives
+               # §TT2 — the same reasoning one priority tier down: the plan already publishes
+               # `tune_ups` (label, date, type, priority) and /api/objectives is public, so the
+               # flag saying "this race day is the B/C one" reveals nothing new. Withholding it
+               # would make the public card unable to tell a tune-up from the goal race.
+               "tune_up": True,
                "reps": _PV_REPS, "rest_gated": True, "rest_shed_km": True,
                "runs": True, "strides": True, "trimp": True,
                # `unplanned` = a run on a day the plan places no session. It carries `km: None`

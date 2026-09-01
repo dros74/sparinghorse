@@ -4753,6 +4753,146 @@ def _stc_race_session():
                                    "proj_acwr_soft": rwk.get("proj_acwr_soft")})})
 
 
+def _stc_tuneup_session():
+    """§TT2 — a TUNE-UP (B/C) race is a session too, and it clears its own run-up.
+
+    `select_chain` has returned `tune_ups` since §6q and the plan has REPORTED them since — a legend
+    line reading "Tune-ups before the peak: …" — but nothing ever laid one. Only `kind == "taper"`
+    built a race spec, so a B/C race day drew whatever the distributor happened to put there. On the
+    default seed fixture that was a 14.4 km, 9x3min VO2 interval session on the morning of a tune-up
+    10k: exactly the failure §RACE's docstring describes for marathon morning, fixed for A-races and
+    left standing for every other race the athlete enters.
+
+    The limbs are the two halves of "laid, but still a tune-up", plus the two ways the run-up rule
+    could be wrong:
+
+      (a) LAID. A B-race inside a non-taper phase produces exactly one race session, on its date, at
+          RACE_KM and its own zone.
+      (b) STILL A TUNE-UP. Laying it must not periodize toward it: the A-chain and the phase list are
+          identical with the tune-up present and absent. A tune-up that reshapes the block is not a
+          tune-up, it is a second A-race the athlete never flagged.
+      (c) RUN-UP CLEARED, LOAD AND ALL. Quality inside TUNEUP_CLEAR_DAYS before the race is dropped
+          AND its TRIMP leaves the week — dropping the row while keeping the load would publish a
+          week whose sessions do not sum to its own header. Quality further out survives, or the rule
+          would quietly strip a week's hard running whenever a tune-up appeared anywhere in it.
+      (d) A-RACES UNTOUCHED. The same helper runs for the A-race path, which has its own taper as a
+          run-up; clearing there would move plans this change has no business moving.
+      (e) PRECEDENCE. Should an A-race and a tune-up ever share a week, the A-race is the one laid."""
+    import sqlite3 as _sq
+    fail, today = [], S._date("2026-07-01")
+    ws = "2026-07-06"          # a Monday; the race lands Friday 2026-07-10
+
+    def _mk(kind, date, km, trimp):
+        return {"date": date, "kind": kind, "km": km, "trimp": trimp}
+
+    # ---- (c) the run-up rule, on the helper's own terms -----------------------------------------
+    # quality 3 days out (Tue) must SURVIVE; quality 1 day out (Thu) must GO. Friday race.
+    base = [_mk("easy", "2026-07-06", 8.0, 40.0),
+            _mk("interval", "2026-07-07", 9.0, 120.0),    # 3 days out — survives
+            _mk("easy", "2026-07-08", 8.0, 40.0),
+            _mk("progression", "2026-07-09", 11.0, 135.0),  # 1 day out — cleared
+            _mk("long", "2026-07-12", 18.0, 95.0)]
+    dt0 = {x["date"]: x["trimp"] for x in base}
+    tu = {"date": "2026-07-10", "km": S.RACE_KM["5k"], "zone": "threshold", "pace_sec": 334,
+          "label": "5k TT", "type": "5k", "tune_up": True}
+    sess, dt = S._place_race([dict(x) for x in base], dict(dt0), tu, ws)
+    kinds = {x["date"]: x.get("kind") for x in sess}
+    if kinds.get("2026-07-09") is not None:
+        fail.append("(c) the progression run 1 day before the tune-up survived — the race is meant "
+                    "to BE that week's hard session, and a workout in its run-up makes the result "
+                    "measure fatigue instead of fitness")
+    if kinds.get("2026-07-07") != "interval":
+        fail.append("(c) the interval 3 days out was cleared too — TUNEUP_CLEAR_DAYS=2 must not "
+                    "strip a whole week's quality because a tune-up sits somewhere in it")
+    if dt.get("2026-07-09"):
+        fail.append(f"(c) the cleared day kept its LOAD ({dt.get('2026-07-09')}) — the row went and "
+                    f"the TRIMP stayed, so the week's sessions no longer sum to its own header")
+    laid = [x for x in sess if x.get("race")]
+    if len(laid) != 1 or laid[0]["date"] != "2026-07-10":
+        fail.append(f"(c) tune-up not laid on its day: {[x['date'] for x in laid]}")
+    elif not laid[0].get("tune_up"):
+        fail.append("(c) the laid session does not carry `tune_up` — surfaces cannot tell a B/C "
+                    "race from the A-race it was never periodized toward")
+
+    # ---- (d) the A-race path keeps the run-up it always had -------------------------------------
+    a_race = dict(tu); a_race.pop("tune_up")
+    a_sess, _a_dt = S._place_race([dict(x) for x in base], dict(dt0), a_race, ws)
+    if {x["date"] for x in a_sess if x.get("kind") == "progression"} != {"2026-07-09"}:
+        fail.append("(d) an A-race cleared its run-up — only tune-ups do that; the A-race's taper "
+                    "already IS its run-up, and touching it moves existing plans")
+
+    # ---- (e) an A-race outranks a tune-up sharing its week --------------------------------------
+    both = S._place_race([dict(x) for x in base], dict(dt0),
+                         [dict(tu, date="2026-07-10"), dict(a_race, date="2026-07-10",
+                                                            label="Goal Race")], ws)[0]
+    won = [x for x in both if x.get("race")]
+    if len(won) != 1 or won[0].get("note") != "Goal Race":
+        fail.append(f"(e) a tune-up displaced the A-race sharing its week: {[x.get('note') for x in won]}")
+
+    # ---- (a) + (b) end to end -------------------------------------------------------------------
+    def plan_with(tune_up):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)
+        S.seed_synthetic_db(mem, end="2026-06-30")
+        mem.execute("DELETE FROM plans")
+        mem.execute("DELETE FROM meta WHERE key='rebase_start'")
+        mem.execute("DELETE FROM objectives")
+        mem.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                    "VALUES ('marathon','Goal Marathon',?,'finish','A','upcoming',"
+                    "'2026-01-01T00:00:00+00:00')",
+                    ((today + S.timedelta(weeks=16)).isoformat(),))
+        if tune_up:
+            mem.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                        "VALUES ('10k','Tune-up 10k',?,'42:00','B','upcoming',"
+                        "'2026-01-01T00:00:00+00:00')",
+                        ((today + S.timedelta(weeks=5)).isoformat(),))
+        mem.commit()
+        p = S.generate_plan(mem, today=today)
+        mem.close()
+        return p
+
+    with_tu, without = plan_with(True), plan_with(False)
+    tud = (today + S.timedelta(weeks=5)).isoformat()
+    laid_e2e = [s for _k, v in with_tu.items() if isinstance(v, dict) and v.get("weeks")
+                for w in v["weeks"] for s in (w.get("sessions") or []) if s.get("tune_up")]
+    if len(laid_e2e) != 1:
+        fail.append(f"(a) {len(laid_e2e)} tune-up sessions in the plan, want exactly 1 — since §6q "
+                    f"the answer here was 0: selected, reported in `tune_ups`, never laid")
+    elif laid_e2e[0]["date"] != tud:
+        fail.append(f"(a) tune-up laid on {laid_e2e[0]['date']}, want {tud}")
+    elif abs(laid_e2e[0]["km"] - S.RACE_KM["10k"]) > 0.05:
+        fail.append(f"(a) tune-up laid at {laid_e2e[0]['km']} km, want RACE_KM['10k']")
+    if [(p.get("phase"), p.get("weeks")) for p in (with_tu.get("phases") or [])] != \
+       [(p.get("phase"), p.get("weeks")) for p in (without.get("phases") or [])]:
+        fail.append("(b) the phase list changed when a tune-up was added — a B/C race must not "
+                    "periodize the block; that is what makes it a tune-up and not an A-race")
+    # the chain's IDENTITY, not its numbers: `proj_ctl` on each anchor is a projection, and it MUST
+    # move once the tune-up's load is charged (§RACE — laying a session and not carrying its load is
+    # the error §PRO20b and §101 each cost a release). What may not move is which races are in the
+    # chain, when, and in what role.
+    _ident = lambda p: [(c.get("label"), c.get("date"), c.get("type"), c.get("role"))
+                        for c in (p.get("chain") or [])]
+    if _ident(with_tu) != _ident(without):
+        fail.append(f"(b) the A-race chain changed when a tune-up was added: "
+                    f"{_ident(without)} → {_ident(with_tu)}")
+
+    return _st("det", "tuneup-session",
+               "§TT2 — a tune-up (B/C) race is LAID as a session on its own date in whatever phase "
+               "it falls in, at RACE_KM and its own zone, and it clears the quality work inside "
+               "TUNEUP_CLEAR_DAYS before it (row AND load) so the race measures fitness rather than "
+               "the workout two days earlier — while the block is still never periodized toward it "
+               "(phases and A-chain unchanged), A-races keep the run-up their taper already gives "
+               "them, and an A-race sharing a week outranks it",
+               passed=not fail,
+               expect="laid on its day · phases/chain unmoved · run-up cleared with its load · "
+                      "quality 3 days out survives · A-race path untouched · A-race wins a tie",
+               got={"failures": fail or "none",
+                    "laid": (None if not laid_e2e else
+                             {"date": laid_e2e[0]["date"], "km": laid_e2e[0]["km"],
+                              "trimp": laid_e2e[0]["trimp"]}),
+                    "clear_days": S.TUNEUP_CLEAR_DAYS})
+
+
 def _stc_race_lifecycle():
     """§RL — the objectives status machine actually transitions: a passed race with a matching run
     settles 'done' (outcome carries the result + goal comparison), a passed race with no run holds
@@ -14849,6 +14989,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_multi_a_chain(),
                  lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
                  lambda: _stc_race_session(),   # §RACE
+                 lambda: _stc_tuneup_session(),  # §TT2
                  lambda: _stc_race_lifecycle(), lambda: _stc_backup_export(),
                  lambda: _stc_chain_drift(), lambda: _stc_goal_moved(),
                  lambda: _stc_ctl_forecast_bias(), lambda: _stc_multi_a_plan(),
