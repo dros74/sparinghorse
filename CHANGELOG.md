@@ -10,6 +10,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.50.1] - 2026-09-01
+
+### Fixed
+
+- **The week a mid-week regeneration lays was searched with a different set of governors from
+  every other week (§STRAD).** §PRO13 reconstructs "the SAME target the full-week path would
+  choose" for the week that straddles today. That reconstruction went out without either §3.1
+  biomechanical ceiling (`session_eq_cap`, `week_eq_cap`) and without §PRO9's long-run cap, so the
+  one week a Tuesday regeneration actually prescribes was bounded by neither the damage-axis
+  ceilings nor the long-run ladder. All three are now hoisted above the call and passed, exactly as
+  the full-week path already did — its own comment states the rule ("hoisted above the governor
+  call because they are now INPUTS to it rather than a post-hoc reshape test").
+
+  **Two symptoms, opposite in sign, from the one omission.**
+
+  *Safety.* With no ceiling passed, nothing bounded the straddling week on the damage axis. **Five
+  of the ten frozen golden scenarios were breaching the §3.1 week ceiling** on that week —
+  69.10 eq-km against a 64.31 ceiling in four of them, and the taper scenario at **79.80 against
+  64.31 while also laying a 26.00 eq-km session against a 20.54 ceiling**. Every one now sits
+  under both. A fixture whose athlete logged one 8.4 km run in a 5 km week had the straddling week
+  prescribing 33.8 km where the full-week path allowed 10.6.
+
+  *Phasing.* `_bio_on` is `bool(session_eq_cap or week_eq_cap)` and `_peak_governs` is
+  `not (shape_neutral and _bio_on)` — so passing no ceilings also **re-armed the per-day peak ACWR
+  brake that §PRO17 deliberately stood down** for assertive weeks. Measured on one athlete's plan:
+  the same search answered **409.1 without the ceilings and 647.2 with them**, against the **633.0**
+  the full-week path had answered the previous day. The week's intent fell **56.3 → 36.4 km**, its
+  projected end-of-week ACWR read **0.953** where the Monday read **1.294** — under
+  `NEAR_CEILING_ACWR` — so §PRO6's near-ceiling streak reset mid-ride, the forced deload never
+  tripped, and the block's down weeks went from **three spaced four apart to two spaced seven**.
+  Purely from regenerating on the Tuesday. That is the exact invariant the straddle fold's own
+  comment claims: *"Which DAY of the week the plan is regenerated on must not re-phase the road."*
+
+  Walked day by day across a real week with the plan followed, the deload road is now identical on
+  every regeneration day; before the fix, Tuesday and Wednesday re-phased it.
+
+  ⚠ **Not fully closed.** A straddling week's projection still reads slightly lower as the week
+  empties (~0.02 of ACWR per elapsed day, from the shrinking remainder window). Where a week sits
+  within a few hundredths of `NEAR_CEILING_ACWR`, that can still tip the streak: measured on real
+  data, the road holds at full compliance and down to ~70% of prescription, and re-phases at 60%.
+  Judging the straddling week on a full-week-equivalent ratio is the completion; it moves a safety
+  governor's decision variable and is deliberately left for its own release.
+
+- **`det/straddle-caps`** — the straddling week may breach neither §3.1 ceiling and its intent must
+  equal the full-week path's for that week, swept over every day of the week under **two** trailing
+  corpora. Two, because whichever ceiling binds first hides the other: with one corpus a revert of
+  `session_eq_cap` alone still passed. All three caps are now individually seen to fail.
+
+- **`det/cap-truth-anchor`'s fixture logged one run per week** against a shape asking for 29.5 km —
+  so the §3.1 week ceiling sat at ~6.5 eq-km, binding on everything, invisible only because the
+  straddle path was skipping it. Given production-shaped supporting volume (all short runs, so the
+  window's max still comes from the one 8.4 km long run) the long cap is back in the binding seat,
+  which is where that det does its measuring — and its straddle limb is seen to fail again.
+
 ## [0.50.0] - 2026-08-31
 
 ### Changed

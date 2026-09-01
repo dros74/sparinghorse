@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.50.0"
+ENGINE_VERSION = "0.50.1"
 
 
 def _zones_asof(db, date_iso=None):
@@ -3351,30 +3351,56 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # §PRO6/§PRO11 (forced deload / re-phase) are deliberately NOT reproduced here: they
             # mutate `shape`, and the straddling week is already underway.
             # Caution keeps `intent_trimp`/`wk["km"]` verbatim ⇒ byte-identical.
+            # §PRO9 — the straddle path never received the long-run progression cap: every call below
+            # went out without it, so the "+10% over the trailing-4wk longest" promise was simply not
+            # kept on the one week a mid-week regeneration actually lays (measured on my 2026-07-28
+            # plan 65: trailing longest 8.5 ⇒ cap 9.35, laid 10.5). Same expression as the full-week
+            # path, assertive-only ⇒ caution byte-identical.
+            # §STRAD — and the same is true of the two BIOMECHANICAL ceilings, which is why all three
+            # are hoisted ABOVE §PRO13's governor call below. The full-week path's own comment states
+            # the rule ("hoisted above the governor call because they are now INPUTS to it rather than
+            # a post-hoc reshape test"); the straddle path computed only the long cap, and only after
+            # the call that needed it. Same expressions as the full-week path, assertive-only.
+            _trailing = [x for x in (seed_longs + blk_longs)[-LONG_RUN_STEP_WINDOW:] if x]
+            long_km_cap = (round(LONG_RUN_STEP_CAP * max(_trailing), 1)
+                           if (assertive and _trailing) else None)
+            _trailing_eq = [x for x in (seed_eq + blk_eqs)[-BIO_EQ_WINDOW:] if x]
+            _bio_cap = (BIO_EQ_STEP * max(_trailing_eq)) if (assertive and _trailing_eq) else None
+            _trailing_seq = [x for x in (seed_seq + blk_seq)[-BIO_EQ_WINDOW:] if x]
+            _session_eq_cap = (SESSION_EQ_STEP * max(_trailing_seq)) if (assertive and _trailing_seq) else None
             wk_intent_trimp, wk_intent_km = intent_trimp, (wk.get("km") or 0)
             if assertive and not _is_taper(wk):
                 _sd, _sp = _is_down(wk), _week_phase(wk) == "peak"      # §P1
                 _prog = ((1 + PROG_RAMP) * last_nondown
                          if (last_nondown and eff_cap >= ACWR_SOFT - 1e-9
                              and not _sd and not _sp) else None)
+                # §STRAD — THE CAPS ARE PART OF THE QUESTION, NOT A LATER REVIEW OF THE ANSWER.
+                # Without `session_eq_cap`/`week_eq_cap` this search ran with `_bio_on` False, and
+                # `_peak_governs` is `not (shape_neutral and _bio_on)` — so the per-day PEAK ACWR
+                # brake that §PRO17 deliberately stood down for assertive weeks was silently RE-ARMED
+                # on the one week a mid-week regeneration lays. Measured on my 2026-09-01 plan, week
+                # 08-31: the same call answered 409.1 without the caps and 647.2 with them, against
+                # the 633.0 the full-week path had answered on the Monday. The week's intent collapsed
+                # 56.3 → 36.4 km, the remainder was prorated against the collapse, the week's projected
+                # end-of-week ACWR read 0.953 where Monday read 1.294 — under NEAR_CEILING_ACWR — and
+                # §PRO6's near-ceiling streak reset mid-ride. The forced deload never tripped and the
+                # down week slid from 09-14 to 10-05: two down weeks SEVEN apart where the Monday
+                # regeneration laid three, four apart. Which DAY the plan is regenerated on had
+                # re-phased the deload road, which is the exact invariant the fold below claims.
+                # §PRO17's rule, restated: search the week that will actually be LAID, caps and all.
                 _full_allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones,
                                                 ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
                                                 days_override=av_days, av_blocked=av_off,
                                                 prog_floor=_prog, shape_neutral=assertive,
+                                                session_eq_cap=_session_eq_cap,   # §STRAD — §3.1/§PRO17
+                                                week_eq_cap=_bio_cap,             # §STRAD — §3.1
+                                                long_km_cap=long_km_cap,          # §STRAD — §PRO9
                                                 actual_floor=act_floor, ladder=True,   # §PRO24
                                                 prev_tail=prev_tail)   # §REST
                 _target = ((BUILD_DOWN_FRAC * last_nondown)
                            if (_sd and last_nondown) else _full_allowed)
                 wk_intent_trimp = min(_target, _full_allowed)
                 wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
-            # §PRO9 — the straddle path never received the long-run progression cap: every call below
-            # went out without it, so the "+10% over the trailing-4wk longest" promise was simply not
-            # kept on the one week a mid-week regeneration actually lays (measured on my 2026-07-28
-            # plan 65: trailing longest 8.5 ⇒ cap 9.35, laid 10.5). Same expression as the full-week
-            # path, assertive-only ⇒ caution byte-identical.
-            _trailing = [x for x in (seed_longs + blk_longs)[-LONG_RUN_STEP_WINDOW:] if x]
-            long_km_cap = (round(LONG_RUN_STEP_CAP * max(_trailing), 1)
-                           if (assertive and _trailing) else None)
             # §PRO15 — the long run's aim for THIS week: the distance the full-week path below would
             # lay at this intent. The remainder is governed as a share of what is LEFT, so without an
             # aim an over-run early week demotes its long run proportionally — and because the §PRO9

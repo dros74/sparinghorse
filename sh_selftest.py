@@ -10462,6 +10462,98 @@ def _stc_straddle_streak():
                     "straddle_acwr_b": bw[0].get("proj_acwr"), "failures": fail or "none"})
 
 
+def _stc_straddle_caps():
+    """§STRAD — THE WEEK A MID-WEEK REGENERATION LAYS IS BOUND BY THE SAME CEILINGS AS ANY OTHER.
+
+    §PRO13 reconstructs "the SAME target the full-week path below would choose" for the straddling
+    week, and the whole straddle branch exists so that WHICH DAY the plan is regenerated on does not
+    move the road. That reconstruction went out without the two biomechanical ceilings
+    (`session_eq_cap`/`week_eq_cap`) and without §PRO9's long cap — so the one week a mid-week
+    regeneration actually lays was searched against a different set of governors from every other
+    week. Two symptoms, opposite in sign, from the one omission:
+
+    (a) SAFETY — with no eq caps passed, nothing bounded the week on the damage axis. Measured on
+        this fixture: the straddling week laid 35.8–39.5 eq-km against a §3.1 week ceiling of 23.40
+        (a 53–69% breach) and an 11.30 eq-km session against a 9.75 ceiling, while the full-week
+        path on the SAME week respected both. This limb is the safety statement and it is the
+        reason this det exists.
+    (b) PHASING — `_bio_on` is `bool(session_eq_cap or week_eq_cap)` and `_peak_governs` is
+        `not (shape_neutral and _bio_on)`, so passing no caps ALSO re-armed the per-day peak ACWR
+        brake that §PRO17 deliberately stood down for assertive weeks. On my 2026-09-01 live plan
+        that brake crushed the same search from 647.2 to 409.1 against the 633.0 the full-week path
+        had answered the previous day; the week's intent fell 56.3 → 36.4 km, its projected
+        end-of-week ACWR read 0.953 where Monday read 1.294, §PRO6's near-ceiling streak reset
+        mid-ride, the forced deload never tripped, and the block's down weeks went from three spaced
+        four apart to two spaced SEVEN — purely from regenerating on the Tuesday. [[review-posture-one-hop-out]]
+
+    The tooth is PARITY, not a magic number: the straddling week's intent must equal what the
+    full-week path lays for that same week, on every day of the week."""
+    from datetime import date, timedelta
+    easy, bs = 425, date(2026, 8, 3)                       # Monday
+    zones = {"easy": 460, "easy_top": 425, "marathon": 360, "threshold": 330, "interval": 300}
+    shape = [{"wk": i, "km": 55, "runs": 5, "long": 15, "strides": 0, "intent": "Build — general"}
+             for i in (1, 2, 3)]
+    # TWO corpora, because ONE cannot see both ceilings: whichever binds first hides the other.
+    # With a tight week ceiling the sessions never grow enough to test the session ceiling — and a
+    # revert of `session_eq_cap` alone then passes, which is exactly the redundancy that let a
+    # weekend-off tooth pass two reverts in §DAYPREF. Each corpus below leaves ONE ceiling binding
+    # and the other slack, so each cap is individually seen to fail.
+    # [[revert-tests-must-be-seen-to-fail]] [[fixture-thinner-than-production]]
+    corpora = {"week-ceiling-binds": ([17.0, 17.5, 18.0, 18.0], [7.0, 7.2, 7.5, 7.5]),
+               "session-ceiling-binds": ([60.0, 60.0, 60.0, 60.0], [6.0, 6.0, 6.2, 6.2])}
+    # the seed rides where the live case did (ATL/CTL ≈ 1.38) — that is where the re-armed per-day
+    # peak brake actually bites, so limb (b) measures the real mechanism rather than a slack one.
+    def lay(today, recent_eq, recent_seq, regime="assertive"):
+        w, _ = S.generate_block([dict(x) for x in shape], bs, 76.0, 105.0, easy, zones=zones,
+                                today=today, regime=regime, consec_hard=0, last_nondown=400.0,
+                                recent_longs=[14.0, 14.5, 15.0, 15.2],
+                                recent_eq=list(recent_eq), recent_session_eq=list(recent_seq))
+        return w[0]
+    fail, got = [], {}
+    for tag, (recent_eq, recent_seq) in corpora.items():
+        week_cap = S.BIO_EQ_STEP * max(recent_eq)
+        sess_cap = S.SESSION_EQ_STEP * max(recent_seq)
+        full = lay(bs, recent_eq, recent_seq)               # today == week start ⇒ FULL-week path
+        by_day = {}
+        for off in (1, 2, 3, 4):
+            st = lay(bs + timedelta(days=off), recent_eq, recent_seq)
+            wk_eq = S._week_eq_km(st["sessions"])
+            sess_eq = max((S._session_eq_km(x) for x in st["sessions"]), default=0.0)
+            by_day[f"+{off}"] = {"intent_km": st.get("intent_km"), "week_eq": round(wk_eq, 2),
+                                 "max_session_eq": round(sess_eq, 2)}
+            if wk_eq > week_cap + 1e-6:                     # (a) the §3.1 WEEK ceiling
+                fail.append(f"{tag} +{off}d: straddling week laid {wk_eq:.2f} eq-km over the "
+                            f"{week_cap:.2f} ceiling")
+            if sess_eq > sess_cap + 1e-6:                   # (a) the §3.1 SESSION ceiling
+                fail.append(f"{tag} +{off}d: straddling week laid a {sess_eq:.2f} eq-km session "
+                            f"over the {sess_cap:.2f} ceiling")
+            if abs((st.get("intent_km") or 0) - (full.get("intent_km") or 0)) > 0.05:   # (b) PARITY
+                fail.append(f"{tag} +{off}d: straddle intent {st.get('intent_km')} != full-week "
+                            f"{full.get('intent_km')} — the paths answer different questions")
+        got[tag] = {"ceilings": {"week_eq": round(week_cap, 2), "session_eq": round(sess_cap, 2)},
+                    "full_week": {"intent_km": full.get("intent_km"),
+                                  "week_eq": round(S._week_eq_km(full["sessions"]), 2),
+                                  "max_session_eq": round(
+                                      max((S._session_eq_km(x) for x in full["sessions"]), default=0.0), 2)},
+                    "straddle_by_day": by_day}
+    # caution never passes a cap, so it never armed `_bio_on` either ⇒ untouched by all of this
+    _ce, _cs = corpora["week-ceiling-binds"]
+    c_full = lay(bs, _ce, _cs, regime="caution")
+    c_strad = lay(bs + timedelta(days=2), _ce, _cs, regime="caution")
+    if (c_full.get("intent_km"), c_strad.get("intent_km")) != (shape[0]["km"], shape[0]["km"]):
+        fail.append(f"caution moved: intent {c_full.get('intent_km')}/{c_strad.get('intent_km')} "
+                    f"(want the shape's {shape[0]['km']} on both paths)")
+    return _st("det", "straddle-caps",
+               "§STRAD the week a mid-week regeneration lays is searched with the SAME governors as "
+               "a full week: both §3.1 biomechanical ceilings and §PRO9's long cap are inputs to "
+               "§PRO13's intent, so the straddling week can neither breach the damage-axis ceilings "
+               "nor be crushed by the per-day peak brake §PRO17 stood down; caution untouched",
+               passed=not fail,
+               expect="on every day of the week, under BOTH corpora: no eq ceiling breached and "
+                      "the straddling week's intent == the full-week path's",
+               got={**got, "failures": fail or "none"})
+
+
 def _stc_regime_plan():
     """§PRO3/§PRO4 INTEGRATION — generate_plan in the ASSERTIVE regime (in-memory DB; §FORM1:
     assertive is the clean-body default — the history exists to seed the governors, not to earn the
@@ -11154,8 +11246,26 @@ def _stc_cap_truth_anchor():
         "CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, sport TEXT,"
         " distance REAL, duration REAL, elapsed_time REAL, raw TEXT);"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY);")
-    for i, (d, km) in enumerate([("2026-01-06", 5.0), ("2026-01-13", 5.05),
-                                 ("2026-01-20", 8.4), ("2026-01-22", 4.0)]):
+    # §STRAD — the supporting volume is LOAD-BEARING, not scenery. This fixture used to log one run
+    # per week (5.0 / 5.05 / 8.4 + 4.0) against a shape asking for 29.5 km — an athlete who runs a
+    # 8.4 km long run inside a 5 km week exists nowhere in production. That made the §3.1 WEEK-eq
+    # ceiling (BIO_EQ_STEP × the trailing weekly eq) about 6.5 eq-km, i.e. binding on every week in
+    # the fixture — invisible for as long as the straddle path was skipping the biomechanical caps
+    # entirely, and the dominant governor the moment §STRAD made that path match the full-week one.
+    # With the week ceiling binding, wk4's long run is pinned by it whether or not the straddling
+    # week's real 8.4 ever reached the §PRO9 window, so limb (b) below stopped discriminating the
+    # thing it names. Real weekly volume puts the LONG cap back in the binding seat, which is where
+    # this det does its measuring. [[fixture-thinner-than-production]]
+    # ⚠ The supporting runs are all SHORT on purpose. Padding weeks 1–2 with a long run instead
+    # makes this det vacuous: the §PRO9 window takes the MAX over the trailing weeks, so an 8.0 km
+    # run in week 1 answers for the 8.4 in week 3 and BOTH reverts below (drop the straddling week's
+    # actual / drop the elapsed weeks' actuals) still pass. Weeks 1–2 top out at 5.05 km, so 8.4 is
+    # the only run in the corpus that can lift the cap past limb (b)'s threshold — which is what
+    # makes removing it observable. [[revert-tests-must-be-seen-to-fail]]
+    _log = [("2026-01-06", 5.0), ("2026-01-08", 4.8), ("2026-01-09", 5.0), ("2026-01-11", 5.0),
+            ("2026-01-13", 5.05), ("2026-01-15", 4.8), ("2026-01-16", 5.0), ("2026-01-18", 5.0),
+            ("2026-01-19", 5.0), ("2026-01-20", 8.4), ("2026-01-21", 5.0), ("2026-01-22", 4.0)]
+    for i, (d, km) in enumerate(_log):
         m.execute("INSERT INTO activities VALUES(?,?,?,?,?,?,?,?)",
                   (i + 1, d, d + "T18:00:00", S.RUNNING_SPORT, km, km * 400, km * 400, "{}"))
     zones = {"easy": 460, "easy_top": 425, "marathon": 360, "threshold": 330, "interval": 300}
@@ -14280,7 +14390,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_trimp_price(), lambda: _stc_week_trimp_bound(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
-                 lambda: _stc_straddle_streak(),
+                 lambda: _stc_straddle_streak(), lambda: _stc_straddle_caps(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),
