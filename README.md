@@ -182,6 +182,7 @@ than an invented explanation.
 | `SH_READONLY` | public container only (set in docker-compose) |
 | `SH_DEMO` | demo container only — full private console over a self-resetting synthetic athlete |
 | `SH_DEMO_RESET_EVERY_S` | how often the demo restores its synthetic athlete (default 3600) |
+| `SH_DEMO_ROUTE_CENTER` | `lat,lon` the demo's synthetic routes are drawn around (default: Central Park) |
 
 ## Calibration
 The engine **self-calibrates** most things from your synced data (pace zones from VO₂max, CTL/ATL from TRIMP,

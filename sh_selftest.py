@@ -1332,6 +1332,72 @@ def _stc_public_view_coverage(db):
                     "failures": fails or "none"})
 
 
+def _stc_demo_track():
+    """§DEMO — the synthetic route a demo run draws IS the distance the card prints beside it.
+
+    The map panel is one of the better things this app does and an empty one reads as broken, so the
+    demo generates GPS tracks. Invented data is only honest if it is internally consistent: a viewer
+    who reads "15.8 km" under a loop that measures 3 km has caught the app lying about something
+    small, and will reasonably wonder what else.
+
+    (a) THE DISTANCE MATCHES — measured on the sphere, over the drawn polyline, within 1%. This is
+        the tooth that fails on both bugs the generator actually had: scaling the loop with a
+        perimeter that included a phantom wrap-around segment (every track ~1% short), and the
+        `dist` series accumulating over that same missing segment.
+    (b) IT FITS SOMEWHERE REAL. A single loop scaled to 15.8 km is ~5 km across — wider than
+        Manhattan, and the first version drew one straight over the Hudson. Repeating a ~3.2 km
+        circuit is what a runner actually does, so the track's bounding box must stay small however
+        long the run: a marathon and a 5 k occupy roughly the same park.
+    (c) DETERMINISTIC PER RUN — the same activity keeps its route across the hourly reset (nothing is
+        more obviously fake than a run whose route changes while you look at it), and two different
+        runs get different routes.
+    (d) THE DOWNSAMPLER'S CONTRACT — 120 samples of every series, so the map and the pace/HR profile
+        get exactly the shape they would get from real streams."""
+    import math
+    fail, detail = [], {}
+    R = 6371.0
+
+    def gc(a, b):
+        la1, lo1, la2, lo2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+        h = math.sin((la2 - la1) / 2) ** 2 + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2
+        return 2 * R * math.asin(math.sqrt(h))
+
+    for aid, km, dur, hr in ((101, 5.5, 1650, 168), (102, 15.8, 6180, 149), (103, 42.2, 15400, 152)):
+        t = S._demo_track(aid, km, dur, hr)
+        path = t["path"]
+        drawn = sum(gc(path[i], path[i + 1]) for i in range(len(path) - 1))
+        lats, lons = [p[0] for p in path], [p[1] for p in path]
+        span = max(gc((min(lats), min(lons)), (min(lats), max(lons))),
+                   gc((min(lats), min(lons)), (max(lats), min(lons))))
+        detail[f"{km}km"] = {"drawn_km": round(drawn, 2), "dist_end": t["dist"][-1],
+                             "span_km": round(span, 2), "points": len(path)}
+        if abs(drawn - km) / km > 0.01:                                   # (a)
+            fail.append(f"a {km} km run draws a {drawn:.2f} km route — the map contradicts the card")
+        if abs(t["dist"][-1] - km) > 0.05:
+            fail.append(f"a {km} km run's dist series ends at {t['dist'][-1]}")
+        if span > 2.5:                                                    # (b)
+            fail.append(f"a {km} km run spans {span:.2f} km of map — it is one huge loop, not laps")
+        if len(path) != S.DEMO_TRACK_POINTS:                              # (d)
+            fail.append(f"{len(path)} path points, expected {S.DEMO_TRACK_POINTS}")
+        for series in ("dist", "pace", "hr", "elevation", "cadence"):
+            if len(t.get(series) or []) != S.DEMO_TRACK_POINTS:
+                fail.append(f"{series} has {len(t.get(series) or [])} samples, expected {S.DEMO_TRACK_POINTS}")
+        if not (t.get("has_gps") and t.get("has_pace") and t.get("has_hr")):
+            fail.append("a generated track does not advertise the series it carries")
+    # (c) stable for one run, different between runs
+    if S._demo_track(101, 10.0, 3000, 150)["path"] != S._demo_track(101, 10.0, 3000, 150)["path"]:
+        fail.append("the same run drew two different routes — it would change under the visitor")
+    if S._demo_track(101, 10.0, 3000, 150)["path"] == S._demo_track(102, 10.0, 3000, 150)["path"]:
+        fail.append("two different runs drew the identical route")
+    return _st("det", "demo-track",
+               "§DEMO a synthetic run's drawn route measures the distance printed beside it (within "
+               "1%), repeats a park-sized circuit instead of scaling to one implausible loop, stays "
+               "put across resets, and carries the full 120-sample downsampler contract",
+               passed=not fail,
+               expect="drawn km == stated km · span ≤ 2.5 km at any distance · deterministic per run",
+               got={**detail, "failures": fail or "none"})
+
+
 def _stc_demo_guard():
     """§DEMO — the public demo box may be driven, but not taken.
 
@@ -14793,7 +14859,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_demo_guard(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_demo_guard(), lambda: _stc_demo_track(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),

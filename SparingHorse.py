@@ -5825,15 +5825,6 @@ def _demo_guard():
                        error="Not available in the demo — this one talks to a real Runalyze, Suunto "
                              "or Claude account, or runs the full self-test battery. It works "
                              "normally when you host it yourself."), 403
-    # §DEMO — the per-run PROFILE and MAP need Runalyze stream data (per-second pace/HR/GPS), which a
-    # synthetic athlete does not have and should not: inventing a GPS track would put a fake person on
-    # a real map. Left alone these 502 on first click, which reads as a broken app rather than as an
-    # absent input; say what is actually missing.
-    if re.match(r"^/api/activity/\d+/(profile|map)$", p):
-        return jsonify(ok=False, demo=True,
-                       error="No route or per-second data in the demo — the synthetic athlete's runs "
-                             "have summary figures but no GPS track or streams. With a real Runalyze "
-                             "account this shows the run's pace/HR profile and its map."), 200
     if p == "/api/settings" and request.method == "POST":
         body = request.get_json(silent=True) or {}
         touched = [k for k in DEMO_BLOCKED_SETTINGS if k in body]
@@ -8990,6 +8981,96 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
 _DEMO_RESET_LOCK = threading.Lock()
 
 
+# §DEMO — where the synthetic athlete runs. A demo with an empty map panel looks broken, and the
+# route view is one of the nicer things this app does, so the demo needs tracks. They are INVENTED,
+# which is only honest because the athlete is too: the banner says so, and nothing here is presented
+# as a record of anywhere anyone went. Overridable so a self-hoster's demo is not in someone
+# else's city; the default is the most recognisable running loop on earth, which reads as demo data.
+DEMO_ROUTE_CENTER = os.environ.get("SH_DEMO_ROUTE_CENTER", "40.7829,-73.9654")   # Central Park, NYC
+DEMO_TRACK_POINTS = 120     # what the real downsampler emits, so the panels get the shape they expect
+DEMO_TRACK_LAP_KM = 3.2     # roughly a park circuit — the unit the route repeats to reach its distance
+
+
+def _demo_track(aid, km, duration_s, hr_avg):
+    """§DEMO — a plausible GPS loop and its pace/HR/elevation curves for one synthetic run.
+
+    Shaped like a route rather than drawn like one: the radius is a small sum of harmonics, which
+    gives an organic closed loop that wanders the way a real out-and-back-and-round does, instead of
+    the circle a naive generator produces. The loop is then SCALED so its measured polyline length is
+    the run's actual distance — the map and the summary must not disagree, and a viewer who reads
+    "15.8 km" under a 3 km lap has caught the app lying about something small.
+
+    Deterministic per activity id, so the same run keeps the same route across the hourly reset; two
+    different runs get different routes. Matches the real downsampler's contract exactly (see
+    PROFILE_VERSION): 120 samples of dist/pace/hr/elevation/cadence plus the path."""
+    import math
+    import random
+    rnd = random.Random(1000 + int(aid))
+    clat, clon = (float(x) for x in DEMO_ROUTE_CENTER.split(","))
+    n = DEMO_TRACK_POINTS
+    # 2..5 harmonics with small amplitudes: enough to look walked, not enough to self-intersect
+    harm = [(k, rnd.uniform(0.04, 0.16), rnd.uniform(0, 2 * math.pi)) for k in range(2, 6)]
+    # ⚠ LAPS, NOT ONE BIG LOOP. Scaling a single loop to the run's distance is arithmetically fine and
+    # visually absurd: 15.8 km as one circuit is ~5 km across, wider than Manhattan, so the first
+    # version drew a smooth blob straight over the Hudson. Nobody runs a 15.8 km circle; they run a
+    # park loop several times. Repeating a ~3.2 km circuit keeps the track on land, keeps the total
+    # distance exact, and looks like training instead of like a shape.
+    laps = max(1, round((km or DEMO_TRACK_LAP_KM) / DEMO_TRACK_LAP_KM))
+    unit = []
+    for i in range(n):
+        th = 2 * math.pi * laps * i / n
+        # a hair of outward drift per lap so the circuits sit beside each other rather than exactly
+        # on top — a real GPS trace never retraces itself perfectly either
+        r = (1.0 + sum(a * math.sin(k * th + ph) for k, a, ph in harm)) * (1.0 + 0.02 * (i / n))
+        unit.append((r * math.cos(th), r * math.sin(th)))
+    # Measure the unit path, then scale it so the drawn track IS the run's distance. ⚠ The sum runs
+    # to n-1, not around: with laps the path is an open polyline, and wrapping the last point back to
+    # the first added a phantom segment across the whole loop — it over-measured the route, so every
+    # track came out ~1% short of the distance printed beside it.
+    per = sum(math.dist(unit[i], unit[i + 1]) for i in range(n - 1)) or 1.0
+    scale = (km or 1.0) / per                       # km per unit
+    kmlat = 111.32                                  # km per degree latitude
+    kmlon = max(1e-6, 111.32 * math.cos(math.radians(clat)))
+    path, dist, cum = [], [], 0.0
+    for i, (ux, uy) in enumerate(unit):
+        path.append([round(clat + uy * scale / kmlat, 5), round(clon + ux * scale / kmlon, 5)])
+        dist.append(round(cum, 3))
+        if i < n - 1:
+            cum += math.dist(unit[i], unit[i + 1]) * scale
+    base_pace = int((duration_s or km * 330) / max(km, 0.1))     # sec/km
+    hr0 = int(hr_avg or 145)
+    pace, hr, elev, cad = [], [], [], []
+    for i in range(n):
+        th = 2 * math.pi * i / n
+        # a gentle negative split plus terrain noise — a flat line would be the giveaway
+        drift = 1.0 - 0.06 * (i / n) + 0.035 * math.sin(3 * th + harm[0][2])
+        pv = int(base_pace * drift * rnd.uniform(0.985, 1.015))
+        pace.append(pv)
+        # heart rate follows effort, lagging slightly and rising over the run (cardiac drift)
+        hr.append(int(hr0 * (base_pace / max(pv, 1)) ** 0.35 + 5 * (i / n)))
+        elev.append(int(18 + 22 * math.sin(2 * th + harm[1][2])))
+        cad.append(None if i == 0 else int(rnd.uniform(170, 182)))
+    return {"v": PROFILE_VERSION, "has_gps": True, "has_pace": True, "has_hr": True,
+            "has_elevation": True, "has_cadence": True, "hr_avg": hr0,
+            "path": path, "dist": dist, "pace": pace, "hr": hr,
+            "elevation": elev, "cadence": cad, "streams_final": True}
+
+
+def demo_seed_tracks(db):
+    """§DEMO — give every synthetic run a route, by writing the same `trackcache` rows the real
+    downsampler would have written. Nothing else in the app has to know: the map and the pace/HR
+    profile read this table, so they simply start working.
+    Demo-only on purpose — `seed_synthetic_db` is shared with CI and the browser-flow fixtures, and
+    tracks there would change what those tests see for no benefit."""
+    rows = db.execute("SELECT id, distance, duration, hr_avg FROM activities "
+                      "WHERE " + RUN_FAMILY_SQL + " AND distance > 0").fetchall()
+    for r in rows:
+        prof = _demo_track(r["id"], r["distance"], r["duration"], r["hr_avg"])
+        db.execute("INSERT OR REPLACE INTO trackcache(activity_id, profile, cached_at) VALUES (?,?,?)",
+                   (r["id"], json.dumps(prof), datetime.now(timezone.utc).isoformat()))
+    return len(rows)
+
+
 def demo_reset(db):
     """§DEMO — put the synthetic athlete back the way visitors first meet them.
 
@@ -9011,6 +9092,12 @@ def demo_reset(db):
                 db.commit()
         except Exception as e:                      # a reset that cannot plan is still a reset
             print(f"[demo] reset seeded but could not regenerate: {e}")
+        try:
+            n = demo_seed_tracks(db)                # §DEMO — routes for the map + profile panels
+            db.commit()
+            print(f"[demo] wrote {n} synthetic routes")
+        except Exception as e:                      # a demo without maps is still a demo
+            print(f"[demo] route generation skipped: {e}")
         set_meta(db, "demo_reset_at", datetime.now(timezone.utc).isoformat())
         db.commit()
     return True

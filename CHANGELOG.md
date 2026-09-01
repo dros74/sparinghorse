@@ -10,6 +10,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.53.1] - 2026-09-01
+
+### Added
+
+- **The demo's runs have routes (§DEMO).** An empty map panel reads as a broken app rather than as
+  an absent input, and the route view is one of the better things here — so the demo now generates a
+  GPS track and pace/HR/elevation/cadence curves for every synthetic run, written as the same
+  `trackcache` rows the real downsampler would have produced. Nothing else had to change: the map and
+  the profile panel read that table and simply start working.
+
+  **Invented data is only honest if it is internally consistent**, so the generated route *is* the
+  distance printed beside it — measured on the sphere over the drawn polyline, within 0.1%. A viewer
+  who reads "15.8 km" under a loop that measures 3 km has caught the app lying about something small.
+
+  ⚠ **Laps, not one enormous loop.** Scaling a single circuit to 15.8 km is arithmetically fine and
+  visually absurd: the loop comes out ~5 km across — wider than the island the first version drew it
+  over. Repeating a ~3.2 km circuit is what a runner actually does, keeps the track somewhere
+  plausible, and keeps the distance exact. A marathon and a 5 k now occupy roughly the same park
+  (1.2 km and 0.85 km of map respectively).
+
+  Routes are deterministic per activity, so a run keeps its route across the hourly reset — nothing
+  looks faker than a track that changes while you watch it — and differ between runs. The centre is
+  `SH_DEMO_ROUTE_CENTER`, defaulting to Central Park: recognisable enough that it reads as demo data,
+  and nowhere near whoever is hosting it.
+
+- **`det/demo-track`** — the drawn route matches the stated distance, the bounding box stays under
+  2.5 km at any distance (so a regression back to one huge loop fails), routes are stable per run and
+  distinct between runs, and every series carries the downsampler's full 120 samples. Seen to fail on
+  both bugs the generator actually had.
+
+### Fixed
+
+- **The demo no longer refuses `/api/activity/<id>/profile` and `/map`.** 0.53.0 answered them with
+  an honest "no route in the demo" message, which was the right answer while there was no data and
+  the wrong one now there is.
+- **Every generated track was ~1% short of its stated distance.** The scale was computed from a
+  perimeter that summed *around* the loop — including a wrap-around segment from the last point back
+  to the first. With laps the path is an open polyline and that segment does not exist, so the route
+  was over-measured and came out under-length.
+
 ## [0.53.0] - 2026-09-01
 
 ### Added
