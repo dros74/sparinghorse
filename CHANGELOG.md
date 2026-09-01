@@ -10,6 +10,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.53.0] - 2026-09-01
+
+### Added
+
+- **A public demo: the full private console over a synthetic athlete (§DEMO).** The honest problem
+  with showing this project to anyone was that a screenshot cannot demonstrate an engine — you have
+  to be able to push it and watch it push back. `SH_DEMO=1` runs the **complete private console**
+  against a synthetic athlete, so a stranger can regenerate the plan, post a check-in, move the race,
+  set rest days and see the governors actually respond.
+
+  This is deliberately **not** the `SH_READONLY` public view, and close to its opposite: read-only
+  serves the *public* projection (medical sections withheld, inputs hidden) over the *real* database,
+  while demo serves *everything* over a database that belongs to nobody.
+
+  **It seeds and restores itself.** On first boot against an empty volume it seeds the synthetic
+  athlete and generates a plan; every hour (`SH_DEMO_RESET_EVERY_S`) it restores that state, and a
+  banner offers **Reset now**. Reset re-runs `seed_synthetic_db` inside the app's own connection
+  rather than restoring a file copy — a file-level restore of an open SQLite database works until it
+  doesn't. Measured across repeated resets: 3 plans, 115 activities, 440 KB, no growth.
+
+  **It carries no credentials** — no Runalyze token, no Claude key, and no secrets-store mount — and
+  it gets **its own volume** (`./demo`, never the shared `./data`). No barrier inside the app is as
+  good as not mounting the real database.
+
+  `_demo_guard` refuses four families, each for its own reason:
+
+  | Refused | Why |
+  |---|---|
+  | `POST /api/secrets` | a public box must never accept an API key from a stranger, nor hold one to leak |
+  | `POST /api/sync`, `/api/suunto/*` | outbound calls against someone's real account |
+  | `POST /api/selftest/run` | an anonymous POST that burns ~3 minutes of CPU is a denial-of-service primitive |
+  | `private_url`, `house_url`, `house_name` | the only settings rendered back to the *next* visitor — the defacement and open-redirect surface |
+
+  Everything else really runs. ⚠ Status reads stay open (`GET /api/secrets`, which returns
+  configured-flags and never values, and `GET /api/suunto/status`): blocking the whole path 403'd the
+  demo's own Settings panel on first paint — found by loading the page, not by reading the guard.
+
+- **`SparingHorse.py demo-bake`** — the plan explainer is the one feature a demo cannot run live,
+  because it needs a Claude key and a public host should not hold one. Bake the narration once
+  wherever the key already lives; the demo serves that text **flagged as a sample**. With nothing
+  baked it says plainly that the AI layer isn't wired up on the demo box and that everything else on
+  screen is computed by the deterministic engine — which is true, and a better thing for a visitor to
+  read than an invented explanation.
+
+- **`det/demo-guard`** — drives the real routes with the flag on: the refusals are 403, the
+  plan-shaping settings and status reads are not, and the whole guard is inert when `SH_DEMO` is
+  unset. ⚠ The identity-settings tooth names its three keys **literally** rather than looping over
+  `DEMO_BLOCKED_SETTINGS`: the first cut looped over the constant, so deleting a key from it deleted
+  the test for that key and the revert passed. Measured, then fixed.
+
+### Fixed
+
+- **The demo banner rendered on the private and public boxes too.** `.demobar{display:flex}` is a
+  class selector and `[hidden]` is a UA rule, so the class outranked the attribute and the banner was
+  never actually hidden — a browser flow caught it by noticing the *public* page telling a visitor
+  the plan "regenerates for real". Fixed twice over: `.demobar[hidden]{display:none}` restates it at
+  class specificity, and the markup is now injected server-side **only when `SH_DEMO` is set**, so
+  demo copy is not in the private or public DOM at all. Verified across all three modes.
+
+- **The demo's first page load hit four failures a visitor would have seen** — a 403 on the Settings
+  panel's secrets status, a 403 on the auto-sync the page fires on load, and 502s on a run's profile
+  and map. The page now skips auto-sync in demo mode (there is no account to sync from), and the
+  profile/map routes answer honestly: a synthetic athlete has summary figures but no GPS track, and
+  inventing one would put a fake person on a real map. Load is now clean — zero 4xx/5xx.
+
 ## [0.52.1] - 2026-09-01
 
 ### Fixed

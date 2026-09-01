@@ -125,6 +125,40 @@ caches only the shell and never the API.
   Read-only is enforced server-side (403 on every mutation, query-only connection) and the **medical sections
   — blood markers, readiness, and the per-run effort detail — are withheld** from the public view. Decision:
   training shape + plan can be public; medical/HR detail stays private.
+- **`sparinghorse-demo`** — `SH_DEMO=1`, the **full private console over a synthetic athlete**. Not the same
+  thing as the read-only view: this one lets a stranger regenerate the plan, post a check-in, move the race
+  and watch the engine actually respond. It seeds itself into its **own** database (`./demo`, never the real
+  one) on first boot and restores it hourly, so whatever a visitor leaves behind is temporary.
+
+### Running a public demo
+The demo exists because the honest problem with showing this project to anyone is that a screenshot doesn't
+demonstrate an engine — you have to be able to push it and see it push back.
+
+    mkdir -p demo && docker compose up -d sparinghorse-demo
+
+It carries **no credentials**: no Runalyze token, no Claude key, and no secrets-store mount. On top of that,
+`_demo_guard` refuses four families of request, each for its own reason:
+
+| Refused | Why |
+|---|---|
+| `POST /api/secrets` | a public box must never accept an API key from a stranger, nor hold one to leak |
+| `POST /api/sync`, `/api/suunto/*` | outbound calls against someone's real account |
+| `POST /api/selftest/run` | an anonymous POST that burns ~3 minutes of CPU is a denial-of-service primitive |
+| `private_url`, `house_url`, `house_name` | the only settings displayed to the *next* visitor — the defacement and open-redirect surface |
+
+Everything else really runs: regenerate, check in, objectives, availability, adjustments, rest-day and
+long-run-day preferences. Status reads (`GET /api/secrets`, `GET /api/suunto/status`) stay open because the
+Settings panel renders them.
+
+**The plan explainer** is the one feature a demo can't run live — it needs a Claude key, and a public host
+should not be holding one. Bake the narration once, wherever your key already lives, and the demo serves that
+text flagged as a sample:
+
+    SH_DB=demo/sparinghorse.db python SparingHorse.py demo-bake
+
+Without it the panel says plainly that the AI layer isn't wired up on the demo box and that everything else
+on screen is computed by the deterministic engine — which is true, and a better thing for a visitor to read
+than an invented explanation.
 
 ## Configuration (env)
 | Var | Purpose |
@@ -138,6 +172,8 @@ caches only the shell and never the API.
 | `SH_HOUSE_URL` / `SH_HOUSE_NAME` | optional back-link in the header |
 | `SH_GUIDE_URL` | "more info" link on pushed Suunto guides (default: this repo) |
 | `SH_READONLY` | public container only (set in docker-compose) |
+| `SH_DEMO` | demo container only — full private console over a self-resetting synthetic athlete |
+| `SH_DEMO_RESET_EVERY_S` | how often the demo restores its synthetic athlete (default 3600) |
 
 ## Calibration
 The engine **self-calibrates** most things from your synced data (pace zones from VO₂max, CTL/ATL from TRIMP,

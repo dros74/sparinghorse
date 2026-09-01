@@ -89,6 +89,43 @@ services:
     # Reached by the tunnel via service name (http://sparinghorse-public:8770) over `edge`.
     # Host-local debug only: ports: ["127.0.0.1:8771:8770"]
 
+  # ── Demo — the FULL private console over a SYNTHETIC athlete, open to anyone ─
+  # This is not the public read-only view: it is the private console, complete, so a stranger can
+  # regenerate the plan, post a check-in, move the race and watch the engine actually respond. The
+  # data belongs to nobody — `SH_DEMO=1` seeds a synthetic athlete into its OWN database on first
+  # boot and restores it every hour, so whatever a visitor leaves behind is temporary.
+  #
+  # ⚠ ITS OWN VOLUME. `./demo:/data` — NOT the shared `./data`. The demo must never be able to read
+  # or write the real database, and no barrier inside the app is as good as not mounting the file.
+  # ⚠ NO SECRETS, NO SECRETS VOLUME. No Runalyze token, no Claude key, and deliberately no
+  # `SH_SECRETS_DB` mount: a public box should hold no credential, and `_demo_guard` also refuses
+  # `POST /api/secrets` so a visitor cannot paste one in. The plan explainer serves a narration
+  # baked beforehand with `SparingHorse.py demo-bake` (stored in the demo DB), flagged as a sample.
+  sparinghorse-demo:
+    image: sparinghorse:local
+    container_name: sparinghorse-demo
+    restart: unless-stopped
+    depends_on:
+      - sparinghorse        # ensures the image is built first
+    environment:
+      - SH_DEMO=1
+      - SH_DB=/data/sparinghorse.db
+      # How often the synthetic athlete is restored. Lower it if the demo gets busy.
+      - SH_DEMO_RESET_EVERY_S=3600
+      # Give the demo the same clock as the rest of the stack, or its "today" is UTC and the
+      # straddling week reads a day out. See the §TZ note on the private service.
+      - SH_TZ=${SH_TZ:-}
+      # Header widgets, so the demo looks like the real thing rather than a stripped fixture.
+      - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
+      # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY / SH_SECRETS_DB / SH_HOUSE_* here —
+      # a demo carries no credentials and does not advertise the owner's other sites.
+    volumes:
+      - ./demo:/data        # its own database; never the real one
+    networks:
+      - edge
+    # Reached by the tunnel via service name (http://sparinghorse-demo:8770) over `edge`.
+    # Host-local debug only: ports: ["127.0.0.1:8772:8770"]
+
 # Shared network for the Cloudflare tunnel to reach both instances by service name. cloudflared
 # (its own stack, currently on the default `bridge`) must join this same network — see the deploy
 # runbook. Naming it explicitly keeps the name stable regardless of the compose project/dir name.

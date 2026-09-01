@@ -117,6 +117,33 @@ ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 # blocks every mutating endpoint, hides all inputs, and withholds the medical sections (blood
 # markers + readiness). The private container (behind Cloudflare Access) runs without the flag.
 READONLY = os.environ.get("SH_READONLY", "").lower() in ("1", "true", "yes")
+# §DEMO — the PUBLIC DEMO container (`SH_DEMO=1`). Not the same thing as READONLY, and deliberately
+# its opposite in spirit: READONLY serves the PUBLIC view (medical sections withheld, inputs hidden)
+# over the real database, while DEMO serves the FULL PRIVATE console over a SYNTHETIC one, so a
+# stranger can click everything the user can and watch the engine actually respond. It exists
+# because the honest blocker on publishing this project was that nobody could see it work.
+#
+# WHAT A VISITOR MAY DO: regenerate the plan, post a readiness check-in, add or move an objective,
+# mark an away week, propose and apply an adjustment, set rest days and the long-run day, note a
+# session. Everything that makes the engine interesting, against data that belongs to nobody.
+#
+# WHAT IS REFUSED, and why each one (see `_demo_guard`):
+#   · secrets (`/api/secrets`) — a demo box must never accept an API key from a stranger, and must
+#     never hold one to leak. The five SECRET_SPEC keys are the whole point of that route.
+#   · the identity settings — `private_url`, `house_url`, `house_name` — because they are the only
+#     settings whose value is displayed to the NEXT visitor: a link and a name in the header. Left
+#     writable, the demo is a defacement target and an open redirect.
+#   · `/api/sync` and the Suunto routes — outbound calls to someone else's account. Tokenless they
+#     already fail, but failing with "RUNALYZE_TOKEN is not set" reads like a broken app; refusing
+#     with a demo message reads like a demo.
+#   · `/api/selftest/run` — spawns a ~3-minute subprocess battery. An anonymous POST that burns three
+#     minutes of CPU is a denial-of-service primitive, not a feature.
+# Everything else is allowed and really runs, which is what makes the demo worth having.
+DEMO = os.environ.get("SH_DEMO", "").lower() in ("1", "true", "yes")
+# How often the demo database is restored to its seeded state. Visitors WILL leave it strange —
+# that is the point of letting them touch it — so the reset is what makes the next visitor's first
+# impression the intended one. There is also an explicit `POST /api/demo/reset` for the impatient.
+DEMO_RESET_EVERY_S = int(os.environ.get("SH_DEMO_RESET_EVERY_S", "3600"))
 # On the public page, an optional "Log in" link to the private (Access-protected) console
 # (`config().private_url`); optional house branding — a back-link in the header — in
 # `config().house_url` / `.house_name`; and an optional per-user athlete context injected into the
@@ -5752,6 +5779,71 @@ def _readonly_guard():
     # its POST (a write check-in) is already rejected above by the mutating-method guard.
 
 
+# §DEMO — the refusal list. Written as an explicit set of PATHS rather than as "block writes",
+# because the whole value of the demo is that most writes DO work: a visitor who cannot regenerate
+# the plan has not seen the engine. Each entry is refused for a reason recorded beside `DEMO` above.
+# §DEMO — the banner lives in `static/demobar.html`, not in a string here. TECH-11 moved the SPA out
+# of a Python string literal precisely so markup and product copy stop hiding inside the server, and
+# putting a fragment back would undo that for the sake of one element — `det/copy-posture` said so
+# out loud, reading the banner's "everything you change here" as the server addressing a reader.
+# Read once at import: it is a shipped asset, not user input.
+try:
+    DEMO_BANNER_HTML = (Path(__file__).resolve().parent / "static" / "demobar.html").read_text(encoding="utf-8")
+except OSError:                      # a trimmed image without the fragment: no banner, not a crash
+    DEMO_BANNER_HTML = ""
+DEMO_BLOCKED_PATHS = ("/api/secrets", "/api/sync", "/api/suunto", "/api/selftest", "/selftest")
+# The settings whose value is rendered back to the NEXT visitor — a link and a name in the header.
+# Every other settings key shapes only the plan, which is exactly what a visitor should be able to
+# play with. [[repos-public-private-split]] is why the private URL in particular stays untouchable.
+DEMO_BLOCKED_SETTINGS = ("private_url", "house_url", "house_name")
+
+
+@app.before_request
+def _demo_guard():
+    """§DEMO — a stranger may drive the engine, but not the box it runs on.
+
+    Refuses the four families named beside `DEMO`: secrets, outbound account calls (Runalyze sync,
+    Suunto), the self-test subprocess, and the three identity settings that are displayed to the next
+    visitor. Everything else — regenerate, check in, objectives, availability, adjustments, day
+    preferences, notes — is allowed and really runs against the synthetic database.
+    Answers 403 with a message written for a HUMAN reading a demo, not for an operator reading a log:
+    a stranger who clicks Sync should learn what the button does in the real app, not that a token is
+    missing."""
+    if not DEMO:
+        return
+    p = request.path
+    # ⚠ `GET /api/secrets` is ALLOWED and must be: it returns the configured-flag and provenance for
+    # each key and NEVER a value (see `secret_status`), and the Settings panel loads it to render.
+    # Blocking the whole path 403'd the page on first paint — the demo's own Settings tab showed an
+    # error before a visitor touched anything. Only the WRITE is refused.
+    # Same reasoning for `GET /api/suunto/status`: it reports whether a watch is connected (it is
+    # not), which is what the panel renders. Only the PUSH and DISCONNECT talk to Suunto.
+    if request.method == "GET" and p in ("/api/secrets", "/api/suunto/status"):
+        pass
+    elif any(p == b or p.startswith(b + "/") for b in DEMO_BLOCKED_PATHS):
+        return jsonify(ok=False, demo=True,
+                       error="Not available in the demo — this one talks to a real Runalyze, Suunto "
+                             "or Claude account, or runs the full self-test battery. It works "
+                             "normally when you host it yourself."), 403
+    # §DEMO — the per-run PROFILE and MAP need Runalyze stream data (per-second pace/HR/GPS), which a
+    # synthetic athlete does not have and should not: inventing a GPS track would put a fake person on
+    # a real map. Left alone these 502 on first click, which reads as a broken app rather than as an
+    # absent input; say what is actually missing.
+    if re.match(r"^/api/activity/\d+/(profile|map)$", p):
+        return jsonify(ok=False, demo=True,
+                       error="No route or per-second data in the demo — the synthetic athlete's runs "
+                             "have summary figures but no GPS track or streams. With a real Runalyze "
+                             "account this shows the run's pace/HR profile and its map."), 200
+    if p == "/api/settings" and request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        touched = [k for k in DEMO_BLOCKED_SETTINGS if k in body]
+        if touched:
+            return jsonify(ok=False, demo=True,
+                           error=f"Not editable in the demo: {', '.join(touched)} — these are shown "
+                                 f"to everyone who visits. Every other setting here is live, so try "
+                                 f"the rest day and long-run day preferences."), 403
+
+
 # The self-test battery used to run IN this process, rebinding module globals (READONLY, the tokens,
 # `regenerate`) for ~40 s — so every other request answered 503 + Retry-After meanwhile. That was the
 # app's only self-inflicted downtime, and its own test suite inflicted it. TECH-1 moved the battery to
@@ -7150,8 +7242,30 @@ def api_plan_generate():
 
 @app.post("/api/plan/explain")
 def api_plan_explain():
-    """§6c — plain-language explanation of the latest plan + the most recent change (advisory)."""
+    """§6c — plain-language explanation of the latest plan + the most recent change (advisory).
+
+    §DEMO — a demo box holds no Claude key, and must not: it would be spending someone else's money
+    on strangers, and the key would be sitting on a public host. But "AI features aren't set up — add
+    a Claude API key in Settings" is the wrong thing to show a visitor who came to see whether the
+    feature exists; it reads as broken rather than as absent.
+    So the demo serves a narration BAKED ONCE by the user, on their own box, with their own key
+    (`SparingHorse.py demo-bake`), stored in `meta` and therefore surviving every reset.
+    ⚠ It is flagged `sample: True` and the UI says so. This is the honesty line and it matters: the
+    text a visitor reads is real product output, generated by the real prompt against this same
+    synthetic plan — it is simply not generated for THEM, and pretending otherwise would be a lie
+    about the one feature that is hardest to verify from outside. If nothing has been baked, say that
+    plainly too, rather than inventing an explanation the model never wrote."""
     d = body()
+    if DEMO:
+        baked = get_meta(get_db(), "demo_explain")
+        if baked:
+            return jsonify(ok=True, text=baked, cached=True, sample=True, demo=True), 200
+        return jsonify(ok=False, demo=True, sample=True,
+                       error="The plan explainer is an optional Claude-powered feature. It is not "
+                             "wired up on this demo box, because a public host should not be holding "
+                             "an API key. Everything else you see — the whole plan, the governors, "
+                             "the projections — is computed by the deterministic engine with no AI "
+                             "involved at all."), 200
     out = explain_plan(get_db(), d.get("diff"), fresh=bool(d.get("fresh")))
     return jsonify(out), (200 if out.get("ok") else 502)
 
@@ -8110,6 +8224,14 @@ def _render_app(page="dash"):
                if cfg.house_url else "")
     doc = html_page(INDEX_HTML
             .replace("__SH_READONLY__", "true" if READONLY else "false")
+            .replace("__SH_DEMO__", "true" if DEMO else "false")
+            # §DEMO — the banner is EMITTED ONLY IN DEMO, not merely hidden. Two reasons, and
+            # the second is why CI went red: (1) demo copy has no business in the private or
+            # public DOM at all, and (2) `hidden` alone did not hold — `[hidden]` is a UA rule
+            # and the `.demobar` class outranked it, so the banner rendered on every box until
+            # a browser flow noticed the public page telling a visitor the plan "regenerates".
+            # The CSS is fixed too; this makes the question moot rather than merely answered.
+            .replace("__SH_DEMOBAR__", DEMO_BANNER_HTML if DEMO else "")
             .replace("__SH_STALE_HOURS__", str(SCHED_STALE_HOURS))
             # json.dumps escapes quotes/backslashes but NOT "/", so neutralise "</" → a value with
             # "</script>" (e.g. a raw env SH_PRIVATE_URL that bypassed validate_setting) can't close
@@ -8864,6 +8986,61 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
             "from": start_monday.isoformat(), "to": last_day.isoformat()}
 
 
+# ── §DEMO — keeping the demo demonstrable ───────────────────────────────────
+_DEMO_RESET_LOCK = threading.Lock()
+
+
+def demo_reset(db):
+    """§DEMO — put the synthetic athlete back the way visitors first meet them.
+
+    Reuses `seed_synthetic_db` rather than restoring a file copy, for two reasons: it already DELETEs
+    every table it owns before repopulating (so it IS a reset, and a tested one), and it runs inside
+    the app's own connection, so there is no window where a live request reads a half-swapped file.
+    A file-level restore of an open SQLite database is the kind of thing that works until it doesn't.
+
+    The plan is regenerated afterwards, because a demo whose first screen says "no plan yet" has
+    failed at the one job it has."""
+    with _DEMO_RESET_LOCK:
+        seed_synthetic_db(db)
+        set_meta(db, "synthetic_seed", "1")
+        db.commit()
+        try:
+            plan = regenerate(db)
+            if plan.get("ok"):
+                save_plan(db, plan)
+                db.commit()
+        except Exception as e:                      # a reset that cannot plan is still a reset
+            print(f"[demo] reset seeded but could not regenerate: {e}")
+        set_meta(db, "demo_reset_at", datetime.now(timezone.utc).isoformat())
+        db.commit()
+    return True
+
+
+def _demo_reset_loop():
+    """Restore on a timer. Visitors WILL leave the athlete strange — a marathon moved to next Tuesday,
+    six check-ins in one day, every rest day set to Sunday — and that is exactly what they should be
+    able to do. The timer is what makes the NEXT visitor's first impression the intended one."""
+    while True:
+        time.sleep(max(60, DEMO_RESET_EVERY_S))
+        try:
+            with app.app_context():
+                demo_reset(get_db())
+            print("[demo] database restored to its seeded state")
+        except Exception as e:
+            print(f"[demo] scheduled reset failed: {e}")
+
+
+@app.post("/api/demo/reset")
+def api_demo_reset():
+    """§DEMO — the visible reset. Someone who has just moved the race and regenerated should be able
+    to put it back without waiting an hour, and someone arriving mid-experiment should be able to see
+    the intended plan. Demo-only: on any other deployment this route does not exist as an action."""
+    if not DEMO:
+        return jsonify(ok=False, error="not a demo instance"), 404
+    demo_reset(get_db())
+    return jsonify(ok=True, reset_at=get_meta(get_db(), "demo_reset_at"))
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 init_db()
 try:
@@ -8873,6 +9050,21 @@ except Exception as e:
     print(f"[settings] startup overlay skipped: {e}")
 apply_secret_overrides()   # overlay window-set secrets (Runalyze token / Claude key) before the scheduler
 start_scheduler()   # runs under waitress (import) and the dev server alike (logs the effective TZ)
+if DEMO:
+    # Seed on boot when the mounted volume is empty (a fresh container, or a wiped one), so the
+    # deploy is `up -d` and nothing else — no separate seeding step to forget. An existing synthetic
+    # DB is left alone; the timer will restore it on its own schedule.
+    try:
+        with app.app_context():
+            _d = get_db()
+            if _d.execute("SELECT 1 FROM activities LIMIT 1").fetchone() is None:
+                print("[demo] empty database — seeding the synthetic athlete")
+                demo_reset(_d)
+    except Exception as e:
+        print(f"[demo] initial seed skipped: {e}")
+    threading.Thread(target=_demo_reset_loop, daemon=True).start()
+    print(f"[demo] DEMO MODE — full private console over synthetic data, "
+          f"reset every {DEMO_RESET_EVERY_S}s")
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "selftest":   # CLI: python SparingHorse.py selftest
@@ -8883,6 +9075,30 @@ if __name__ == "__main__":
             rep["id"] = st.save_selftest_run(db, rep)
         print(st._selftest_text(rep))
         sys.exit(1 if rep["summary"]["failed"] else 0)
+    if len(sys.argv) > 1 and sys.argv[1] == "demo-bake":   # CLI: SH_DB=demo.db python SparingHorse.py demo-bake
+        # §DEMO — bake the plan narration ONCE, here, with the user's own key, and store it in the
+        # demo database. The demo container then serves that text (flagged as a sample) instead of
+        # asking a stranger to supply an API key, and never makes an LLM call of its own.
+        # Run it wherever the key lives; the demo box needs no key at all, which is the point.
+        with app.app_context():
+            db = get_db()
+            if not llm_available():
+                print("No Claude API key available — set ANTHROPIC_API_KEY (or configure it in "
+                      "Settings) and run this again. Nothing was written.")
+                sys.exit(2)
+            if db.execute("SELECT 1 FROM plans LIMIT 1").fetchone() is None:
+                print("No plan in this database yet. Seed it first:  SH_DB=… python SparingHorse.py seed")
+                sys.exit(2)
+            out = explain_plan(db, None, fresh=True)
+            if not out.get("ok") or not out.get("text"):
+                print(f"The explainer returned no text: {out.get('error')}. Nothing was written.")
+                sys.exit(1)
+            set_meta(db, "demo_explain", out["text"])
+            db.commit()
+            print(f"Baked {len(out['text'])} characters into meta['demo_explain'].")
+            print("The demo will serve this, flagged as a sample. Re-run after changing the plan "
+                  "fixture so the narration still describes what a visitor sees.")
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "golden":     # CLI: python SparingHorse.py golden
         # (Re)write test/golden/*.json from the pinned fixtures. Deliberate act: run it only when an
         # engine change is INTENDED, and quote the resulting diff in the commit message. A refactor

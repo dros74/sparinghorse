@@ -1332,6 +1332,85 @@ def _stc_public_view_coverage(db):
                     "failures": fails or "none"})
 
 
+def _stc_demo_guard():
+    """§DEMO — the public demo box may be driven, but not taken.
+
+    The demo serves the FULL PRIVATE console over a synthetic athlete, which is the opposite posture
+    from READONLY and therefore needs its own gate: almost everything a visitor clicks really runs,
+    so the small set that must NOT run is the whole safety story. Driven through the REAL routes with
+    `SH_DEMO` on, because a guard checked against its own constant list proves only that the list
+    exists.
+
+    (a) REFUSED, each for a reason: `/api/secrets` writes (a public box must never accept a stranger's
+        API key, nor hold one to leak), `/api/sync` and the Suunto routes (outbound calls against
+        someone's real account), `/api/selftest/run` (an anonymous POST that burns ~3 min of CPU is a
+        denial-of-service primitive), and the three identity settings — `private_url`, `house_url`,
+        `house_name` — which are the only settings rendered back to the NEXT visitor, i.e. the
+        defacement and open-redirect surface.
+    (b) ALLOWED, and this half matters as much: regenerate, check in, and the plan-shaping settings.
+        A demo where the engine does not respond is a screenshot, and the reason this mode exists is
+        that screenshots were not convincing anyone.
+    (c) STATUS READS STAY OPEN. `GET /api/secrets` (configured-flags, never values) and
+        `GET /api/suunto/status` are what the Settings panel renders; blocking the whole path 403'd
+        the demo's own first paint. Found by loading the page, not by reading the guard.
+    (d) OFF BY DEFAULT — with `SH_DEMO` unset the guard must not touch a single route, or every
+        private console inherits a demo's restrictions."""
+    client = S.app.test_client()
+    saved = S.DEMO
+    fails, detail = [], {}
+    try:
+        S.DEMO = True
+        # (a) the refusals
+        for meth, path, body in (("post", "/api/secrets", {"key": "anthropic_api_key", "value": "sk-x"}),
+                                 ("post", "/api/sync", {}),
+                                 ("post", "/api/suunto/push", {}),
+                                 ("post", "/api/selftest/run", {}),
+                                 ("get", "/selftest", None)):
+            r = getattr(client, meth)(path, json=body) if body is not None else getattr(client, meth)(path)
+            detail[f"{meth.upper()} {path}"] = r.status_code
+            if r.status_code != 403:
+                fails.append(f"{meth.upper()} {path} answered {r.status_code}, must be 403 in demo")
+        # ⚠ NAMED HERE, NOT READ FROM `DEMO_BLOCKED_SETTINGS`. Looping over the constant tests the
+        # constant against itself: delete a key from it and the loop simply stops checking that key,
+        # so the revert passes and the setting quietly becomes writable. Measured — that is exactly
+        # what happened on the first cut of this det. [[revert-tests-must-be-seen-to-fail]]
+        for key in ("private_url", "house_url", "house_name"):
+            r = client.post("/api/settings", json={key: "https://example.com"})
+            detail[f"settings:{key}"] = r.status_code
+            if r.status_code != 403:
+                fails.append(f"a demo visitor could write the {key} setting ({r.status_code})")
+        # (b) the allowances — the demo is worthless if these are refused
+        for key in ("rest_day_rank", "long_run_day", "athlete_context"):
+            r = client.post("/api/settings", json={key: ""})
+            if r.status_code == 403:
+                fails.append(f"the {key} setting is refused in demo — the engine cannot be driven")
+        # (c) the status reads the Settings panel needs on first paint
+        for path in ("/api/secrets", "/api/suunto/status"):
+            r = client.get(path)
+            detail[f"GET {path}"] = r.status_code
+            if r.status_code == 403:
+                fails.append(f"GET {path} is 403 in demo — the page 403s before anyone touches it")
+        if client.get("/api/secrets").get_json().get("secrets") is None:
+            fails.append("GET /api/secrets returned no status payload for the Settings panel")
+        # (d) and none of it applies when the flag is off
+        S.DEMO = False
+        off = client.post("/api/sync", json={})
+        detail["guard_off_sync"] = off.status_code
+        if off.status_code == 403 and (off.get_json() or {}).get("demo"):
+            fails.append("the demo guard fired with SH_DEMO unset — every private console would inherit it")
+    finally:
+        S.DEMO = saved
+    return _st("det", "demo-guard",
+               "§DEMO the demo box refuses secrets, outbound account calls (sync/Suunto), the "
+               "self-test subprocess and the three visitor-facing identity settings, while the "
+               "plan-shaping settings and the status reads the Settings panel needs stay open — and "
+               "the whole guard is inert unless SH_DEMO is set",
+               passed=not fails,
+               expect="403 on secrets-write/sync/suunto/selftest/identity-settings · 200 on status "
+                      "reads and plan settings · nothing gated when SH_DEMO is off",
+               got={**detail, "failures": fails or "none"})
+
+
 def _stc_public_allowlist():
     """§PV/TECH-3 — the public projection is an ALLOWLIST. The old posture served the private payload
     and popped what someone remembered was personal, which had already failed in the field (the §AV
@@ -14714,7 +14793,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_demo_guard(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),

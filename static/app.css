@@ -1140,3 +1140,22 @@
   .legend .atl{ color: var(--accent3); }
   .fftip .t-atl{ color: var(--accent3); }
   /* ====================================================================== */
+
+
+/* §DEMO — the demo banner. Sits above the topbar so it is the first thing read, and uses the theme's
+   own accent rather than a new colour, so it reads as part of the app rather than as an ad. */
+/* ⚠ `[hidden]` is a UA rule (`[hidden]{display:none}`) and a CLASS selector outranks it, so a
+   bare `.demobar{display:flex}` renders the banner even with the attribute set — it showed on the
+   private and public boxes until CI caught it. Restate it at class specificity. */
+.demobar[hidden]{display:none}
+.demobar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  padding:10px 16px;background:var(--surface2);border-bottom:1px solid var(--accent);
+  font-size:.86rem;line-height:1.4;color:var(--text)}
+.demobar-tag{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:.72rem;
+  padding:3px 8px;border-radius:4px;background:var(--accent);color:#fff;flex:none}
+.demobar-text{color:var(--muted);flex:1 1 20ch;min-width:0}
+.demobar-btn{flex:none;font:inherit;font-size:.82rem;padding:5px 12px;border-radius:6px;
+  border:1px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer}
+.demobar-btn:hover{background:var(--accent);color:#fff}
+.demobar-btn:disabled{opacity:.55;cursor:default}
+.demobar-btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}

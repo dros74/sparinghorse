@@ -1,6 +1,7 @@
 // Served as a STATIC FILE now, so nothing here is templated: the two server-known values ride
 // in on the nonce'd window.SH bootstrap the shell writes (TECH-11).
 const SH_READONLY = !!(window.SH && window.SH.readonly);   // public read-only mode
+const SH_DEMO = !!(window.SH && window.SH.demo);   // §DEMO — synthetic athlete, shared, self-resetting
 const SH_PRIVATE_URL = (window.SH && window.SH.privateUrl) || "";   // public→private console link
 const SH_STALE_HOURS = (window.SH && window.SH.staleHours) || 26;    // scheduler + /healthz source of truth
 const SH_PAGE = document.body.dataset.page || "dash";   // §RB — "dash" (status) or "runs" (explorer)
@@ -1049,6 +1050,10 @@ function renderDurability(d){
 // from pre-sync data. The full page refresh still fires only when an activity actually arrived,
 // so a quiet load never flickers the heavier tiles.
 async function touchSync(){
+  // §DEMO — there is no account to sync from, and the demo box refuses the route anyway. Calling it
+  // would 403 on every page load, which a visitor sees in the console and, worse, in the sync tile.
+  // Skipping it is the honest no-op: the synthetic history is already complete.
+  if (SH_DEMO) return;
   try{
     const d = await getJSON("/api/sync?auto=1",{method:"POST"});
     if(!d || !d.ok || d.skipped) return;
@@ -3123,3 +3128,23 @@ if(SH_READONLY){
   });
   if(SH_PAGE!=="runs") go((location.hash || "").replace("#",""), false);   // restore tab from the URL (defaults to today)
 })();
+
+
+// §DEMO — reveal the banner and wire its reset. Everything else on the page is the private console
+// exactly as the user sees it; the banner is the only difference, because a visitor who does not
+// know the athlete is invented will read the numbers as a claim about a real person.
+if (SH_DEMO) {
+  const bar = $("#demobar"), btn = $("#demoReset");
+  if (bar) bar.hidden = false;
+  if (btn) btn.addEventListener("click", () => {
+    btn.disabled = true;
+    const was = btn.textContent;
+    btn.textContent = "Resetting…";
+    // A reset re-seeds and re-plans server-side, so the honest way to show the result is to reload
+    // rather than to patch a dozen cards from here and hope they agree.
+    fetch("/api/demo/reset", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})
+      .then(r => r.json())
+      .then(() => location.reload())
+      .catch(() => { btn.disabled = false; btn.textContent = was; });
+  });
+}
