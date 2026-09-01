@@ -10,6 +10,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.51.0] - 2026-09-01
+
+### Added
+
+- **The general phase stops prescribing the same week twice (§MIX).** Every base week in the
+  assertive path carried ONE structure — a short VO₂ touch — on the same weekday, all block long.
+  The `threshold` zone was defined, priced (`TRIMP_PER_MIN` 2.55, `EQ_KM_FACTOR` 2.5) and given a
+  pace, and **never once prescribed**: measured across a 19-week block, 250 min at interval, 294 at
+  marathon, **0 at threshold**. Davis's Breeze general phase — the tier this engine is calibrated
+  against — runs 1.8 non-long quality sessions a week across three structures, 12 VO₂ : 5 threshold
+  : 5 progression.
+
+  The general phase now draws **two** quality sessions a week from a pool, on a **deterministic**
+  four-week cycle keyed to the quality-week ordinal — so a down week does not advance the rotation,
+  the same inputs still regenerate the same plan, and every golden stays diffable. A fresh block
+  now reads:
+
+  | week | quality |
+  |---|---|
+  | 3 | short VO₂ touch + VO₂ reps (3 min) |
+  | 5 | short VO₂ touch + cruise tempo |
+  | 6 | VO₂ reps (3 min) + short VO₂ touch |
+  | 7 | cruise tempo + VO₂ reps (3 min) |
+
+  **Threshold replaces an interval — it is never a third hard session**, so a week's hard count is
+  fixed at two and only the mix moves. The cycle runs 6 VO₂ : 2 threshold = 75/25, against Breeze's
+  own 12:5 ≈ 70/30 once its progression runs (not yet built) are set aside.
+
+  ⚠ **`BASE_THR_FRAC` = 0.06 is derived, not tuned.** Threshold costs **0.176 eq-km per TRIMP**
+  against interval's **0.223** at this engine's zone paces, so 0.05 × 0.223/0.176 = 0.063 — the
+  slice at which swapping an interval slot for a threshold one is **EQ-neutral by construction**.
+  The §3.1 biomechanical ceilings see the same week either way, and "replaces" is true on the
+  damage axis rather than merely in the session count. Both slots count as hard: a base week now
+  asks 0.10–0.11 of weekly TRIMP in `HARD_ZONES` against a 0.15 cap.
+
+- **Strides survive the specific phases.** Breeze carries 4 × 20 sec through week 18; this engine
+  hardcoded `"strides": 0` in build and peak, so the cheapest neuromuscular touch there is vanished
+  exactly when the plan got specific. ⚠ Not regime-gated, so caution moves too — deliberately, on
+  the precedent the strides *slot* rule already set. Verified on the caution golden: `strides` is
+  the only key that changes, sessions and km byte-identical. A stride marker rides an easy run that
+  was already prescribed; it adds no TRIMP and no kilometre.
+
+### Fixed
+
+- **A quality session may start the week when the week's first run follows a rest day.** The slot
+  walk began at the second run day because the first is "the first run back" — true on every stock
+  layout, where it means Monday, the day after the Sunday long run. It stops being true the moment
+  a rest-day preference pushes the first run later: with rest on Monday the first run is Tuesday,
+  which follows a *rest* day and sits two days off the long run.
+
+  This was load-bearing, not a tidy-up. On a 5-run week shaped Tue/Wed/Thu/Sat/Sun the only pair of
+  quality days ≥ 2 apart that also avoids the day before the long run is Tue + Thu — and Tuesday was
+  slot 0. The second session found no slot and was dropped **silently**: the shape asked for two,
+  the week laid one, and nothing said so. Measured before the fix: 2 of 2 laid on a 6-run week, 1 of
+  2 on 4- and 5-run weeks. Byte-identical for anyone who has set no day preference — every stock
+  layout starts on Monday.
+
+- **`det/components`** asserted the base phase carries the single VO₂ touch — which was the defect
+  itself, frozen as a contract. It now asserts the pool, the pair and the per-kind fractions.
+- **`det/quality-mix`** — two sessions a week from the pool, the cycle keyed to quality weeks (not
+  calendar weeks), at most one threshold per week, the swap eq-neutral within 10%, no two
+  consecutive quality weeks alike, hard share under the phase cap, caution's single cruise tempo
+  untouched. Four reverts each seen to fail on their own tooth.
+
+### Known gaps
+
+- **Progression runs are not built.** Breeze uses six Kenyan-style progression runs, five of them in
+  the general phase, and the engine has no structure that ramps across zones within one session.
+  Until it does, the general-phase pool holds two families rather than three, and the taper's
+  "tempo" sessions still resolve to the marathon zone.
+- Threshold is a **general-phase** structure here, as in Breeze, whose supportive and specific
+  phases are marathon-pace dominated. A block already past its base phase will see little change.
+
 ## [0.50.2] - 2026-09-01
 
 ### Fixed

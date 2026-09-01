@@ -6,7 +6,7 @@
       "vo2max"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 81.1,
+    "end_atl": 81.0,
     "end_ctl": 73.4,
     "start": "2026-06-29",
     "weeks": [
@@ -167,19 +167,19 @@
         "adjusted": false,
         "clipped": false,
         "elapsed": false,
-        "eq_km": 77.75,
+        "eq_km": 82.75,
         "frozen": false,
         "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
-        "intent_km": 72.5,
-        "intent_runs": 5,
-        "km": 71.5,
+        "intent_km": 72.7,
+        "intent_runs": 6,
+        "km": 70.5,
         "long": 5,
-        "peak_acwr": 1.314,
+        "peak_acwr": 1.272,
         "phase": "base",
         "prog_ridden": true,
-        "proj_acwr": 1.278,
-        "proj_acwr_flat": 1.142,
-        "proj_acwr_soft": 1.142,
+        "proj_acwr": 1.268,
+        "proj_acwr_flat": 1.147,
+        "proj_acwr_soft": 1.147,
         "proj_ctl": 74.7,
         "quality": [
           {
@@ -191,19 +191,29 @@
             "rep_min": 2,
             "structure": "intervals",
             "zone": "interval"
+          },
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "VO\u2082 reps (3min)",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
           }
         ],
         "role": "build",
-        "runs": 5,
+        "runs": 6,
         "sessions": [
           {
             "date": "2026-07-13",
             "kind": "easy",
-            "km": 15.1,
-            "minutes": 76,
+            "km": 13.1,
+            "minutes": 66,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 124.6
+            "trimp": 108.9
           },
           {
             "component": "vo2max",
@@ -318,38 +328,114 @@
             "zone": "interval"
           },
           {
-            "date": "2026-07-16",
+            "component": "vo2max",
+            "date": "2026-07-15",
+            "kind": "interval",
+            "km": 7.2,
+            "minutes": 33,
+            "note": "VO\u2082 reps (3min) \u2014 10min easy wu + 3\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "pace_zone": "3:44/km interval",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 2.0,
+                "minutes": 10,
+                "pace_zone": "5:02/km easy",
+                "trimp": 16.5,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.8,
+                "minutes": 3,
+                "pace_zone": "3:44/km interval",
+                "trimp": 9.3,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:02/km easy",
+                "trimp": 3.3,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.8,
+                "minutes": 3,
+                "pace_zone": "3:44/km interval",
+                "trimp": 9.3,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy jog recovery",
+                "effort": "recovery",
+                "km": 0.4,
+                "minutes": 2,
+                "pace_zone": "5:02/km easy",
+                "trimp": 3.3,
+                "zone": "easy"
+              },
+              {
+                "detail": "3min @ interval",
+                "effort": "work",
+                "km": 0.8,
+                "minutes": 3,
+                "pace_zone": "3:44/km interval",
+                "trimp": 9.3,
+                "zone": "interval"
+              },
+              {
+                "detail": "easy cool-down",
+                "effort": "cooldown",
+                "km": 2.0,
+                "minutes": 10,
+                "pace_zone": "5:02/km easy",
+                "trimp": 16.5,
+                "zone": "easy"
+              }
+            ],
+            "trimp": 67.5,
+            "zone": "interval"
+          },
+          {
+            "date": "2026-07-17",
             "kind": "easy",
-            "km": 16.1,
-            "minutes": 81,
+            "km": 13.9,
+            "minutes": 70,
             "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
             "strides": 2,
-            "trimp": 133.9
+            "trimp": 115.5
           },
           {
             "date": "2026-07-18",
             "kind": "easy",
-            "km": 13.1,
-            "minutes": 66,
+            "km": 11.5,
+            "minutes": 58,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 109.2
+            "trimp": 95.4
           },
           {
             "component": "economy",
             "date": "2026-07-19",
             "kind": "long",
-            "km": 19.1,
-            "minutes": 96,
+            "km": 16.7,
+            "minutes": 84,
             "note": "long easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 157.6
+            "trimp": 137.8
           }
         ],
         "start": "2026-07-13",
         "strides": 2,
-        "trimp_total": 602.5,
+        "trimp_total": 602.3,
         "wk": 3
       },
       {
@@ -363,11 +449,11 @@
         "intent_runs": 5,
         "km": 57.9,
         "long": 4,
-        "peak_acwr": 1.219,
+        "peak_acwr": 1.212,
         "phase": "base",
-        "proj_acwr": 1.105,
-        "proj_acwr_flat": 1.032,
-        "proj_acwr_soft": 1.032,
+        "proj_acwr": 1.104,
+        "proj_acwr_flat": 1.028,
+        "proj_acwr_soft": 1.028,
         "proj_ctl": 73.4,
         "quality": [],
         "role": "down",
@@ -659,8 +745,9 @@
             "kind": "easy",
             "km": 13.3,
             "minutes": 67,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 110.4
           },
           {
@@ -705,7 +792,7 @@
           }
         ],
         "start": "2026-09-14",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 651.2,
         "wk": 1
       },
@@ -948,8 +1035,9 @@
             "kind": "easy",
             "km": 13.7,
             "minutes": 69,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 114.2
           },
           {
@@ -994,7 +1082,7 @@
           }
         ],
         "start": "2026-09-21",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 686.8,
         "wk": 2
       },
@@ -1237,8 +1325,9 @@
             "kind": "easy",
             "km": 14.5,
             "minutes": 73,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 120.4
           },
           {
@@ -1283,7 +1372,7 @@
           }
         ],
         "start": "2026-09-28",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 719.8,
         "wk": 3
       },
@@ -1617,8 +1706,9 @@
             "kind": "easy",
             "km": 14.5,
             "minutes": 73,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 120.5
           },
           {
@@ -1663,7 +1753,7 @@
           }
         ],
         "start": "2026-10-12",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 738.8,
         "wk": 5
       },
@@ -1924,8 +2014,9 @@
             "kind": "easy",
             "km": 15.1,
             "minutes": 76,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 126.0
           },
           {
@@ -1970,7 +2061,7 @@
           }
         ],
         "start": "2026-10-19",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 771.9,
         "wk": 6
       },
@@ -2231,8 +2322,9 @@
             "kind": "easy",
             "km": 15.9,
             "minutes": 80,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 132.3
           },
           {
@@ -2277,7 +2369,7 @@
           }
         ],
         "start": "2026-10-26",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 804.8,
         "wk": 7
       },
@@ -2551,8 +2643,9 @@
             "kind": "easy",
             "km": 10.1,
             "minutes": 51,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 84.3
           },
           {
@@ -2597,7 +2690,7 @@
           }
         ],
         "start": "2026-07-27",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 504.8,
         "wk": 1
       },
@@ -2822,8 +2915,9 @@
             "kind": "easy",
             "km": 13.7,
             "minutes": 69,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 113.3
           },
           {
@@ -2868,7 +2962,7 @@
           }
         ],
         "start": "2026-08-03",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 627.5,
         "wk": 2
       },
@@ -3111,8 +3205,9 @@
             "kind": "easy",
             "km": 13.7,
             "minutes": 69,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 113.1
           },
           {
@@ -3157,7 +3252,7 @@
           }
         ],
         "start": "2026-08-10",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 660.3,
         "wk": 3
       },
@@ -3581,8 +3676,9 @@
             "kind": "easy",
             "km": 13.5,
             "minutes": 68,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 112.1
           },
           {
@@ -3627,7 +3723,7 @@
           }
         ],
         "start": "2026-08-24",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 680.9,
         "wk": 1
       }
@@ -3917,8 +4013,9 @@
             "kind": "easy",
             "km": 14.5,
             "minutes": 73,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 120.8
           },
           {
@@ -3963,7 +4060,7 @@
           }
         ],
         "start": "2026-11-09",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 815.2,
         "wk": 1
       },
@@ -4241,8 +4338,9 @@
             "kind": "easy",
             "km": 14.3,
             "minutes": 72,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 118.5
           },
           {
@@ -4287,7 +4385,7 @@
           }
         ],
         "start": "2026-11-16",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 844.8,
         "wk": 2
       }

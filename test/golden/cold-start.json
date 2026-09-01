@@ -139,7 +139,7 @@
         "phase": "base",
         "proj_acwr": 2.191,
         "proj_acwr_flat": 2.016,
-        "proj_acwr_soft": 0.3914,
+        "proj_acwr_soft": 0.529,
         "proj_ctl": 13.3,
         "quality": [
           {
@@ -149,6 +149,16 @@
             "label": "short VO\u2082 touch",
             "rec_min": 2,
             "rep_min": 2,
+            "structure": "intervals",
+            "zone": "interval"
+          },
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "VO\u2082 reps (3min)",
+            "rec_min": 2,
+            "rep_min": 3,
             "structure": "intervals",
             "zone": "interval"
           }
@@ -295,7 +305,7 @@
         "phase": "base",
         "proj_acwr": 1.801,
         "proj_acwr_flat": 1.56,
-        "proj_acwr_soft": 0.5388,
+        "proj_acwr_soft": 0.6768,
         "proj_ctl": 21.4,
         "quality": [
           {
@@ -307,6 +317,14 @@
             "rep_min": 2,
             "structure": "intervals",
             "zone": "interval"
+          },
+          {
+            "component": "ssmax",
+            "frac": 0.06,
+            "kind": "tempo",
+            "label": "cruise tempo",
+            "structure": "continuous",
+            "zone": "threshold"
           }
         ],
         "role": "build",
@@ -379,9 +397,19 @@
         "phase": "base",
         "proj_acwr": 1.68,
         "proj_acwr_flat": 1.518,
-        "proj_acwr_soft": 0.8121,
+        "proj_acwr_soft": 0.8143,
         "proj_ctl": 26.4,
         "quality": [
+          {
+            "component": "vo2max",
+            "frac": 0.05,
+            "kind": "interval",
+            "label": "VO\u2082 reps (3min)",
+            "rec_min": 2,
+            "rep_min": 3,
+            "structure": "intervals",
+            "zone": "interval"
+          },
           {
             "component": "vo2max",
             "frac": 0.05,
@@ -463,16 +491,24 @@
         "phase": "base",
         "proj_acwr": 1.588,
         "proj_acwr_flat": 1.432,
-        "proj_acwr_soft": 0.9202,
+        "proj_acwr_soft": 0.9277,
         "proj_ctl": 31.4,
         "quality": [
+          {
+            "component": "ssmax",
+            "frac": 0.06,
+            "kind": "tempo",
+            "label": "cruise tempo",
+            "structure": "continuous",
+            "zone": "threshold"
+          },
           {
             "component": "vo2max",
             "frac": 0.05,
             "kind": "interval",
-            "label": "short VO\u2082 touch",
+            "label": "VO\u2082 reps (3min)",
             "rec_min": 2,
-            "rep_min": 2,
+            "rep_min": 3,
             "structure": "intervals",
             "zone": "interval"
           }
@@ -748,8 +784,9 @@
             "kind": "easy",
             "km": 4.2,
             "minutes": 26,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 42.9
           },
           {
@@ -794,7 +831,7 @@
           }
         ],
         "start": "2026-08-24",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 272.0,
         "wk": 1
       },
@@ -946,8 +983,9 @@
             "kind": "easy",
             "km": 5.8,
             "minutes": 36,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 59.8
           },
           {
@@ -992,7 +1030,7 @@
           }
         ],
         "start": "2026-08-31",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 349.5,
         "wk": 2
       },
@@ -1060,8 +1098,9 @@
             "kind": "easy",
             "km": 8.0,
             "minutes": 50,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 82.4
           },
           {
@@ -1084,7 +1123,7 @@
           }
         ],
         "start": "2026-09-07",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 390.6,
         "wk": 3
       },
@@ -1328,8 +1367,9 @@
             "kind": "easy",
             "km": 7.2,
             "minutes": 45,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 74.2
           },
           {
@@ -1374,7 +1414,7 @@
           }
         ],
         "start": "2026-09-21",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 425.9,
         "wk": 5
       },
@@ -1563,8 +1603,9 @@
             "kind": "easy",
             "km": 7.5,
             "minutes": 47,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 78.3
           },
           {
@@ -1609,7 +1650,7 @@
           }
         ],
         "start": "2026-09-28",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 462.2,
         "wk": 6
       },
@@ -1798,8 +1839,9 @@
             "kind": "easy",
             "km": 8.2,
             "minutes": 51,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 84.6
           },
           {
@@ -1844,7 +1886,7 @@
           }
         ],
         "start": "2026-10-05",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 495.2,
         "wk": 7
       }
@@ -2161,8 +2203,9 @@
             "kind": "easy",
             "km": 8.5,
             "minutes": 53,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 86.8
           },
           {
@@ -2207,7 +2250,7 @@
           }
         ],
         "start": "2026-10-12",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 529.1,
         "wk": 1
       },
@@ -2413,8 +2456,9 @@
             "kind": "easy",
             "km": 9.0,
             "minutes": 56,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 91.7
           },
           {
@@ -2459,7 +2503,7 @@
           }
         ],
         "start": "2026-10-19",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 561.5,
         "wk": 2
       },
@@ -2683,8 +2727,9 @@
             "kind": "easy",
             "km": 9.0,
             "minutes": 56,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "6:15/km easy",
+            "strides": 2,
             "trimp": 91.6
           },
           {
@@ -2729,7 +2774,7 @@
           }
         ],
         "start": "2026-10-26",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 594.6,
         "wk": 3
       }

@@ -269,8 +269,9 @@
             "kind": "easy",
             "km": 7.4,
             "minutes": 37,
-            "note": "easy run",
+            "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
+            "strides": 2,
             "trimp": 60.6
           },
           {
@@ -293,7 +294,7 @@
           }
         ],
         "start": "2026-06-29",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 409.1,
         "volume_met": false,
         "wk": 1

@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.50.2"
+ENGINE_VERSION = "0.51.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1428,6 +1428,56 @@ BASE_TEMPO_FRAC = 0.10     # hard fraction of weekly TRIMP for the Base light te
 BASE_TEMPO_ZONE = "threshold"
 BASE_TEMPO_FROM_WEEK = 3   # no tempo in the first 2 Base weeks (ease into quality after strides)
 
+# §MIX — THE GENERAL PHASE STOPS PRESCRIBING THE SAME WEEK TWICE.
+# Davis's Breeze general phase (weeks 1–10, this athlete's tier) runs 1.8 non-long quality sessions a
+# week drawn from three structures — VO₂ intervals ×12, sustained threshold ×5, Kenyan progression ×5.
+# This engine ran ONE structure, every week, on the same weekday: a short VO₂ touch. The `threshold`
+# zone was defined, priced (TRIMP_PER_MIN 2.55, EQ_KM_FACTOR 2.5) and given a pace, and never once
+# prescribed in a 19-week block — the cruise-tempo spec below it sits on the non-davis branch, so the
+# assertive path dropped it the day the VO₂ touch replaced it. Measured on plan 160: 250 min at
+# interval, 294 at marathon, 0 at threshold.
+#
+# THE ROTATION IS DETERMINISTIC — MY EXPLICIT CALL: a fixed cycle over the quality-week ordinal, so
+# the same inputs still regenerate the same plan and every golden stays diffable. A seeded shuffle
+# would break monotony harder and make plan-to-plan diffs noise.
+# THRESHOLD REPLACES AN INTERVAL, never a third hard session — also my call — so the week's hard
+# COUNT is fixed at two and only the mix moves. The 4-week cycle runs 6 VO₂ : 2 threshold = 75/25,
+# against Breeze's own 12:5 ≈ 70/30 once its progression runs (not yet built) are set aside.
+# BOTH SLOTS COUNT AS HARD, my call too, so a week is 0.10–0.11 of weekly TRIMP in HARD_ZONES against
+# PHASE_HARD_CAP["base"] = 0.15.
+#
+# ⚠ Why the threshold slice is BIGGER than the interval one it replaces. Per unit of training stress
+# threshold is cheaper on the damage axis than interval work — 0.176 vs 0.223 eq-km per TRIMP at this
+# athlete's zone paces, from EQ_KM_FACTOR and TRIMP_PER_MIN. 0.05 × 0.223/0.176 = 0.063, so 0.06 is
+# the slice at which swapping an interval for a threshold session is EQ-NEUTRAL by construction: the
+# §3.1 biomechanical ceilings see the same week either way and "replaces" is true on the damage axis,
+# not merely in the session count.
+# ⚠ And why the interval slice does NOT move: DAVIS_BASE_VO2_FRAC was HALVED to 0.05 (2026-07-04)
+# because a single .10 touch self-tripped the §3.1 brake during a steep volume rebuild. Two 0.05
+# sessions are gentler per BOUT than one 0.10 (the session ceiling is per-bout) but cost the WEEK
+# ceiling the same, so the week-eq headroom is the thing to watch, and it is measured per release.
+BASE_THR_FRAC = 0.06       # §MIX — the eq-neutral swap for one DAVIS_BASE_VO2_FRAC interval slot
+BASE_VO2_LONG_REP_MIN = 3  # §MIX — Breeze's general phase runs 1.5/2/3/5-min reps; alternate 2 and 3
+BASE_QUALITY_CYCLE = (     # §MIX — (slot A, slot B) per quality-week ordinal; deterministic, 4-week
+    ("vo2_short", "vo2_long"),
+    ("vo2_short", "threshold"),
+    ("vo2_long", "vo2_short"),
+    ("threshold", "vo2_long"),
+)
+
+
+def _base_quality_spec(name):
+    """§MIX — one structure from the general-phase pool. Named rather than inlined so the rotation
+    reads as a sequence of decisions and `det/quality-mix` can assert the pool by name."""
+    if name == "threshold":
+        return {"kind": "tempo", "zone": BASE_TEMPO_ZONE, "frac": BASE_THR_FRAC,
+                "structure": "continuous", "label": "cruise tempo", "component": "ssmax"}
+    rep_min = BASE_VO2_LONG_REP_MIN if name == "vo2_long" else DAVIS_BASE_VO2_REP_MIN
+    return {"kind": "interval", "zone": "interval", "frac": DAVIS_BASE_VO2_FRAC,
+            "structure": "intervals", "rep_min": rep_min, "rec_min": 2,
+            "label": f"VO₂ reps ({rep_min}min)" if name == "vo2_long" else "short VO₂ touch",
+            "component": "vo2max"}
+
 
 def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     """Parametric Base-phase shape (§6f Step B/C): easy-aerobic volume growth launched from the
@@ -1440,6 +1490,7 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     touch instead of the cruise tempo — develop VO₂max early while mileage rises (it's cheap to hold
     later), same hard frac, still under PHASE_HARD_CAP["base"]; the eq_km governor watches the km."""
     shape, km = [], float(start_km)
+    q_ordinal = 0                              # §MIX — counts quality weeks, not calendar weeks
     for i in range(n_weeks):
         wk = i + 1
         down = (wk % BASE_DOWN_EVERY == 0)
@@ -1450,12 +1501,17 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
             km *= (1 + BASE_WEEKLY_RAMP)
         quality = []
         if not down and wk >= BASE_TEMPO_FROM_WEEK:
-            quality = ([{"kind": "interval", "zone": "interval", "frac": DAVIS_BASE_VO2_FRAC,
-                         "structure": "intervals", "rep_min": DAVIS_BASE_VO2_REP_MIN, "rec_min": 2,
-                         "label": "short VO₂ touch", "component": "vo2max"}] if davis else
-                       [{"kind": "tempo", "zone": BASE_TEMPO_ZONE, "frac": BASE_TEMPO_FRAC,
-                         "structure": "continuous", "label": "light cruise tempo",
-                         "component": "ssmax"}])
+            if davis:
+                # §MIX — TWO sessions, drawn from the pool by a deterministic cycle. The ordinal
+                # counts QUALITY weeks, not calendar weeks, so a down week does not advance the
+                # rotation and the sequence a phase lays is the same however the down weeks fall.
+                pair = BASE_QUALITY_CYCLE[q_ordinal % len(BASE_QUALITY_CYCLE)]
+                quality = [_base_quality_spec(n) for n in pair]
+                q_ordinal += 1
+            else:
+                quality = [{"kind": "tempo", "zone": BASE_TEMPO_ZONE, "frac": BASE_TEMPO_FRAC,
+                            "structure": "continuous", "label": "light cruise tempo",
+                            "component": "ssmax"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * BASE_LONG_FRAC), "strides": 0 if down else 2,
                       "quality": quality,
@@ -1581,7 +1637,18 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                 {"kind": "long_mp", "zone": "marathon", "frac": BUILD_MP_FRAC,
                  "attach": "long", "label": "marathon-pace long run", "component": "resilience"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
-                      "long": round(this_km * BUILD_LONG_FRAC), "strides": 0, "quality": quality,
+                      "long": round(this_km * BUILD_LONG_FRAC),
+                      # §MIX — strides survive the specific phases. Breeze carries 4 × 20 sec
+                      # through week 18; this engine hardcoded 0 here and in Peak, so the
+                      # cheapest neuromuscular touch there is vanished exactly when the plan
+                      # got specific. Down weeks keep 0, as Base already does.
+                      # ⚠ NOT davis-gated, so caution moves too — deliberately, and on the
+                      # precedent the strides SLOT rule already set ("a shape rule, not a load
+                      # lever — deliberately NOT caution-byte-identical, weekly km untouched").
+                      # Verified on the caution golden: `strides` is the ONLY key that changes,
+                      # sessions and km byte-identical. A stride marker rides an easy run that
+                      # was already prescribed; it adds no TRIMP and no kilometre.
+                      "strides": 0 if down else 2, "quality": quality,
                       "phase": "build", "role": "down" if down else "build",   # §P1
                       "intent": "Down week — absorb the block" if down
                       else ("Supportive — growing MP work + VO₂ maintenance" if davis
@@ -1621,7 +1688,12 @@ def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                 {"kind": "long_mp", "zone": "marathon", "frac": PEAK_MP_FRAC,
                  "attach": "long", "label": "race-pace long run", "component": "resilience"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
-                      "long": round(this_km * PEAK_LONG_FRAC), "strides": 0, "quality": quality,
+                      "long": round(this_km * PEAK_LONG_FRAC),
+                      # §MIX — as Build. Peak has NO down weeks (it flows into the taper,
+                      # which is its recovery — the same reason §PRO6 exempts the phase), so
+                      # there is no down case to guard here.
+                      "strides": 2, "quality": quality,
+
                       # §P1 — the §PRO6 deload exemption used to sniff the "Peak" PREFIX of the
                       # sentence below (the peak rides into the taper; the taper IS its recovery).
                       # `phase` carries that now, so the sentence is free to be reworded.
@@ -1825,7 +1897,22 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         q_slots = pins[:len(mid_q)]
         mid_q = mid_q[:len(q_slots)]
     else:
-        q_slots, s = [], 1
+        # §MIX — WHERE THE WALK MAY START. It began at slot 1 because slot 0 is "the first run back",
+        # which on every stock layout means MONDAY, the day after the Sunday long run — a fatigue
+        # argument, and a good one. It stops being true the moment a rest-day preference pushes the
+        # week's first run later: with rest on Monday the first run is TUESDAY, which follows a REST
+        # day and sits two days off the long run. It is the freshest day of the week, and Breeze puts
+        # quality on its own first run day constantly.
+        # This is load-bearing for §MIX's second session, not a tidy-up. On a 5-run week shaped
+        # Tue/Wed/Thu/Sat/Sun the only pair of quality days ≥2 apart that also avoids the day before
+        # the long run is Tue+Thu — and Tue is slot 0. Starting at 1, the second session was found no
+        # slot and `mid_q[:len(q_slots)]` dropped it SILENTLY: the shape asked for two, the week laid
+        # one, and nothing said so. Measured before the fix: 2 of 2 laid on a 6-run week, 1 of 2 on
+        # 4- and 5-run weeks.
+        # `days[0] > 0` is exactly "the week's first run is not Monday", i.e. an in-week rest day
+        # precedes it — which only happens when the athlete has expressed a preference. Every stock
+        # layout starts at day 0, so this is byte-identical for anyone who has set nothing.
+        q_slots, s = [], (0 if days and days[0] > 0 else 1)
         for _q in mid_q:
             # §DAYPREF — three things `s <= n - 2` + `av_blocked is not None` used to say implicitly:
             #  · "not the long slot" is now `s != long_idx`, because the long run is no longer last;

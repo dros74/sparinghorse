@@ -10554,6 +10554,89 @@ def _stc_straddle_caps():
                got={**got, "failures": fail or "none"})
 
 
+def _stc_quality_mix():
+    """§MIX — THE GENERAL PHASE STOPS PRESCRIBING THE SAME WEEK TWICE.
+
+    Before this, every base week in the assertive path carried ONE structure — a short VO₂ touch —
+    on the same weekday, and the `threshold` zone was defined, priced and never once prescribed:
+    measured on plan 160, 250 min at interval, 294 at marathon, **0 at threshold** across 19 weeks.
+    Davis's Breeze general phase (this athlete's tier) runs 1.8 non-long quality sessions a week
+    across three structures, 12 VO₂ : 5 threshold : 5 progression.
+
+    Four teeth, one per decision that shaped the rotation:
+    (a) TWO sessions a week, both from the pool, on every quality week.
+    (b) DETERMINISTIC — the same shape call answers identically, and the ordinal counts QUALITY
+        weeks, so a down week does not advance the cycle and the sequence a phase lays does not
+        depend on where its down weeks fall.
+    (c) THRESHOLD REPLACES AN INTERVAL — never a third hard session. The week's hard COUNT is
+        fixed at two, and the swap is EQ-NEUTRAL by construction: `BASE_THR_FRAC` is set so that
+        one threshold slot costs the §3.1 ceilings what the interval slot it replaced cost.
+    (d) NO TWO CONSECUTIVE quality weeks are identical — the monotony this exists to break.
+    Plus the hard share stays under `PHASE_HARD_CAP["base"]`, and caution keeps its single
+    cruise-tempo week."""
+    fails = {}
+    shape = S.base_shape(14, 45, davis=True)
+    qweeks = [w for w in shape if w["quality"]]
+    pool = {"interval", "tempo"}
+    # (a) two sessions, both from the pool
+    bad = [w["wk"] for w in qweeks if len(w["quality"]) != 2]
+    if bad:
+        fails["two_per_week"] = f"weeks with != 2 quality sessions: {bad}"
+    off = [w["wk"] for w in qweeks if any(q["kind"] not in pool for q in w["quality"])]
+    if off:
+        fails["pool"] = f"weeks drawing outside the pool: {off}"
+    # (b) deterministic, and blind to where the down weeks fall
+    again = S.base_shape(14, 45, davis=True)
+    if [[q["label"] for q in w["quality"]] for w in shape] != \
+       [[q["label"] for q in w["quality"]] for w in again]:
+        fails["deterministic"] = "two identical calls produced different rotations"
+    seq = [tuple(q["label"] for q in w["quality"]) for w in qweeks]
+    cyc = S.BASE_QUALITY_CYCLE
+    if len(seq) >= len(cyc) and seq[:len(cyc)] != seq[len(cyc):2 * len(cyc)][:len(seq) - len(cyc)]:
+        pass   # the cycle repeats by construction; the ordinal tooth below is the real one
+    # the ordinal must skip down weeks: the 1st, 2nd, 3rd… QUALITY weeks follow the cycle in order
+    want = [tuple(q["label"] for q in [E._base_quality_spec(n) for n in cyc[i % len(cyc)]])
+            for i in range(len(qweeks))]
+    if seq != want:
+        fails["ordinal"] = f"rotation is not the cycle over QUALITY weeks: {seq[:5]} vs {want[:5]}"
+    # (c) threshold replaces an interval — never a third session, and eq-neutral
+    if any(sum(1 for q in w["quality"] if q["kind"] == "tempo") > 1 for w in qweeks):
+        fails["replaces"] = "a week carried two threshold sessions — the swap became an addition"
+    _eq_per_trimp = lambda z, pace: (60.0 / pace) * S.EQ_KM_FACTOR[z] / S.trimp_per_min(z)
+    thr_cost = S.BASE_THR_FRAC * _eq_per_trimp("threshold", 335)
+    int_cost = S.DAVIS_BASE_VO2_FRAC * _eq_per_trimp("interval", 304)
+    if abs(thr_cost - int_cost) / int_cost > 0.10:
+        fails["eq_neutral"] = (f"the swap is not eq-neutral: threshold slot {thr_cost:.4f} vs "
+                              f"interval {int_cost:.4f} eq-km per unit weekly TRIMP")
+    # (d) no two consecutive quality weeks alike
+    dup = [qweeks[i]["wk"] for i in range(1, len(seq)) if seq[i] == seq[i - 1]]
+    if dup:
+        fails["monotony"] = f"consecutive quality weeks carry an identical pair: weeks {dup}"
+    # the hard share the shape ASKS for stays under the phase cap
+    hard_frac = max((sum(q["frac"] for q in w["quality"]) for w in qweeks), default=0.0)
+    if hard_frac > S.PHASE_HARD_CAP["base"]:
+        fails["hard_cap"] = f"base asks {hard_frac:.3f} of weekly TRIMP hard, cap {S.PHASE_HARD_CAP['base']}"
+    # caution untouched — one continuous cruise tempo, as before
+    cq = [w["quality"] for w in S.base_shape(8, 45, davis=False) if w["quality"]]
+    if any(len(q) != 1 or q[0]["kind"] != "tempo" or q[0]["frac"] != S.BASE_TEMPO_FRAC for q in cq):
+        fails["caution"] = f"caution base quality moved: {cq[:2]}"
+    return _st("det", "quality-mix",
+               "§MIX the general phase draws TWO quality sessions a week from a pool of three "
+               "structures on a deterministic cycle keyed to the QUALITY-week ordinal: threshold "
+               "replaces an interval (never a third hard session, and eq-neutral by construction), "
+               "no two consecutive quality weeks are alike, the hard share stays under the phase "
+               "cap, and caution keeps its single cruise tempo",
+               passed=not fails,
+               expect="2 sessions/week from {interval, tempo} · cycle over quality weeks · ≤1 "
+                      f"threshold/week · eq-neutral swap · hard ≤ {S.PHASE_HARD_CAP['base']}",
+               got={"rotation": [f"wk{w['wk']}: " + " + ".join(q["label"] for q in w["quality"])
+                                 for w in qweeks[:6]],
+                    "max_hard_frac": round(hard_frac, 3),
+                    "swap_eq_cost": {"threshold_slot": round(thr_cost, 4),
+                                     "interval_slot": round(int_cost, 4)},
+                    "failures": fails or "none"})
+
+
 def _stc_straddle_remainder():
     """§STRAD2/§STRAD3 — THE REMAINDER IS BOUND BY WHAT THE WEEK HAS ALREADY COST.
 
@@ -11084,9 +11167,16 @@ def _stc_components():
         if S._is_down(w["intent"]) or w["wk"] < S.BASE_TEMPO_FROM_WEEK:
             if q:
                 fails.append(f"davis base wk{w['wk']} should carry no quality")
-        elif not (len(q) == 1 and q[0]["kind"] == "interval" and q[0]["frac"] == S.DAVIS_BASE_VO2_FRAC
-                  and q[0].get("component") == "vo2max"):
-            fails.append(f"davis base wk{w['wk']} should be the VO₂ touch: {q}")
+        elif len(q) != 2:
+            # §MIX — the general phase carries TWO quality sessions now, not one. This limb used to
+            # assert the single VO₂ touch, which was the whole defect: one structure, every week,
+            # on the same weekday, and the threshold zone never prescribed at all.
+            fails.append(f"davis base wk{w['wk']} should carry two quality sessions: {q}")
+        elif any(s["kind"] not in ("interval", "tempo") for s in q):
+            fails.append(f"davis base wk{w['wk']} drew outside the general-phase pool: {q}")
+        elif any(s["frac"] != (S.BASE_THR_FRAC if s["kind"] == "tempo" else S.DAVIS_BASE_VO2_FRAC)
+                 for s in q):
+            fails.append(f"davis base wk{w['wk']} quality frac drifted: {q}")
     db_shape = S.build_shape(7, 24, davis=True)
     mp_fracs = [q["frac"] for w in db_shape if not S._is_down(w["intent"])
                 for q in w["quality"] if q["kind"] == "long_mp"]
@@ -14500,7 +14590,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
                  lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_straddle_streak(), lambda: _stc_straddle_caps(),
-                 lambda: _stc_straddle_remainder(),
+                 lambda: _stc_straddle_remainder(), lambda: _stc_quality_mix(),
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),

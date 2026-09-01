@@ -488,7 +488,7 @@
           }
         ],
         "start": "2026-09-07",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 132.6,
         "wk": 1
       },
@@ -623,7 +623,7 @@
           }
         ],
         "start": "2026-09-14",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 134.3,
         "wk": 2
       },
@@ -758,7 +758,7 @@
           }
         ],
         "start": "2026-09-21",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 134.3,
         "wk": 3
       }
@@ -976,7 +976,7 @@
           }
         ],
         "start": "2026-09-28",
-        "strides": 0,
+        "strides": 2,
         "trimp_total": 119.2,
         "wk": 1
       }
