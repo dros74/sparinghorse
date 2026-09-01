@@ -1332,6 +1332,51 @@ def _stc_public_view_coverage(db):
                     "failures": fails or "none"})
 
 
+def _stc_csp_worker():
+    """§CSP — the Content-Security-Policy must let the app's OWN service worker run.
+
+    `worker-src` was never declared, so the browser fell back to `script-src` — a nonce plus unpkg,
+    and a nonce cannot be attached to a worker script. `navigator.serviceWorker.register("/sw.js")`
+    was therefore BLOCKED on every box from the day the CSP landed (`git log -S worker-src` finds
+    nothing before this), which means the PWA layer this app ships — `sw.js`, `manifest.webmanifest`,
+    the icons — had never once run. It stayed invisible because the registration `.catch()`es
+    silently; it took a console error on a demo page load to surface it.
+
+    Three teeth, because the interesting failure is not "the header lost a word":
+    (a) the directive is present and same-origin;
+    (b) the page still ASKS for a worker — a fix that quietly stopped registering would satisfy (a)
+        while leaving the feature just as dead, and the asset must actually be served;
+    (c) the rest of the policy is intact, so this never becomes the commit that loosened the CSP."""
+    c = S.app.test_client()
+    r = c.get("/")
+    csp = r.headers.get("Content-Security-Policy", "")
+    fail = []
+    if "worker-src 'self'" not in csp:                                   # (a)
+        fail.append("no `worker-src 'self'` — /sw.js falls back to script-src and is blocked")
+    if "worker-src" in csp and "worker-src 'self'" not in csp:
+        fail.append(f"worker-src is present but not 'self': {csp}")
+    html = r.get_data(as_text=True)
+    if "serviceWorker" not in html or "/sw.js" not in html:              # (b)
+        fail.append("the shell no longer registers a service worker — the directive guards nothing")
+    if c.get("/sw.js").status_code != 200:
+        fail.append("/sw.js is not served, so the registration cannot succeed")
+    for must in ("default-src 'self'", "object-src 'none'", "frame-ancestors 'none'",
+                 "base-uri 'none'", "connect-src 'self'"):               # (c)
+        if must not in csp:
+            fail.append(f"the CSP lost `{must}` — this fix must not be the one that opened it up")
+    if "script-src 'nonce-" not in csp:
+        fail.append("script-src is no longer nonce-based")
+    return _st("det", "csp-worker",
+               "§CSP the policy admits the app's own service worker (`worker-src 'self'`) so the PWA "
+               "layer it ships can actually register, the shell still asks for one and /sw.js is "
+               "served, and the rest of the policy — nonce'd scripts, no objects, no framing — is "
+               "unchanged",
+               passed=not fail,
+               expect="worker-src 'self' present · shell registers /sw.js · policy otherwise intact",
+               got={"csp": csp[:200], "sw_served": c.get("/sw.js").status_code,
+                    "failures": fail or "none"})
+
+
 def _stc_demo_track():
     """§DEMO — the synthetic route a demo run draws IS the distance the card prints beside it.
 
@@ -14859,7 +14904,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_demo_guard(), lambda: _stc_demo_track(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_demo_guard(), lambda: _stc_demo_track(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),

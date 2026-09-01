@@ -5910,6 +5910,15 @@ def _security_headers(resp):
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; "
             "font-src https://fonts.gstatic.com; "
             "img-src 'self' data: https://*.tile.openstreetmap.org https://unpkg.com; "
+            # `worker-src` was never declared, so the browser fell back to `script-src` — which
+            # allows a nonce and unpkg and nothing else, and a nonce cannot be attached to a worker
+            # script. The result: `navigator.serviceWorker.register("/sw.js")` has been BLOCKED on
+            # every box since the CSP landed (`git log -S worker-src` finds nothing), so the PWA
+            # layer this app ships — sw.js, the manifest, the icons — has never once run. The
+            # registration `.catch()`es silently, which is why it stayed invisible until a demo page
+            # load surfaced the console error. Same-origin only: it grants the worker exactly what
+            # `default-src 'self'` already grants everything else.
+            "worker-src 'self'; "
             "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'"
         )
     return resp

@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.53.2] - 2026-09-01
+
+### Fixed
+
+- **The service worker has never run, on any deployment (§CSP).** `worker-src` was never declared in
+  the Content-Security-Policy, so the browser fell back to `script-src` — a nonce plus unpkg, and a
+  nonce cannot be attached to a worker script. `navigator.serviceWorker.register("/sw.js")` has
+  therefore been **blocked since the CSP landed** (`git log -S worker-src` finds nothing before this),
+  which means the PWA layer this app ships — `sw.js`, `manifest.webmanifest`, the touch icons — has
+  never once installed. It stayed invisible because the registration `.catch()`es silently; it took a
+  console error on a demo page load to surface it.
+
+  One directive: `worker-src 'self'`. Same-origin only — it grants the worker exactly what
+  `default-src 'self'` already grants everything else, and nothing in the policy loosens. Verified in
+  a real browser: the worker now reaches **active**, and the page's console is clean.
+
+- **`det/csp-worker`** — the directive is present and same-origin, the shell still *asks* for a
+  worker and `/sw.js` is still served (a "fix" that quietly stopped registering would satisfy the
+  header check while leaving the feature just as dead), and the rest of the policy — nonce'd scripts,
+  no objects, no framing, `connect-src 'self'` — is unchanged, so this cannot become the commit that
+  opened the CSP up.
+
 ## [0.53.1] - 2026-09-01
 
 ### Added
