@@ -137,7 +137,7 @@ service and proxy to loopback — never to `0.0.0.0`). Caddy sets `X-Forwarded-F
 ## 4. Running it
 
 ```
-mkdir -p data secrets && cp .env.example .env     # fill RUNALYZE_TOKEN, SH_TZ, the optional keys
+mkdir -p data secrets backups && cp .env.example .env   # fill RUNALYZE_TOKEN, SH_TZ, the optional keys
 docker compose up -d --build                      # builds the image, starts all three
 docker compose ps                                 # each service should read "healthy" within ~30 s
 ```
@@ -153,7 +153,9 @@ makes a non-root `docker compose` fail before it looks at any service.
 ## 5. Upgrading
 
 **Every code release needs `docker compose up -d --build`.** A plain `up -d` restarts the same image
-and deploys nothing. After the build, open the footer of the private page and check the version it
+and deploys nothing. **Upgrading past 0.56.1:** the private service bind-mounts `./backups`, and a
+Synology's Docker refuses to start a container whose bind source does not exist — `mkdir -p backups`
+first (`prepare_env.sh` creates `data`, `secrets` and `backups` for you). After the build, open the footer of the private page and check the version it
 prints matches the release; `/healthz` on any box reports `ok`. An `.env` change needs a container
 recreate (`up -d`), not a rebuild.
 

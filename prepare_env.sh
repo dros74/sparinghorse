@@ -40,6 +40,13 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$ENV_FILE" ] || { echo "✗ $ENV_FILE not found — run this in the compose directory (cp .env.example .env first on a new box)" >&2; exit 1; }
+# the three host directories the compose file bind-mounts; a Synology's Docker refuses to start a
+# container whose bind source is missing (./backups arrived in 0.56.1 and bit the first upgrade)
+for d in data secrets backups; do
+  if [ ! -d "$d" ]; then
+    if [ "$CHECK" = 1 ]; then echo "  would create ./$d (bind mount source)"; else mkdir -p "$d" && echo "  created ./$d (bind mount source)"; fi
+  fi
+done
 
 # ── helpers (values are read to test emptiness only; nothing echoes them) ──────────────────────────
 has_key()   { grep -q "^$1=" "$ENV_FILE"; }

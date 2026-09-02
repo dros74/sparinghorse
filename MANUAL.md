@@ -108,7 +108,7 @@ file editing is required for day-to-day use.
 
 `docker compose` runs the **same image twice off one shared `./data` DB**:
 
-    mkdir -p data && cp .env.example .env
+    mkdir -p data secrets backups && cp .env.example .env
     docker compose up -d --build
 
 | Service | Port | Role |

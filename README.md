@@ -150,7 +150,7 @@ the trust model, what must never be reachable, the proxy examples, upgrade, back
 [`DEPLOY.md`](DEPLOY.md); the quick version follows. Since 0.55.2 the image runs unprivileged on a
 read-only root with a healthcheck, and installs a hash-pinned `requirements.lock`.
 
-    mkdir -p data && cp .env.example .env   # fill RUNALYZE_TOKEN (+ optional keys)
+    mkdir -p data secrets backups && cp .env.example .env   # fill RUNALYZE_TOKEN (+ optional keys)
     docker compose up -d --build
 
 - **`sparinghorse`** (`:8770`) — full read/write, holds the tokens, runs the nightly sync. Keep it private
