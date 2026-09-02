@@ -263,6 +263,14 @@ async function runFull() {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.evaluate(() => document.querySelector('.mnav-btn[data-goto="fitness"]')?.click());
   await page.waitForTimeout(500);
+  // 0.60.2 — Current shape on a phone: two metrics per row (his ask), measured, not read off the CSS
+  const shape = await page.evaluate(() => {
+    const d = document.querySelector('#sec-shape'); if (d) d.open = true;
+    const r = [...document.querySelectorAll('#tiles .tile')].slice(0, 4).map(t => t.getBoundingClientRect());
+    return { n: r.length, rows: new Set(r.map(x => Math.round(x.top))).size, maxW: Math.max(...r.map(x => x.width)), host: (document.querySelector('#tiles') || {}).clientWidth || 0 };
+  });
+  ok(`current shape shows two tiles per row at 390px (${shape.n} tiles on ${shape.rows} rows, widest ${Math.round(shape.maxW)}px of ${shape.host})`,
+     shape.n === 4 && shape.rows === 2 && shape.maxW < shape.host * 0.6);
   const ax = await page.evaluate(() => {
     const vis = [...document.querySelectorAll('#ffchart .axlbl .ax')].filter(e => e.offsetParent);
     const w = vis.map(e => e.getBoundingClientRect().width);
@@ -581,6 +589,18 @@ async function runFull() {
   await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
   await axeCheck('dashboard'); await axeThemes('dashboard');
   await page.click('#settingsBtn'); await page.waitForTimeout(800); await axeCheck('settings modal');
+  // 0.60.2 — the Console access and System blocks share the keys block's inset: they ran edge to edge
+  // (inputs wider than the content column, System values clipped at the dialog's right edge)
+  await page.waitForSelector('#authBox .secblock, #systemBox .secblock', { timeout: 15000 }).catch(() => {});
+  const inset = await page.evaluate(() => {
+    const d = document.querySelector('#settingsDialog').getBoundingClientRect();
+    return ['#authBox .secblock', '#systemBox .secblock', '#authBox input', '#systemBox .sysrow .v'].map(sel => {
+      const e = document.querySelector(sel); if (!e) return { sel, missing: true };
+      const r = e.getBoundingClientRect(); return { sel, left: Math.round(r.left - d.left), right: Math.round(d.right - r.right) };
+    });
+  });
+  ok(`settings: the access + system blocks sit inside the dialog inset (${inset.map(i => i.missing ? i.sel + ':missing' : i.left + '/' + i.right).join(' ')})`,
+     inset.every(i => !i.missing && i.left >= 16 && i.right >= 16));
   await page.keyboard.press('Escape'); await page.waitForTimeout(200);
   await page.goto(BASE + '/runs', { waitUntil: 'networkidle' }); await page.waitForTimeout(800); await axeCheck('run browser');
   await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
@@ -858,6 +878,14 @@ async function runPublic() {
     return !!t && !!o && t.open === true && o.nextElementSibling === t; }));
   await page.screenshot({ path: `${SHOTS}/10-public.png`, fullPage: true });
   await axeCheck('public'); await axeThemes('public');
+  // 0.60.2 — the public Today page kept "☀ Today" as its only link (the read-only branch swallowed
+  // the page branch), so a visitor who pressed it had no way back to the dashboard
+  await page.goto(BASE + '/today', { waitUntil: 'networkidle' }); await page.waitForTimeout(800);
+  const tl = page.locator('#todayLink');
+  ok(`public /today links back to the dashboard ("${(await tl.innerText().catch(() => '')).trim()}")`,
+     (await tl.getAttribute('href')) === '/' && /dashboard/i.test(await tl.innerText().catch(() => '')));
+  ok('public /today shows the verdict card and the session, nothing else', await page.locator('#readiness .statuscard').count() === 1 && await page.locator('#ciBtn').count() === 0);
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
 }
 
 async function runPublicFull() {
@@ -947,6 +975,15 @@ async function runMap() {
   ok(`no CSP / integrity / Leaflet console errors (${cspErrors.length})`, cspErrors.length === 0);
   await page.screenshot({ path: `${SHOTS}/12-map.png`, fullPage: false });
   await axeCheck('demo');
+  // 0.60.2 — the reset control rides in the top cluster beside the theme button, and the fixed chrome
+  // clears the banner: on a desktop the theme button used to sit exactly on top of "Reset now"
+  const demo = await page.evaluate(() => {
+    const b = document.querySelector('#demobar'), c = document.querySelector('.topctl'), r = document.querySelector('.topctl #demoReset');
+    if (!b || !c || !r) return { ok: false, why: 'missing ' + [b, c, r].map(x => !!x).join('/') };
+    const br = b.getBoundingClientRect(), cr = c.getBoundingClientRect(), rr = r.getBoundingClientRect(), tr = document.querySelector('#themeBtn').getBoundingClientRect();
+    return { ok: cr.top >= br.bottom - 1 && Math.abs(rr.top - tr.top) < 2 && rr.right <= tr.left, bar: Math.round(br.bottom), cluster: Math.round(cr.top), reset: Math.round(rr.top), theme: Math.round(tr.top) };
+  });
+  ok(`demo: the reset control sits beside the theme button, below the banner (${JSON.stringify(demo)})`, demo.ok === true);
 }
 
 // 0.56.0 §AUTH — the private console locks itself. A fresh instance lands on /setup; a later visit

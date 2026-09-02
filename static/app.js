@@ -821,6 +821,9 @@ function plannedSession(s, easyPace){
   // metric would misprescribe the day, so it only renders for plain easy/long runs.
   const noteParts=(s.note||"").split(" — ");
   const noteTxt=U.t((q&&noteParts.length>1)?noteParts.slice(0,-1).join(" — "):s.note);   // card replaces the cramped structure string
+  // 0.60.2 — a note that only restates the title ("easy run" under "Easy run") is not a line
+  const ttlTxt=String(KINDT[s.kind]||s.kind+" run").replace(/<[^>]+>/g,"");
+  const noteLine=(noteTxt&&String(noteTxt).trim().toLowerCase()!==ttlTxt.toLowerCase()) ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(noteTxt)}</div>` : "";
   return `<div class="planned"${s.done?' style="opacity:.85"':''}><div class="rkick">${kick}</div>
     <div class="mrow">
       <span class="ttl">${KINDT[s.kind]||esc(s.kind)+" run"}</span>
@@ -830,7 +833,7 @@ function plannedSession(s, easyPace){
       ${metric("Target load", s.trimp!=null?Math.round(s.trimp):"—", "TRIMP")}
     </div>
     ${actLine}
-    <div class="muted" style="font-size:12px;margin-top:6px">${esc(noteTxt)}</div>${q?workoutCard(s,true):""}</div>`;
+    ${noteLine}${q?workoutCard(s,true):""}</div>`;
 }// §3 status card — "lead with the verdict": gradient panel (state-coloured), glass pill, big verdict.
 // UX-4 — how old is the data behind this verdict? The readiness card was happy to render a confident
 // green off a sync that failed two nights ago, and the only hint was a timestamp in the page footer
@@ -876,7 +879,8 @@ function whyLine(s){
   const where = phase ? `${phase}${s.week?`, week ${esc(String(s.week))}`:""}` : "";
   const what = s.kind==="rest" ? "a rest day" : `${esc(String(s.kind||"run").replace(/_/g," "))}${s.km?` · ${esc(String(U.d(s.km)))} ${U.unit}`:""}${s.pace_zone?` at ${esc(U.t(String(s.pace_zone)))}`:""}`;
   const comp = s.component && COMPT[s.component] ? COMPT[s.component].split(/(?<=\.)\s/)[0] : (s.kind==="rest" ? "Recovery is part of the plan — adaptation happens between the sessions." : "");
-  return `<div class="whyline"><b>Why this session:</b> ${where?where+" — ":""}${what}.${comp?" "+esc(comp):""}${s.note?` <span class="muted">${esc(U.t(String(s.note)))}</span>`:""}</div>`;
+  // 0.60.2 — the session card above already prints the note; echoing it here read the same sentence twice
+  return `<div class="whyline"><b>Why this session:</b> ${where?where+" — ":""}${what}.${comp?" "+esc(comp):""}</div>`;
 }
 function renderReadiness(d){
   RDY=d;
@@ -1006,7 +1010,7 @@ function renderEfficiency(d){
     : "temperature not recorded on these runs";
   host.innerHTML=`
     <p class="effhero"><b class="${vcls}">${esc(d.verdict)}</b>${gain!=null?`<span class="d">${gain>0?"+":""}${gain.toFixed(1)}% over ${esc(dates)}</span>`:""}</p>
-    <p class="muted" style="font-size:11px;margin:6px 0 0;line-height:1.5">Metres per minute per heartbeat, one point per aerobic run
+    <p class="explain" style="margin-top:6px">Metres per minute per heartbeat, one point per aerobic run
       (average HR at or below the top of Z2${d.z2_top?`, ${d.z2_top} bpm`:""}) of ${Math.round(U.d(d.min_km))} ${U.unit} or more. Running the same pace at a lower
       heart rate <em>is</em> the adaptation — no model in between, just the watch. Measure-first: shown and trended, governing nothing.</p>
     <div class="effrow"><span class="k">Efficiency · ${d.n} runs</span><span class="k">${tr.pct_per_30d!=null?`${tr.pct_per_30d>0?"+":""}${tr.pct_per_30d}%/month${tr.r!=null?` · r ${tr.r}`:""}`:""}</span></div>
@@ -1014,7 +1018,7 @@ function renderEfficiency(d){
     <div class="effrow"><span class="k">Temperature</span><span class="k">${esc(tempTxt)}</span></div>
     <div class="effplot temp">${effPlot(pts,"temp_c","temp",null)}</div>
     <div class="effax" style="margin-top:5px"><span>${esc(first?monYr(first.date):"")}</span><span>${esc(last?monYr(last.date):"")}</span></div>
-    <p class="muted" style="font-size:11px;margin:12px 0 0;line-height:1.5"><b>Read the two together.</b> Heat costs you efficiency, and
+    <p class="explain" style="margin-top:12px"><b>Read the two together.</b> Heat costs you efficiency, and
       your cool runs are also your most recent and fittest — so the gain above is flattered by whatever the weather did. The panels are
       separate and share only their time axis on purpose: nothing here subtracts a temperature correction, because how big that correction
       should be is not settled on your data yet. Hover any point for its pace, distance and heart rate.</p>`;
@@ -1071,7 +1075,7 @@ function renderDurability(d){
     <div class="gauge-scale"><span>0%</span><span><b>${good}%</b></span><span><b>${high}%</b></span><span>${SCALE}%</span></div>
     <p class="durverdict"><b class="${wordCls}">${esc(d.verdict)}</b> — median of your last 6 long runs
       (≥${Math.round(U.d(d.min_km))} ${U.unit})${esc(priorTxt)} · ${d.n_long} tracked</p>
-    <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Aerobic decoupling — how much your
+    <p class="explain">Aerobic decoupling — how much your
       pace:HR drifts from the first half of a long run to the second. Low means your running economy holds up over
       the distance; high or rising means it decays. Measure-first: tracked and trended, governing nothing. Compare
       like distances — decoupling drifts with distance, so the trend voids itself when the long-run mix changes.</p>
@@ -3223,14 +3227,16 @@ if(SH_READONLY){
   // §RB — the run browser (route geo + HR calendar) is private-only: drop its section + links too.
   ["sec-health","sec-zones","settingsDialog","firstrun","sec-runs","runsLink","durcard","effcard"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
   ["syncBtn","backfillBtn","planBtn","settingsBtn"].forEach(id=>{const e=$("#"+id); if(e) e.remove();});
-  loadReadiness();
   const cluster=document.querySelector(".topctl");
   if(cluster){
     let extra='<span class="ro-badge" title="Read-only public view">read-only</span>';
     if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${esc(SH_PRIVATE_URL)}" title="Private console">🔒 Log in</a>`;
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
-}else if(SH_PAGE==="today"){
+}
+// 0.60.2 — the page chrome is decided by the PAGE, on every box. The public Today page used to fall
+// through the read-only branch above and keep "☀ Today" as its only link — no way back to the dashboard.
+if(SH_PAGE==="today"){
   // 0.57.0 — the daily surface: the readiness card, the session and the check-in, and nothing else
   document.title="Sparing Horse — today";
   const l=$("#todayLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the dashboard"; }
@@ -3254,6 +3260,8 @@ if(SH_READONLY){
   document.title="Sparing Horse — run browser";
   const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
   const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
+}else if(SH_READONLY){
+  loadReadiness();   // the public dashboard: the verdict card only (the server redacts its inputs)
 }else{
   loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadAuth(); loadSystem(); loadDurability(); loadEfficiency();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
@@ -3291,6 +3299,14 @@ if(SH_READONLY){
 if (SH_DEMO) {
   const bar = $("#demobar"), btn = $("#demoReset");
   if (bar) bar.hidden = false;
+  // 0.60.2 — the reset control rides in the top control cluster beside the theme button. It used to
+  // sit at the banner's right end, where the fixed cluster covered it on a desktop and stacked over
+  // it on a phone. The fixed cluster and the hub link then clear the banner's MEASURED height (it
+  // wraps to two lines on a narrow window), so nothing floats over the notice.
+  const cluster = document.querySelector(".topctl");
+  if (btn && cluster) cluster.prepend(btn);
+  const place = () => { if (bar && !bar.hidden) document.documentElement.style.setProperty("--demobar-h", bar.offsetHeight + "px"); };
+  place(); window.addEventListener("resize", place);
   if (btn) btn.addEventListener("click", () => {
     btn.disabled = true;
     const was = btn.textContent;

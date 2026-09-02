@@ -102,14 +102,27 @@
   /* shared house chrome: a fixed top-right control cluster (login + swatches) and a
      top-left hub link. Swatches mirror bookworm's component (30px + accent underline);
      the login pill sits to their left (the sparinghorse arrangement). */
-  .topctl{position:fixed;top:8px;right:16px;z-index:50;display:inline-flex;align-items:center;gap:10px}
-  .hublink{position:fixed;top:8px;left:16px;z-index:50;font-family:var(--mono);font-size:11px;
+  .topctl{position:fixed;top:calc(8px + var(--demobar-h,0px));right:16px;z-index:50;display:inline-flex;align-items:center;gap:10px}   /* 0.60.2 — --demobar-h: the demo banner's measured height (app.js), 0 elsewhere */
+  .hublink{position:fixed;top:calc(8px + var(--demobar-h,0px));left:16px;z-index:50;font-family:var(--mono);font-size:11px;
     letter-spacing:.14em;text-transform:uppercase;color:var(--muted);text-decoration:none}
   .hublink:hover{color:var(--accent)}
-  .themes{display:inline-flex;gap:8px}    cursor:pointer;opacity:.55;position:relative;background:var(--sw);transition:opacity .12s}
+  /* 0.60.2 — the swatch rule's orphaned tail lived here since the SPA split (f5e7e1b); a stray
+     `…}` swallows the NEXT selector, so `.grid{display:grid}` below had been dropped by the parser
+     and the shape tiles stacked one per row on every width. det/css-no-orphan-tail guards it. */
   .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
   @media(max-width:880px){.grid{grid-template-columns:repeat(2,1fr)}}
-  @media(max-width:520px){.grid{grid-template-columns:1fr}}
+  @media(max-width:520px){   /* 0.60.2 — two metrics per row on a phone (as asked), not a column of four */
+    .grid{grid-template-columns:repeat(2,1fr);gap:10px}
+    .tile{padding:14px 12px 14px}
+    .tile.hascap{padding-top:12px;padding-bottom:26px}
+    .tile .k{letter-spacing:.08em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .tile .info{display:none}   /* a hover affordance; no hover on a phone, and it wrapped the label */
+    .tile .v{font-size:26px;white-space:nowrap}
+    .tile .v small{font-size:11px}
+    .tile .sub{font-size:11px}
+    .tilecap{font-size:10px;right:10px;bottom:8px;max-width:calc(100% - 20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .modal-head h2 .muted{display:none}   /* the Settings subtitle wrapped to three lines beside the close button */
+  }
   .tile{background:linear-gradient(180deg,var(--surface),var(--surface-2));
     border:1px solid var(--line);border-radius:14px;padding:18px 18px 16px;position:relative;overflow:hidden}
   .tile::before{content:"";position:absolute;left:0;top:0;height:3px;width:100%;background:linear-gradient(90deg,var(--accent),var(--accent2,var(--accent)));opacity:.9}
@@ -360,7 +373,10 @@
     border:1px solid var(--line);border-radius:14px;padding:20px;overflow:hidden}
   #readiness .statuscard{margin:-20px -20px 0;border-radius:14px 14px 0 0;box-shadow:none}
   .acwrcard{display:flex;flex-direction:column}
-  .acwrcard .acwr-title{font-family:var(--serif);font-weight:600;font-size:15px;margin-bottom:34px}
+  .acwr-title{font-family:var(--serif);font-weight:600;font-size:17px}   /* 0.60.2 — ONE card-title rule: the efficiency card's was falling through to body sans, and 15px sat under the session title's 17px */
+  .acwrcard .acwr-title{margin-bottom:34px}
+  .effcard .acwr-title{margin-bottom:6px}
+  .explain{font-size:12px;color:var(--muted);margin:10px 0 0;line-height:1.5}   /* 0.60.2 — the trackers' explainer paragraphs: one size (they ran 11 / 11 / 12) */
   /* CTL ramp readout — the divider sits just under the ACWR explanation, then the ramp FILLS the
      rest of the tile (flex:1) and vertically centres its readout in that lower half (so it isn't
      crammed against the divider on a stretched tile) */
@@ -416,7 +432,7 @@
   .effrow{display:flex;align-items:baseline;justify-content:space-between;gap:4px 12px;margin:12px 0 0;flex-wrap:wrap}
   .effrow .k{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
   .effscale{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:var(--muted);margin:0 0 2px}
-  .effhero{font-family:var(--serif);font-size:21px;font-weight:600}
+  .effhero{font-family:var(--serif);font-size:22px;font-weight:600}   /* 0.60.2 — same size as the other trackers' readout (.acwr-foot .v) */
   .effhero .d{font-size:13px;font-family:var(--mono);color:var(--accent);margin-left:6px}
   /* A-race pill bar */
   .objbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid var(--line);
@@ -944,6 +960,9 @@
   .secinput{display:flex;gap:8px;align-items:center}
   .secinput input{flex:1}
   #secretsBox:not(:empty){padding:20px 22px 0}  /* match #settings/modal-head inset so the keys block isn't flush-left */
+  #authBox:not(:empty),#systemBox:not(:empty){padding:0 22px}   /* 0.60.2 — the same inset: both blocks ran edge to edge and the System values clipped */
+  #secretsBox:empty+#authBox:not(:empty){padding-top:20px}
+  .secblock>.help{font-size:12px;color:var(--muted);line-height:1.5}   /* 0.60.2 — was unstyled body text inside a 12px block */
   /* Settings modal — native <dialog>, centered, backdrop-dimmed */
   dialog.modal{border:none;border-radius:16px;padding:0;width:min(680px,94vw);max-height:86vh;
     background:var(--surface);color:var(--text);box-shadow:0 24px 64px rgba(0,0,0,.4);overflow:hidden}
@@ -961,7 +980,10 @@
      rows the secrets box alone can exceed 86vh, which collapsed the old #settings-only scroller
      to zero height — nothing scrolled and everything below the keys was unreachable. */
   .modal-body{overflow:auto;flex:1 1 auto;min-height:0}
-  #settings{padding:20px 22px}    border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;font-size:13px}  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
+  #settings{padding:20px 22px}
+  /* 0.60.2 — the weather chip's orphaned tail sat between these two since 0.57.0 (e514ff3b) and took
+     `.muted{color:…}` with it: every muted label rendered at full text contrast for a day. */
+  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
   .tilefail{font-style:normal}
   .tilefail .tf-retry{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);font-style:normal}
@@ -1107,9 +1129,9 @@
 .demobar-tag{font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:.72rem;
   padding:3px 8px;border-radius:4px;background:var(--accent);color:#fff;flex:none}
 .demobar-text{color:var(--muted);flex:1 1 20ch;min-width:0}
-.demobar-btn{flex:none;font:inherit;font-size:.82rem;padding:5px 12px;border-radius:6px;
-  border:1px solid var(--accent);background:transparent;color:var(--accent-ink);cursor:pointer}   /* 0.56.1: text-safe ink (3.8:1 before) */
-.demobar-btn:hover{background:var(--accent);color:var(--onacc)}
+/* 0.60.2 — the reset control is a .themebtn in the top cluster (app.js moves it there), accent-inked so it reads as an action */
+.topctl .demobar-btn{border-color:var(--accent);color:var(--accent-ink)}   /* 0.56.1: text-safe ink (3.8:1 before) */
+.topctl .demobar-btn:hover{background:var(--accent);color:var(--onacc);border-color:var(--accent)}
 .demobar-btn:disabled{opacity:.55;cursor:default}
 .demobar-btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
@@ -1150,6 +1172,11 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
     padding:5px 8px;border-left:2px solid transparent;border-radius:0 4px 4px 0;line-height:1.3}
   .rail a:hover,.rail a.on{color:var(--text);border-left-color:var(--accent);background:var(--surface)}
   .rail a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+}
+/* 0.60.2 — between 1180 and 1400px the centred 1080px column began under the rail (at 1280 the rail's
+   labels showed through the cards' left edge); with a rail present, the column sits to its right */
+@media (min-width:1180px) and (max-width:1399px){
+  .wrap:has(> .rail){margin-left:182px;max-width:min(1080px,calc(100vw - 208px))}
 }
 
 /* §LIMITS (0.58.0) — the week's limits strip */

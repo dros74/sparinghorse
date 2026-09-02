@@ -1,6 +1,9 @@
 # ── secrets / personal — NEVER commit ───────────────────────────────
 .env
-.claude/settings.local.json   # captured permission cmds can contain the API token
+# prepare_env.sh's pre-write backups of .env — the same secrets as .env
+.env.bak-*
+# captured permission cmds can contain the API token
+.claude/settings.local.json
 
 # personal / medical data dropped into the folder (not part of the app)
 document*.pdf
@@ -16,7 +19,8 @@ JDavis/
 *.db-wal
 *.db-journal
 data/
-secrets/        # private-only key store (Runalyze token / Claude key set in the Settings window)
+# private-only key store (Runalyze token / Claude key set in the Settings window)
+secrets/
 
 # ── python ──────────────────────────────────────────────────────────
 __pycache__/
@@ -46,7 +50,7 @@ book_summaries.txt
 JohnDavis-*/
 page_*.png
 sleep_full.json
-secrets.key     # 0.56.0: the secrets store's encryption key when SH_SECRET_KEY is unset
+# 0.56.0: the secrets store's encryption key when SH_SECRET_KEY is unset
 secrets.key
 
 # private dev notes — never in the public mirror

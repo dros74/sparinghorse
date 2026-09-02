@@ -3,7 +3,8 @@
 #
 # Run on the host, in the compose directory, before `docker compose up -d --build`:
 #
-#     sh prepare_env.sh --check                       # preview: prints what would change, writes nothing
+#     sh prepare_env.sh --check                       # preview: prints what would change, writes nothing;
+#                                                     #   exit 0 = nothing pending, 3 = something is (deploy scripts gate on it)
 #     sh prepare_env.sh                               # asks for the Cloudflare Access team + audience tag
 #     sh prepare_env.sh --team myteam --aud <64 hex>  # non-interactive
 #     sh prepare_env.sh --passphrase                  # also set SH_PASSPHRASE (skips the /setup page)
@@ -42,9 +43,10 @@ done
 [ -f "$ENV_FILE" ] || { echo "✗ $ENV_FILE not found — run this in the compose directory (cp .env.example .env first on a new box)" >&2; exit 1; }
 # the three host directories the compose file bind-mounts; a Synology's Docker refuses to start a
 # container whose bind source is missing (./backups arrived in 0.56.1 and bit the first upgrade)
+PENDING=0
 for d in data secrets backups; do
   if [ ! -d "$d" ]; then
-    if [ "$CHECK" = 1 ]; then echo "  would create ./$d (bind mount source)"; else mkdir -p "$d" && echo "  created ./$d (bind mount source)"; fi
+    if [ "$CHECK" = 1 ]; then echo "  would create ./$d (bind mount source)"; PENDING=1; else mkdir -p "$d" && echo "  created ./$d (bind mount source)"; fi
   fi
 done
 
@@ -89,7 +91,11 @@ fi
 PLAN=""; note() { PLAN="$PLAN  $1
 "; }
 SET_KEY=0
-if is_empty SH_SECRET_KEY; then SET_KEY=1; note "SH_SECRET_KEY       → generate (96 hex from /dev/urandom)"; else note "SH_SECRET_KEY       · kept (already set)"; fi
+if ! is_empty SH_SECRET_KEY; then note "SH_SECRET_KEY       · kept (already set)"
+elif [ -f secrets/secrets.key ]; then
+  # the store is already encrypted with the key FILE; an env key is scrypt-derived and would not open it
+  note "SH_SECRET_KEY       · left unset — ./secrets/secrets.key holds the store's key (an env key now would orphan the store)"
+else SET_KEY=1; note "SH_SECRET_KEY       → generate (96 hex from /dev/urandom)"; fi
 
 if [ -z "$TEAM" ] && [ -z "$AUD" ] && [ -t 0 ]; then
   printf 'Cloudflare Access team (name, or team.cloudflareaccess.com; blank = no bypass): '; read -r TEAM
@@ -105,6 +111,8 @@ if [ -n "$TEAM" ] || [ -n "$AUD" ]; then
   else
     SET_CF=1; note "SH_TRUST_PROXY_AUTH → 1"; note "SH_CF_ACCESS_TEAM   → $TEAM"; note "SH_CF_ACCESS_AUD    → (given, 64 hex)"
   fi
+elif ! is_empty SH_CF_ACCESS_AUD && ! is_empty SH_CF_ACCESS_TEAM; then
+  note "Access bypass        · kept (team + audience already set)"
 else
   note "Access bypass        · not set — the console will ask for its passphrase behind the proxy (fine)"
 fi
@@ -129,7 +137,10 @@ fi
 grep -q "^SH_WEATHER_CITIES=" "$ENV_FILE" && note "SH_WEATHER_CITIES    ! present but gone since 0.57.0 — harmless, remove when convenient"
 
 echo "Plan for $ENV_FILE:"; printf '%s' "$PLAN"
-if [ "$CHECK" = 1 ]; then echo "(--check: nothing written)"; exit 0; fi
+if [ "$CHECK" = 1 ]; then
+  if [ "$SET_KEY" = 1 ] || [ "$SET_CF" = 1 ] || [ "$PENDING" = 1 ]; then echo "(--check: nothing written — run without --check to apply)"; exit 3; fi
+  echo "(--check: nothing pending)"; exit 0
+fi
 if [ "$SET_KEY" = 0 ] && [ "$SET_CF" = 0 ] && [ -z "$PP" ]; then echo "Nothing to do."; exit 0; fi
 
 # ── write ──────────────────────────────────────────────────────────────────────────────────────────

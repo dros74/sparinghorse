@@ -13774,6 +13774,22 @@ def _stc_error_shape():
                got={"violations": fails or "none"})
 
 
+def _stc_css_no_orphan_tail():
+    """0.60.2 — no rule in app.css is silently dropped by the parser. A multi-line rule whose FIRST line
+    is deleted leaves its tail behind (`…;transition:opacity .12s}`); at the top level that stray `}`
+    plus the garbage before it become the prelude of the NEXT rule, whose selector is then invalid, so
+    the browser drops that rule without a word. Two such tails shipped: the swatch tail (f5e7e1b,
+    2026-08-22) took `.grid{display:grid}` with it — the shape tiles stacked one per row on every
+    width for eleven days — and the weather-chip tail (e514ff3b, 0.57.0) took `.muted{color:…}`.
+    Pattern: a `}` followed by `prop:value…}` with no `{` in between."""
+    src = S.re.sub(r"/\*.*?\*/", "", S.APP_CSS, flags=S.re.S)
+    hits = [f"line {src[:m.start()].count(chr(10)) + 1}: …{m.group(0)[:70]}"
+            for m in S.re.finditer(r"\}[ \t]+[a-z-]+:[^{}]*\}", src)]
+    return _st("det", "css-no-orphan-tail",
+               "app.css carries no orphaned rule tail (a stray `…}` that makes the parser drop the next rule)",
+               passed=not hits, expect="0 tails", got={"tails": hits or "none"})
+
+
 def _stc_accent2_fallback():
     """UX-5a → UX-5b → ratified (0.30.0) — the square-polychrome palette IS the house palette again.
 
@@ -16507,7 +16523,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_structure(), lambda: _stc_session_join(), lambda: _stc_junk_floor(),
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
-                 lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
+                 lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(), lambda: _stc_css_no_orphan_tail(),
                  lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(), lambda: _stc_limits(db),
                  lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(), lambda: _stc_access_seen(),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),

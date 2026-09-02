@@ -47,6 +47,8 @@ the quick start; MANUAL.md covers using the app.
   shape (`--team myteam --aud <64 hex>`, or it asks; blank means no bypass and the console asks for
   its passphrase, which also works). It never prints a secret and never overwrites a value that is
   already set. Keep a copy of the new `.env` somewhere safe: the key is what decrypts the token store.
+  `--check` exits 3 when something is pending (a directory to create, a variable to add) so a deploy
+  script can stop before the build; its `.env.bak-<stamp>` backups are git-ignored.
 - **Where the two values are (0.60.0 — no dashboard needed).** Deploy once without the bypass, open
   the private site through Access once, then `sh prepare_env.sh --from-container` reads the team and
   the audience tag the console saw and asks you to confirm the team name; `docker compose up -d`

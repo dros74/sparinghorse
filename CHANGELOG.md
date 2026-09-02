@@ -10,6 +10,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.2] - 2026-09-03
+
+### Fixed
+
+- **The public Today page had no way back.** Its header link stayed "☀ Today" because the read-only
+  branch swallowed the page branch; the page chrome is now decided by the page on every box, and the
+  browser suite checks the public link.
+- **The Current shape tiles had stacked one per row on every width since 2026-08-22.** Two half-deleted
+  rules in app.css left orphaned tails (`…;transition:opacity .12s}`), and a stray `}` at the top level
+  makes the browser drop the NEXT rule without a word: the swatch tail (the SPA split) took
+  `.grid{display:grid}`, and the weather-chip tail (0.57.0) took `.muted{color:…}`, so every muted
+  label rendered at full text contrast for a day. Both repaired; `det/css-no-orphan-tail` now scans
+  for the pattern. On a phone the tiles are two per row (as asked) and compact to fit; a tablet gets
+  two, a desktop its four.
+- **Settings: the Console access and System blocks ran edge to edge** — the passphrase inputs were
+  wider than the dialog's content column and the System values clipped at the right. Both blocks now
+  share the keys block's inset; the block help text takes the block's 12 px.
+- **Demo: the reset control sat under the theme button** — literally, on a desktop the fixed theme
+  button covered it, and on a phone the two stacked. It now rides in the top control cluster beside
+  the theme button, and the fixed chrome clears the banner's measured height.
+- **The desktop section rail overlapped the content between 1180 and 1400 px** (its labels showed
+  through the cards' left edge at 1280); with a rail present the column sits to its right.
+- **Type on the readiness row reads as one system:** the three tracker cards share one title rule
+  (the efficiency card's had fallen through to body sans) and one explainer size (they ran 11 / 11 /
+  12 px); the trackers' big readouts are one size; a session note that only restated the title
+  ("easy run" under "Easy run") no longer prints; the Today why-line no longer repeats the note the
+  session card just showed.
+
 ## [0.60.1] - 2026-09-02
 
 ### Fixed
