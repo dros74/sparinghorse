@@ -2054,6 +2054,360 @@ def _stc_limits(db):
                got={**detail, "failures": fails or "none"})
 
 
+def _stc_denominators():
+    """§P2 (0.59.0, symmetry decision (a)) — BOTH denominators are published on every laid week, each
+    named for what reads it: `intent_km` is the governor basis (the C-test), `sheet_km` the adherence
+    basis (what the athlete reads). Where they diverge the week says why. Teeth on the marathon golden:
+      (a) every non-frozen week carries `bar` with both bases named and `sheet_km` equal to the sum of
+          its sessions (the sheet is not a second number — it IS the sessions);
+      (b) the race week is labelled as such (its sheet includes the race, its training_km does not);
+      (c) `diverge` is true exactly when a note is present, and a live non-race week within
+          BAR_DIVERGE_TOL carries none;
+      (d) the ledger's prescription rows read the SHEET (decision (a)): a prescription row's laid km
+          equals the standing plan's `km`, never its `intent_km` when the two differ;
+      (e) the frozen carry path stamps `bar` with the frozen note and `ran_km` (an in-memory week)."""
+    import sqlite3 as _sq
+    fails, detail = [], {}
+    fx, fx_today = _race_fixture_db("marathon")
+    try:
+        plan = S.generate_plan(fx, today=fx_today)
+    finally:
+        fx.close()
+    weeks = [w for k, v in plan.items() if isinstance(v, dict) and "weeks" in v for w in v["weeks"]]
+    ratios, race_seen = [], 0
+    for w in weeks:
+        if w.get("frozen"):
+            continue
+        b = w.get("bar")
+        if not b:
+            fails.append(f"(a) week {w.get('start')} has no bar"); continue
+        if b.get("governor_basis") != "intent_km" or b.get("adherence_basis") != "sheet_km":
+            fails.append(f"(a) week {w.get('start')} bases {b.get('governor_basis')}/{b.get('adherence_basis')}")
+        sheet = round(sum((s.get("km") or 0.0) for s in w.get("sessions") or []), 1)
+        if abs((b.get("sheet_km") or 0) - sheet) > 0.06:
+            fails.append(f"(a) week {w.get('start')} sheet_km {b.get('sheet_km')} ≠ Σ sessions {sheet}")
+        is_race = any(s.get("race") for s in w.get("sessions") or [])
+        if is_race:
+            race_seen += 1
+            if not (b.get("diverge") and "race week" in str(b.get("note"))):
+                fails.append(f"(b) race week {w.get('start')} not labelled: {b}")
+            if b.get("training_km", 0) >= b.get("sheet_km", 0):
+                fails.append(f"(b) race week {w.get('start')}: training_km {b.get('training_km')} not below sheet {b.get('sheet_km')}")
+        if bool(b.get("diverge")) != bool(b.get("note")):
+            fails.append(f"(c) week {w.get('start')}: diverge={b.get('diverge')} but note={b.get('note')!r}")
+        if b.get("ratio") is not None:
+            ratios.append(b["ratio"])
+            if not is_race and abs(b["ratio"] - 1.0) <= S.BAR_DIVERGE_TOL and b.get("note"):
+                fails.append(f"(c) week {w.get('start')} within tolerance yet labelled: {b.get('note')}")
+            if not is_race and abs(b["ratio"] - 1.0) > S.BAR_DIVERGE_TOL and "diverge beyond" not in str(b.get("note")):
+                fails.append(f"(c) week {w.get('start')} ratio {b['ratio']} beyond tolerance yet not labelled")
+    detail.update(weeks=len(weeks), race_weeks=race_seen,
+                  ratio_range=[min(ratios), max(ratios)] if ratios else None,
+                  diverging=sum(1 for w in weeks if (w.get("bar") or {}).get("diverge")))
+    if not race_seen:
+        fails.append("(b) the marathon fixture laid no race week — the tooth has nothing to bite")
+    # (d) the ledger reads the sheet: a fixture plan whose km and intent_km differ
+    from datetime import date as _d, timedelta as _td
+    today = _d(2026, 6, 1)
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    for i in range(60):
+        day = (today - _td(days=60 - i)).isoformat()
+        mem.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw) "
+                    "VALUES(?,?,?,?,?,?,?,'{}')", (i + 1, day, day + "T18:00", S.RUNNING_SPORT, 10.0, 3600, 60.0))
+    w1 = S._monday(today) - _td(weeks=2)
+    plan3 = {"objective": {}, "base": {"weeks": [{"wk": 1, "start": w1.isoformat(), "km": 44.0, "intent_km": 40.0,
+                                                  "proj_ctl": 50.0, "sessions": []}]}}
+    mem.execute("INSERT INTO plans(id,created_at,for_date,inputs,plan) VALUES(1,'now',?,'{}',?)",
+                ((w1 - _td(days=2)).isoformat(), S.json.dumps(plan3)))
+    mem.commit()
+    S.track_record_scan(mem, today=today.isoformat())
+    r = mem.execute("SELECT predicted, payload FROM track_record WHERE kind='prescription' AND key=?", (w1.isoformat(),)).fetchone()
+    if not r:
+        fails.append("(d) no prescription row for the fixture week")
+    else:
+        pl = S.json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"]
+        if abs((r["predicted"] or 0) - 44.0) > 0.05 or pl.get("intent_km") != 40.0:
+            fails.append(f"(d) the prescription row read laid={r['predicted']} intent={pl.get('intent_km')} — the sheet (44) must be the denominator, the bar (40) the payload")
+    mem.close()
+    # (e) the frozen carry path
+    b = E._week_bar(intent_km=40.0, sessions=[{"km": 10.0}, {"km": 12.0}], frozen=True, ran_km=30.0)
+    if not (b.get("diverge") and "frozen" in str(b.get("note")) and b.get("ran_km") == 30.0 and b.get("sheet_km") == 22.0):
+        fails.append(f"(e) frozen bar wrong: {b}")
+    return _st("det", "denominators",
+               "§P2 — both denominators published on every laid week (intent_km = governor basis, sheet_km = "
+               "adherence basis), the sheet equals the sessions, race and frozen weeks are labelled, the "
+               "ledger's prescription rows read the sheet",
+               passed=not fails, expect="both bases named; labelled where they diverge; ledger reads the sheet",
+               got={**detail, "failures": fails or "none"})
+
+
+def _stc_permission():
+    """§B (0.59.0, symmetry decision (d)) — readiness as a BOUNDED permission token. The token can only
+    ever cancel a brake C will one day apply; it must grant on a fresh positive declaration with no red
+    evidence and on NOTHING else. Each rule is a tooth, on an in-memory DB with `hrv_signal` and
+    `active_medical_halt` stubbed:
+      (a) no check-in → no grant, and the reason names silence;
+      (b) a fresh (today) "good"/"good" check-in with no red evidence → grant, with an expiry;
+      (c) the same check-in 3 days old → no grant (stale is not a declaration about today);
+      (d) fresh but "ok" legs, or "heavy" legs, or poor sleep → no grant (not a positive declaration);
+      (e) fresh good + a stop symptom → no grant, red evidence named;
+      (f) fresh good + HRV below its band → no grant; HRV MISSING → grant unaffected (absence never
+          counts for or against); an active medical hold → no grant;
+      (g) the readiness payload carries the token and the public projection does not;
+      (h) retired with C (0.59.0): the engine now reads the token, through generate_plan's
+          `permission` argument only — det/deload-retire (g) holds that door."""
+    import sqlite3 as _sq
+    fails = []
+    from datetime import datetime as _dt
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    now = _dt(2026, 6, 1, 9, 0)
+    orig_hrv, orig_halt = S.hrv_signal, S.active_medical_halt
+    hrv_state = {"state": None}
+    halt = {"on": False}
+    S.hrv_signal = lambda db: dict(hrv_state)
+    S.active_medical_halt = lambda db: halt["on"]
+    try:
+        def put(date, energy, sleep, stop=0, created=None):
+            mem.execute("DELETE FROM readiness")
+            mem.execute("INSERT INTO readiness(date,energy,sleep,stop_symptom,created_at) VALUES(?,?,?,?,?)",
+                        (date, energy, sleep, stop, created))
+            mem.commit()
+        tok = S.readiness_permission(mem, now=now)
+        if tok["grant"] or "silence" not in str(tok["why"]):
+            fails.append(f"(a) no check-in: {tok}")
+        put("2026-06-01", "good", "good", created="2026-06-01T07:30:00")
+        tok = S.readiness_permission(mem, now=now)
+        if not (tok["grant"] and tok["fresh"] and tok["expires"]):
+            fails.append(f"(b) fresh good not granted: {tok}")
+        put("2026-05-29", "good", "good", created="2026-05-29T07:30:00")
+        tok = S.readiness_permission(mem, now=now)
+        if tok["grant"] or tok["fresh"]:
+            fails.append(f"(c) a 3-day-old good granted: {tok}")
+        for e, sl in (("ok", "good"), ("heavy", "good"), ("good", "poor")):
+            put("2026-06-01", e, sl, created="2026-06-01T07:30:00")
+            tok = S.readiness_permission(mem, now=now)
+            if tok["grant"]:
+                fails.append(f"(d) legs {e} / sleep {sl} granted")
+        put("2026-06-01", "good", "good", stop=1, created="2026-06-01T07:30:00")
+        tok = S.readiness_permission(mem, now=now)
+        if tok["grant"] or not any("stop" in r for r in tok["red_evidence"]):
+            fails.append(f"(e) stop symptom did not veto: {tok}")
+        put("2026-06-01", "good", "good", created="2026-06-01T07:30:00")
+        hrv_state["state"] = "low"
+        tok = S.readiness_permission(mem, now=now)
+        if tok["grant"] or not any("HRV" in r for r in tok["red_evidence"]):
+            fails.append(f"(f) low HRV did not veto: {tok}")
+        hrv_state["state"] = None
+        tok = S.readiness_permission(mem, now=now)
+        if not tok["grant"] or tok["telemetry"].get("hrv") != "missing":
+            fails.append(f"(f) missing HRV counted against a fresh positive check-in: {tok}")
+        halt["on"] = True
+        tok = S.readiness_permission(mem, now=now)
+        if tok["grant"]:
+            fails.append("(f) an active medical hold did not veto")
+        halt["on"] = False
+        tok = S.readiness_permission(mem, assessment={"verdict": "red"}, now=now)
+        if tok["grant"]:
+            fails.append("(f) a red verdict did not veto")
+        # a bare-date check-in (no created_at) reads as that day's noon: yesterday's is fresh, 3 days ago is not
+        put("2026-05-31", "good", "good")
+        if not S.readiness_permission(mem, now=now)["grant"]:
+            fails.append("(c) yesterday's bare-date good check-in read as stale")
+    finally:
+        S.hrv_signal, S.active_medical_halt = orig_hrv, orig_halt
+    mem.close()
+    # (g) the payload carries it, the public projection does not
+    pub = S.public_view("readiness", {"date": "2026-06-01", "assessment": {"verdict": "green", "action": "x", "public": True},
+                                       "session": None, "permission": {"grant": True}})
+    if "permission" in pub:
+        fails.append("(g) the public projection carries the permission token")
+    if "readiness.permission" not in S._PV_WITHHELD:
+        fails.append("(g) readiness.permission is not registered as withheld")
+    src = (S.Path(S.__file__).resolve().parent / "SparingHorse.py").read_text(encoding="utf-8")
+    if '"permission": readiness_permission(' not in src:
+        fails.append("(g) today_readiness no longer publishes the token")
+    # (h) tripwire
+    # (h) — the 0.59.0 tripwire ("the engine reads the token nowhere") was retired the day C landed,
+    # with the owner present, as it said it would be. Its positive successor is det/deload-retire (g):
+    # the token enters the engine ONLY through generate_plan(permission=…).
+    return _st("det", "permission",
+               "§B — readiness permission token: grants only on a fresh positive check-in with no red evidence; "
+               "silence/ok/heavy/stale/stop/HRV-low/hold/red-verdict grant nothing; missing HRV counts neither way; "
+               "private only; the engine reads it only through generate_plan(permission=…) (det/deload-retire)",
+               passed=not fails, expect="bounded grant; one door into the engine",
+               got={"failures": fails or "none"})
+
+
+def _stc_deload_retire():
+    """§C (0.59.0, symmetry decisions (b)(c)(d)) — "this deload isn't owed", on TWO corpora built from the
+    marathon fixture with today placed inside a positional down week (rebase_start moved back so the
+    base phase's fourth week contains today):
+      A — the block before it was NOT run (its activities deleted): the deload is not owed by the numbers;
+      B — the block WAS run (a run per week matching its bar): the deload is owed.
+    Teeth:
+      (a) with no token, A publishes the read (absorbed ≤ RETIRE_ABSORB_MAX, the load-ratio and fatigue
+          gates) but neither offers nor retires: silence keeps the deload, and the reason says so;
+      (b) with a STALE token (grant False) the same — a July "good" unlocks no August week;
+      (c) with a fresh grant in confirm mode A OFFERS and lays the down week UNCHANGED (owner-confirmed);
+      (d) the athlete's word, both ways: a "retire" row makes the week a level week (role build, more km
+          than the down lay, no quality) with source "athlete"; a "keep" row stops the offer;
+      (e) automatic mode (ten scored 28-day forecasts under-predicting by ≥ 20 %) retires on its own,
+          `record_pending` is banked by the app, and the retirement then STICKS with no token at all;
+      (f) corpus B with a fresh grant: kept (the absorbed gate fails), and the plan minus its `deload`
+          reads is byte-identical to the no-token plan — nothing fires, nothing moves;
+      (g) the engine reads the token only through `generate_plan(permission=…)`."""
+    import sqlite3 as _sq, inspect as _insp, copy as _copy
+    from datetime import date as _d, timedelta as _td
+    _date_ = S._date
+    fails, detail = [], {}
+    GRANT = {"grant": True, "fresh": True, "why": "fixture: a fresh positive check-in"}
+    STALE = {"grant": False, "fresh": False, "why": "fixture: the last check-in is 72 h old"}
+    TODAY = _d(2026, 6, 1)                                   # a Monday
+
+    def build(offset_days, strip_block):
+        fx, _ = _race_fixture_db("marathon", today=TODAY)
+        E.set_meta(fx, "rebase_start", (TODAY - _td(days=offset_days)).isoformat())
+        if strip_block:
+            fx.execute("DELETE FROM activities WHERE date >= ?", ((TODAY - _td(days=21)).isoformat(),))
+        fx.commit()
+        return fx
+
+    def judged_week(plan):
+        return next((w for k, v in plan.items() if isinstance(v, dict) and isinstance(v.get("weeks"), list)
+                     for w in v["weeks"] if (w.get("deload") or {}).get("judged")), None)
+
+    def week_at(plan, ws):
+        return next((w for k, v in plan.items() if isinstance(v, dict) and isinstance(v.get("weeks"), list)
+                     for w in v["weeks"] if w.get("start") == ws), None)
+
+    def strip(plan):
+        pl = _copy.deepcopy(plan)
+        for k, v in pl.items():
+            if isinstance(v, dict) and isinstance(v.get("weeks"), list):
+                for w in v["weeks"]:
+                    w.pop("deload", None)
+        pl.pop("diff", None)
+        return S._plan_identity(pl)          # timestamps aside, as the A3 double-click test defines "same"
+
+    offset = None
+    for off in (49, 21, 77, 28, 56, 35):
+        fx = build(off, True)
+        try:
+            plan0 = S.generate_plan(fx, today=TODAY)
+            w0 = judged_week(plan0) if plan0.get("ok") else None
+        finally:
+            fx.close()
+        if w0:
+            offset = off
+            break
+    if offset is None:
+        fails.append("no rebase_start offset placed today inside a positional down week — the fixture cannot reach the governor")
+        return _st("det", "deload-retire", "§C — a positional deload is retired only on evidence + the athlete's word",
+                   passed=False, expect="a judged down week", got={"failures": fails})
+    detail["offset_days"] = offset
+    ws = w0["start"]
+    d0 = w0["deload"]
+    detail["read"] = {k: d0.get(k) for k in ("absorbed_frac", "acwr", "gates", "mode")}
+    # (a) no token
+    if d0.get("retired") or d0.get("offer") or w0.get("role") != "down":
+        fails.append(f"(a) with no token the week moved: retired={d0.get('retired')} offer={d0.get('offer')} role={w0.get('role')}")
+    if not (d0.get("absorbed_frac") is not None and d0["absorbed_frac"] <= S.RETIRE_ABSORB_MAX and d0["gates"]["absorbed"]):
+        fails.append(f"(a) corpus A's block reads as absorbed: {d0.get('absorbed_frac')} — the fixture did not strip it")
+    if d0["gates"].get("readiness") or "silence" not in str(d0.get("why")):
+        fails.append(f"(a) silence did not keep the deload: gates={d0['gates']} why={d0.get('why')!r}")
+    if not (d0["gates"]["acwr"] and d0["gates"]["atl"]):
+        fails.append(f"(a) the fixture's load gates do not hold (acwr {d0.get('acwr')}, ctl {d0.get('ctl')}, atl {d0.get('atl')}) — corpus A cannot isolate the readiness gate")
+    if d0.get("mode") != "confirm":
+        fails.append(f"(a) mode {d0.get('mode')!r} on an empty ledger — automatic must be earned")
+    km_down = w0.get("km")
+    # (b) stale token
+    fx = build(offset, True)
+    try:
+        wS = judged_week(S.generate_plan(fx, today=TODAY, permission=STALE))
+        if wS is None or wS["deload"].get("offer") or wS["deload"].get("retired") or "72 h" not in str(wS["deload"].get("readiness_why")):
+            fails.append(f"(b) a stale token unlocked something, or its reason was dropped: {wS and wS['deload']}")
+        # (c) fresh grant, confirm mode → offer, unchanged lay
+        pC = S.generate_plan(fx, today=TODAY, permission=GRANT)
+        wC = judged_week(pC)
+        dC = wC["deload"] if wC else {}
+        if not (dC.get("offer") and not dC.get("retired") and wC.get("role") == "down" and wC.get("km") == km_down):
+            fails.append(f"(c) confirm mode: offer={dC.get('offer')} retired={dC.get('retired')} role={wC and wC.get('role')} km={wC and wC.get('km')} vs down {km_down}")
+        # (d) the athlete's word — retire
+        S._tr_write(fx, "deload", ws, 0, None, None, None, None, {"retired": True, "source": "athlete"}, "now"); fx.commit()
+        pR = S.generate_plan(fx, today=TODAY, permission=GRANT)
+        wR = week_at(pR, ws)
+        dR = (wR or {}).get("deload") or {}
+        if not (dR.get("retired") and dR.get("source") == "athlete" and wR.get("role") == "build"):
+            fails.append(f"(d) the athlete's retire did not take: {dR} role={wR and wR.get('role')}")
+        elif not (wR.get("km") or 0) > (km_down or 0):
+            fails.append(f"(d) the retired week did not gain volume: {wR.get('km')} vs the down lay {km_down}")
+        if wR and any(s.get("reps") for s in wR.get("sessions") or []):
+            fails.append("(d) the retired week gained a quality session — the deload's rest from intensity must be kept")
+        detail["retired_km"] = (wR or {}).get("km"); detail["down_km"] = km_down
+        # (d) the athlete's word — keep
+        fx.execute("DELETE FROM track_record WHERE kind='deload'"); fx.commit()
+        S._tr_write(fx, "deload", ws, 0, None, None, None, None, {"retired": False, "source": "athlete"}, "now"); fx.commit()
+        wK = week_at(S.generate_plan(fx, today=TODAY, permission=GRANT), ws)
+        dK = (wK or {}).get("deload") or {}
+        if dK.get("retired") or dK.get("offer") or wK.get("role") != "down" or "kept by the athlete" not in str(dK.get("why")):
+            fails.append(f"(d) the athlete's keep did not hold: {dK} role={wK and wK.get('role')}")
+        # (e) automatic mode, earned on the ledger
+        fx.execute("DELETE FROM track_record WHERE kind='deload'")
+        for i in range(S.RETIRE_AUTO_MIN_N):
+            S._tr_write(fx, "ctl_week", f"2026-0{1 + i // 4}-{1 + (i % 4) * 7:02d}", 28, 50.0, 65.0, 15.0, None, {"fixture": True}, "now")
+        fx.commit()
+        pA = S.generate_plan(fx, today=TODAY, permission=GRANT)
+        wA = week_at(pA, ws)
+        dA = (wA or {}).get("deload") or {}
+        if not (dA.get("mode") == "automatic" and dA.get("retired") and dA.get("source") == "engine" and dA.get("record_pending") and wA.get("role") == "build"):
+            fails.append(f"(e) automatic mode did not retire on its own: {dA} role={wA and wA.get('role')}")
+        S._deload_bank(fx, pA)
+        banked = fx.execute("SELECT payload FROM track_record WHERE kind='deload' AND key=?", (ws,)).fetchone()
+        if not banked:
+            fails.append("(e) the app did not bank the engine's decision")
+        wN = week_at(S.generate_plan(fx, today=TODAY, permission=None), ws)        # the token expired
+        dN = (wN or {}).get("deload") or {}
+        if not (dN.get("retired") and dN.get("source") == "engine" and wN.get("role") == "build"):
+            fails.append(f"(e) the retirement did not STICK once the token was gone: {dN} role={wN and wN.get('role')}")
+    finally:
+        fx.close()
+    # (f) corpus B — the block was run
+    fx = build(offset, True)
+    try:
+        for b in (d0.get("block") or []):
+            day = (_date_(b["start"]) + _td(days=2)).isoformat()
+            fx.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?)",
+                       (day, day + "T18:00", S.RUNNING_SPORT, float(b["intent_km"]) + 1.0, 3600 * 4, 200.0))
+        fx.commit()
+        pB0 = S.generate_plan(fx, today=TODAY)
+        pB1 = S.generate_plan(fx, today=TODAY, permission=GRANT)
+        wB = judged_week(pB1)
+        dB = (wB or {}).get("deload") or {}
+        if not (dB and dB.get("absorbed_frac") is not None and dB["absorbed_frac"] > S.RETIRE_ABSORB_MAX and not dB["gates"]["absorbed"]):
+            fails.append(f"(f) corpus B's block does not read as absorbed: {dB.get('absorbed_frac')}")
+        if dB.get("offer") or dB.get("retired") or (wB or {}).get("role") != "down":
+            fails.append(f"(f) corpus B moved with a fresh grant: offer={dB.get('offer')} retired={dB.get('retired')}")
+        if strip(pB0) != strip(pB1):
+            fails.append("(f) with the gate not firing, the plan with a token differs from the plan without one beyond the `deload` read")
+        detail["corpus_b_absorbed"] = dB.get("absorbed_frac")
+    finally:
+        fx.close()
+    # (g) the only door
+    if "permission" not in _insp.signature(S.generate_plan).parameters:
+        fails.append("(g) generate_plan has no `permission` parameter — the token has no door into the engine")
+    eng = (S.Path(S.__file__).resolve().parent / "sh_engine.py").read_text(encoding="utf-8")
+    if "readiness_permission" in eng or "hrv_signal" in eng:
+        fails.append("(g) the engine computes readiness itself — the token must come in through the argument")
+    return _st("det", "deload-retire",
+               "§C — a positional deload is retired only when the block was not absorbed, the load ratio has "
+               "headroom, fatigue sits under fitness AND a fresh positive check-in says so; owner-confirmed, "
+               "automatic once the ledger earns it; sticky either way; nothing fires without the token",
+               passed=not fails, expect="two corpora: A trips (with the athlete's word or automatic mode), B never",
+               got={**detail, "failures": fails or "none"})
+
+
 def _stc_abuse_limits():
     """§ABUSE (0.55.1, review S2) — request-size and rate limits, driven through the real routes.
 
@@ -16080,6 +16434,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
                  lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(), lambda: _stc_limits(db),
+                 lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),

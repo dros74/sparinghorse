@@ -1697,7 +1697,14 @@ function weekHtml(w,p,today){
     lines.sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:0);
   }
   const sess=lines.map(l=>l.html).join("");
-  const flags=[w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>'
+  // §C (0.59.0) — the deload governor's read on the judged down week: retired, offered, or kept (and why)
+  const dl=w.deload;
+  const dlChip = (dl&&dl.judged) ? (dl.retired
+      ? `<span class="eased" title="${esc(dl.why||"")}">deload retired · block ${dl.absorbed_frac!=null?Math.round(dl.absorbed_frac*100)+" %":"—"} absorbed</span>`
+      : (dl.offer&&!SH_READONLY)
+        ? `<span class="wfz" title="${esc(dl.why||"")}">deload not owed · <button type="button" class="linkbtn" data-deload="${esc(dl.week||w.start)}" data-retire="1">retire it</button> · <button type="button" class="linkbtn" data-deload="${esc(dl.week||w.start)}" data-retire="0">keep it</button></span>`
+        : `<span class="muted" title="${esc(dl.why||"")}">deload ${dl.source==="athlete"&&!dl.retired?"kept (your call)":"kept"}</span>`) : "";
+  const flags=[dlChip, w.frequency_met?'<span class="wfz" title="You’ve already run this week’s prescribed count and volume — today’s remaining run is optional, not forced.">✓ frequency met — today optional</span>'
                  // §6o-B — volume charged: the week's km intent is already run (even if the run count is short) — no more sessions are laid on the remaining days
                  :(w.volume_met?'<span class="wfz" title="You’ve already run this week’s planned km — the remaining days aren’t re-prescribed just to hit a run count. Rest is prescribed; an easy run is fine if you feel good.">✓ volume run — today optional</span>':''),
                w.fatigue_capped?'<span class="down" title="A building week, but recent fatigue left no ACWR headroom — the long run was held back. Load capped for safety, not silently degraded.">⚠ build intent capped by recent fatigue</span>'
@@ -1718,11 +1725,13 @@ function weekHtml(w,p,today){
   const eqkm=(w.eq_km&&w.eq_km>w.km+0.5)?` · <span class="muted mono" title="Biomechanical load: pace-weighted damage-equivalent km (fast running does several times more tissue damage per km than easy). The biomechanical/tissue-damage axis (informed by John Davis), which heart-rate load can't see.">${U.d(w.eq_km)} eq-${U.unit}</span>`:'';
   // §CARD2 — the straddling week's total = actuals so far + prescription ahead; show the split so
   // the number explains itself (the old prescription-sum header made an over-run week LOOK smaller).
+  // §P2 (0.59.0) — where the two denominators diverge, the card says so (the note is the reason)
+  const barNote=(w.bar&&w.bar.diverge&&w.bar.intent_km!=null)?` · <span class="muted mono" title="${esc(w.bar.note||"")}">bar ${U.d(w.bar.intent_km)} · sheet ${U.d(w.bar.sheet_km)} ${U.unit}</span>`:'';
   const kmSplit=(w.partial&&w.km_done!=null)?` · <span class="muted mono" title="This week straddles today, so its total counts days you've already run at their REAL distance (${U.d(w.km_done)} ${U.unit} in ${w.runs_done} run${w.runs_done===1?'':'s'}) plus what's still prescribed ahead (${U.d(w.km_ahead)} ${U.unit} in ${w.runs_ahead}). Days you out-run no longer shrink the week's headline.">${U.d(w.km_done)} run + ${U.d(w.km_ahead)} ahead</span>`:'';
   return `<div class="wk ${down?'wdown':''} ${w.frozen?'wfrozen':''} ${cur?'wcur':''}">
       <div class="wn">${w.wk}${w.frozen?'<span class="wlock" title="completed — carried verbatim">🔒</span>':''}</div>
       <div class="wbody">
-        <div><span class="wkm">${U.d(w.km)} ${U.unit}</span>${eqkm} · ${w.runs} runs${kmSplit}${flags?' · '+flags:''}</div>
+        <div><span class="wkm">${U.d(w.km)} ${U.unit}</span>${eqkm} · ${w.runs} runs${kmSplit}${barNote}${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
         <div class="wsesslog">${sess}</div>
       </div>
@@ -2048,6 +2057,16 @@ function renderPlan(p){
     scrollToEl(document.getElementById("recent"));
   }));
   // a double's per-run links → that specific run's map (stop bubbling so the line's own click doesn't fire)
+  host.querySelectorAll("button[data-deload]").forEach(el=>el.addEventListener("click", async ev=>{
+    ev.preventDefault(); ev.stopPropagation();
+    const week=el.dataset.deload, retire=el.dataset.retire==="1";
+    el.disabled=true;
+    const r=await fetch("/api/plan/deload",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({week, retire})});
+    const p=await r.json();
+    if(!r.ok||!p.ok){ el.disabled=false; const sp=el.closest("span"); if(sp) sp.textContent=p.error||"Could not record the answer."; return; }
+    LASTDIFF=p.diff; await refreshPlan(p);
+  }));
   host.querySelectorAll(".brkrun[data-act-id]").forEach(el=>el.addEventListener("click",ev=>{
     ev.stopPropagation();
     loadActivity(+el.dataset.actId);
@@ -3221,6 +3240,9 @@ if(SH_READONLY){
     const L=cur.limits, b=L.binding, ax=b?L[b]:null;
     const line = b ? `This week is held by <b>${esc(LIMIT_NAMES[b]||b)}</b>${ax&&ax.ceiling!=null?` — ${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit||""))}`:""}${ax&&ax.basis?` <span class="muted">(${esc(BASIS_NAMES[ax.basis]||ax.basis)})</span>`:""}.` : "No limit binds this week.";
     const host=$("#readiness"); if(host) host.insertAdjacentHTML("beforeend", `<div class="whyline"><b>Binding limit:</b> ${line}</div>`);
+    // §C (0.59.0) — the judged down week's read, when this is one
+    const dl=cur.deload;
+    if(host&&dl&&dl.judged) host.insertAdjacentHTML("beforeend", `<div class="whyline"><b>Deload:</b> ${dl.retired?"retired — ":dl.offer?"not owed by the numbers — answer on the week card. ":""}${esc(dl.why||"")}</div>`);
   }).catch(()=>{});
 }else if(SH_PAGE==="runs"){
   // §RB — explorer chrome: the header link points back home; the mobile Runs tab reads active.

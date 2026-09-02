@@ -86,6 +86,13 @@ The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB
 physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
 server-side (not just hidden in the UI).
 
+**The symmetry (0.59.0).** The engine has always braked on evidence and deloaded on a schedule. Now
+a scheduled deload can be cancelled by evidence: when the block before it was not run, the load
+ratio has headroom, fatigue sits under fitness and a fresh check-in says legs good, the week is
+offered as a level week instead — owner-confirmed until the engine's own ledger earns it the right
+to decide alone. Both denominators of a week (the ramp's bar and the session sheet) are published,
+and readiness is a bounded permission token: it can cancel a brake, never add load.
+
 **The limits (0.58.0).** Every laid week publishes the body's limits as one object: per governor axis
 (load ratio, long-run step, damage-equivalent km per week and per session, near-ceiling streak, fitness
 gain per week) the ceiling, what the week was laid at, the headroom, whether it bound the week, and the

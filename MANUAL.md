@@ -314,6 +314,22 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   or fatigue-capped session loses its chip — a session that no longer happens builds nothing, and the app
   won't claim otherwise.
 
+**A deload that is not owed (0.59.0).** The plan lays a down week every fourth week to absorb the
+block before it. If the block was not actually run — a work trip, a cold — that deload is not owed,
+and the week card says so: the block's km against its bar, the load ratio, fatigue against fitness,
+and whether you checked in fresh. All four must hold, and the last is the one that matters: the
+engine cannot tell a busy week from an ill one, only you can, so a check-in saying legs good and
+sleep fine within the last two days is required and silence keeps the deload. When the numbers say
+it is not owed the card offers **retire it** or **keep it**; retiring makes the week a *level* week —
+the volume the block was carrying, still under every cap, with no quality session added. Your
+answer is recorded once and stands. The engine will decide on its own only after its own ledger
+shows ten 28-day forecasts that under-predicted your fitness by 20 % or more.
+
+**Two numbers for a week (0.59.0).** A week has an *intent bar* (what the ramp asked for) and a
+*sheet* (the sessions you read). They agree within a few percent on a normal week; where they do
+not, the card prints both — a race week's sheet includes the race, and a week already lived keeps
+the bar it was laid with. The adherence figures read the sheet; the governors read the bar.
+
 **The taper's touch.** In the last weeks before a marathon the plan lays a "Race-pace touch": short
 reps at marathon pace, the pace every long run has rehearsed. It is structured, not hard — the
 sharpening is in the freshness. Shorter races sharpen with a short tempo at threshold.

@@ -888,6 +888,11 @@ async function runUnits() {
     headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ units: u }) }).then(r => r.json()), u);
   const r = await set('mi');
   ok('units=mi saved through the settings API', !!(r && r.ok));
+  // read it back: the save must be VISIBLE to the next request, not merely acknowledged
+  const readback = await page.evaluate(() => fetch('/api/settings').then(r => r.json()));
+  const uset = ((readback && readback.settings) || []).find(x => x.key === 'units') || {};
+  ok(`the setting reads back as mi (source ${uset.source})`, uset.value === 'mi');
+  if (uset.value !== 'mi') console.log('    settings payload: ' + JSON.stringify(uset));
   const survivors = async () => page.evaluate(() => {
     const c = document.body.cloneNode(true);
     c.querySelectorAll('.setform, #settings, script, style, [hidden]').forEach(n => n.remove());
@@ -901,6 +906,8 @@ async function runUnits() {
   ok(`Today reads in miles — ${left.length} km survivors`, left.length === 0);
   if (left.length) console.log('    today: ' + left.join(' | '));
   await page.goto(BASE, { waitUntil: 'domcontentloaded' }); await settle();
+  const bootUnits = await page.evaluate(() => (window.SH && window.SH.units) || null);
+  ok(`the dashboard booted with units=mi (got ${bootUnits})`, bootUnits === 'mi');
   await page.evaluate(() => document.querySelectorAll('details').forEach(d => { d.open = true; }));
   await page.waitForTimeout(800);
   left = await survivors();

@@ -12,6 +12,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 64.6,
+          "note": null,
+          "ratio": 0.964,
+          "sheet_km": 62.3,
+          "training_km": 62.3
+        },
         "clipped": false,
         "elapsed": false,
         "freq_actual": null,
@@ -134,6 +144,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 64.6,
+          "note": null,
+          "ratio": 0.995,
+          "sheet_km": 64.3,
+          "training_km": 64.3
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 64.3,
@@ -267,6 +287,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 72.7,
+          "note": null,
+          "ratio": 0.97,
+          "sheet_km": 70.5,
+          "training_km": 70.5
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 82.75,
@@ -601,7 +631,21 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 58.0,
+          "note": null,
+          "ratio": 0.998,
+          "sheet_km": 57.9,
+          "training_km": 57.9
+        },
         "clipped": false,
+        "deload": {
+          "judged": false,
+          "positional": true
+        },
         "elapsed": false,
         "eq_km": 57.9,
         "frozen": false,
@@ -609,6 +653,7 @@
         "intent_km": 58.0,
         "intent_runs": 5,
         "km": 57.9,
+        "km_level": 22,
         "limits": {
           "acwr": {
             "basis": "L",
@@ -746,6 +791,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 81.8,
+          "note": null,
+          "ratio": 0.957,
+          "sheet_km": 78.3,
+          "training_km": 78.3
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 98.34,
@@ -1095,6 +1150,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 85.7,
+          "note": null,
+          "ratio": 0.953,
+          "sheet_km": 81.7,
+          "training_km": 81.7
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 102.02,
@@ -1444,6 +1509,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 90.0,
+          "note": null,
+          "ratio": 0.953,
+          "sheet_km": 85.8,
+          "training_km": 85.8
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 108.4,
@@ -1811,7 +1886,21 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 71.9,
+          "note": null,
+          "ratio": 0.999,
+          "sheet_km": 71.8,
+          "training_km": 71.8
+        },
         "clipped": false,
+        "deload": {
+          "judged": false,
+          "positional": true
+        },
         "elapsed": false,
         "eq_km": 71.8,
         "frozen": false,
@@ -1819,6 +1908,7 @@
         "intent_km": 71.9,
         "intent_runs": 5,
         "km": 71.8,
+        "km_level": 69,
         "limits": {
           "acwr": {
             "basis": "L",
@@ -1943,6 +2033,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 91.9,
+          "note": null,
+          "ratio": 0.954,
+          "sheet_km": 87.7,
+          "training_km": 87.7
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 110.58,
@@ -2310,6 +2410,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 95.7,
+          "note": null,
+          "ratio": 0.957,
+          "sheet_km": 91.6,
+          "training_km": 91.6
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 114.84,
@@ -2677,6 +2787,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 99.9,
+          "note": null,
+          "ratio": 0.952,
+          "sheet_km": 95.1,
+          "training_km": 95.1
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 120.7,
@@ -3062,7 +3182,21 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 80.0,
+          "note": null,
+          "ratio": 0.997,
+          "sheet_km": 79.8,
+          "training_km": 79.8
+        },
         "clipped": false,
+        "deload": {
+          "judged": false,
+          "positional": true
+        },
         "elapsed": false,
         "eq_km": 79.8,
         "frozen": false,
@@ -3070,6 +3204,7 @@
         "intent_km": 80.0,
         "intent_runs": 5,
         "km": 79.8,
+        "km_level": 78,
         "limits": {
           "acwr": {
             "basis": "L",
@@ -3207,6 +3342,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 75.9,
+          "note": null,
+          "ratio": 0.955,
+          "sheet_km": 72.5,
+          "training_km": 72.5
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 90.38,
@@ -3537,6 +3682,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 79.9,
+          "note": null,
+          "ratio": 0.956,
+          "sheet_km": 76.4,
+          "training_km": 76.4
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 96.8,
@@ -3886,6 +4041,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 83.7,
+          "note": null,
+          "ratio": 0.956,
+          "sheet_km": 80.0,
+          "training_km": 80.0
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 100.96,
@@ -4235,7 +4400,21 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 67.0,
+          "note": null,
+          "ratio": 1.0,
+          "sheet_km": 67.0,
+          "training_km": 67.0
+        },
         "clipped": false,
+        "deload": {
+          "judged": false,
+          "positional": true
+        },
         "elapsed": false,
         "eq_km": 67.0,
         "frozen": false,
@@ -4243,6 +4422,7 @@
         "intent_km": 67.0,
         "intent_runs": 5,
         "km": 67.0,
+        "km_level": 80,
         "limits": {
           "acwr": {
             "basis": "L",
@@ -4476,6 +4656,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 85.9,
+          "note": null,
+          "ratio": 0.951,
+          "sheet_km": 81.7,
+          "training_km": 81.7
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 103.66,
@@ -4836,6 +5026,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 101.0,
+          "note": null,
+          "ratio": 0.953,
+          "sheet_km": 96.3,
+          "training_km": 96.3
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 121.9,
@@ -5220,6 +5420,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 104.4,
+          "note": null,
+          "ratio": 0.952,
+          "sheet_km": 99.4,
+          "training_km": 99.4
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 126.24,
@@ -5711,6 +5921,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 61.0,
+          "note": null,
+          "ratio": 0.987,
+          "sheet_km": 60.2,
+          "training_km": 60.2
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 64.7,
@@ -5976,6 +6196,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": true,
+          "governor_basis": "intent_km",
+          "intent_km": 33.0,
+          "note": "race week: the sheet includes the race; the bar is the training ask",
+          "ratio": 0.991,
+          "sheet_km": 32.7,
+          "training_km": 11.6
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 54.2,
@@ -6103,6 +6333,16 @@
     "weeks": [
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": false,
+          "governor_basis": "intent_km",
+          "intent_km": 75.0,
+          "note": null,
+          "ratio": 0.989,
+          "sheet_km": 74.2,
+          "training_km": 74.2
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 75.64,
@@ -6422,6 +6662,16 @@
       },
       {
         "adjusted": false,
+        "bar": {
+          "adherence_basis": "sheet_km",
+          "diverge": true,
+          "governor_basis": "intent_km",
+          "intent_km": 40.0,
+          "note": "race week: the sheet includes the race; the bar is the training ask",
+          "ratio": 1.407,
+          "sheet_km": 56.3,
+          "training_km": 14.1
+        },
         "clipped": false,
         "elapsed": false,
         "eq_km": 82.1,

@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.58.1"
+ENGINE_VERSION = "0.59.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1544,8 +1544,10 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
         down = (wk % BASE_DOWN_EVERY == 0)
         if down:
             this_km = max(1, round(km * BASE_DOWN_FRAC))
+            km_level = max(1, round(km))           # §C — what the week asks if the deload is retired
         else:
             this_km = max(1, round(km))
+            km_level = None
             km *= (1 + BASE_WEEKLY_RAMP)
         quality = []
         if not down and wk >= BASE_TEMPO_FROM_WEEK:
@@ -1562,7 +1564,7 @@ def base_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                             "component": "ssmax"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
                       "long": round(this_km * BASE_LONG_FRAC), "strides": 0 if down else 2,
-                      "quality": quality,
+                      "quality": quality, **({"km_level": km_level} if down else {}),
                       "phase": "base", "role": "down" if down else "build",   # §P1
                       "intent": "Down week — absorb the block" if down
                       else ("General — aerobic volume + early VO₂ (build it now, hold it cheap)"
@@ -1662,8 +1664,10 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
         down = (wk % BUILD_DOWN_EVERY == 0)
         if down:
             this_km = max(1, round(km * BUILD_DOWN_FRAC))
+            km_level = max(1, round(km))           # §C — what the week asks if the deload is retired
         else:
             this_km = max(1, round(km))
+            km_level = None
             km *= (1 + BUILD_WEEKLY_RAMP)
         if down:
             quality = []
@@ -1696,7 +1700,7 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                       # Verified on the caution golden: `strides` is the ONLY key that changes,
                       # sessions and km byte-identical. A stride marker rides an easy run that
                       # was already prescribed; it adds no TRIMP and no kilometre.
-                      "strides": 0 if down else 2, "quality": quality,
+                      "strides": 0 if down else 2, "quality": quality, **({"km_level": km_level} if down else {}),
                       "phase": "build", "role": "down" if down else "build",   # §P1
                       "intent": "Down week — absorb the block" if down
                       else ("Supportive — growing MP work + VO₂ maintenance" if davis
@@ -3518,8 +3522,165 @@ def _hard_share(sessions, total_trimp):
 # et al., Aarhus, n≈5000 — sharp longest-run jumps predicted injury where weekly-mileage jumps did
 # not), and the read says whether this week's long run sits inside that step. No probability is
 # printed: one athlete with one injury event cannot calibrate one, and the plan must not pretend to.
+RETIRE_ABSORB_MAX = 0.80     # §C (0.59.0) — a block absorbed at ≤ this fraction of its bar was not run: the deload is not owed
+RETIRE_ACWR_HEADROOM = 0.10  # §C — the load ratio must sit at least this far under the regime's cap before a deload may be retired
+RETIRE_AUTO_MIN_N = 10       # §C (decision (b)) — automatic mode needs this many scored 28-day CTL forecasts …
+RETIRE_AUTO_BIAS = 0.20      # §C (decision (b)) — … with a median under-prediction of at least this fraction
+BAR_DIVERGE_TOL = 0.10  # §P2 (0.59.0) — sheet ÷ intent bar beyond this on a LIVE non-race week is labelled; measured 0.92–1.00 (proposal §11)
 LIMITS_LAID_TOL = 0.15  # km — the sheet rounds a capped bout to 0.1 km AFTER the cap; within this it still reads "within"
 LIMITS_BASIS = {"acwr": "L", "long_step": "L", "eq_week": "A", "eq_session": "S", "tissue": "L", "chronic": "L"}
+
+
+def _retire_mode(db):
+    """§C, decision (b) — owner-confirmed until the 28-day CTL forecast has been scored RETIRE_AUTO_MIN_N
+    times with a median under-prediction of at least RETIRE_AUTO_BIAS; automatic from then on, still
+    under every cap. Read off the ledger's own rows (kind `ctl_week`, signed like score_ctl_week:
+    positive = the athlete came out fitter than projected)."""
+    try:
+        rows = db.execute("SELECT predicted, err FROM track_record WHERE kind='ctl_week'").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    pcts = sorted(float(r["err"]) / float(r["predicted"]) for r in rows
+                  if r["predicted"] and r["err"] is not None and float(r["predicted"]) > 0)
+    n = len(pcts)
+    med = (pcts[n // 2] if n % 2 else (pcts[n // 2 - 1] + pcts[n // 2]) / 2.0) if n else None
+    auto = n >= RETIRE_AUTO_MIN_N and med is not None and med >= RETIRE_AUTO_BIAS
+    return ("automatic" if auto else "confirm",
+            {"n": n, "median_pct": (round(med, 3) if med is not None else None),
+             "needs": {"n": RETIRE_AUTO_MIN_N, "median_pct": RETIRE_AUTO_BIAS}})
+
+
+def _deload_record(db, week_start):
+    """§C — the sticky decision for one week (a write-once `track_record` row, kind `deload`): the
+    athlete's word, or the engine's own in automatic mode. None when nothing was decided."""
+    try:
+        r = db.execute("SELECT payload FROM track_record WHERE kind='deload' AND key=?",
+                       (week_start,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not r:
+        return None
+    try:
+        return json.loads(r["payload"]) if isinstance(r["payload"], str) else dict(r["payload"] or {})
+    except (TypeError, ValueError):
+        return None
+
+
+def _deload_read(db, sh, idx, cur_start, today, prior_plan, ctl, atl, cap, permission):
+    """§C (0.59.0, symmetry decisions (b)(c)(d)) — "this deload isn't owed". The periodizer has laid a
+    positional down week that contains today; this governor decides whether the block before it was
+    actually absorbed, and publishes every number it read. A retirement demotes the week to a LEVEL
+    week (the volume the trajectory carried, governor-capped as any week is — never a build spike, and
+    the deload's rest from intensity is kept: quality stays off). All four gates must hold:
+      absorbed_frac ≤ RETIRE_ABSORB_MAX   the block's actual km over its bar (P2's intent_km): not run
+      acwr ≤ cap − RETIRE_ACWR_HEADROOM   headroom under the regime's ceiling
+      atl ≤ ctl                          not already in the hole
+      permission.grant                   a FRESH POSITIVE check-in with no red evidence (B) — the
+                                         load-bearing gate: a busy week and an illness week are
+                                         identical in the activity stream; only the athlete's word
+                                         separates them, so silence keeps the deload.
+    The decision is STICKY (a write-once ledger row) so a token expiring mid-week cannot resurrect the
+    deload; in confirm mode the row is the athlete's word (POST /api/plan/deload), in automatic mode
+    the app banks the engine's own decision after the lay (`record_pending`)."""
+    ws = (cur_start + timedelta(weeks=idx)).isoformat()
+    j0 = 0
+    for j in range(idx - 1, -1, -1):
+        if sh[j].get("role") == "down":
+            j0 = j + 1
+            break
+    prior_weeks = {}
+    for k, v in (prior_plan or {}).items():
+        if isinstance(v, dict) and isinstance(v.get("weeks"), list):
+            for pw in v["weeks"]:
+                if pw.get("start"):
+                    prior_weeks[pw["start"]] = pw
+    asked = ran = 0.0
+    block = []
+    for j in range(j0, idx):
+        mon = cur_start + timedelta(weeks=j)
+        if mon + timedelta(days=6) >= today:
+            continue                                   # not elapsed — cannot be judged (kept for safety)
+        pw = prior_weeks.get(mon.isoformat()) or {}
+        intent = float(pw.get("intent_km") or sh[j].get("km") or 0.0)
+        try:
+            _, km = _current_week_actuals(db, mon)
+        except sqlite3.OperationalError:
+            km = 0.0
+        km = float(km or 0.0)
+        asked += intent
+        ran += km
+        block.append({"start": mon.isoformat(), "intent_km": round(intent, 1), "ran_km": round(km, 1)})
+    absorbed = round(ran / asked, 3) if asked else None
+    last = block[-1] if block else None
+    absorbed_prior = (round(last["ran_km"] / last["intent_km"], 3) if last and last["intent_km"] else None)
+    acwr = round(atl / ctl, 3) if ctl else None
+    tok = permission or {}
+    gates = {"absorbed": absorbed is not None and absorbed <= RETIRE_ABSORB_MAX,
+             "acwr": acwr is not None and acwr <= round(cap - RETIRE_ACWR_HEADROOM, 3),
+             "atl": ctl is not None and atl is not None and atl <= ctl,
+             "readiness": bool(tok.get("grant"))}
+    mode, bias = _retire_mode(db)
+    record = _deload_record(db, ws)
+    retired, source, pending, offer = False, None, False, False
+    if record is not None:
+        retired, source = bool(record.get("retired")), record.get("source")
+    elif all(gates.values()):
+        if mode == "automatic":
+            retired, source, pending = True, "engine", True
+        else:
+            offer = True
+    pct = (f"{round(absorbed * 100)} %" if absorbed is not None else "unmeasured")
+    if retired:
+        why = (f"deload retired ({source}): the block was absorbed at {pct} of its bar, load ratio "
+               f"{acwr}, fatigue under fitness, a fresh positive check-in")
+    elif record is not None:
+        why = f"deload kept by the athlete (block absorbed at {pct} of its bar)"
+    elif offer:
+        why = (f"not owed by the numbers — block absorbed at {pct} of its bar, load ratio {acwr}, a fresh "
+               f"positive check-in; owner-confirmed until the forecast bias earns automatic mode "
+               f"(n {bias['n']}/{bias['needs']['n']})")
+    elif not gates["absorbed"]:
+        why = f"the block was absorbed ({pct} of its bar) — the deload is owed"
+    elif not gates["acwr"]:
+        why = f"load ratio {acwr} leaves no headroom under the cap {cap}"
+    elif not gates["atl"]:
+        why = "fatigue above fitness — already in the hole"
+    else:
+        why = "no fresh positive check-in — silence keeps the deload"
+    return {"positional": True, "judged": True, "week": ws, "block": block,
+            "absorbed_frac": absorbed, "absorbed_prior": absorbed_prior,
+            "acwr": acwr, "ctl": round(ctl, 1) if ctl is not None else None,
+            "atl": round(atl, 1) if atl is not None else None, "cap": cap,
+            "gates": gates, "mode": mode, "bias": bias,
+            "retired": retired, "offer": offer, "source": source, "record_pending": pending,
+            "why": why, "readiness_why": tok.get("why")}
+
+
+def _week_bar(*, intent_km, sessions, frozen=False, ran_km=None):
+    """§P2 (0.59.0, symmetry decision (a)) — BOTH denominators, named and published on every laid week.
+    `intent_km` is the as-laid ramp bar: the governor basis (the C-test and every governor read).
+    `sheet_km` is the session sheet the athlete reads day to day: the adherence basis. Where the two
+    diverge the week says why, in a field, not a footnote: a race week's sheet includes the race; a
+    frozen week's bar is what was asked when the week was first laid while its sheet is what was run;
+    anything else beyond BAR_DIVERGE_TOL on a live week is labelled as such (proposal §11 measured
+    0.92–1.00× where both are live). No behaviour change: nothing reads this yet — C will."""
+    sessions = sessions or []
+    sheet = round(sum((s.get("km") or 0.0) for s in sessions), 1)
+    training = round(sum((s.get("km") or 0.0) for s in sessions if not s.get("race")), 1)
+    ratio = round(sheet / intent_km, 3) if intent_km else None
+    if frozen:
+        note = "frozen: the bar is what was asked when the week was first laid; the sheet is what was run"
+    elif training != sheet:
+        note = "race week: the sheet includes the race; the bar is the training ask"
+    elif ratio is not None and abs(ratio - 1.0) > BAR_DIVERGE_TOL:
+        note = f"the sheet and the bar diverge beyond {int(BAR_DIVERGE_TOL * 100)} %"
+    else:
+        note = None
+    out = {"intent_km": intent_km, "sheet_km": sheet, "training_km": training, "ratio": ratio,
+           "governor_basis": "intent_km", "adherence_basis": "sheet_km", "diverge": bool(note), "note": note}
+    if ran_km is not None:
+        out["ran_km"] = ran_km
+    return out
 
 
 def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid, long_bound,
@@ -3939,6 +4100,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "clipped": False, "partial": True,
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
+            pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=sessions)   # §P2 (0.59.0)
             pweek["limits"] = _week_limits(          # §LIMITS (0.58.0) — the straddling week's read; the
                 assertive=assertive, eff_cap=eff_cap,   # streak/ramp governors are not reproduced here (§PRO13)
                 acwr_laid=(eow_flat if eow_flat is not None else eow), clipped=False,
@@ -4295,6 +4457,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
         if bio_over:                                 # §3.1 — the soft bio ceiling reshaped this week to easy
             week["bio_capped"] = round(bio_cap, 1)
+        week["bar"] = _week_bar(intent_km=week["intent_km"], sessions=sessions)   # §P2 (0.59.0)
         week["limits"] = _week_limits(               # §LIMITS (0.58.0) — the limits as one object
             assertive=assertive, eff_cap=eff_cap,
             acwr_laid=(week.get("proj_acwr_soft") if week.get("proj_acwr_soft") is not None
@@ -5627,6 +5790,8 @@ def _trim_post_race(plan, chain, block_start):
                 # §CARD3 — the trimmed listing IS the week's prescription: the dropped tail was
                 # never asked of the athlete, so the adherence bar shrinks with it.
                 w["intent_runs"] = w["runs"]
+                if w.get("bar") is not None:   # §P2 (0.59.0) — the sheet the athlete reads is the trimmed
+                    w["bar"] = _week_bar(intent_km=w.get("intent_km"), sessions=kept)   # one; the km bar stays as asked
 
 
 def _card_truth_elapsed(plan, db, today):
@@ -5672,9 +5837,12 @@ def _card_truth_elapsed(plan, db, today):
                 w["intent_km"] = w.get("km")
             w.update(runs=runs, km=km, runs_done=runs, km_done=km,
                      runs_ahead=0, km_ahead=0)
+            if w.get("bar") is None:     # §P2 (0.59.0) — a lived week is carried VERBATIM (§6f E): the bar it
+                w["bar"] = _week_bar(        # was laid with stays; only a pre-P2 week is stamped, and says so
+                    intent_km=w.get("intent_km"), sessions=w.get("sessions") or [], frozen=True, ran_km=km)
 
 
-def generate_plan(db, force_regime=None, today=None):
+def generate_plan(db, force_regime=None, today=None, permission=None):
     """Engine entry point (§6b): a pure function of (today, current shape, objectives), with the
     PAST frozen (§6f Step E). Re-periodizes forward to the nearest A-race; falls back to a
     maintenance block when no objective remains. Every call is re-runnable and versioned, so
@@ -5913,6 +6081,23 @@ def generate_plan(db, force_regime=None, today=None):
                                 race_zone=("marathon" if (ph.get("type") or "").lower() == "marathon"
                                            else "threshold")) if kind == "taper"
                   else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive")))
+            # §C (0.59.0) — "this deload isn't owed". The shape has laid its positional down weeks;
+            # the governor judges the ONE that contains today (its block has fully elapsed, so
+            # `absorbed_frac` is a measurement), publishes the read on the week, and — only when every
+            # gate holds and the decision is on the record — demotes it to a level week: the
+            # trajectory's own volume, governor-capped like any week, quality kept off.
+            for _i, _w in enumerate(sh):
+                if _w.get("role") != "down":
+                    continue
+                _mon = cur_start + timedelta(weeks=_i)
+                if not (_mon <= today <= _mon + timedelta(days=6)):
+                    _w["deload"] = {"positional": True, "judged": False}
+                    continue
+                _w["deload"] = _deload_read(db, sh, _i, cur_start, today, prior_plan, ctl0, atl0,
+                                            ride_cap, permission)
+                if _w["deload"].get("retired"):
+                    _w.update(role="build", km=(_w.get("km_level") or _w["km"]),
+                              intent="Level week — the deload is not owed (the block was not absorbed)")
             # (§6h CTL-responsive floor removed 2026-06-30 — it was a dormant follower: the re-base decay
             # kept it below its activation band in real plans, and the §PRO assertive ride is the proper
             # fitness-tracker now. Caution is a clean conservative ramp; assertive rides the ceiling.)

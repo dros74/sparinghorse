@@ -56,7 +56,7 @@ from requests.adapters import HTTPAdapter, Retry
 # the seed and every `S.<name>` in the battery keep resolving exactly where they did.
 # ⚠ ENGINE_VERSION moved with the engine it stamps — bump it in sh_engine.py.
 from sh_engine import (
-    LIMITS_LAID_TOL,   # noqa: F401 — re-exported for the app and the battery
+    LIMITS_LAID_TOL, BAR_DIVERGE_TOL, RETIRE_ABSORB_MAX, RETIRE_ACWR_HEADROOM, RETIRE_AUTO_MIN_N, RETIRE_AUTO_BIAS,   # noqa: F401 — re-exported for the app and the battery
     ACWR_HARD, ACWR_SOFT, ACWR_SOFT_CTL_FLOOR, AV_HORIZON_DAYS, AV_MAX_STREAK, BANK_PLAN_SCAN,
     BASE_DOWN_EVERY, BASE_DOWN_FRAC, BASE_LONG_FRAC, BASE_QUALITY_CYCLE, BASE_RUNS,
     BASE_TEMPO_FRAC, BASE_THR_FRAC, BASE_VO2_LONG_REP_MIN,
@@ -4841,15 +4841,35 @@ def regenerate(db, baseline=None, today=None, skip_if_unchanged=False):
     prev = json.loads(prev_row["plan"]) if prev_row else None
     if baseline is None:
         baseline = prev
-    plan = generate_plan(db, today=today)
+    # §C (0.59.0) — the readiness token is the load-bearing gate of the deload governor; the engine
+    # reads it only through this argument (the goldens and the CLI pass none, so nothing fires there).
+    plan = generate_plan(db, today=today, permission=readiness_permission(db))
     if not plan.get("ok"):
         return plan
     if skip_if_unchanged and prev is not None and _plan_identity(plan) == _plan_identity(prev):
         plan["unchanged"] = True
     else:
         save_plan(db, plan)
+    _deload_bank(db, plan)
     plan["diff"] = diff_plans(baseline, plan)
     return plan
+
+
+def _deload_bank(db, plan):
+    """§C — in automatic mode the engine's own retirement is banked as a write-once `deload` row the
+    moment the plan is laid, so the decision outlives the check-in that unlocked it."""
+    now = _now_iso()
+    for k, v in (plan or {}).items():
+        if not (isinstance(v, dict) and isinstance(v.get("weeks"), list)):
+            continue
+        for w in v["weeks"]:
+            d = w.get("deload") or {}
+            if d.get("record_pending") and d.get("week"):
+                _tr_write(db, "deload", d["week"], 0, None, None, None, None,
+                          {"retired": True, "source": "engine", "at": now,
+                           "absorbed_frac": d.get("absorbed_frac"), "acwr": d.get("acwr"),
+                           "gates": d.get("gates"), "mode": d.get("mode"), "bias": d.get("bias")}, now)
+    db.commit()
 
 
 def save_plan(db, plan):
@@ -5830,6 +5850,68 @@ def _bonus_run_ok(verdict, session_kind, acwr):
             and acwr is not None and acwr < BONUS_ACWR_MAX)
 
 
+PERMISSION_FRESH_H = 48   # §B (0.59.0) — a check-in older than this is not a declaration about today
+
+
+def readiness_permission(db, assessment=None, now=None):
+    """§B (0.59.0, symmetry decision (d)) — readiness as a BOUNDED PERMISSION TOKEN. It can never
+    increase a prescription; it can only satisfy one AND-gate in C (cancel a brake the measured
+    evidence already says is unnecessary). The rules, each a tooth in det/permission:
+      • grant requires a POSITIVE declaration — a check-in ≤ PERMISSION_FRESH_H old saying legs good
+        and sleep not poor, with no stop symptom. Silence, "ok", "heavy": no grant. Missing is not green.
+      • red evidence anywhere on the readiness card vetoes: a stop symptom, an active medical hold,
+        HRV below its band, a red verdict.
+      • absent telemetry never counts FOR or AGAINST: no HRV reading neither grants nor vetoes.
+    Nothing consumes the token yet (that is C, built with the athlete present); det/permission carries
+    a tripwire that goes red the day the engine reads it, so the change is seen, not slipped in."""
+    now = now or datetime.now()
+    tok = {"grant": False, "fresh": False, "declared": None, "sleep": None, "checkin_date": None,
+           "age_h": None, "expires": None, "red_evidence": [], "telemetry": {}, "why": None,
+           "fresh_hours": PERMISSION_FRESH_H, "consumers": []}
+    row = db.execute("SELECT date, energy, sleep, stop_symptom, created_at FROM readiness "
+                     "WHERE date <= ? ORDER BY date DESC LIMIT 1", (now.strftime("%Y-%m-%d"),)).fetchone()
+    hrv = hrv_signal(db)
+    tok["telemetry"]["hrv"] = "reported" if hrv.get("state") else "missing"
+    red = []
+    if active_medical_halt(db):
+        red.append("active medical hold")
+    if hrv.get("state") == "low":
+        red.append("HRV below its normal band")
+    if assessment and assessment.get("verdict") == "red":
+        red.append("readiness verdict red")
+    if row is None:
+        tok.update(red_evidence=red, why="no check-in on record — silence keeps every brake")
+        return tok
+    when = None
+    for cand in (row["created_at"], row["date"]):
+        try:
+            when = datetime.fromisoformat(str(cand)[:19]) if cand else None
+        except (TypeError, ValueError):
+            when = None
+        if when:
+            break
+    if when is not None and len(str(row["created_at"] or "")) < 11:   # a bare date: read it as its noon
+        when = when.replace(hour=12)
+    age_h = round((now - when).total_seconds() / 3600.0, 1) if when else None
+    fresh = age_h is not None and 0 <= age_h <= PERMISSION_FRESH_H
+    if row["stop_symptom"]:
+        red.append("stop symptom flagged on the last check-in")
+    positive = fresh and row["energy"] == "good" and row["sleep"] != "poor" and not row["stop_symptom"]
+    tok.update(fresh=fresh, declared=row["energy"], sleep=row["sleep"], checkin_date=row["date"],
+               age_h=age_h, red_evidence=red,
+               expires=((when + timedelta(hours=PERMISSION_FRESH_H)).isoformat(timespec="minutes") if (when and fresh) else None))
+    if red:
+        tok["why"] = "red evidence on the card: " + "; ".join(red)
+    elif not fresh:
+        tok["why"] = f"the last check-in is {age_h} h old — older than {PERMISSION_FRESH_H} h, it says nothing about today"
+    elif not positive:
+        tok["why"] = f"the check-in says legs {row['energy'] or 'unreported'}, sleep {row['sleep'] or 'unreported'} — not a positive declaration"
+    else:
+        tok["grant"] = True
+        tok["why"] = "a fresh positive check-in and no red evidence — one brake may be cancelled, never a build added"
+    return tok
+
+
 def today_readiness(db):
     """Today's check-in (if any) + the resulting assessment + today's planned session."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -5871,7 +5953,8 @@ def today_readiness(db):
         assessment = {**assessment, "done": True,
                       "action": f"Today's session is done — {ran}. Recover; nothing else scheduled."}
     return {"date": today, "checkin": checkin,
-            "assessment": assessment, "session": session}
+            "assessment": assessment, "session": session,
+            "permission": readiness_permission(db, assessment=assessment)}   # §B (0.59.0) — private only
 
 
 # ── Flask app ───────────────────────────────────────────────────────────────
@@ -6883,7 +6966,7 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             "frozen": True, "intent": True, "intent_km": True, "intent_runs": True, "km": True,
             # §P1 — the structured role/phase behind the `intent` sentence already published
             # above. Strictly less revealing than the sentence they are derived from.
-            "phase": True, "role": True,
+            "phase": True, "role": True, "km_level": True,   # §C — what a down week asks if its deload is retired
             "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
             "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
             "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,
@@ -6893,6 +6976,18 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             # 2026-08-22): `long_step_capped` prints "long-run held (+10%)", `fatigue_capped` feeds
             # the ease note, `long_capped`/`long_flat` say why a week has no distinct long run.
             "fatigue_capped": True, "long_capped": True, "long_flat": True,
+            # §P2 (0.59.0) — both denominators and where they diverge: a description of the
+            # prescription (and, on a frozen week, the km already public as `km_done`).
+            "bar": {"intent_km": True, "sheet_km": True, "training_km": True, "ratio": True, "ran_km": True,
+                    "governor_basis": True, "adherence_basis": True, "diverge": True, "note": True},
+            # §C (0.59.0) — the deload governor's read: the numbers are the prescription's own; the
+            # readiness gate and the token's reason are health-adjacent and withheld.
+            "deload": {"positional": True, "judged": True, "week": True,
+                       "block": {"start": True, "intent_km": True, "ran_km": True},
+                       "absorbed_frac": True, "absorbed_prior": True, "acwr": True, "ctl": True, "atl": True,
+                       "cap": True, "gates": {"absorbed": True, "acwr": True, "atl": True},
+                       "mode": True, "bias": {"n": True, "median_pct": True, "needs": {"n": True, "median_pct": True}},
+                       "retired": True, "offer": True, "source": True, "record_pending": True, "why": True},
             "long_step_capped": True,
             # §REST — same governor-annotation class: the day-spacing gate's honest marker, printed
             # "held to rest days — spacing kept" on the week card. Describes the prescription, not the athlete.
@@ -7101,6 +7196,9 @@ _PV_WITHHELD = {
     "track.races[].lo_hms", "track.races[].hi_hms",   # the band brackets the result too
     "track.races[].plan_id",                 # internal
     "track.overrides.rows",                  # 0.58.0 — a week's km, intent and check-in mix: private (§TR-A)
+    "readiness.permission",                  # §B (0.59.0) — the token names the check-in and the red evidence: private
+    "plan.<phase>.weeks[].deload.gates.readiness",   # §C — whether a fresh positive check-in exists: private
+    "plan.<phase>.weeks[].deload.readiness_why",     # §C — the token's own reason: private
     "track.ctl.points[].laid_km",            # §TR-A — the week's prescribed volume …
     "track.ctl.points[].ran_km",             #   … and what was run in it: private, the ratio is public
     "plan.adjustment",                       # free-text / medical context
@@ -8145,6 +8243,39 @@ def api_plan_generate():
     # §PRO14 — the UI renders THIS response directly (refreshPlan(p) skips the GET), so it must
     # carry the running engine too or the staleness banner silently can't evaluate. Annotated after
     # save_plan has already serialized the artifact, so the stamp never reaches the stored row.
+    return jsonify(_plan_for_view(plan))
+
+
+@app.post("/api/plan/deload")
+def api_plan_deload():
+    """§C (0.59.0) — the athlete's word on an offered deload retirement: {week, retire}. Only a week
+    the latest plan has JUDGED (the positional down week containing today) can be decided, once —
+    the row is write-once, so a second word is refused rather than rewritten. Both answers are
+    recorded: a "keep" stops the offer from reappearing every night."""
+    d = body()
+    ws = str(d.get("week") or "")[:10]
+    retire = bool(d.get("retire"))
+    try:
+        _date(ws)
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="week must be a Monday date (YYYY-MM-DD)"), 400
+    db = get_db()
+    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    latest = json.loads(row["plan"]) if row else {}
+    week = next((w for k, v in latest.items() if isinstance(v, dict) and isinstance(v.get("weeks"), list)
+                 for w in v["weeks"] if w.get("start") == ws and (w.get("deload") or {}).get("judged")), None)
+    if week is None:
+        return jsonify(ok=False, error="that week is not the judged down week of the latest plan"), 400
+    if db.execute("SELECT 1 FROM track_record WHERE kind='deload' AND key=?", (ws,)).fetchone():
+        return jsonify(ok=False, error="that week was already decided — the record is write-once"), 409
+    now = _now_iso()
+    _tr_write(db, "deload", ws, 0, None, None, None, None,
+              {"retired": retire, "source": "athlete", "at": now, "read": week.get("deload")}, now)
+    db.commit()
+    with _plan_lock:
+        plan = regenerate(db)
+    if not plan.get("ok"):
+        return jsonify(plan), 400
     return jsonify(_plan_for_view(plan))
 
 

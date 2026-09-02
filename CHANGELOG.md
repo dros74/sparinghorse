@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.59.0] - 2026-09-02
+
+_The engine symmetry release (ENGINE_SYMMETRY_PROPOSAL §5, decided §12): the engine has braked on
+evidence and accelerated on a schedule; from this release a scheduled brake can be cancelled by
+evidence — and only cancelled, never replaced by gas._
+
+### Added
+
+- **§C — "this deload isn't owed" (decisions (b), (c), (d)).** The periodizer keeps laying its
+  positional down weeks. A governor judges the one that contains today — its block has fully
+  elapsed, so the read is a measurement — and publishes it on the week as `deload`: `absorbed_frac`
+  (the block's actual km over its bar, P2's `intent_km`), the load ratio against the regime's cap,
+  fatigue against fitness, and whether a fresh positive check-in exists (B's token). When **all
+  four** hold the deload is not owed: the week is demoted to a **level** week — the volume the
+  trajectory carried, governor-capped like any week, quality kept off; never a build spike. The
+  load-bearing gate is the athlete's word: a busy week and an illness week are identical in the
+  activity stream, so silence keeps the deload. **Owner-confirmed first** — the week card offers
+  "retire it / keep it" and the answer is a write-once ledger row (`POST /api/plan/deload`) — and
+  **automatic** once the ledger holds ten scored 28-day forecasts with a median under-prediction of
+  20 % or more, still under every cap; the engine's own decision is then banked the same way, so a
+  token expiring mid-week cannot resurrect a deload. Goldens: additive only (the `deload` read on
+  every positional down week); nothing fires without a token, and the CLI passes none.
+
+- **§P2 — both denominators, published (symmetry decision (a)).** Every laid week carries `bar`:
+  `intent_km` (the as-laid ramp bar — the governor basis, what C's test reads) and `sheet_km` (the
+  session sheet — the adherence basis, what the athlete reads day to day), with `training_km`, the
+  ratio and a `note` wherever they diverge: a race week's sheet includes the race; a frozen week's
+  bar is what was asked when the week was first laid while its sheet is what was run; a live week
+  beyond 10 % is labelled. The week card prints the pair where they diverge. Additive: goldens gain
+  the block and lose nothing. Nothing reads it yet.
+- **§B — readiness as a bounded permission token (decision (d)).** The readiness payload carries
+  `permission`: a grant only on a check-in at most 48 h old declaring legs good and sleep not poor,
+  with no stop symptom and no red evidence on the card (a medical hold, HRV below its band, a red
+  verdict). Silence, "ok" or "heavy" grant nothing; absent telemetry never counts for or against.
+  Private only. **No behaviour change:** the engine reads it nowhere, and `det/permission` carries a
+  tripwire that goes red the day it does — C must be seen, not slipped in.
+
 ## [0.58.1] - 2026-09-02
 
 ### Fixed
