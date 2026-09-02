@@ -7,6 +7,9 @@
 #     sh prepare_env.sh                               # asks for the Cloudflare Access team + audience tag
 #     sh prepare_env.sh --team myteam --aud <64 hex>  # non-interactive
 #     sh prepare_env.sh --passphrase                  # also set SH_PASSPHRASE (skips the /setup page)
+#     sh prepare_env.sh --from-container              # read team + tag from the running console (0.60.0):
+#                                                     #   deploy once without the bypass, open the private
+#                                                     #   site through Access once, then run this
 #
 # What it does, and only this:
 #   • backs up .env to .env.bak-<stamp> (mode 600) before touching anything;
@@ -21,12 +24,13 @@
 set -eu
 
 ENV_FILE="${ENV_FILE:-.env}"
-CHECK=0; TEAM=""; AUD=""; ASK_PP=0
+CHECK=0; TEAM=""; AUD=""; ASK_PP=0; FROM_C=0; TEAM_GIVEN=0
 usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK=1 ;;
-    --team) TEAM="${2:-}"; shift ;;
+    --team) TEAM="${2:-}"; TEAM_GIVEN=1; shift ;;
+    --from-container) FROM_C=1 ;;
     --aud) AUD="${2:-}"; shift ;;
     --passphrase) ASK_PP=1 ;;
     -h|--help) usage; exit 0 ;;
@@ -51,6 +55,28 @@ replace_or_append() {                                  # $1 key, $2 value — in
 }
 shape_team() { printf '%s' "$1" | grep -Eq '^[a-z0-9][a-z0-9-]*(\.cloudflareaccess\.com)?$'; }
 shape_aud()  { printf '%s' "$1" | grep -Eq '^[0-9a-f]{64}$'; }
+
+# ── the console can say what it saw (0.60.0) — unverified claims, so the team is CONFIRMED by a human ──
+if [ "$FROM_C" = 1 ]; then
+  OUT=$(docker compose exec -T sparinghorse python SparingHorse.py access-seen 2>/dev/null) \
+    || { echo "✗ could not read from the container — is it up (docker compose ps)? On a Synology run this with sudo." >&2
+         echo "  (the console must have seen one Access token: open the private site through Cloudflare Access once, then retry)" >&2; exit 1; }
+  SEEN_TEAM=$(printf '%s\n' "$OUT" | sed -n 's/^team=//p' | head -1)
+  SEEN_AUD=$(printf '%s\n' "$OUT" | sed -n 's/^aud=//p' | head -1)
+  [ -n "$SEEN_TEAM" ] && [ -n "$SEEN_AUD" ] || { echo "✗ the console has not seen an Access token yet — open the private site through Cloudflare Access once, then retry" >&2; exit 1; }
+  if [ "$TEAM_GIVEN" = 1 ] && [ "$TEAM" != "$SEEN_TEAM" ]; then
+    echo "✗ --team '$TEAM' is not the team the console saw ('$SEEN_TEAM') — one of the two is wrong; nothing written" >&2; exit 1
+  fi
+  echo "The console saw Access team '$SEEN_TEAM' (audience tag: 64 hex). It must be YOUR team: a stranger's token would print a stranger's name here."
+  if [ "$TEAM_GIVEN" = 1 ]; then :
+  elif [ -t 0 ]; then
+    printf "Is '%s' your Cloudflare Access team? [y/N] " "$SEEN_TEAM"; read -r yn
+    case "$yn" in y|Y|yes|YES) ;; *) echo "not confirmed — nothing written"; exit 1 ;; esac
+  else
+    echo "✗ non-interactive: confirm the team by passing --team '$SEEN_TEAM'" >&2; exit 1
+  fi
+  TEAM="$SEEN_TEAM"; AUD="$SEEN_AUD"
+fi
 
 # ── decide ─────────────────────────────────────────────────────────────────────────────────────────
 PLAN=""; note() { PLAN="$PLAN  $1

@@ -47,6 +47,13 @@ the quick start; MANUAL.md covers using the app.
   shape (`--team myteam --aud <64 hex>`, or it asks; blank means no bypass and the console asks for
   its passphrase, which also works). It never prints a secret and never overwrites a value that is
   already set. Keep a copy of the new `.env` somewhere safe: the key is what decrypts the token store.
+- **Where the two values are (0.60.0 — no dashboard needed).** Deploy once without the bypass, open
+  the private site through Access once, then `sh prepare_env.sh --from-container` reads the team and
+  the audience tag the console saw and asks you to confirm the team name; `docker compose up -d`
+  recreates the container with them. They also show in Settings → System. In the Zero Trust
+  dashboard (as of 2026-09) they are under Access controls → Applications → the application →
+  **Details** ("Application Audience (AUD) Tag"); the team is the part before `.cloudflareaccess.com`
+  in the login URL.
 - **First boot.** With no passphrase in the secrets store the console serves only `/setup`. Either
   open it and set one (12+ characters), or put `SH_PASSPHRASE=…` in `.env` before the first start and
   the page never appears. `/healthz`, the static assets and the icons are the only other things

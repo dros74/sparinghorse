@@ -681,6 +681,9 @@ The **Settings** window (private container only) is where you configure the app 
   easy ceiling. Re-test rather than re-typing the same value (re-saving the same number deliberately does
   not re-freshen it). Empty = derive from your runs (the default).
 
+- - **System → Cloudflare Access** (0.60.0) — the team and audience tag the console has seen on
+  incoming Access tokens, and whether the login bypass is on. To skip the passphrase behind Access,
+  run `sh prepare_env.sh --from-container` on the host and recreate the container (DEPLOY.md §2a).
 - **Distance units** (0.58.0) — `km` or `mi`. The engine plans in kilometres whatever you choose and the
   API stays metric; this changes how every distance and pace is *shown*, on every page and every box
   (the public box follows it too). Reload after saving.

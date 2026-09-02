@@ -2983,6 +2983,11 @@ async function loadSystem(){
     ${row("Watch push", d.suunto.connected ? (d.suunto.last_push ? `pushed ${esc(when(d.suunto.last_push))}` : "connected") : "not connected")}
     ${row("Newest backup", d.backup.latest ? `${esc(d.backup.latest)} · ${age(d.backup.age_h)}` : "none yet", !d.backup.latest || (d.backup.age_h||0)>48)}
     ${row("Backups kept in", esc(d.backup.dir||""))}
+    ${row("Cloudflare Access", d.access&&d.access.bypass
+        ? `login bypass on · team ${esc(d.access.team||"")}${d.access.seen&&!d.access.matches?" · <b>the tokens seen carry a different team or tag</b>":""}`
+        : d.access&&d.access.seen
+          ? `seen: team <b>${esc(d.access.seen.team)}</b> · tag <span class="mono">${esc(d.access.seen.aud)}</span> — to skip the login, on the host: <span class="mono">sh prepare_env.sh --from-container</span> then <span class="mono">docker compose up -d</span> (DEPLOY.md §2a)`
+          : "no Access token seen on requests yet (direct, or another proxy)", d.access&&d.access.bypass&&d.access.seen&&!d.access.matches)}
     <div class="help">Backups are written after each successful nightly; ${d.backup.push?"a push hook is configured":"no push hook (SH_BACKUP_PUSH)"} — see DEPLOY.md §7.</div></div>`;
 }
 async function loadSecrets(probe, justSaved){

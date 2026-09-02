@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.0] - 2026-09-02
+
+### Added
+
+- **The console says which Cloudflare Access team and audience tag it sees.** Configuring the login
+  bypass needed two values from a dashboard that keeps moving them (on an iPad, with no developer
+  tools, there was no other way to get the tag). Now every request through Access leaves its team
+  and 64-hex audience on record — unverified claims, display only; an unverifiable token is still
+  refused — shown in Settings → System and by `python SparingHorse.py access-seen`.
+  `prepare_env.sh --from-container` reads them out of the running console and asks you to confirm
+  the team name before writing, because a stranger's token would print a stranger's team. Deploy once
+  without the bypass, open the private site through Access once, run the script, `docker compose up -d`.
+  Nothing on the public or demo box. `det/access-seen`.
+
 ## [0.59.0] - 2026-09-02
 
 _The engine symmetry release (ENGINE_SYMMETRY_PROPOSAL §5, decided §12): the engine has braked on

@@ -2408,6 +2408,81 @@ def _stc_deload_retire():
                got={**detail, "failures": fails or "none"})
 
 
+def _stc_access_seen():
+    """0.60.0 — the console records the Cloudflare Access team + audience tag a request CARRIES, so
+    the operator can configure the login bypass without a dashboard. Teeth:
+      (a) a request bearing an unverifiable token (a made-up signature) is NOT authenticated — the
+          record is display-only, never a credential;
+      (b) after it, /api/system (logged in) reports the team and the 64-hex tag, and `access_seen`
+          reads them back from `meta` in a fresh process (the CLI's path);
+      (c) a token whose audience is not 64 hex, or whose issuer is not *.cloudflareaccess.com, is
+          ignored — the record never holds junk;
+      (d) the READONLY box records nothing (the guard is off there)."""
+    import tempfile, base64 as _b64, json as _json
+    tmp = S.Path(tempfile.mkdtemp(prefix="sh-cfseen-"))
+    fails, detail = [], {}
+    PP = "correct horse battery staple"
+    saved = (S.SECRETS_DB, S.SECRETS_KEY_FILE, S._fernet, S._AUTH_ACTIVE, S.READONLY, S.DEMO,
+             S.TRUST_PROXY_AUTH, S.CF_ACCESS_TEAM, S.CF_ACCESS_AUD, dict(S._CF_SEEN))
+    def jwt(iss, aud):
+        seg = lambda d: _b64.urlsafe_b64encode(_json.dumps(d).encode()).decode().rstrip("=")
+        return f"{seg({'alg': 'RS256', 'kid': 'x'})}.{seg({'iss': iss, 'aud': aud, 'exp': 4_000_000_000})}.c2ln"
+    AUD = "ab" * 32
+    try:
+        S.SECRETS_DB = tmp / "secrets.db"; S.SECRETS_KEY_FILE = tmp / "secrets.key"; S._fernet = None
+        S._AUTH_ACTIVE, S.READONLY, S.DEMO = True, False, False
+        S.TRUST_PROXY_AUTH, S.CF_ACCESS_TEAM, S.CF_ACCESS_AUD = False, "", ""
+        S._CF_SEEN.clear()
+        S.app.config["SESSION_COOKIE_SECURE"] = False
+        S.app.secret_key = S._session_signing_key()
+        c = S.app.test_client()
+        c.post("/setup", data={"passphrase": PP, "confirm": PP})    # sets the passphrase AND logs `c` in
+        anon = S.app.test_client()                                    # no session: the token is all it carries
+        # (c) junk first, so the record cannot be "already right" by accident
+        anon.get("/api/plan", headers={"Cf-Access-Jwt-Assertion": jwt("https://fixture.cloudflareaccess.com", "not-hex")})
+        anon.get("/api/plan", headers={"Cf-Access-Jwt-Assertion": jwt("https://evil.example.com", AUD)})
+        if S._CF_SEEN:
+            fails.append(f"(c) a junk token was recorded: {S._CF_SEEN}")
+        # (a) an unverifiable token is not a login
+        r = anon.get("/api/plan", headers={"Cf-Access-Jwt-Assertion": jwt("https://fixture.cloudflareaccess.com", AUD)})
+        if r.status_code != 401:
+            fails.append(f"(a) a request with an unverifiable Access token answered {r.status_code}, not 401")
+        # (b) recorded, reported, persisted
+        if S._CF_SEEN.get("team") != "fixture" or S._CF_SEEN.get("aud") != AUD:
+            fails.append(f"(b) not recorded: {S._CF_SEEN}")
+        c.post("/login", data={"passphrase": PP})
+        r = c.get("/api/system")
+        acc = ((r.get_json() or {}).get("access") or {}) if r.status_code == 200 else {}
+        detail["system.access"] = {"seen_team": (acc.get("seen") or {}).get("team"), "bypass": acc.get("bypass")}
+        if (acc.get("seen") or {}).get("team") != "fixture" or (acc.get("seen") or {}).get("aud") != AUD or acc.get("bypass"):
+            fails.append(f"(b) /api/system does not report the seen team/tag (or claims a bypass): {acc}")
+        S._CF_SEEN.clear()                                  # a fresh process: the meta row must carry it
+        with S.app.app_context():
+            back = S.access_seen(S.get_db())
+        if not back or back.get("team") != "fixture" or back.get("aud") != AUD:
+            fails.append(f"(b) access_seen did not read the record back from meta: {back}")
+        # (d) the public box records nothing
+        S._CF_SEEN.clear(); S.READONLY = True
+        anon.get("/api/plan", headers={"Cf-Access-Jwt-Assertion": jwt("https://other.cloudflareaccess.com", AUD)})
+        if S._CF_SEEN:
+            fails.append(f"(d) the READONLY box recorded a token: {S._CF_SEEN}")
+    finally:
+        (S.SECRETS_DB, S.SECRETS_KEY_FILE, S._fernet, S._AUTH_ACTIVE, S.READONLY, S.DEMO,
+         S.TRUST_PROXY_AUTH, S.CF_ACCESS_TEAM, S.CF_ACCESS_AUD, seen0) = saved
+        S._CF_SEEN.clear(); S._CF_SEEN.update(seen0)
+        with S.app.app_context():
+            try:
+                S.set_meta(S.get_db(), "cf_access_seen", None); S.get_db().commit()
+            except Exception:
+                pass
+    return _st("det", "access-seen",
+               "0.60.0 — the Access team + audience a request carries are recorded for the operator (display "
+               "only: an unverifiable token is still 401), reported on /api/system, persisted for the CLI, junk "
+               "ignored, nothing on the public box",
+               passed=not fails, expect="recorded and reported, never a credential",
+               got={**detail, "failures": fails or "none"})
+
+
 def _stc_abuse_limits():
     """§ABUSE (0.55.1, review S2) — request-size and rate limits, driven through the real routes.
 
@@ -16434,7 +16509,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
                  lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(), lambda: _stc_limits(db),
-                 lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(),
+                 lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(), lambda: _stc_access_seen(),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),

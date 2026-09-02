@@ -6599,6 +6599,54 @@ def _auth_user():
     return None
 
 
+_CF_SEEN = {}     # 0.60.0 — the last (UNVERIFIED) Access team + audience a request carried; display only
+
+
+def _cf_observe():
+    """0.60.0 — record the Cloudflare Access team and audience tag the request carries, so the operator
+    can read them off Settings → System or `python SparingHorse.py access-seen` instead of hunting
+    for them in a dashboard. UNVERIFIED and DISPLAY-ONLY: nothing here authenticates anything —
+    `_proxy_user` still checks the signature, issuer, audience and expiry before trusting a token.
+    The issuer is the value to eyeball: a token from a stranger's team would print a stranger's name
+    here, which is why prepare_env.sh asks before writing it."""
+    tok = request.headers.get("Cf-Access-Jwt-Assertion") or request.cookies.get("CF_Authorization")
+    if not tok or tok.count(".") != 2:
+        return
+    try:
+        seg = tok.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4)))
+        iss = str(claims.get("iss") or "")
+        aud = claims.get("aud")
+        aud = aud[0] if isinstance(aud, list) and aud else aud
+        team = iss.split("//")[-1].split(".")[0] if ".cloudflareaccess.com" in iss else ""
+    except (ValueError, TypeError, AttributeError):
+        return
+    if not (team and isinstance(aud, str) and re.fullmatch(r"[0-9a-f]{64}", aud)
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]*", team)):
+        return
+    if _CF_SEEN.get("team") == team and _CF_SEEN.get("aud") == aud:
+        return
+    _CF_SEEN.update(team=team, aud=aud, at=_now_iso())
+    try:
+        db = get_db()
+        set_meta(db, "cf_access_seen", json.dumps(_CF_SEEN))
+        db.commit()
+    except sqlite3.Error:
+        pass
+
+
+def access_seen(db):
+    """The recorded team + audience (this process first, else what another process stored)."""
+    if _CF_SEEN.get("team"):
+        return dict(_CF_SEEN)
+    raw = get_meta(db, "cf_access_seen")
+    try:
+        d = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        d = None
+    return d if isinstance(d, dict) and d.get("team") else None
+
+
 @app.before_request
 def _auth_guard():
     if READONLY or DEMO or not _AUTH_ACTIVE:
@@ -6606,6 +6654,7 @@ def _auth_guard():
     p = request.path
     if p in AUTH_EXEMPT_PATHS or p.startswith(AUTH_EXEMPT_PREFIXES):
         return
+    _cf_observe()
     is_api = p.startswith("/api/")
     if not passphrase_is_set():
         if is_api:
@@ -8981,7 +9030,12 @@ def api_system():
     latest = files[-1] if files else None
     age_h = round((time.time() - latest.stat().st_mtime) / 3600, 1) if latest else None
     su = suunto_status()
-    return jsonify(ok=True, engine_version=ENGINE_VERSION, tz=(PROCESS_TZ or config().sync_tz.key),
+    seen = access_seen(db)
+    access = {"bypass": bool(TRUST_PROXY_AUTH and CF_ACCESS_TEAM and CF_ACCESS_AUD),
+              "team": CF_ACCESS_TEAM or None, "seen": seen,
+              "matches": bool(seen and CF_ACCESS_TEAM and CF_ACCESS_AUD and seen.get("aud") == CF_ACCESS_AUD
+                              and _cf_issuer().endswith(seen.get("team", "") + ".cloudflareaccess.com"))}
+    return jsonify(ok=True, engine_version=ENGINE_VERSION, tz=(PROCESS_TZ or config().sync_tz.key), access=access,
                    last_sync=last_sync,
                    sync_stale=(not last_sync) or _seconds_since(last_sync) > SCHED_STALE_HOURS * 3600,
                    sched={"last_run": get_meta(db, "sched:last_run"), "last_ok": last_ok,
@@ -10399,6 +10453,16 @@ if __name__ == "__main__":
         ok, msg = restore_db(sys.argv[2])
         print(msg)
         sys.exit(0 if ok else 1)
+    if len(sys.argv) > 1 and sys.argv[1] == "access-seen":  # CLI: python SparingHorse.py access-seen
+        # 0.60.0 — the Access team + audience the console has seen on incoming tokens, for
+        # prepare_env.sh --from-container. Unverified claims, printed for the operator to confirm.
+        with app.app_context():
+            seen = access_seen(get_db())
+        if not seen:
+            print("none seen yet — open the private console through Cloudflare Access once, then retry")
+            sys.exit(1)
+        print(f"team={seen['team']}\naud={seen['aud']}\nat={seen.get('at', '')}")
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "passphrase":  # CLI: python SparingHorse.py passphrase --set | --reset
         # 0.56.0 — runs against the same store the server reads on every request, so it takes effect
         # at once: no restart. Inside the container: `docker compose exec sparinghorse python
