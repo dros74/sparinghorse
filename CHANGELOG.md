@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.1] - 2026-09-02
+
+### Fixed
+
+- **The limits block rendered in the week card's number gutter** — one word per line down a 30 px
+  column — on every opened week since 0.58.0. The card is a three-column grid and the block was
+  its last direct child; it now spans the grid. Seen first on the live plan after the deploy —
+  the browser suite had never opened the block. It measures it now.
+
 ## [0.60.0] - 2026-09-02
 
 ### Added

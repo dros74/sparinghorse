@@ -1153,7 +1153,7 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 }
 
 /* §LIMITS (0.58.0) — the week's limits strip */
-details.limits{margin:8px 0 2px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:var(--surface)}
+details.limits{grid-column:1 / -1;margin:8px 0 2px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:var(--surface)}   /* 0.60.1 — the week card is a 30px-gutter grid; the block spans it, or it lands in the gutter one word per line */
 details.limits > summary{cursor:pointer;list-style:none;font-size:12px}
 details.limits > summary::-webkit-details-marker{display:none}
 details.limits .limhead b{color:var(--accent-ink)}

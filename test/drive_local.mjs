@@ -75,6 +75,13 @@ async function runFull() {
     { timeout: 15000 });
   ok('objective pill rendered (Demo Marathon)', /Demo Marathon/.test(await page.locator('#objbar').innerText()));
   ok('plan phase bar rendered', await page.locator('#plan .phaseseg').count() >= 1);
+  // 0.60.1 — the limits block must span the week card, not fall into its 30px number gutter (a
+  // real defect the owner saw first: every word on its own line). Open the first one and measure it.
+  await page.evaluate(() => { const d = document.querySelector('#plan details.limits'); if (d) d.open = true; });
+  const limBox = await page.locator('#plan details.limits').first().boundingBox().catch(() => null);
+  const wkBox = await page.locator('#plan .wk').first().boundingBox().catch(() => null);
+  ok(`the limits block spans the week card (${limBox ? Math.round(limBox.width) : '—'} of ${wkBox ? Math.round(wkBox.width) : '—'} px)`,
+     !!(limBox && wkBox && limBox.width > wkBox.width * 0.8));
 
   // first-run card must be HIDDEN on a configured instance (token-or-data + objective)
   ok('first-run card hidden when configured', await page.locator('#firstrun .firstrun').count() === 0);
