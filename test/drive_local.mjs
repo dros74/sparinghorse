@@ -23,6 +23,9 @@ const ok = (name, cond) => { cond ? (pass++, console.log('  ✓ ' + name))
 const browser = await chromium.launch();
 // bypassCSP: axe-core is injected as an inline script (0.56.1); the CSP itself is pinned by det/csp-worker
 const page = await browser.newPage({ viewport: { width: 1280, height: 1700 }, bypassCSP: true });
+// 0.57.0 — the analytics sections are <details>, closed on a fresh device. The flows below read and
+// hit-test what is inside them, so every page load starts with them remembered as open.
+await page.addInitScript(() => { try { for (const id of ['sec-shape', 'sec-effort', 'sec-zones', 'sec-ff', 'sec-vol', 'sec-drift', 'sec-track', 'sec-health']) localStorage.setItem('sh-open-' + id, '1'); } catch (e) {} });
 const errors = [];
 page.on('pageerror', e => errors.push(String(e)));
 
@@ -46,8 +49,9 @@ async function axeCheck(label, pg = page) {
   if (other.length) console.log(`      (axe ${label}: ${other.map(v => v.id + '×' + v.n).join(', ')} — informational)`);
 }
 async function axeThemes(label) {
-  for (const t of ['dark', 'aurora', 'light']) {
-    await page.locator(`.swatch[data-theme="${t}"]`).click(); await page.waitForTimeout(300);
+  // 0.57.0: one button cycles auto → dark → light → auto; the run starts on auto (light in headless)
+  for (const t of ['dark', 'light', 'auto']) {
+    await page.locator('#themeBtn').click(); await page.waitForTimeout(300);
     await axeCheck(`${label} · ${t}`);
   }
 }
@@ -412,7 +416,7 @@ async function runFull() {
       });
     };
     const out = {};
-    const sw = document.querySelector('.swatch');                                  // 30×9 visual
+    const sw = document.querySelector('#themeBtn');                                // 0.57.0: a ≥28px button
     out.swatch = probe(sw, [[0, 0], [0, -11], [0, 11]]);
     const q = [...document.querySelectorAll('#zones .qhint')].find(e => e.offsetParent);   // 15×15
     out.qhint = q ? probe(q, [[0, 0], [0, -11], [0, 11], [-11, 0], [11, 0]]) : null;
@@ -434,7 +438,7 @@ async function runFull() {
     out.hrange = hb.map(b => probe(b, [[0, 0], [0, -11], [0, 11]]));
     return out;
   });
-  ok(`theme swatch hittable 11px beyond its 9px-tall box (${hits.swatch})`,
+  ok(`theme button hittable across its box (${hits.swatch})`,
      hits.swatch.every(v => v === 'self'));
   ok(`? hint hittable 11px out in all four directions (${hits.qhint})`,
      !!hits.qhint && hits.qhint.every(v => v === 'self'));
@@ -446,11 +450,11 @@ async function runFull() {
 
   // ── UX-11: the browser chrome follows the theme, and the small repairs ────
   const chrome0 = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
-  await page.locator('.swatch[data-theme="dark"]').click();
+  await page.locator('#themeBtn').click();   // auto → dark (0.57.0: one button cycles the themes)
   const chrome1 = await page.evaluate(() => ({
     meta: document.querySelector('meta[name="theme-color"]').content,
     man: document.querySelector('link[rel="manifest"]').getAttribute('href') }));
-  await page.locator('.swatch[data-theme="light"]').click();   // leave the run in Daylight
+  await page.locator('#themeBtn').click(); await page.locator('#themeBtn').click();   // → light → auto: leave the run in Daylight
   ok(`theme-color starts on Daylight (${chrome0})`, chrome0 === '#f4f1ea');
   ok(`theme chrome follows the switch (${chrome1.meta} · ${chrome1.man})`,
      chrome1.meta === '#191a1d' && (chrome1.man || '').includes('theme=dark'));
@@ -548,6 +552,20 @@ async function runFull() {
     holds: weekHoldsToday({ start: '2026-09-21' }, '2026-09-27'),
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone }));
   await nzCtx.close();
+  // 0.57.0 — the desktop section rail and the Today page
+  ok('the desktop section rail lists the sections (≥8 links)', await page.locator('nav.rail a').count() >= 8);
+  await page.locator('nav.rail a[data-sec="sec-track"]').click(); await page.waitForTimeout(400);
+  ok('a rail link opens its (closed) section', await page.$eval('#sec-track', d => d.open));
+  ok('a fresh device sees the analytics closed (details, no open by default)',
+     await page.evaluate(() => { localStorage.clear(); return [...document.querySelectorAll('details.section')].length; }) >= 8);
+  await page.goto(BASE + '/today', { waitUntil: 'networkidle' }); await page.waitForTimeout(800);
+  ok('/today shows the readiness card and the check-in', await page.locator('#readiness .statuscard').count() === 1 && await page.locator('#ciBtn').count() === 1);
+  ok('/today carries the why-this-session line', await page.locator('.whyline').count() === 1);
+  ok('/today shows no plan, no analytics, no latest-run tile', await page.evaluate(() =>
+     ['#sec-plan', '#sec-recent', '#sec-shape', '#sec-track'].every(sel => { const e = document.querySelector(sel); return !e || e.offsetParent === null; })));
+  ok('/today links back to the dashboard', (await page.locator('#todayLink').getAttribute('href')) === '/');
+  await axeCheck('today');
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
   await axeCheck('dashboard'); await axeThemes('dashboard');
   await page.click('#settingsBtn'); await page.waitForTimeout(800); await axeCheck('settings modal');
   await page.keyboard.press('Escape'); await page.waitForTimeout(200);
@@ -618,7 +636,7 @@ async function runFull() {
     const read = () => getComputedStyle(t).filter;
     const light = read();
     document.documentElement.dataset.theme = 'dark'; const dark = read();
-    document.documentElement.dataset.theme = 'aurora'; const aurora = read();
+    const aurora = dark;   // 0.57.0: two themes
     document.documentElement.dataset.theme = 'light'; t.remove();
     return { light, dark, aurora };
   });
@@ -819,9 +837,12 @@ async function runPublic() {
   const chip = await page.evaluate(() => {
     const e = document.querySelector('#scFresh'); return e ? e.textContent.trim() : ''; });
   ok('public readiness card carries no sync age (the household routine stays private)', chip === '');
-  await page.locator('.swatch[data-theme="dark"]').click();
+  await page.locator('#themeBtn').click();   // auto → dark (0.57.0: one button cycles the themes)
   const tc = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
   ok('theme-color follows the switch on the public box too', tc === '#191a1d');
+  ok('0.57.0 — the public box opens on the track record (ledger-first, open)', await page.evaluate(() => {
+    const t = document.getElementById('sec-track'), o = document.getElementById('objbar');
+    return !!t && !!o && t.open === true && o.nextElementSibling === t; }));
   await page.screenshot({ path: `${SHOTS}/10-public.png`, fullPage: true });
   await axeCheck('public'); await axeThemes('public');
 }

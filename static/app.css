@@ -1,6 +1,7 @@
   /* House design system tokens (DESIGN.md §2.3) — apps reference TOKEN NAMES only, never raw hex,
      so one data-theme switch re-skins the whole app. Light/Daylight is the CSS base (:root) so a
-     fresh load (JS off / pre-script) is light; Dark/Charcoal + Aurora/Electric are overrides. The
+     fresh load (JS off / pre-script) is light; Dark/Charcoal is the override (0.57.0: the third theme,
+     Aurora, is gone — follow-system plus one alternate). The
      inline <head> script restores the saved preference per origin before first paint. Legacy aliases
      (--surface-2/--terra/--ok-bright) map onto the canonical tokens so existing rules keep working. */
   :root{   /* Daylight — warm paper, terracotta */
@@ -44,20 +45,6 @@
   @media (prefers-reduced-motion: reduce){
     *,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important;
       animation-iteration-count:1!important}
-  }
-
-  [data-theme="aurora"]{   /* Electric — deep indigo, violet→cyan accents, neon signals */
-    --bg:#121226; --surface:#1c1d3e; --surface2:#262752; --line:#3a3c74;
-    --text:#eef0ff; --muted:#a2a6dc; --accent:#7b61ff; --accent2:#28d6ee;
-    --accent-ink:#b1a6ff; --warn-ink:#ffc24d; --ok-ink:#22e3a6;   /* 0.56.1: the violet is 3.3:1 on surface2 as text; lifted for small type */
-    --ok:#22e3a6; --warn:#ffc24d; --danger:#ff5d8a;
-    --readybg:#12b39a; --readybg2:#6bc6b2;   /* neon stays bright: dark ink + a LIFTED bottom stop */
-    --readyamber:var(--warn); --readyamber2:#ffd07d;   /* white-mix 22% */
-    --readyred:var(--danger); --readyred2:#ff7f9e;   /* white-mix 18% */
-    --onready:#121226;   /* dark indigo ink on the neon gradient */
-    --onacc:#0b0b18;   /* 0.56.1: white on the violet was 4.2:1; the deepest indigo clears 4.5 */
-    --z1:#7c8597; --z2:#3f7fd0; --z3:var(--ok); --z4:var(--warn); --z5:var(--danger);   /* HR intensity bands (UX-6) */
-    --surface-2:var(--surface2); --terra:var(--accent); --ok-bright:var(--ok);
   }
   *{box-sizing:border-box}
   html,body{margin:0}
@@ -119,16 +106,7 @@
   .hublink{position:fixed;top:8px;left:16px;z-index:50;font-family:var(--mono);font-size:11px;
     letter-spacing:.14em;text-transform:uppercase;color:var(--muted);text-decoration:none}
   .hublink:hover{color:var(--accent)}
-  .themes{display:inline-flex;gap:8px}
-  .swatch{width:30px;height:12px;border-radius:2px;border:1px solid var(--line);padding:0;
-    cursor:pointer;opacity:.55;position:relative;background:var(--sw);transition:opacity .12s}
-  .swatch:hover,.swatch[aria-pressed="true"]{opacity:1}
-  .swatch[aria-pressed="true"]::after{content:"";position:absolute;left:0;right:0;bottom:-5px;
-    height:2px;background:var(--accent);border-radius:2px}
-  /* UX-10 — the 30×9 swatch projects a transparent 30×25 hit area (the touch floor is 24px);
-     vertical-only, so the three swatches' hit areas never overlap each other */
-  .swatch::before{content:"";position:absolute;left:0;right:0;top:-8px;bottom:-8px}
-
+  .themes{display:inline-flex;gap:8px}    cursor:pointer;opacity:.55;position:relative;background:var(--sw);transition:opacity .12s}
   .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
   @media(max-width:880px){.grid{grid-template-columns:repeat(2,1fr)}}
   @media(max-width:520px){.grid{grid-template-columns:1fr}}
@@ -212,12 +190,7 @@
   .actbg svg{position:absolute;inset:0;width:100%;height:100%}
   /* low-contrast so the tile text stays readable */
   .actbg .proffill{fill:color-mix(in oklab,var(--accent),transparent 94%);
-    stroke:color-mix(in oklab,var(--accent),transparent 78%);stroke-width:1}
-  /* Aurora's deep-indigo surface nearly swallows the faint accent area-fill — lift it toward white
-     so the shade under the trace reads a touch lighter than the background (not just more violet) */
-  [data-theme="aurora"] .actbg .proffill{fill:color-mix(in oklab,color-mix(in oklab,var(--accent),#fff 30%),transparent 86%)}
-  [data-theme="aurora"] .tilebg .proffill{fill:color-mix(in oklab,color-mix(in oklab,var(--accent),#fff 30%),transparent 84%)}
-  .actbg .avgline{stroke:var(--muted);stroke-width:1;stroke-dasharray:5 4;opacity:.4}
+    stroke:color-mix(in oklab,var(--accent),transparent 78%);stroke-width:1}  .actbg .avgline{stroke:var(--muted);stroke-width:1;stroke-dasharray:5 4;opacity:.4}
   /* hovered metric traced on top of the locked area — value-coloured, no fill; non-scaling so the
      stretched viewBox doesn't make the stroke uneven */
   .actbg .profline{fill:none;stroke-width:1;vector-effect:non-scaling-stroke;
@@ -274,13 +247,9 @@
   .actmap .leaflet-container{height:100%;background:var(--surface-2);font-family:var(--sans)}
   /* UX-11 — OSM tiles are drawn for a light page; on the dark themes a white map glares. Filter
      the TILES only: the route line and markers are ours and already read the theme's tokens */
-  [data-theme="dark"] .actmap .leaflet-tile{filter:brightness(.72) invert(1) hue-rotate(185deg) saturate(.4) contrast(.92)}
-  [data-theme="aurora"] .actmap .leaflet-tile{filter:brightness(.68) invert(1) hue-rotate(215deg) saturate(.38) contrast(.88)}
-  [data-theme="dark"] .actmap .leaflet-control-attribution,
-  [data-theme="aurora"] .actmap .leaflet-control-attribution{
+  [data-theme="dark"] .actmap .leaflet-tile{filter:brightness(.72) invert(1) hue-rotate(185deg) saturate(.4) contrast(.92)}  [data-theme="dark"] .actmap .leaflet-control-attribution{
     background:color-mix(in oklab,var(--surface),transparent 15%);color:var(--muted)}
-  [data-theme="dark"] .actmap .leaflet-control-attribution a,
-  [data-theme="aurora"] .actmap .leaflet-control-attribution a{color:var(--accent)}
+  [data-theme="dark"] .actmap .leaflet-control-attribution a{color:var(--accent)}
   /* cross-training note — shown when the most-recent activity isn't a run */
   .crossnote{color:var(--muted);font-size:11.5px;line-height:1.5;margin-top:12px;
     padding-top:9px;border-top:1px dashed var(--line)}
@@ -377,11 +346,7 @@
   .statuscard .sc-fresh:empty{display:none}
   /* Past the nightly's own staleness window the chip stops being a footnote and says so. */
   .statuscard .sc-fresh.stale{color:var(--onready);font-weight:600}
-  .statuscard .sc-fresh.stale::before{content:"⚠ "}
-  .statuscard .sc-wx{display:inline-flex;gap:12px;margin-left:auto}
-  .statuscard .sc-wx .wxc{display:inline-flex;align-items:center;gap:4px;color:color-mix(in oklab,var(--onready),transparent 8%)}
-  .statuscard .sc-wx .wxk{opacity:.6;font-size:11px;letter-spacing:.06em}
-  /* readiness ⨉ chronic-load ⨉ durability: the verdict card takes the whole row; the two trackers
+  .statuscard .sc-fresh.stale::before{content:"⚠ "}  /* readiness ⨉ chronic-load ⨉ durability: the verdict card takes the whole row; the two trackers
      share the row below, half each (0.32.1 — three-across read crowded) */
   .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch}
   .rgrid>#readiness{grid-column:1 / -1}
@@ -520,7 +485,7 @@
   .phases{display:flex;gap:3px;margin:6px 0 4px;height:34px;border-radius:8px;overflow:hidden}
   .phaseseg{display:flex;flex-direction:column;justify-content:center;align-items:center;
     color:var(--text);font-family:var(--mono);font-size:11px;text-align:center;padding:0 4px;
-    background:color-mix(in oklab,var(--accent),var(--surface-2) var(--mix))}
+    background:color-mix(in oklab,var(--accent),var(--surface-2) max(var(--mix),40%))}   /* 0.57.0: the first segment mixed only 20% surface — 4.3:1 for the dark label once the opacity dimming went; 40% clears 4.5 */
   .phaseseg b{font-size:11px}
   /* the phase bar is a selector: each segment reveals its own phase's weeks below */
   /* 0.56.1: the inactive state used opacity, which halves the label's contrast; it is a desaturated fill now, and the active phase keeps its ring */
@@ -529,7 +494,7 @@
   .phaseseg.active{filter:none;box-shadow:inset 0 0 0 2px var(--accent)}
   /* dark themes: the fill is clamped toward the surface so the light label clears 4.5:1 on every segment (the first
      segments mixed only 20% surface into a bright accent, which no ink reads on); the phase's hue still shows */
-  [data-theme="dark"] .phaseseg,[data-theme="aurora"] .phaseseg{background:color-mix(in oklab,var(--accent),var(--surface-2) max(var(--mix),58%))}
+  [data-theme="dark"] .phaseseg{background:color-mix(in oklab,var(--accent),var(--surface-2) max(var(--mix),58%))}
   /* only the active phase's weeks are shown; the rest live behind their bar segment */
   .phasepanel{display:none}
   .phasepanel.active{display:block}
@@ -996,25 +961,7 @@
      rows the secrets box alone can exceed 86vh, which collapsed the old #settings-only scroller
      to zero height — nothing scrolled and everything below the keys was unreachable. */
   .modal-body{overflow:auto;flex:1 1 auto;min-height:0}
-  #settings{padding:20px 22px}
-  /* Weather city picker — chips + typeahead, replaces the raw lat/lon string */
-  .wxchips{display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 8px}
-  .wxchip{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);
-    border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;font-size:13px}
-  .wxchip b{font-family:var(--mono);font-size:11px;letter-spacing:.08em;color:var(--muted)}
-  .wxchip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;
-    line-height:1;padding:0 2px;border-radius:6px}
-  .wxchip button:hover{color:var(--danger)}
-  .wxsearchrow{display:flex;gap:8px}
-  .wxsearchrow input{flex:1}
-  .wxresults{list-style:none;margin:6px 0 0;padding:0;border:1px solid var(--line);border-radius:8px;
-    overflow:hidden}
-  .wxresults:empty{display:none}
-  .wxresults li{padding:8px 11px;cursor:pointer;font-size:13px;border-top:1px solid var(--line)}
-  .wxresults li:first-child{border-top:none}
-  .wxresults li:hover{background:var(--surface-2)}
-  .wxresults .sub{color:var(--muted);font-size:12px}
-  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
+  #settings{padding:20px 22px}    border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 11px;font-size:13px}  .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
   .tilefail{font-style:normal}
   .tilefail .tf-retry{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);font-style:normal}
@@ -1114,20 +1061,7 @@
     --accent2: oklch(0.72 0.17 135);
     --accent3: oklch(0.72 0.17 225);
     --accent4: oklch(0.72 0.17 315);
-  }
-  /* Aurora keeps its OWN identity. The palette :root above (equal specificity, later in source) would
-     otherwise win over the original [data-theme="aurora"] block and repaint Aurora terracotta — so we
-     re-assert the four category hues HERE. TRUE SQUARE: anchored at Aurora's brand violet (~292) and
-     stepped exactly 90deg (292/112/202/22). Lifted to L0.78/C0.21 (brighter than the other themes'
-     0.72/0.185) so the hues read neon on the deep-indigo ground rather than muddy. */
-  [data-theme="aurora"]{
-    --accent1: oklch(0.78 0.21 292);     /* violet — brand */
-    --accent:  var(--accent1);
-    --accent2: oklch(0.78 0.21 112);     /* green */
-    --accent3: oklch(0.78 0.21 202);     /* cyan/blue */
-    --accent4: oklch(0.78 0.21 22);      /* coral */
-  }
-  /* Current shape tiles: VO2max(terracotta) / Fitness(green) / Fatigue(blue) / Form(magenta).
+  }  /* Current shape tiles: VO2max(terracotta) / Fitness(green) / Fatigue(blue) / Form(magenta).
      Keyed by the tile's data-m METRIC IDENTITY (ratified 0.30.0) — not :nth-child, which silently
      re-hued every tile the day a tile was added, dropped or reordered. */
   #tiles .tile[data-m="vo2max"]{ --accent: var(--accent1); }
@@ -1180,8 +1114,40 @@
 .demobar-btn:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
 /* 0.56.1 — week segments in the dark themes: the strip mixes only 30% surface into the phase accent, and the
-   light label read at 3.4:1 (Charcoal) / 2.9:1 (Aurora) on the selected week; clamp the fill toward the surface
+   light label read at 3.4:1 on the selected week; clamp the fill toward the surface
    as the phase bar does. Last in the file on purpose: it must outrank .weekseg[aria-pressed] above. */
-[data-theme="dark"] .weekseg,[data-theme="aurora"] .weekseg,
-[data-theme="dark"] .weekseg[aria-pressed="true"],[data-theme="aurora"] .weekseg[aria-pressed="true"]{
+[data-theme="dark"] .weekseg,[data-theme="dark"] .weekseg[aria-pressed="true"]{
   background:color-mix(in oklab,var(--accent),var(--surface-2) 58%)}
+
+/* 0.57.0 — the theme control: one button (system → dark → light) instead of three 30×9 swatches */
+.themebtn{font:inherit;font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;min-height:28px;
+  padding:4px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--muted);cursor:pointer}
+.themebtn:hover{color:var(--text);border-color:var(--muted)}
+
+/* 0.57.0 — the Today page: the readiness card, the session and the check-in, nothing else */
+[data-page="today"] #sec-plan,[data-page="today"] #sec-recent,[data-page="today"] #sec-runs,
+[data-page="today"] details.section,[data-page="today"] #firstrun,[data-page="today"] #dqbanner,
+[data-page="today"] .acwrcard,[data-page="today"] .effcard,[data-page="today"] .durcard,
+[data-page="today"] #syncBtn,[data-page="today"] #backfillBtn,[data-page="today"] #planBtn{display:none!important}
+[data-page="today"] .rgrid{grid-template-columns:1fr}
+[data-page="today"] #sec-readiness{display:block!important}
+.whyline{margin:10px 0 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);font-size:13px;line-height:1.5}
+.whyline b{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-right:6px}
+
+/* 0.57.0 — the analytics sections are <details>: the summary is the heading, the marker is a small chevron */
+details.section > summary{list-style:none;cursor:pointer;display:flex;align-items:center;gap:8px}
+details.section > summary::-webkit-details-marker{display:none}
+details.section > summary::before{content:"▸";font-family:var(--mono);font-size:12px;color:var(--muted);transition:transform .15s}
+details.section[open] > summary::before{transform:rotate(90deg)}
+details.section > summary h2{margin:0;display:inline}
+details.section > summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+
+/* 0.57.0 — the desktop section rail (review U6): fixed at the left on wide screens, absent elsewhere */
+.rail{display:none}
+@media (min-width:1180px){
+  .rail{display:flex;flex-direction:column;gap:2px;position:fixed;left:16px;top:96px;width:150px;z-index:40}
+  .rail a{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-decoration:none;
+    padding:5px 8px;border-left:2px solid transparent;border-radius:0 4px 4px 0;line-height:1.3}
+  .rail a:hover,.rail a.on{color:var(--text);border-left-color:var(--accent);background:var(--surface)}
+  .rail a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+}

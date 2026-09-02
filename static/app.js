@@ -49,20 +49,28 @@ const REDUCE = () => !!(window.matchMedia && window.matchMedia("(prefers-reduced
 const scrollToEl = (el, block="start") => { if(el) el.scrollIntoView({behavior: REDUCE()?"auto":"smooth", block}); };
 const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));  // HTML-escape before innerHTML
 
-// theme switcher
-const themes = $("#themes");
-const SH_THEME_BG = window.SH_THEME_BG || {light:"#f4f1ea",dark:"#191a1d",aurora:"#121226"};   // each theme's --bg
-function paintTheme(){ const t=document.documentElement.dataset.theme;
-  themes.querySelectorAll("button").forEach(b=>b.setAttribute("aria-pressed", b.dataset.theme===t));
+// theme switcher — 0.57.0: one button cycling auto (follow the system) → dark → light. "auto" stores
+// nothing and re-reads prefers-color-scheme; a saved choice wins until the cycle returns to auto.
+const SH_THEME_BG = window.SH_THEME_BG || {light:"#f4f1ea",dark:"#191a1d"};   // each theme's --bg
+const themeBtn = $("#themeBtn");
+const systemTheme = () => (window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+function themeChoice(){ try{ const s=localStorage.getItem("sh-theme"); return (s==="dark"||s==="light") ? s : "auto"; }catch(e){ return "auto"; } }
+function paintTheme(){
+  const choice=themeChoice(), t=choice==="auto" ? systemTheme() : choice;
+  document.documentElement.dataset.theme=t;
+  if(themeBtn){ themeBtn.textContent = "Theme · "+(choice==="auto"?"auto":choice==="dark"?"charcoal":"daylight");
+    themeBtn.setAttribute("aria-label", choice==="auto" ? "Theme: follows the system" : `Theme: ${choice==="dark"?"Charcoal":"Daylight"}`); }
   // UX-11 — the browser chrome follows the theme: the tab/PWA title-bar colour, and the manifest
   // link a later install reads (the shell's head script does the same two writes at parse time)
   const mc=document.querySelector('meta[name="theme-color"]');
   if(mc) mc.setAttribute("content", SH_THEME_BG[t]||SH_THEME_BG.light);
   const mf=document.querySelector('link[rel="manifest"]');
   if(mf) mf.setAttribute("href", "/manifest.webmanifest?theme="+t); }
-themes.addEventListener("click", e=>{ const b=e.target.closest("button"); if(!b)return;
-  document.documentElement.dataset.theme=b.dataset.theme;
-  try{localStorage.setItem("sh-theme",b.dataset.theme)}catch(e){} paintTheme(); });
+if(themeBtn) themeBtn.addEventListener("click", ()=>{
+  const next = {auto:"dark", dark:"light", light:"auto"}[themeChoice()];
+  try{ if(next==="auto") localStorage.removeItem("sh-theme"); else localStorage.setItem("sh-theme",next); }catch(e){}
+  paintTheme(); });
+if(window.matchMedia) matchMedia("(prefers-color-scheme: dark)").addEventListener("change", ()=>{ if(themeChoice()==="auto") paintTheme(); });
 paintTheme();
 
 // `m` is the tile's metric identity ("vo2max"/"fitness"/"fatigue"/"form") — the category palette
@@ -290,11 +298,6 @@ async function loadWeekly(){
   WEEKLY_MAX = Math.max(...WEEKLY_ALL.map(x=>x.km), 1);
   renderWeekly();
   wireWeeklyDrag();
-}
-
-async function loadWeather(){
-  try{ WX = await getJSON("/api/weather"); }catch(e){ WX=null; }
-  if(RDY) renderReadiness(RDY);   // fold the three-city forecast into the readiness card footer
 }
 
 // Resilient sync POST: a long backfill can exceed the gateway timeout and return an HTML error page,
@@ -803,15 +806,7 @@ function plannedSession(s, easyPace){
     </div>
     ${actLine}
     <div class="muted" style="font-size:12px;margin-top:6px">${esc(noteTxt)}</div>${q?workoutCard(s,true):""}</div>`;
-}
-// the configured cities' forecast, folded into the readiness card footer (white on the gradient)
-function wxFootHtml(){
-  if(!WX||!WX.cities||!WX.cities.length) return "";
-  return `<span class="sc-wx" title="Current conditions in the cities you've configured">`+
-    WX.cities.map(c=>`<span class="wxc"><span class="wxk">${esc((c.key||"").toUpperCase())}</span> ${c.icon||""} ${c.temp==null?"–":c.temp+"°"}</span>`).join("")+
-    `</span>`;
-}
-// §3 status card — "lead with the verdict": gradient panel (state-coloured), glass pill, big verdict.
+}// §3 status card — "lead with the verdict": gradient panel (state-coloured), glass pill, big verdict.
 // UX-4 — how old is the data behind this verdict? The readiness card was happy to render a confident
 // green off a sync that failed two nights ago, and the only hint was a timestamp in the page footer
 // nobody scrolls to. The chip reads `last_sync` from /healthz (which TECH-8 records) and turns amber
@@ -833,7 +828,7 @@ function paintFreshness(){
   el.classList.toggle("stale", hrs > SH_STALE_HOURS);
   el.title = `Last successful sync: ${then.toLocaleString()}`;
 }
-function statusCard(a, foot, wx){
+function statusCard(a, foot){
   const v=a.verdict||"green";
   const orbs=`<span class="sc-orb" style="top:-50px;right:-40px;width:180px;height:180px"></span>`+
              `<span class="sc-orb" style="bottom:-60px;left:-30px;width:150px;height:150px;background:color-mix(in oklab,var(--onready),transparent 95%)"></span>`;
@@ -844,16 +839,27 @@ function statusCard(a, foot, wx){
       </div>
       <div class="sc-verdict">${esc(a.action||v)}</div>
       ${a.halt?`<div class="halt">⚠ Plan halted — clear it with your doctor before resuming.</div>`:""}
-      ${(foot||wx||(!SH_READONLY&&SYNC_LAST))?`<div class="sc-foot">${foot?`<span>${esc(foot)}</span>`:""}<span class="sc-fresh" id="scFresh"></span>${wx||""}</div>`:""}
+      ${(foot||(!SH_READONLY&&SYNC_LAST))?`<div class="sc-foot">${foot?`<span>${esc(foot)}</span>`:""}<span class="sc-fresh" id="scFresh"></span></div>`:""}
     </div>`;
+}
+// 0.57.0 (§5.1) — one line saying why THIS session, rendered from the plan's own fields: the phase and
+// week the session sits in, what it is, and the fitness component it builds. Only on the Today page.
+const PHASE_NAMES={rebase:"Re-base",base:"Base",build:"Build",peak:"Peak",taper:"Taper",race:"Race week",maintenance:"Maintenance"};
+function whyLine(s){
+  if(!s) return `<div class="whyline"><b>Why nothing:</b> no plan covers today — add a race in the Objectives panel and generate a plan.</div>`;
+  const pk=String(s.pk||""), phase=PHASE_NAMES[pk] || (pk.startsWith("bridge")?"Bridge":pk.startsWith("peak")?"Peak":pk.startsWith("taper")?"Taper":pk?pk:"");
+  const where = phase ? `${phase}${s.week?`, week ${esc(String(s.week))}`:""}` : "";
+  const what = s.kind==="rest" ? "a rest day" : `${esc(String(s.kind||"run").replace(/_/g," "))}${s.km?` · ${esc(String(s.km))} km`:""}${s.pace_zone?` at ${esc(String(s.pace_zone))}`:""}`;
+  const comp = s.component && COMPT[s.component] ? COMPT[s.component].split(/(?<=\.)\s/)[0] : (s.kind==="rest" ? "Recovery is part of the plan — adaptation happens between the sessions." : "");
+  return `<div class="whyline"><b>Why this session:</b> ${where?where+" — ":""}${what}.${comp?" "+esc(comp):""}${s.note?` <span class="muted">${esc(String(s.note))}</span>`:""}</div>`;
 }
 function renderReadiness(d){
   RDY=d;
-  setTimeout(paintFreshness, 0);            // the chip outlives each re-render of the card                                   // cache so loadWeather can re-render with the forecast folded in
+  setTimeout(paintFreshness, 0);            // the chip outlives each re-render of the card
   if(d.zones) ZONESD=d.zones;              // §W1 — current zones ride along (private), so the card never races the zones fetch
   const a=d.assessment||{};
   if(SH_READONLY || a.public){   // public view: verdict card + planned session only
-    $("#readiness").innerHTML = statusCard(a, "", wxFootHtml()) + plannedSession(d.session);
+    $("#readiness").innerHTML = statusCard(a, "") + plannedSession(d.session) + (SH_PAGE==="today" ? whyLine(d.session) : "");
     return;
   }
   const c=d.checkin||{};
@@ -871,7 +877,7 @@ function renderReadiness(d){
                         : "Note (optional)";
   const foot=[(a.reasons||[]).join(" · "), hrvTxt, aiLine].filter(Boolean).join("  ·  ");
   $("#readiness").innerHTML=
-    statusCard(a, foot, wxFootHtml()) +
+    statusCard(a, foot) +
     plannedSession(d.session) +
     `<div class="checkin">
       ${/* §H7 — an unset dropdown reads "—", never a pre-selected "ok". Showing "Legs: ok" on a day
@@ -883,6 +889,7 @@ function renderReadiness(d){
       <label class="stop" title="Stop-the-run exertional symptom (chest pain, breathlessness, dizziness, fainting) — halts the plan"><input type="checkbox" id="ci_stop" ${c.stop_symptom?"checked":""}> I had to stop / chest symptom</label>
       <button class="primary" id="ciBtn" style="font-size:13px;padding:7px 12px">Save check-in</button>
     </div>`;
+  if(SH_PAGE==="today") $("#readiness").insertAdjacentHTML("beforeend", whyLine(d.session));   // 0.57.0 — the why line, on the Today page only
   $("#ciBtn").addEventListener("click", async ()=>{
     const btn=$("#ciBtn");
     const body={energy:$("#ci_energy").value, sleep:$("#ci_sleep").value,
@@ -1179,7 +1186,7 @@ document.addEventListener("click", e=>{
   t.classList.toggle("open", c.classList.toggle("open"));
 });
 let AI={narration:true,parsing:true,judgment:false};   // 0.56.0 §S5 — the switches, from /healthz
-let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null,
+let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, RDY=null,
     ZONESD=null;   // §W1 — current training_zones payload (rides /api/readiness + /api/zones); null on public
 let TOKEN_OK=false, HAS_SHAPE=false;   // first-run signals (from /healthz + /api/shape)
 const _frSeen={tok:false, shape:false, obj:false};   // gate the card until all 3 report once
@@ -2730,36 +2737,13 @@ if(_hform) _hform.addEventListener("submit", async e=>{
 
 // ── Settings (private-only, in a modal) — edit the non-secret personalization that otherwise comes
 // from SH_* env. Values are stored in the DB (meta) and override env; secrets are never shown/settable.
-// "Name,lat,lon[,CODE];…" ⇄ [{name,lat,lon,code}] for the weather city picker (backend format unchanged).
-function parseCities(str){
-  return (str||"").split(";").map(s=>s.trim()).filter(Boolean).map(p=>{
-    const b=p.split(",").map(x=>x.trim());
-    return {name:b[0], lat:b[1], lon:b[2], code:((b[3]||(b[0]||"").slice(0,3))||"").toUpperCase()};
-  }).filter(c=>c.name && c.lat && c.lon);
-}
-function serializeCities(arr){ return arr.map(c=>`${c.name},${c.lat},${c.lon},${c.code}`).join(";"); }
-
 async function loadSettings(){
   const host=$("#settings"); if(!host) return;
   let d; try{ d=await getJSON("/api/settings"); }catch(e){ host.innerHTML=`<div class="empty">Could not load settings.</div>`; return; }
   if(!d.ok){ host.innerHTML=`<div class="empty">${esc(d.error||"unavailable")}</div>`; return; }
   // data-orig = the value as loaded, so saveSettings posts ONLY the fields the user changed —
   // posting an untouched env/default-sourced value would persist it to meta and shadow the env.
-  const cityField=s=>`<div class="setrow">
-      <label>${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
-      <input type="hidden" id="set_weather_cities" data-key="weather_cities" data-orig="${esc(s.value||"")}" value="${esc(s.value||"")}">
-      <div class="wxchips" id="wxchips"></div>
-      <div class="wxsearchrow">
-        <input id="wxsearch" type="text" placeholder="Search a city — e.g. Lisbon" autocomplete="off">
-        <button type="button" class="ghost" id="wxsearchbtn">Search</button>
-      </div>
-      <div class="err" id="wxcap"></div>
-      <ul class="wxresults" id="wxresults"></ul>
-      <div class="help">Type a city and pick it — the coordinates are resolved for you. Up to 5; no cities = the widget is hidden.</div>
-      <div class="err" id="err_weather_cities"></div>
-    </div>`;
   const field=s=>{
-    if(s.key==="weather_cities") return cityField(s);
     const id="set_"+s.key;
     if(s.kind==="flag"){   // 0.56.0 §S5 — an on/off switch; the value is "1"/"0"
       const on = String(s.value||"").trim()==="1";
@@ -2812,7 +2796,7 @@ async function loadSettings(){
     <div class="err" id="averr"></div>
   </div>`;
   $("#setform").addEventListener("submit", saveSettings);
-  wireCityPicker();
+
   wireAway();
 }
 
@@ -2849,46 +2833,6 @@ async function wireAway(){
   });
   await render();
 }
-
-const MAX_CITIES=5;   // mirrors the server's MAX_WEATHER_CITIES (validated there too)
-function wireCityPicker(){
-  const hidden=$("#set_weather_cities"); if(!hidden) return;
-  let cities=parseCities(hidden.value);
-  const chips=$("#wxchips"), results=$("#wxresults"), search=$("#wxsearch"),
-        searchBtn=$("#wxsearchbtn"), cap=$("#wxcap");
-  const sync=()=>{ hidden.value=serializeCities(cities); renderChips(); };
-  function renderChips(){
-    chips.innerHTML = cities.length
-      ? cities.map((c,i)=>`<span class="wxchip"><b>${esc(c.code)}</b> ${esc(c.name)} <button type="button" data-i="${i}" aria-label="Remove ${esc(c.name)}">✕</button></span>`).join("")
-      : `<span class="muted" style="font-size:12px">No cities — the widget is hidden.</span>`;
-    chips.querySelectorAll("button[data-i]").forEach(b=>b.addEventListener("click",()=>{ cities.splice(+b.dataset.i,1); sync(); }));
-    const full = cities.length>=MAX_CITIES;   // at the cap → block adding, prompt a removal
-    search.disabled=searchBtn.disabled=full;
-    cap.textContent = full ? `Maximum ${MAX_CITIES} cities — remove one to add another.` : "";
-    if(full) results.innerHTML="";
-  }
-  async function doSearch(){
-    const q=search.value.trim(); if(q.length<2){ results.innerHTML=""; return; }
-    results.innerHTML=`<li class="sub">searching…</li>`;
-    let out; try{ out=await getJSON("/api/geocode?q="+encodeURIComponent(q)); }catch(e){ results.innerHTML=`<li class="sub">search failed</li>`; return; }
-    if(!out.ok){ results.innerHTML=`<li class="sub">search unavailable</li>`; return; }
-    const rs=out.results||[];
-    results.innerHTML = rs.length
-      ? rs.map((r,i)=>`<li data-i="${i}">${esc(r.name)} <span class="sub">${esc([r.admin1,r.country].filter(Boolean).join(", "))}</span></li>`).join("")
-      : `<li class="sub">no matches</li>`;
-    results.querySelectorAll("li[data-i]").forEach(li=>li.addEventListener("click",()=>{
-      const r=rs[+li.dataset.i];
-      const name=(r.name||"").replace(/[,;]/g," ").trim();   // ',' and ';' are delimiters in the stored format
-      if(name && cities.length<MAX_CITIES && !cities.some(c=>c.lat==r.lat && c.lon==r.lon)){   // cap + skip dup
-        cities.push({name, lat:r.lat, lon:r.lon, code:name.slice(0,3).toUpperCase()});
-      }
-      search.value=""; results.innerHTML=""; sync();
-    }));
-  }
-  $("#wxsearchbtn").addEventListener("click", doSearch);
-  search.addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); doSearch(); } });
-  renderChips();
-}
 async function saveSettings(e){
   e.preventDefault();
   document.querySelectorAll("#setform .err").forEach(n=>n.textContent="");
@@ -2909,7 +2853,6 @@ async function saveSettings(e){
   $("#setok").textContent="Saved ✓";
   loadSettings();          // refresh provenance badges (env → saved)
   fetch("/healthz").then(r=>r.json()).then(h=>{ if(h.ai) AI=h.ai; }).catch(()=>{});   // the AI switches gate the buttons on the next render
-  if(typeof loadWeather==="function") loadWeather();   // weather cities take effect live
 }
 // Keys block — the two secrets (Runalyze token / Claude key). WRITE-ONLY: the value is never sent back,
 // so the field is always empty and shows status only. Private console only (#secretsBox is removed on
@@ -3103,7 +3046,7 @@ if(SH_PAGE==="runs"){
     footSync(d.last_sync); }).catch(()=>{});
 }else{
 fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; if(d.ai) AI=d.ai; TOKEN_OK=!!d.token_configured; SYNC_LAST=d.last_sync||null; noteSync(d.last_sync); paintFreshness(); _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
-loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones(); loadTrack();
+if(SH_PAGE!=="today"){ loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadEffort(); loadZones(); loadTrack(); }
 }
 // §HR — the 'Current zones' card: training-intent rows, pace (VDOT, prescription anchor) + HR
 // (unified hr_zones grid, monitoring cross-check), both fitness-tracking. Private-only (section is
@@ -3157,6 +3100,42 @@ if(_setBtn && _setDlg){
   if(_su){ history.replaceState(null,"",location.pathname);
     if(!$("#setform")) loadSettings(); loadSecrets(true); _setDlg.showModal(); }
 }
+// 0.57.0 (§5.2) — the analytics sections are <details>, closed on a fresh device and remembered per
+// device; the plan, the readiness card and the latest run stay open. The showcase (public and demo)
+// opens on the track record: the engine's own scoring is its argument, so it goes first.
+(function(){
+  document.querySelectorAll("details.section").forEach(d=>{
+    const k="sh-open-"+d.id;
+    try{ const v=localStorage.getItem(k); if(v==="1") d.open=true; else if(v==="0") d.open=false; }catch(e){}
+    d.addEventListener("toggle", ()=>{ try{ localStorage.setItem(k, d.open?"1":"0"); }catch(e){} });
+  });
+  if(SH_PAGE==="dash"){
+    const tab=new URLSearchParams(location.search).get("tab");
+    if(tab && ["today","plan","fitness","body"].includes(tab)){
+      document.body.dataset.mtab=tab; history.replaceState(null,"",location.pathname);
+      document.querySelectorAll(".mnav-btn[data-goto]").forEach(b=>b.setAttribute("aria-current", b.dataset.goto===tab?"page":"false"));
+    }
+    if(SH_READONLY||SH_DEMO){ const t=$("#sec-track"), o=$("#objbar"); if(t&&o){ o.after(t); t.open=true; } }
+    buildRail();
+  }
+})();
+// 0.57.0 (§5.2, review U6) — a section rail on wide screens: the same list the phone's tab bar
+// implies, one link per section, opening a closed section on the way. Desktop only (CSS ≥1100px).
+function buildRail(){
+  const secs=[...document.querySelectorAll("main.wrap > .section, main.wrap > details.section")].filter(s=>s.id!=="sec-runs" && s.offsetParent!==null || s.tagName==="DETAILS");
+  const items=secs.map(s=>{ const h=s.querySelector("h2"); if(!h) return null;
+    const label=(h.childNodes[0]&&h.childNodes[0].textContent||h.textContent).trim().replace(/\s+/g," ");
+    return {id:s.id, label}; }).filter(Boolean);
+  if(items.length<3) return;
+  const nav=document.createElement("nav"); nav.className="rail"; nav.setAttribute("aria-label","Sections");
+  nav.innerHTML=items.map(it=>`<a href="#${it.id}" data-sec="${it.id}">${esc(it.label)}</a>`).join("");
+  nav.addEventListener("click", e=>{ const l=e.target.closest("a[data-sec]"); if(!l) return; e.preventDefault();
+    const s=$("#"+l.dataset.sec); if(!s) return; if(s.tagName==="DETAILS") s.open=true;
+    const reduce=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;
+    s.scrollIntoView({behavior:reduce?"auto":"smooth", block:"start"});
+    nav.querySelectorAll("a").forEach(x=>x.classList.toggle("on", x===l)); });
+  const main=document.querySelector("main.wrap"); if(main) main.prepend(nav);
+}
 if(SH_READONLY){
   // public view: health markers stay private; the readiness VERDICT tile stays (the server
   // redacts its inputs/HRV/note). Drop the write controls; surface read-only + the Log-in link.
@@ -3170,6 +3149,12 @@ if(SH_READONLY){
     if(SH_PRIVATE_URL) extra+=`<a class="adminlink" href="${esc(SH_PRIVATE_URL)}" title="Private console">🔒 Log in</a>`;
     cluster.insertAdjacentHTML("afterbegin", extra);
   }
+}else if(SH_PAGE==="today"){
+  // 0.57.0 — the daily surface: the readiness card, the session and the check-in, and nothing else
+  document.title="Sparing Horse — today";
+  const l=$("#todayLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the dashboard"; }
+  const mt=document.querySelector('.mnav-btn[data-goto="today"]'); if(mt) mt.setAttribute("aria-current","page");
+  loadReadiness();
 }else if(SH_PAGE==="runs"){
   // §RB — explorer chrome: the header link points back home; the mobile Runs tab reads active.
   document.title="Sparing Horse — run browser";
@@ -3197,6 +3182,7 @@ if(SH_READONLY){
   }
   nav.addEventListener("click", e => {
     const b = e.target.closest(".mnav-btn");
+    if(b && b.dataset.goto && SH_PAGE!=="dash"){ location.href = "/?tab="+b.dataset.goto; return; }   // 0.57.0: /today and /runs hand the tab to the dashboard
     if(!b || !b.dataset.goto) return;                   // the Runs tab is a real <a> — let it navigate
     if(SH_PAGE==="runs"){ location.href = "/#"+b.dataset.goto; return; }   // §RB — tabs live on the dashboard
     go(b.dataset.goto, true);

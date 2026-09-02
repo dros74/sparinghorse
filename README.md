@@ -53,6 +53,7 @@ showcase deliberately shows a slice; the real console has the full set.
   fitness-tracking threshold: HR-led on a derived lactate-threshold HR where that's trustworthy, otherwise
   your grade-adjusted pace vs an aerobic-threshold (LT1) bar — with an HR-redline backstop either way.
 - **Readiness gate** — a daily green/amber/red verdict that flags stop-the-run / cardiac-type symptoms.
+- **Today** — a one-screen daily surface (`/today`): the readiness verdict, the session, the check-in and why this session; the installed app starts there.
 - **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation), an HR-zone band, and a route map.
 - **Race lifecycle** — a passed race resolves on its own: the race-day run is matched and the objective
   settles as done (result + goal comparison recorded) or lapsed, with a private *Past races* history.
@@ -84,6 +85,11 @@ showcase deliberately shows a slice; the real console has the full set.
 The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB connection — it
 physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
 server-side (not just hidden in the UI).
+
+**The day (0.57.0).** `/today` is the daily surface — the readiness verdict, the session, the check-in and one
+line saying why this session — and the page the installed app opens on. The dashboard is plan-first, with
+the analytics collapsed until opened (remembered per device); the public and demo boxes open on the track
+record. Two themes, following the system unless a choice is saved.
 
 **Access (0.56.0).** The private console locks itself: on first boot it serves only a *set a passphrase*
 page (or takes `SH_PASSPHRASE` from the environment and never shows one), then a login page and a 30-day
@@ -168,7 +174,7 @@ It carries **no credentials**: no Runalyze token, no Claude key, and no secrets-
 | `GET /api/backup/db`, `GET /api/export/json` | a full-database snapshot per call and a JSON dump of every table — the data is synthetic, the CPU and bandwidth are not |
 | `POST /api/health` | a lab value and its note are shown to the *next* visitor's Body tab (the read stays open so the tab renders) |
 | `private_url`, `house_url`, `house_name` | the only settings displayed to the *next* visitor — the defacement and open-redirect surface |
-| `tz`, `weather_cities`, `athlete_context` | the process clock, the outbound weather target, and prose that reaches the next visitor and every prompt |
+| `tz`, `athlete_context` | the process clock, and prose that reaches the next visitor and every prompt |
 
 Everything else really runs: regenerate, check in, objectives, availability, adjustments, rest-day and
 long-run-day preferences, manual LTHR and age. Status reads (`GET /api/secrets`, `GET /api/suunto/status`,
@@ -194,7 +200,6 @@ than an invented explanation.
 | `SH_TZ` / `SH_SYNC_AT` / `SH_SCHEDULE` | nightly-sync timezone / time / on-off |
 | `SH_SEED_OBJECTIVE` | seed a first race on a fresh DB (`label\|date\|type\|target\|priority`) |
 | `SH_ATHLETE_CONTEXT` | one-line context injected into the LLM prompts (e.g. returning from injury) |
-| `SH_WEATHER_CITIES` | header weather widget (`Name,lat,lon;…`); blank = hidden |
 | `SH_HOUSE_URL` / `SH_HOUSE_NAME` | optional back-link in the header |
 | `SH_GUIDE_URL` | "more info" link on pushed Suunto guides (default: this repo) |
 | `SH_READONLY` | public container only (set in docker-compose) |

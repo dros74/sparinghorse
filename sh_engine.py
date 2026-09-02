@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.56.1"
+ENGINE_VERSION = "0.57.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -115,12 +115,7 @@ SETTINGS_SPEC = [
      "help": "Optional back-link in the header to your own site (must be http/https). "
              "Empty = no link. Reload to see header changes."},
     {"key": "house_name", "env": "SH_HOUSE_NAME", "label": "House link — label", "kind": "line",
-     "help": "Text shown for the header back-link (defaults to the URL)."},
-    {"key": "weather_cities", "env": "SH_WEATHER_CITIES", "label": "Weather widget cities", "kind": "line",
-     # The Settings panel renders a search-and-pick city widget for this; the stored value is the
-     # `Name,lat,lon,CODE;…` string this help describes (still the env/API contract).
-     "help": "Header weather-widget cities, stored as Name,lat,lon[,CODE];… No cities = widget hidden."},
-    {"key": "tz", "env": "SH_TZ", "label": "Your timezone", "kind": "line", "default": "UTC",
+     "help": "Text shown for the header back-link (defaults to the URL)."},    {"key": "tz", "env": "SH_TZ", "label": "Your timezone", "kind": "line", "default": "UTC",
      "help": "IANA zone (e.g. Europe/Luxembourg). This is the clock the whole plan runs on — which "
              "calendar day counts as 'today', and the wall-clock hour the nightly sync fires at. Set "
              "it to where you actually train: a container running UTC while you are two hours ahead "

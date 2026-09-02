@@ -111,7 +111,7 @@ PORT = int(os.environ.get("SH_PORT", "8770"))
 DB_PATH = Path(os.environ.get("SH_DB", "sparinghorse.db"))
 RUNALYZE_BASE = os.environ.get("RUNALYZE_BASE", "https://runalyze.com/api/v1")
 # The window-settable values (the Runalyze token, the Claude key, the athlete context, the house
-# link, the private URL, the weather cities, the timezone) live in the TECH-4 config snapshot below,
+# link, the private URL, the timezone) live in the TECH-4 config snapshot below,
 # not in module globals — `config().runalyze_token`, `config().athlete_context`, and so on.
 # Default to the latest capable model; adaptive thinking + low effort for the light parsing/
 # judgment tasks the engine hands off. Overridable for cost/latency experiments.
@@ -154,7 +154,6 @@ DEMO_RESET_EVERY_S = int(os.environ.get("SH_DEMO_RESET_EVERY_S", "3600"))
 # LLM prompts (`config().athlete_context`, e.g. "post-illness rebuild, cleared by my doctor").
 # Empty context = a neutral generic runner. The medical SAFETY net (cardiac/exertional symptom →
 # halt + see a doctor) is always on regardless of what the context says.
-# Optional weather widget cities: "Name,lat,lon;Name,lat,lon". Empty = the widget is hidden.
 RUNNING_SPORT = "Running"  # the canonical run sport name (used for seed/synthetic inserts)
 
 
@@ -191,7 +190,7 @@ SCHED_STALE_HOURS = 26    # one boundary for boot catch-up, /healthz and the rea
 # token until someone restarted the process. (`_mcp_headers` read the global per call, so MCP picked
 # it up and REST did not — the inconsistency that gives that bug away.)
 RuntimeConfig = namedtuple("RuntimeConfig",
-                           "athlete_context house_url house_name private_url weather_cities "
+                           "athlete_context house_url house_name private_url "
                            "sync_tz runalyze_token anthropic_api_key generation")
 
 _config_lock = threading.Lock()   # serializes the read-modify-write of a swap, not the reads
@@ -201,7 +200,6 @@ _CONFIG = RuntimeConfig(
     house_url=os.environ.get("SH_HOUSE_URL", ""),
     house_name=os.environ.get("SH_HOUSE_NAME", ""),
     private_url=os.environ.get("SH_PRIVATE_URL", ""),
-    weather_cities=(),
     sync_tz=None,                 # set just below, once ZoneInfo + the parser are defined
     runalyze_token=os.environ.get("RUNALYZE_TOKEN", ""),
     anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
@@ -1695,7 +1693,6 @@ _apply_process_tz(os.environ.get("SH_TZ", ""))   # bootstrap from env; the setti
 #                                                  apply_settings_overrides), which is authoritative
 
 
-MAX_WEATHER_CITIES = 5   # header widget cap (mirrored client-side as MAX_CITIES in the picker JS)
 
 
 # ── Runtime settings, the PANEL side (the spec + resolver live in sh_engine.py) ───────────────
@@ -1723,12 +1720,6 @@ def validate_setting(key, value):
         return False, "cannot contain quotes or angle brackets"
     if key in ("house_url", "private_url") and value and not re.match(r"^https?://", value):
         return False, "must start with http:// or https://"
-    if key == "weather_cities" and value.strip():
-        parsed = _parse_weather_cities(value)
-        if not parsed:
-            return False, "could not parse — use Name,lat,lon;Name,lat,lon"
-        if len(parsed) > MAX_WEATHER_CITIES:
-            return False, f"at most {MAX_WEATHER_CITIES} cities — remove one to add another"
     if key.startswith("ai_") and value.strip() and value.strip() not in ("0", "1"):
         return False, "1 (on) or 0 (off)"
     if key == "tz" and value.strip():
@@ -1789,12 +1780,8 @@ def apply_settings_overrides(db):
         house_url=_resolve_setting(db, SETTINGS_BY_KEY["house_url"])[0].strip(),
         house_name=_resolve_setting(db, SETTINGS_BY_KEY["house_name"])[0].strip(),
         private_url=_resolve_setting(db, SETTINGS_BY_KEY["private_url"])[0].strip(),
-        weather_cities=_parse_weather_cities(
-            _resolve_setting(db, SETTINGS_BY_KEY["weather_cities"])[0]),
         sync_tz=tz,
     )
-    with _weather_lock:            # cities may have changed → drop the cached bundle so the next
-        _weather_cache["at"] = 0.0  # /api/weather refetches instead of serving up-to-30-min-stale cities
     # §DAYPREF — the week shape lives in the ENGINE, not in `config()`: `_run_days` is called deep
     # inside the week lay, far below anything holding a db handle, so the preference is published as
     # an engine module global (the pattern SETTINGS_SPEC's own contract describes — "the effective
@@ -5793,7 +5780,7 @@ WEB_MANIFEST = json.dumps({
     "short_name": "Sparing Horse",
     "description": "Your current running shape and a dynamic, objective-driven training plan, "
                    "built on your own Runalyze data.",
-    "start_url": "/",
+    "start_url": "/today",   # 0.57.0 — the installed app opens on the day, not the analytics
     "scope": "/",
     "display": "standalone",
     "background_color": "#f4f1ea",
@@ -5847,7 +5834,7 @@ self.addEventListener('fetch',e=>{
 # The installed window's chrome follows the theme too: the shell rewrites the manifest link with
 # ?theme=<name> (whitelisted — anything else gets the Daylight default), so the title bar and
 # splash match the page being installed. The colours are each theme's --bg (static/app.css).
-_MANIFEST_THEME_BG = {"light": "#f4f1ea", "dark": "#191a1d", "aurora": "#121226"}
+_MANIFEST_THEME_BG = {"light": "#f4f1ea", "dark": "#191a1d"}   # 0.57.0: two themes
 
 
 @app.get("/manifest.webmanifest")
@@ -5888,10 +5875,10 @@ def _private_only_path(p):
     Centralised so the map-privacy self-test can assert this invariant can't silently regress:
     `/api/health` (blood markers), the workout `/map` (route geo reveals where the athlete lives),
     `/api/settings` + `/api/secrets` (athlete context + keys are personal, owner-only control surfaces),
-    and `/api/geocode` (the city-picker proxy). NOTE `/api/effort-discipline` is NOT here: it self-
+    NOTE `/api/effort-discipline` is NOT here: it self-
     sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
     so the score is public while the HR-led critique stays private."""
-    return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
+    return (p in ("/api/health", "/api/settings", "/api/secrets",
                   "/api/secrets/validate", "/api/runs",   # §RB — calendar carries HR-zone grades
                   "/api/system")                          # 0.56.1 — the household's timestamps
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
@@ -5940,10 +5927,9 @@ DEMO_BLOCKED_PATHS = ("/api/secrets", "/api/sync", "/api/suunto", "/api/selftest
 DEMO_BLOCKED_SETTINGS = ("private_url", "house_url", "house_name",
                          # 0.55.1 (review S9) — `tz` moves the WHOLE PROCESS clock (`time.tzset()`), so
                          # one visitor could make "today" wrong for everyone until the reset;
-                         # `weather_cities` points outbound Open-Meteo calls wherever a stranger says;
                          # `athlete_context` is prose shown back in Settings to the next visitor and
                          # injected into every LLM prompt. None of the three shapes the plan.
-                         "tz", "weather_cities", "athlete_context")
+                         "tz", "athlete_context")
 
 
 @app.before_request
@@ -8651,112 +8637,6 @@ def db_weekly_running():
     return [{"week": k, "km": round(v, 1)} for k, v in sorted(buckets.items())]
 
 
-# ── Weather (house chrome widget) ────────────────────────────────────────────
-# A small forecast icon for the configured cities. Source is Open-Meteo: keyless, no token,
-# CC-BY — fits the project's "no extra secrets" rule (so it works on the public container too).
-# We cache the whole bundle in-process for WEATHER_TTL so a page load never hammers the API and
-# a transient outage falls back to the last good fetch.
-def _parse_weather_cities(spec):
-    """Parse SH_WEATHER_CITIES ('Name,lat,lon[,CODE];…') into the widget's city list. The optional
-    4th field is the short display code (e.g. Tokyo→TYO); without it the code defaults to the name's
-    first 3 letters. Empty/bad spec → [] (the widget hides itself). Lets a self-hoster pick their own
-    cities, or none."""
-    out = []
-    for part in (p for p in (spec or "").split(";") if p.strip()):
-        bits = [b.strip() for b in part.split(",")]
-        if len(bits) >= 3:
-            try:
-                lat, lon = float(bits[1]), float(bits[2])
-            except ValueError:
-                continue
-            name = bits[0]
-            code = (bits[3] if len(bits) >= 4 and bits[3] else name[:3]).upper()
-            out.append({"key": code, "name": name, "lat": lat, "lon": lon})
-    return out
-
-
-_config_swap(weather_cities=_parse_weather_cities(os.environ.get("SH_WEATHER_CITIES", "")))
-WEATHER_TTL = 1800          # 30 min — weather doesn't move faster than the cache is worth
-_weather_cache = {"at": 0.0, "data": None}
-_weather_lock = threading.Lock()
-
-# WMO weather-interpretation codes → (emoji, label). Open-Meteo's `weathercode` follows WMO 4677.
-WMO_ICONS = {
-    0: ("☀️", "Clear"), 1: ("🌤️", "Mainly clear"), 2: ("⛅", "Partly cloudy"),
-    3: ("☁️", "Overcast"), 45: ("🌫️", "Fog"), 48: ("🌫️", "Rime fog"),
-    51: ("🌦️", "Light drizzle"), 53: ("🌦️", "Drizzle"), 55: ("🌧️", "Dense drizzle"),
-    56: ("🌧️", "Freezing drizzle"), 57: ("🌧️", "Freezing drizzle"),
-    61: ("🌦️", "Light rain"), 63: ("🌧️", "Rain"), 65: ("🌧️", "Heavy rain"),
-    66: ("🌧️", "Freezing rain"), 67: ("🌧️", "Freezing rain"),
-    71: ("🌨️", "Light snow"), 73: ("🌨️", "Snow"), 75: ("❄️", "Heavy snow"),
-    77: ("🌨️", "Snow grains"), 80: ("🌦️", "Rain showers"), 81: ("🌧️", "Rain showers"),
-    82: ("⛈️", "Violent showers"), 85: ("🌨️", "Snow showers"), 86: ("❄️", "Snow showers"),
-    95: ("⛈️", "Thunderstorm"), 96: ("⛈️", "Thunderstorm + hail"), 99: ("⛈️", "Thunderstorm + hail"),
-}
-
-
-def _fetch_city_weather(city):
-    """One city: current conditions + today's high/low from Open-Meteo. Raises on failure."""
-    r = requests.get(
-        "https://api.open-meteo.com/v1/forecast",
-        params={
-            "latitude": city["lat"], "longitude": city["lon"],
-            "current_weather": "true",
-            "daily": "temperature_2m_max,temperature_2m_min",
-            "timezone": "auto", "forecast_days": 1,
-        },
-        timeout=8,
-    )
-    r.raise_for_status()
-    d = r.json()
-    cur = d.get("current_weather") or {}
-    daily = d.get("daily") or {}
-    code = int(cur.get("weathercode", -1))
-    icon, label = WMO_ICONS.get(code, ("🌡️", "—"))
-    hi = (daily.get("temperature_2m_max") or [None])[0]
-    lo = (daily.get("temperature_2m_min") or [None])[0]
-    return {
-        "key": city["key"], "name": city["name"],
-        "temp": round(cur["temperature"]) if cur.get("temperature") is not None else None,
-        "code": code, "icon": icon, "label": label,
-        "hi": round(hi) if hi is not None else None,
-        "lo": round(lo) if lo is not None else None,
-        # local reading time (timezone=auto ⇒ already the city's local clock), e.g. "2026-06-16T14:00"
-        "time": cur.get("time"),
-    }
-
-
-def get_weather():
-    """Cached three-city bundle. Refreshes at most every WEATHER_TTL; on a failed refresh it
-    keeps serving the last good bundle (with stale=True) rather than blanking the widget."""
-    now = time.time()
-    with _weather_lock:
-        cached = _weather_cache["data"]
-        if cached and now - _weather_cache["at"] < WEATHER_TTL:
-            return cached
-    cities = []
-    for c in config().weather_cities:
-        try:
-            cities.append(_fetch_city_weather(c))
-        except Exception as e:  # one city failing shouldn't drop the others
-            print(f"[weather] {c['name']} fetch failed: {e}")
-    if not cities:
-        with _weather_lock:
-            if _weather_cache["data"]:
-                stale = dict(_weather_cache["data"], stale=True)
-                return stale
-        return {"cities": [], "stale": True}
-    bundle = {"cities": cities, "stale": False, "source": "open-meteo"}
-    with _weather_lock:
-        _weather_cache.update(at=now, data=bundle)
-    return bundle
-
-
-@app.get("/api/weather")
-def api_weather():
-    """Forecast icon for the configured cities (SH_WEATHER_CITIES). Cached + public-safe."""
-    return jsonify(get_weather())
-
 
 @app.get("/api/health")
 def api_health():
@@ -8902,36 +8782,6 @@ def api_export_json():
     buf = io.BytesIO(json.dumps(export_user_data(get_db()), indent=1).encode())
     return send_file(buf, mimetype="application/json", as_attachment=True,
                      download_name=f"sparinghorse-export-{datetime.now().date().isoformat()}.json")
-
-
-@app.get("/api/geocode")
-def api_geocode():
-    """Resolve a city name → candidates with lat/lon, via Open-Meteo's keyless geocoding API (same
-    provider as the weather widget). Server-side proxy so the browser never calls a third party
-    directly (keeps CSP `connect-src 'self'` + the user's typing private). Private-only via
-    `_private_only_path`. Returns a trimmed list the Settings city-picker turns into the stored
-    `Name,lat,lon,CODE` format."""
-    q = (request.args.get("q") or "").strip()[:80]
-    if len(q) < 2:
-        return jsonify(ok=True, results=[])
-    try:
-        r = requests.get("https://geocoding-api.open-meteo.com/v1/search",
-                         params={"name": q, "count": 6, "language": "en", "format": "json"},
-                         timeout=8)
-        r.raise_for_status()
-        rows = r.json().get("results") or []
-        results = [{
-            "name": c.get("name"),
-            "admin1": c.get("admin1") or "",
-            "country": c.get("country") or "",
-            "country_code": (c.get("country_code") or "").upper(),
-            "lat": round(c["latitude"], 4), "lon": round(c["longitude"], 4),
-        } for c in rows if isinstance(c.get("latitude"), (int, float))
-                        and isinstance(c.get("longitude"), (int, float))]
-    except Exception as e:
-        print(f"[geocode] {q!r} failed: {e}")   # detail to logs, generic message to the client
-        return jsonify(ok=False, error="geocoding unavailable"), 502
-    return jsonify(ok=True, results=results)
 
 
 @app.post("/api/settings")
@@ -9106,6 +8956,14 @@ def _render_app(page="dash"):
 @app.get("/")
 def index():
     return _render_app("dash")
+
+
+@app.get("/today")
+def today_page():
+    """0.57.0 (§5.1) — the daily surface: the readiness verdict, today's session, the check-in and one
+    line saying why this session, and nothing else. The same document as the dashboard; <body
+    data-page="today"> selects what shows. The installed app starts here (manifest start_url)."""
+    return _render_app("today")
 
 
 @app.get("/runs")

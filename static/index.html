@@ -12,9 +12,11 @@
 <meta name="apple-mobile-web-app-title" content="Sparing Horse">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="mobile-web-app-capable" content="yes">
-<script>var t="light";try{var s=localStorage.getItem("sh-theme");if(s==="dark"||s==="aurora")t=s;}catch(e){}
+<script>// 0.57.0 — follow the system unless a choice was saved; two themes (Daylight / Charcoal)
+var t=null;try{var s=localStorage.getItem("sh-theme");if(s==="dark"||s==="light")t=s;}catch(e){}
+if(!t) t=(window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light";
 document.documentElement.dataset.theme=t;
-window.SH_THEME_BG={light:"#f4f1ea",dark:"#191a1d",aurora:"#121226"};   // each theme's --bg (app.css)
+window.SH_THEME_BG={light:"#f4f1ea",dark:"#191a1d"};   // each theme's --bg (app.css)
 // UX-11 — the browser chrome follows the saved theme at parse time, before first paint: the
 // theme-color meta (tab / PWA title bar) and the manifest link an install will read
 document.querySelector('meta[name="theme-color"]').setAttribute("content",window.SH_THEME_BG[t]);
@@ -25,11 +27,7 @@ document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.we
   <div class="topbar" role="banner">
     __SH_HUBLINK__
     <div class="topctl">
-      <span class="themes" id="themes" role="group" aria-label="Theme">
-        <button class="swatch" data-theme="light" title="Daylight" aria-label="Daylight theme" style="--sw:linear-gradient(90deg,#f4f1ea 50%,#b9542c 50%)"></button>
-        <button class="swatch" data-theme="dark"  title="Charcoal" aria-label="Charcoal theme" style="--sw:linear-gradient(90deg,#191a1d 50%,#fa7d42 50%)"></button>
-        <button class="swatch" data-theme="aurora" title="Aurora" aria-label="Aurora theme" style="--sw:linear-gradient(90deg,#121226 50%,#7b61ff 50%)"></button>
-      </span>
+      <button class="themebtn" id="themeBtn" type="button" title="Theme — follows the system; click to switch" aria-label="Theme: follows the system">Theme · auto</button>
     </div>
   </div>
 __SH_DEMOBAR__
@@ -44,9 +42,10 @@ __SH_DEMOBAR__
         </div>
       </div>
       <div class="bar">
+        <a class="ghost" id="todayLink" href="/today" title="Today — the readiness verdict, the session, the check-in; the page the installed app opens on">☀ Today</a>
         <a class="ghost" id="runsLink" href="/runs" title="Run browser — a calendar of your whole training history; open any past run on the activity tile">🗓 Runs</a>
         <button class="primary" id="syncBtn">Sync now</button>
-        <button class="primary" id="settingsBtn" title="Personalization — athlete context, weather cities, links, sync timezone">⚙ Settings</button>
+        <button class="primary" id="settingsBtn" title="Personalization — athlete context, links, sync timezone, the AI switches">⚙ Settings</button>
         <button class="ghost" id="backfillBtn" title="One-time full-history pull — walks every page back to your first activity. Use on a fresh machine or if old history is missing.">Backfill all</button>
       </div>
     </header>
@@ -54,6 +53,12 @@ __SH_DEMOBAR__
     <div id="firstrun"></div>
     <div id="dqbanner"></div>
     <div id="objbar" class="objbar" data-mtab="today"></div>
+
+    <div class="section" id="sec-plan" role="region" aria-labelledby="h-plan" data-mtab="plan">
+      <h2 id="h-plan">Training plan <span class="muted mono" style="font-size:12px">— objective-driven, bounded by your fitness</span>
+        <button class="primary" id="planBtn" style="float:right;font-size:12px;padding:6px 12px">Generate plan</button></h2>
+      <div class="panel" id="plan"><div class="empty">No plan yet.</div></div>
+    </div>
 
     <div class="section" id="sec-readiness" role="region" aria-labelledby="h-readiness" data-mtab="today">
       <h2 id="h-readiness">Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
@@ -97,38 +102,22 @@ __SH_DEMOBAR__
       <div class="panel" id="recent"><div class="empty">Loading latest activity…</div></div>
     </div>
 
-    <div class="section" id="sec-plan" role="region" aria-labelledby="h-plan" data-mtab="plan">
-      <h2 id="h-plan">Training plan <span class="muted mono" style="font-size:12px">— objective-driven, bounded by your fitness</span>
-        <button class="primary" id="planBtn" style="float:right;font-size:12px;padding:6px 12px">Generate plan</button></h2>
-      <div class="panel" id="plan"><div class="empty">No plan yet.</div></div>
-    </div>
-
-    <details class="section" id="sec-drift" data-mtab="plan" open>
-      <summary><h2>Plan drift <span class="muted mono" style="font-size:12px">— how far the road has moved from its founding statement</span></h2></summary>
-      <div class="panel" id="drift"><div class="empty">Loading…</div></div>
-    </details>
-
-    <details class="section" id="sec-track" data-mtab="plan" open>
-      <summary><h2>Track record <span class="muted mono" style="font-size:12px">— how the engine's own forecasts have scored against what happened</span></h2></summary>
-      <div class="panel" id="track"><div class="empty">Loading…</div></div>
-    </details>
-
-    <div class="section" id="sec-shape" role="region" aria-labelledby="h-shape" data-mtab="fitness">
-      <h2 id="h-shape">Current shape <span class="muted mono" style="font-size:12px">— your headline fitness numbers, right now</span></h2>
+    <details class="section" id="sec-shape" data-mtab="fitness">
+      <summary><h2 id="h-shape">Current shape <span class="muted mono" style="font-size:12px">— your headline fitness numbers, right now</span></h2></summary>
       <div class="grid" id="tiles"><div class="empty">Loading current shape…</div></div>
-    </div>
+    </details>
 
-    <div class="section" id="sec-effort" role="region" aria-labelledby="h-effort" data-mtab="fitness">
-      <h2 id="h-effort">Effort discipline <span class="muted mono" style="font-size:12px">— are your easy days actually easy?</span></h2>
+    <details class="section" id="sec-effort" data-mtab="fitness">
+      <summary><h2 id="h-effort">Effort discipline <span class="muted mono" style="font-size:12px">— are your easy days actually easy?</span></h2></summary>
       <div class="panel" id="effort"><div class="empty">Loading…</div></div>
-    </div>
+    </details>
 
-    <div class="section" id="sec-zones" role="region" aria-labelledby="h-zones" data-mtab="fitness">
-      <h2 id="h-zones">Current zones <span class="muted mono" style="font-size:12px">— today's pace &amp; HR targets, tracking your fitness</span></h2>
+    <details class="section" id="sec-zones" data-mtab="fitness">
+      <summary><h2 id="h-zones">Current zones <span class="muted mono" style="font-size:12px">— today's pace &amp; HR targets, tracking your fitness</span></h2></summary>
       <div class="panel" id="zones"><div class="empty">Loading…</div></div>
-    </div>
+    </details>
 
-    <details class="section" id="sec-ff" data-mtab="fitness" open>
+    <details class="section" id="sec-ff" data-mtab="fitness">
       <summary><h2>Fitness &amp; fatigue <span class="muted mono" style="font-size:12px">— reconstructed from your training load (CTL/ATL model)</span></h2></summary>
       <div class="panel">
         <div class="legend">
@@ -140,13 +129,23 @@ __SH_DEMOBAR__
       </div>
     </details>
 
-    <details class="section" id="sec-vol" data-mtab="fitness" open>
+    <details class="section" id="sec-vol" data-mtab="fitness">
       <summary><h2>Weekly running volume <span class="muted mono" id="wkrange" style="font-size:12px">— last 26 weeks</span></h2></summary>
       <div class="panel"><div class="chart" id="chart"><div class="empty">No activities synced yet.</div></div></div>
     </details>
 
-    <div class="section" id="sec-health" role="region" aria-labelledby="h-health" data-mtab="body">
-      <h2 id="h-health">Health markers <span class="muted mono" style="font-size:12px">— metabolism &amp; the body behind the engine</span></h2>
+    <details class="section" id="sec-drift" data-mtab="plan">
+      <summary><h2>Plan drift <span class="muted mono" style="font-size:12px">— how far the road has moved from its founding statement</span></h2></summary>
+      <div class="panel" id="drift"><div class="empty">Loading…</div></div>
+    </details>
+
+    <details class="section" id="sec-track" data-mtab="plan">
+      <summary><h2>Track record <span class="muted mono" style="font-size:12px">— how the engine's own forecasts have scored against what happened</span></h2></summary>
+      <div class="panel" id="track"><div class="empty">Loading…</div></div>
+    </details>
+
+    <details class="section" id="sec-health" data-mtab="body">
+      <summary><h2 id="h-health">Health markers <span class="muted mono" style="font-size:12px">— metabolism &amp; the body behind the engine</span></h2></summary>
       <div class="hgrid" id="health"><div class="empty">No markers yet — add one below.</div></div>
       <form class="hform" id="hform">
         <select id="hmarker" required aria-label="Marker"></select>
@@ -154,7 +153,7 @@ __SH_DEMOBAR__
         <input id="hvalue" type="number" step="any" placeholder="value" required aria-label="Value">
         <button class="primary" type="submit">Add reading</button>
       </form>
-    </div>
+    </details>
 
     <dialog id="settingsDialog" class="modal">
       <div class="modal-head">

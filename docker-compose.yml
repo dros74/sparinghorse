@@ -55,8 +55,7 @@ services:
       - SH_SECRETS_DB=/secrets/secrets.db
       # Personalization — real values live in the git-ignored .env on the host, kept OUT of this
       # tracked file so the public mirror + publish_mirror.sh leak gate stay clean.
-      # Header widgets (also set on the public container so they render there too):
-      - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
+      # Header link (also set on the public container so it renders there too):
       - SH_HOUSE_URL=${SH_HOUSE_URL:-}
       - SH_HOUSE_NAME=${SH_HOUSE_NAME:-}
       # §TZ — SH_TZ IS THE WHOLE ENGINE'S CLOCK, not just the nightly job's. Unset, every date the app
@@ -138,9 +137,7 @@ services:
       - SH_DB=/data/sparinghorse.db
       # - SH_PRIVATE_URL=https://private.example.com   # optional "Log in" link → your private console
       # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY here
-      # Header widgets — public-visible by design (weather is 3 decoy capitals; real workout geo is
-      # GPS-map-only and private). Real values from the host .env; no personal data in this file.
-      - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
+      # Header link — public-visible by design. Real values from the host .env; no personal data in this file.
       - SH_HOUSE_URL=${SH_HOUSE_URL:-}
       - SH_HOUSE_NAME=${SH_HOUSE_NAME:-}
     volumes:
@@ -183,8 +180,6 @@ services:
       # Give the demo the same clock as the rest of the stack, or its "today" is UTC and the
       # straddling week reads a day out. See the §TZ note on the private service.
       - SH_TZ=${SH_TZ:-}
-      # Header widgets, so the demo looks like the real thing rather than a stripped fixture.
-      - SH_WEATHER_CITIES=${SH_WEATHER_CITIES:-}
       # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY / SH_SECRETS_DB / SH_HOUSE_* here —
       # a demo carries no credentials and does not advertise the owner's other sites.
     volumes:

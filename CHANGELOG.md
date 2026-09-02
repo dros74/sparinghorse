@@ -10,6 +10,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.57.0] - 2026-09-02
+
+### Added
+
+- **A Today page (§5.1).** `/today` is the daily surface: the readiness verdict, today's session
+  with its paces and heart-rate bands, the check-in, and one line saying *why this session* —
+  rendered from the plan's own fields (the phase and week it sits in, what it is, the fitness
+  component it builds) — and nothing else. The installed app now starts there
+  (`manifest.start_url`); the dashboard header links to it and it links back; on a phone the tab
+  bar hands the other tabs to the dashboard. The binding-limit line joins it when 0.58.0 publishes
+  the limits block.
+- **A section rail on wide screens (review U6).** One link per dashboard section, fixed at the
+  left from 1180 px up; a link opens a closed section on the way. The phone keeps its tab bar.
+
+### Changed
+
+- **The dashboard is plan-first (§5.2).** Order: the objective, the plan (the current week open,
+  as before), the readiness card, the latest run — then the analytics. Every analytics section
+  (shape, effort, zones, fitness & fatigue, weekly volume, drift, track record, health markers) is
+  now a collapsible `<details>`, **closed on a fresh device and remembered per device**. The plan,
+  the readiness card and the latest run stay open.
+- **The showcase opens on the track record.** On the public and demo boxes the ledger — the
+  engine's own forecasts scored against what happened — is the first section, open. It is the
+  product's argument; it used to be the last thing on the page.
+- **Two themes, following the system (decoration decision).** Daylight and Charcoal; the theme
+  follows `prefers-color-scheme` unless a choice is saved, and one button cycles auto → charcoal →
+  daylight. The third theme, Aurora, and the three 30×9 px swatches are gone (review U4 named the
+  swatches the smallest control on every page).
+
+### Removed
+
+- **The weather header widget and its geocode proxy** (decoration decision). `SH_WEATHER_CITIES`,
+  the `weather_cities` setting and city picker, `/api/weather`, `/api/geocode` and two outbound
+  dependencies (Open-Meteo forecast and geocoding) on every box. The aerobic-efficiency card's
+  temperature panel is unrelated and stays — that is the athlete's own run data.
+
+### Tests
+
+- The browser driver asserts the Today page (card, check-in, why line, nothing else), the rail
+  (≥8 links; a link opens a closed section), a fresh device's closed analytics, ledger-first on
+  the public box, and runs axe on `/today`; it starts each load with the sections remembered open
+  so the flows can read inside them. The PWA det pins `start_url` = `/today` and two theme
+  colours; the settings and demo-guard dets no longer know a weather setting.
+
 ## [0.56.1] - 2026-09-02
 
 ### Fixed

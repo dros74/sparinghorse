@@ -142,7 +142,7 @@ def _stc_pwa():
                     fail.append(f"manifest content-type {m.headers.get('Content-Type')}")
                 try:
                     man = S.json.loads(m.get_data(as_text=True))
-                    if man.get("start_url") != "/" or man.get("display") != "standalone" or not man.get("icons"):
+                    if man.get("start_url") != "/today" or man.get("display") != "standalone" or not man.get("icons"):   # 0.57.0: the installed app opens on Today
                         fail.append(f"manifest missing install fields: {sorted(man)}")
                 except ValueError:
                     fail.append("manifest is not valid JSON")
@@ -378,7 +378,7 @@ def _stc_readiness_contrast():
               "red": _stcss_decls(_stcss_rule(S.APP_CSS, ".statuscard.red"))}
     if not base.get("color"):
         fail.append(".statuscard base rule missing a text color")
-    for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]'), ("aurora", '[data-theme="aurora"]')):
+    for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]')):
         props = {**root, **_stcss_decls(_stcss_rule(S.APP_CSS, sel))}
         try:
             ink, ink_a = _stcss_color(base["color"], props)
@@ -406,7 +406,7 @@ def _stc_readiness_contrast():
     # 0.56.1 (review U3) — the theme TOKENS themselves, per theme: muted text on every surface, the
     # ink on the accent buttons, and the text-safe accent/warn inks, all ≥ 4.5:1. The 2026-09-02
     # review measured white on the Charcoal accent at 2.6:1 and Daylight's muted at 4.49:1.
-    for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]'), ("aurora", '[data-theme="aurora"]')):
+    for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]')):
         tok = {**root, **_stcss_decls(_stcss_rule(S.APP_CSS, sel))}
         def col(name):
             c, _ = _stcss_color(tok.get(name, ""), tok)
@@ -2219,10 +2219,9 @@ def _stc_demo_guard():
         # what happened on the first cut of this det. [[revert-tests-must-be-seen-to-fail]]
         for key, val in (("private_url", "https://example.com"), ("house_url", "https://example.com"),
                          ("house_name", "x"),
-                         # 0.55.1 (review S9): the process clock, the outbound weather target and
-                         # the prose the next visitor reads in Settings and every prompt carries
-                         ("tz", "Europe/Lisbon"), ("weather_cities", "Lisbon,38.72,-9.14"),
-                         ("athlete_context", "x")):
+                         # 0.55.1 (review S9): the process clock and the prose the next visitor
+                         # reads in Settings and every prompt carries
+                         ("tz", "Europe/Lisbon"), ("athlete_context", "x")):
             r = client.post("/api/settings", json={key: val})
             detail[f"settings:{key}"] = r.status_code
             if r.status_code != 403:
@@ -2268,13 +2267,13 @@ def _stc_demo_guard():
             hdb.close()
     return _st("det", "demo-guard",
                "§DEMO the demo box refuses secrets, outbound account calls (sync/Suunto), the "
-               "self-test subprocess, the backup/export downloads, health-marker writes and the six "
-               "visitor-facing settings (identity, clock, weather, context), while the day "
+               "self-test subprocess, the backup/export downloads, health-marker writes and the five "
+               "visitor-facing settings (identity, clock, context), while the day "
                "preferences and the status reads the Settings panel needs stay open — and the whole "
                "guard is inert unless SH_DEMO is set",
                passed=not fails,
                expect="403 on secrets-write/sync/suunto/selftest/backup/export/health-write/"
-                      "identity+tz+weather+context settings · 200 on status reads, health read and "
+                      "identity+tz+context settings · 200 on status reads, health read and "
                       "day preferences · nothing gated when SH_DEMO is off",
                got={**detail, "failures": fails or "none"})
 
@@ -4908,10 +4907,7 @@ def _stc_settings():
     # validation guard: markup-break + url-scheme (XSS) + city-format + IANA-tz; athlete_context is free
     checks = [("house_url", "https://ok.com", True), ("house_url", "ftp://x", False),
               ("house_url", "javascript:alert(1)", False), ("house_name", 'a"b', False),
-              ("house_name", "My Site", True), ("weather_cities", "nonsense", False),
-              ("weather_cities", "Lisbon,38.72,-9.14,LIS", True), ("weather_cities", "", True),
-              ("weather_cities", "A,1,1;B,2,2;C,3,3;D,4,4;E,5,5", True),          # exactly 5 = ok
-              ("weather_cities", "A,1,1;B,2,2;C,3,3;D,4,4;E,5,5;F,6,6", False),   # 6 > cap
+              ("house_name", "My Site", True),
               ("tz", "Europe/Luxembourg", True), ("tz", "Not/AZone", False),
               ("private_url", "https://pvt.example.com", True), ("private_url", "javascript:1", False),
               ("private_url", 'https://x"y', False),
@@ -4922,11 +4918,13 @@ def _stc_settings():
     # Assert the WIRING (like _stc_map_privacy): the settings + geocode endpoints must stay private —
     # the public read-only container relies on _private_only_path to 403 them. A refactor that drops
     # one (typo / tuple reorder) must fail here, not leak the user's settings + an open geocode proxy.
-    for p in ("/api/settings", "/api/geocode"):
+    for p in ("/api/settings",):
         if not S._private_only_path(p):
             fails.append(f"{p} not gated private")
+    if hasattr(S, "api_geocode") or S._private_only_path("/api/geocode"):
+        fails.append("the geocode proxy is back (0.57.0 removed the weather widget and its proxy)")
     return _st("det", "settings",
-               "meta→env→default resolution (stored ''=clear) + save-time guard (incl. 5-city cap) + settings/geocode private",
+               "meta→env→default resolution (stored ''=clear) + save-time guard + settings private",
                passed=not fails, expect="resolution + validation + private-only wiring hold",
                got={"violations": fails or "none"})
 
@@ -7013,7 +7011,7 @@ def _stc_calibration_inventory():
     # Plumbing: rate limits, cache lifetimes, schema versions, HTTP headers. Nothing here shapes a
     # prescription or a projection, so nothing here is calibration.
     PLUMBING = {"PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
-                "MAX_WEATHER_CITIES", "SUUNTO_ACTIVITY_RUNNING", "WEATHER_TTL", "EXPORT_FORMAT",
+                "SUUNTO_ACTIVITY_RUNNING", "EXPORT_FORMAT",
                 "_EXPLAIN_CACHE_MAX",
                 # 0.55.1 — abuse dampers and the public by-id window: seconds and days of plumbing,
                 # not magnitudes the plan is computed from
@@ -13211,7 +13209,7 @@ def _stc_accent2_fallback():
     if "SQUARE POLYCHROME PALETTE" not in S.APP_CSS:
         fails.append("(b) the polychrome block is gone — it is the ratified house palette (0.30.0), "
                      "not an experiment to tidy away")
-    for theme in (":root", '[data-theme="dark"]', '[data-theme="aurora"]'):
+    for theme in (":root", '[data-theme="dark"]'):
         # the overlay re-asserts all four per theme — read the LAST block for the selector, since
         # the overlay's re-assertion is (deliberately) the later, winning rule
         blocks = [m.group(1) for m in S.re.finditer(
@@ -15469,7 +15467,7 @@ def _stc_touch_targets():
     fails = []
     css = S.APP_CSS
     # (a) each control projects a hit pseudo — a ::before without `content` generates no box at all
-    for sel in (".swatch::before", ".qhint::before", ".prseg::before", ".hrange button::before"):
+    for sel in (".qhint::before", ".prseg::before", ".hrange button::before"):
         decls = _stcss_decls(_stcss_rule(css, sel))
         if not decls.get("content"):
             fails.append(f"(a) {sel}: no hit-expansion rule (or one without `content` — paints no box)")
@@ -15484,7 +15482,7 @@ def _stc_touch_targets():
                              f"end segment's background pokes past the rounded outline")
     # (c) every expansion anchors on its own element (an unpositioned origin would anchor the
     #     pseudo on some ancestor and grow the wrong box)
-    for sel in (".swatch", ".qhint", ".prseg", ".hrange button"):
+    for sel in (".qhint", ".prseg", ".hrange button"):
         if "relative" not in _stcss_decls(_stcss_rule(css, sel)).get("position", ""):
             fails.append(f"(c) {sel}: not position:relative — its ::before would anchor elsewhere")
     # 0.56.1 (review U4) — the stop-symptom row is a ≥32px full row and the ignore/delete controls are
@@ -15529,7 +15527,7 @@ def _stc_pwa_polish():
     fails = []
     js, css, shell = S.APP_JS, S.APP_CSS, S.INDEX_HTML
     # (a) theme chrome: the shell map + the two writes at parse time, and the switch-side upkeep
-    for hexv in ("#f4f1ea", "#191a1d", "#121226"):
+    for hexv in ("#f4f1ea", "#191a1d"):   # 0.57.0: two themes
         if hexv not in shell or hexv not in js:
             fails.append(f"(a) theme bg {hexv} missing from {'shell' if hexv not in shell else 'app.js'} "
                          f"— one theme's chrome would fall back to Daylight")
@@ -15560,7 +15558,7 @@ def _stc_pwa_polish():
     if "storedSync(" not in tf:
         fails.append("(b) tileFail never reads the stored stamp — the offline line stays ageless")
     # (c) dark-map filters
-    for theme in ("dark", "aurora"):
+    for theme in ("dark",):
         body = _stcss_rule(css, f'[data-theme="{theme}"] .actmap .leaflet-tile')
         if "filter" not in _stcss_decls(body):
             fails.append(f"(c) no tile filter for {theme} — the OSM map glares white on a dark theme")
@@ -15616,8 +15614,8 @@ def _stc_pwa_polish():
     # (h) the dead weather block (the live chips are .sc-wx — pinned so a revert can't sneak back)
     if S.re.search(r"(?:^|\n)\s*\.weather\{", css):
         fails.append("(h) the dead .weather block is back — nothing emits class=weather any more")
-    if not _stcss_rule(css, ".statuscard .sc-wx"):
-        fails.append("(h) the LIVE weather chips (.sc-wx) lost their rule")
+    if _stcss_rule(css, ".statuscard .sc-wx"):
+        fails.append("(h) the weather chips are back — 0.57.0 removed the widget")
     # (i) non-scaling strokes on the stretched charts
     for sel in (".ff .ctl", ".ff .atl", ".ff .zero", ".ff .cross",
                 ".drift .dl", ".drift .grid", ".drift .now", ".drift .cross"):

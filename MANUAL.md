@@ -271,6 +271,11 @@ plots the whole ledger, so the projection's own track record is visible rather t
 
 ## 6. Reading the dashboard, panel by panel
 
+> **Since 0.57.0** the dashboard is plan-first — objective, plan, readiness, latest run — and every analytics
+> panel below is collapsed until you open it (remembered per device). `/today` is the one-screen daily
+> surface: the readiness verdict, today's session, the check-in and one line saying why this session; the
+> installed app opens there. On wide screens a rail at the left lists the sections.
+
 ### Current shape
 VO₂max, **CTL** (chronic load ≈ your fitness, a slow ~42-day average), **ATL** (acute load ≈ recent fatigue,
 a fast ~7-day average), and **ACWR** (ATL ÷ CTL — how hard recent load is relative to your base). ACWR near
@@ -626,7 +631,7 @@ The **Settings** window (private container only) is where you configure the app 
   you confirm a rotation actually landed ("configured" looks identical before and after). Check it
   against your own copy with `printf %s "$KEY" | sha256sum | cut -c1-8`. Typing into several key
   fields and saving one leaves the others' text alone.
-- **Personalization** — athlete context (one line injected into AI prompts), weather cities for the header
+- **Personalization** — athlete context (one line injected into AI prompts), a house link for the header
   widget, an optional house back-link, and the timezone. These are non-secret and stored in the DB.
 - **Manual LTHR (bpm)** — your lactate-threshold heart rate from a field test. When set, it overrides the
   data-derived estimate everywhere the app anchors on LTHR (the effort monitor's ceilings, the HR-zone
