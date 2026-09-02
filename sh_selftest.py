@@ -1390,9 +1390,10 @@ def _stc_demo_track():
         perimeter that included a phantom wrap-around segment (every track ~1% short), and the
         `dist` series accumulating over that same missing segment.
     (b) IT FITS SOMEWHERE REAL. A single loop scaled to 15.8 km is ~5 km across — wider than
-        Manhattan, and the first version drew one straight over the Hudson. Repeating a ~3.2 km
-        circuit is what a runner actually does, so the track's bounding box must stay small however
-        long the run: a marathon and a 5 k occupy roughly the same park.
+        Manhattan, and the first version drew one straight over the Hudson. Lapping a real circuit
+        is what a runner actually does, so no track may be bigger than the circuit itself, however
+        long the run: a marathon and a 5 k occupy the same park. The bound is the LOOP'S OWN span,
+        derived here rather than guessed, so it tracks any future re-solve of the route.
     (c) DETERMINISTIC PER RUN — the same activity keeps its route across the hourly reset (nothing is
         more obviously fake than a run whose route changes while you look at it), and two different
         runs get different routes.
@@ -1420,8 +1421,9 @@ def _stc_demo_track():
             fail.append(f"a {km} km run draws a {drawn:.2f} km route — the map contradicts the card")
         if abs(t["dist"][-1] - km) > 0.05:
             fail.append(f"a {km} km run's dist series ends at {t['dist'][-1]}")
-        if span > 2.5:                                                    # (b)
-            fail.append(f"a {km} km run spans {span:.2f} km of map — it is one huge loop, not laps")
+        if span > _demo_loop_span() + 0.15:                                # (b)
+            fail.append(f"a {km} km run spans {span:.2f} km of map — bigger than the "
+                        f"{_demo_loop_span():.2f} km circuit it is supposed to be lapping")
         if len(path) != S.DEMO_TRACK_POINTS:                              # (d)
             fail.append(f"{len(path)} path points, expected {S.DEMO_TRACK_POINTS}")
         for series in ("dist", "pace", "hr", "elevation", "cadence"):
@@ -1439,7 +1441,208 @@ def _stc_demo_track():
                "1%), repeats a park-sized circuit instead of scaling to one implausible loop, stays "
                "put across resets, and carries the full 120-sample downsampler contract",
                passed=not fail,
-               expect="drawn km == stated km · span ≤ 2.5 km at any distance · deterministic per run",
+               expect=f"drawn km == stated km · span ≤ the loop's own {_demo_loop_span():.2f} km "
+                      f"at any distance · deterministic per run",
+               got={**detail, "failures": fail or "none"})
+
+
+def _demo_loop_span():
+    """the demo circuit's own longest dimension, in km — the yardstick every track must fit inside"""
+    import math
+    us = [u for u, _ in S.DEMO_LOOP_UV]
+    vs = [v for _, v in S.DEMO_LOOP_UV]
+    return math.hypot(max(us) - min(us), max(vs) - min(vs)) / 1000.0
+
+
+# §DEMO — Central Park as the route generator has to respect it, in metres ALONG (u) and ACROSS (v)
+# the park's own axis: the same frame SparingHorse.DEMO_LOOP_UV is written in. Simplified from the
+# same public map data the route was solved against (OpenStreetMap), to ~12 m; the route clears every
+# one of these by 25 m, so the simplification cannot make a passing route fail. These are the ground
+# the demo athlete is claimed to run on, and the reason this det exists is that the FIRST generator
+# ignored it completely and drew a 15.8 km run straight across the Lake.
+_DEMO_PARK_UV = (
+    (1880,382), (1886,-383), (1855,-416), (-2156,-449), (-2163,-400), (-2232,-389), (-2235,333), (-2190,379), (1708,416), (1843,415),
+)
+
+_DEMO_WATER_UV = {
+    "Reservoir": (
+        (621,13), (644,-6), (672,-124), (758,-202), (767,-244), (737,-284), (630,-313),
+        (542,-363), (-22,-360), (-63,-319), (-76,-237), (10,-110), (9,115), (31,199),
+        (291,301), (352,298), (399,271), (518,73), (607,40), (606,14),
+    ),
+    "The Lake": (
+        (-842,244), (-830,269), (-887,276), (-961,230), (-973,244), (-948,297), (-1016,306),
+        (-1068,284), (-1145,215), (-1217,187), (-1277,132), (-1241,126), (-1176,158), (-1125,78),
+        (-1085,56), (-1097,-6), (-1164,-48), (-1154,-94), (-1065,-166), (-1033,-179), (-996,-146),
+        (-1029,-101), (-1108,-65), (-1013,-58), (-966,-57), (-1005,-20), (-1037,-18), (-1078,109),
+        (-1058,128), (-933,142), (-897,128), (-904,167), (-835,181), (-879,183), (-875,206),
+        (-804,224), (-754,205), (-724,215), (-723,232),
+    ),
+    "Harlem Meer": (
+        (1688,-78), (1701,-122), (1752,-157), (1772,-218), (1725,-225), (1734,-266), (1670,-293),
+        (1660,-339), (1572,-353), (1586,-379), (1710,-371), (1813,-391), (1852,-354), (1812,-252),
+        (1831,-245), (1832,-166), (1810,-70), (1740,-38), (1700,-48),
+    ),
+    "The Pond": (
+        (-2141,-334), (-2033,-294), (-1988,-246), (-2003,-220), (-2037,-265), (-2071,-238), (-2138,-279),
+        (-2177,-181), (-2137,-150), (-2112,-153), (-2110,-136), (-2193,-171), (-2207,-202), (-2183,-287),
+        (-2199,-335),
+    ),
+    "The Pool": (
+        (1191,381), (1208,378), (1197,339), (1233,314), (1256,238), (1264,222), (1242,220),
+        (1195,268), (1203,289), (1154,308), (1176,321), (1167,361),
+    ),
+    "Conservatory Water": (
+        (-1092,-371), (-1074,-386), (-985,-378), (-968,-350), (-1006,-321), (-1093,-329), (-1111,-354),
+    ),
+    "Turtle Pond": (
+        (-515,20), (-518,-10), (-546,-13), (-526,-76), (-585,-86), (-584,-38), (-566,-32),
+        (-596,66), (-558,84),
+    ),
+}
+
+
+def _stc_demo_route():
+    """§DEMO — the invented route is on invented ground, but it is NOT in the water.
+
+    A synthetic athlete is honest; a synthetic athlete swimming the Jacqueline Kennedy Onassis
+    Reservoir is a bug with a straight face. The first generator drew a harmonic blob around a centre
+    point, which is a reasonable way to draw a closed curve and a hopeless way to draw a route: a
+    3.2 km circuit is ~1 km across, Central Park is 830 m wide, and the demo's long runs crossed the
+    Lake, the Reservoir and both flanking avenues. The route is now SOLVED against the park rather
+    than drawn, and this is the tooth that holds it there.
+
+    (a) THE CIRCUIT IS A CIRCUIT — closed, simple (a self-crossing loop is not a route: an early
+        solve walked one end cap three times because the cap was appended in the wrong direction,
+        which every land check passed and no runner would recognise), and park-sized.
+    (b) THE ROUTE IS ON LAND — every vertex inside the park boundary, and ≥15 m from every pond,
+        lake and reservoir in it.
+    (c) SO IS WHAT GETS DRAWN. The map shows a 120-sample DOWNSAMPLE, and its chords cut every corner
+        the route turns — an earlier solve was entirely on land and still put 75 of 116 drawn tracks
+        in the water. So the check is run on the LINE, not on its vertices, at the demo's own longest
+        run with headroom (24 km, ~200 m between samples).
+        ⚠ THE 120-SAMPLE CONTRACT HAS A CEILING, and it is arithmetic, not a bug here: past ~2.6 laps
+        there are fewer than 14 samples per circuit, and no 14-gon holds a 9 km loop's corners. The
+        measured floor is ~24 km; a marathon drawn this way cuts 116 m into the Reservoir. That is
+        equally true of a REAL lapped marathon through activity_profile(n=120) — it is the
+        downsampler's resolution, not the route — and the demo athlete's longest run is 22.5 km.
+        If the demo ever seeds a marathon (`seed --past-race`), its map will show the same coarse
+        polygon a real one would.
+    (d) THE ROUTE TRAVELS. Re-centring the demo (SH_DEMO_ROUTE_CENTER, for a self-hoster who would
+        rather not be in New York) moves every point and changes no distance."""
+    import math
+    fail, detail = [], {}
+
+    def to_uv(lat, lon):
+        """the app's lat/long back into park metres — the inverse of what _demo_loop() just did"""
+        clat, clon = (float(x) for x in S.DEMO_ROUTE_CENTER.split(","))
+        th = math.radians(S.DEMO_ROUTE_BEARING)
+        x = (lon - clon) * 111.32 * math.cos(math.radians(clat)) * 1000.0
+        y = (lat - clat) * 111.32 * 1000.0
+        return (x * math.cos(th) + y * math.sin(th), -x * math.sin(th) + y * math.cos(th))
+
+    def inside(pt, ring):
+        u, v = pt; c = False
+        for i in range(len(ring)):
+            u1, v1 = ring[i]; u2, v2 = ring[(i + 1) % len(ring)]
+            if (u1 > u) != (u2 > u) and v < v1 + (u - u1) * (v2 - v1) / (u2 - u1):
+                c = not c
+        return c
+
+    def dist(pt, ring):
+        u, v = pt; best = 1e18
+        for i in range(len(ring)):
+            au, av = ring[i]; bu, bv = ring[(i + 1) % len(ring)]
+            du, dv = bu - au, bv - av
+            L = du * du + dv * dv or 1e-9
+            t = max(0.0, min(1.0, ((u - au) * du + (v - av) * dv) / L))
+            best = min(best, math.hypot(u - (au + t * du), v - (av + t * dv)))
+        return best
+
+    def clearances(pts, label):
+        """(inside the park wall, away from any water) in metres, over a list of park-frame points"""
+        park_clear, water_clear, worst = 1e18, 1e18, None
+        for pt in pts:
+            if not inside(pt, _DEMO_PARK_UV):
+                fail.append(f"{label}: a point is outside the park entirely")
+                park_clear = -1.0
+                break
+            park_clear = min(park_clear, dist(pt, _DEMO_PARK_UV))
+            for name, ring in _DEMO_WATER_UV.items():
+                d = -dist(pt, ring) if inside(pt, ring) else dist(pt, ring)
+                if d < water_clear:
+                    water_clear, worst = d, name
+        return round(park_clear), round(water_clear), worst
+
+    loop = list(S.DEMO_LOOP_UV)
+    # (a) — closed, simple, park-sized
+    lap = sum(math.dist(loop[i], loop[(i + 1) % len(loop)]) for i in range(len(loop))) / 1000.0
+    detail["lap_km"] = round(lap, 2)
+    detail["span_km"] = round(_demo_loop_span(), 2)
+    if not 4.0 <= lap <= 20.0:
+        fail.append(f"the demo circuit is {lap:.2f} km — that is not a park loop")
+
+    def ccw(a, b, c):
+        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+    crossings = 0
+    for i in range(len(loop)):
+        a, b = loop[i], loop[(i + 1) % len(loop)]
+        for j in range(i + 1, len(loop)):
+            if j == i or (j + 1) % len(loop) == i or j == (i + 1) % len(loop):
+                continue
+            c, d = loop[j], loop[(j + 1) % len(loop)]
+            if ccw(a, c, d) != ccw(b, c, d) and ccw(a, b, c) != ccw(a, b, d):
+                crossings += 1
+    detail["self_crossings"] = crossings
+    if crossings:
+        fail.append(f"the circuit crosses itself {crossings}× — that is not one loop")
+
+    # (b) — the route itself
+    pk, wt, worst = clearances(loop, "route")
+    detail["route_clear_m"] = {"park_wall": pk, "water": wt, "nearest": worst}
+    if pk < 15:
+        fail.append(f"the route runs {pk} m from the park wall — outside is a road")
+    if wt < 15:
+        fail.append(f"the route runs {wt} m from {worst} — that is the water")
+
+    # (c) — and the LINE the map actually draws, at the distance where chords cut hardest
+    DRAWN_KM = 24.0                       # the demo's longest run is 22.5 km; this is that with room
+    line = []
+    for aid in range(1, 13):              # every start phase and both directions
+        uv = [to_uv(*p) for p in S._demo_track(aid, DRAWN_KM, int(DRAWN_KM * 330), 150)["path"]]
+        for i in range(len(uv) - 1):
+            a, b = uv[i], uv[i + 1]
+            for q in range(8):
+                t = q / 8
+                line.append((a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])))
+    pk2, wt2, worst2 = clearances(line, "drawn line")
+    detail["drawn_km"] = DRAWN_KM
+    detail["drawn_clear_m"] = {"park_wall": pk2, "water": wt2, "nearest": worst2}
+    if wt2 < 0:
+        fail.append(f"the DRAWN {DRAWN_KM:.0f} km track enters {worst2} by {-wt2} m — "
+                    f"the map is in the water")
+
+    # (d) — a self-hoster can move it
+    keep = S.DEMO_ROUTE_CENTER
+    try:
+        S.DEMO_ROUTE_CENTER, S._DEMO_LOOP = "49.6116,6.1319", None      # Luxembourg City
+        moved = S._demo_track(1, 10.0, 3300, 150)
+        detail["moved_to"] = moved["path"][0]
+        if abs(moved["path"][0][0] - 49.6) > 0.2:
+            fail.append("SH_DEMO_ROUTE_CENTER did not move the route")
+        if abs(moved["dist"][-1] - 10.0) > 0.05:
+            fail.append("moving the demo changed the distance the run claims")
+    finally:
+        S.DEMO_ROUTE_CENTER, S._DEMO_LOOP = keep, None
+
+    return _st("det", "demo-route",
+               "§DEMO the invented route is a real closed circuit ON LAND: inside the park, ≥15 m "
+               "from every lake and pond, and the 120-sample line the MAP DRAWS is clear too at "
+               "every distance the demo produces — the first generator ran a 15.8 km run through "
+               "the middle of the Lake",
+               passed=not fail,
+               expect="simple park-sized loop · route and drawn line inside the park and out of the "
+                      "water · re-centring moves it without changing the distance",
                got={**detail, "failures": fail or "none"})
 
 
@@ -15045,7 +15248,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_demo_guard(), lambda: _stc_demo_track(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_demo_guard(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),

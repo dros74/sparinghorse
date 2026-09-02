@@ -8822,7 +8822,7 @@ runClient();
 # cover. Doubles as an open-source demo: `python SparingHorse.py seed` then run with SH_DB
 # pointed at the seeded file. Synthetic data only — no personal/real numbers.
 def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past_race=False,
-                      cold=False):
+                      cold=False, demo=False):
     import random
     rnd = random.Random(seed)
     today = _date(end) if end else datetime.now().date()
@@ -8862,7 +8862,21 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
         "threshold": {"pace": 295, "hr": 166, "spread": 16, "title": "Threshold"},
         "long":      {"pace": 390, "hr": 146, "spread": 18, "title": "Long run"},
     }
-    base_km, aid = 32.0, 0
+    # §DEMO — the demo athlete runs a FULL marathon build; the shared CI fixture does not, and must
+    # not: ten goldens and a dozen dets are pinned to its every number. Two things only `demo=True`
+    # carries, both of them things the dashboard READS and the fixture never had:
+    #  · VOLUME. At base 32 the longest run of the entire block is 15.8 km — just under
+    #    DURABILITY_MIN_KM — so the durability card was permanently empty. The one card whose whole
+    #    subject is the long run had no long run to read. Base 45 puts 14 of them over the floor.
+    #  · THE REST OF THE RUNALYZE PAYLOAD. `raw` held only what the planner consumes, so every
+    #    display fed from the other fields came up blank or flat: no decoupling (durability), no
+    #    temperature (the §EF weather panel), no feel, and a pace identical in week 24 to week 1 —
+    #    24 weeks of building that efficiency drew as a dead-flat line (r = -0.004).
+    base_km, aid = (45.0 if demo else 32.0), 0
+    DEMO_DECOUP_BASE    = 780.0   # decoupling for a 16 km run in week 0 (Runalyze-raw ≈ %×100 ⇒ 7.8%)
+    DEMO_DECOUP_GAIN    = 480.0   # …falling this far by the last week — the adaptation the card reads
+    DEMO_DECOUP_PER_KM  = 18.0    # …and rising with distance, per §3.3's own caveat (longer ⇒ more fade)
+    DEMO_ECON_GAIN      = 0.05    # 5% faster at the same HR by the end of the build (the §EF trend)
     for w in range(weeks):
         wk_monday = start_monday + timedelta(weeks=w)
         ramp = 1.0 + 0.55 * (w / max(1, weeks - 1))     # ~+55% volume by the end
@@ -8880,14 +8894,33 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
                 continue
             km = max(3.0, round(km + rnd.uniform(-0.6, 0.6), 1))
             z = ZONES[zone]
-            dur = int(km * z["pace"])
+            prog = w / max(1, weeks - 1)                 # 0 in the first week, 1 in the last
+            dur = int(km * z["pace"] * (1.0 - DEMO_ECON_GAIN * prog if demo else 1.0))
             hr_avg = z["hr"] + rnd.randint(-4, 4)
             hr_max = hr_avg + z["spread"] + rnd.randint(0, 6)
             aid += 1
+            extra = {}
+            if demo:
+                # Decoupling — economy fade over the run, the §3.3 durability read's raw material.
+                # It RISES with distance and FALLS as the athlete adapts, which is exactly the
+                # confound that card spends three caveats on: the demo's long runs get longer AND
+                # decouple less, so the chart shows the two moving against each other on real axes.
+                extra["aerobic_decoupling_pace"] = round(max(
+                    120.0, DEMO_DECOUP_BASE - DEMO_DECOUP_GAIN * prog
+                    + DEMO_DECOUP_PER_KM * (km - DURABILITY_MIN_KM) + rnd.uniform(-22, 22)), 1)
+                # A seasonal temperature, so §EF's weather panel has weather in it. Plotted BESIDE
+                # efficiency and never subtracted from it — which is only a visible discipline if
+                # there is a temperature series to not subtract.
+                doy = day.timetuple().tm_yday
+                extra["temperature"] = round(12.0 + 11.0 * math.sin(2 * math.pi * (doy - 110) / 365.0)
+                                             + rnd.uniform(-2.0, 2.0), 1)
+                # Runalyze's 1–5 subjective feel, worst→best: mostly fine, a notch down on long days.
+                extra["subjective_feeling"] = max(1, min(5, (3 if zone == "long" else 4)
+                                                         + rnd.choice([-1, 0, 0, 1])))
             # per-run effective VO2max (what /api/vo2max charts as the VO2max tile sparkline) — a
             # rising baseline ~46→54 tracking the build, with a small zone bump (quality reads higher)
             # and mild run-to-run noise. use_vo2max gates it on, matching Runalyze's per-activity field.
-            run_vo2 = round(46.0 + 8.0 * (w / max(1, weeks - 1))
+            run_vo2 = round(46.0 + 8.0 * prog
                             + {"easy": 0.0, "threshold": 1.5, "long": 0.5}[zone]
                             + rnd.uniform(-0.8, 0.8), 1)
             upsert_activity(db, {
@@ -8897,7 +8930,7 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
                 "hr_avg": hr_avg, "hr_max": hr_max, "trimp": est_trimp(dur / 60.0, zone),
                 "cadence": rnd.randint(168, 176), "elevation_up": round(km * 6),
                 "vo2max": run_vo2, "use_vo2max": True,
-                "source": "synthetic",
+                "source": "synthetic", **extra,
             })
     race_day = today - timedelta(days=5)
     if past_race:   # §6s — the race itself (5 days ago), so the settled scorecard can reckon the result
@@ -9001,69 +9034,188 @@ _DEMO_RESET_LOCK = threading.Lock()
 # which is only honest because the athlete is too: the banner says so, and nothing here is presented
 # as a record of anywhere anyone went. Overridable so a self-hoster's demo is not in someone
 # else's city; the default is the most recognisable running loop on earth, which reads as demo data.
-DEMO_ROUTE_CENTER = os.environ.get("SH_DEMO_ROUTE_CENTER", "40.7829,-73.9654")   # Central Park, NYC
+#
+# ⚠ THE FIRST VERSION RAN THROUGH THE MIDDLE OF THE LAKE. It drew a harmonic blob around a centre
+# point, which is a fine way to draw a closed curve and a terrible way to draw a route: a 3.2 km
+# circuit is ~1 km across and Central Park is 830 m wide, so the "park loop" crossed the Lake, the
+# Reservoir and both flanking avenues. The shape of a route is not decorative — it is a claim about
+# ground — so this is no longer drawn at all. DEMO_LOOP_UV below is a real loop SOLVED against the
+# park: the corridor between the park boundary and every pond, lake and reservoir inside it was
+# measured (OpenStreetMap, the same source as the map tiles under it), and the route is the path
+# that stays in it. It keeps >=21 m inside the park wall and >=9 m of daylight from every body of
+# water — not the bare minimum but as much daylight as the ground allows, because the map draws a
+# 120-point DOWNSAMPLE and its chords cut every corner: an earlier solve cleared The Pool by 8 m,
+# was entirely on land, and still put 75 of 116 drawn tracks in the water. It threads inside The
+# Pool where the wall leaves no room and swings around Harlem Meer at the north, as the real
+# drive does. det/demo-route re-derives the clearances from the baked numbers and checks the
+# DRAWN line, so a future edit cannot quietly put the athlete back in the water.
+DEMO_ROUTE_CENTER = os.environ.get("SH_DEMO_ROUTE_CENTER", "40.78391,-73.96472")   # Central Park, NYC
+# The park's own axis: the loop is stored in metres ALONG (u) and ACROSS (v) it, not in lat/long, so
+# moving the demo elsewhere is a re-centre and a rotation rather than a redraw. A self-hoster who
+# overrides the centre gets Central Park's loop translated to their coordinates — it stays a valid
+# 9.1 km circuit, but nothing checks what is under it there.
+DEMO_ROUTE_BEARING = float(os.environ.get("SH_DEMO_ROUTE_BEARING", "60.565"))      # degrees
 DEMO_TRACK_POINTS = 120     # what the real downsampler emits, so the panels get the shape they expect
-DEMO_TRACK_LAP_KM = 3.2     # roughly a park circuit — the unit the route repeats to reach its distance
+DEMO_ROUTE_WANDER_M = 3.0   # per-run drift off the centreline, far under the route's own clearance
+DEMO_CLIMB_M = 26.0         # the park rises toward Harlem Hill; one hill per lap, which is what a lapped
+                            # long run's elevation trace actually looks like
+DEMO_CORNER_DEG = 25.0      # a turn this sharp gets a sample of its own, so the drawn line keeps the corner
+
+# The loop, as (along, across) metres on the park axis. Closed: the last point joins the first.
+DEMO_LOOP_UV = (
+    (-2182,289), (-2130,305), (-1527,303), (-1478,326), (-1425,333), (-1151,333),
+    (-1043,345), (-715,334), (325,353), (709,348), (1037,352), (1087,339),
+    (1107,289), (1181,209), (1222,174), (1386,166), (1824,166), (1839,119),
+    (1838,64), (1802,38), (1473,41), (980,50), (706,40), (615,94),
+    (563,110), (500,198), (450,295), (408,330), (357,349), (303,351),
+    (249,345), (145,310), (42,273), (-3,242), (-28,194), (-169,-221),
+    (-216,-238), (-709,-231), (-1202,-238), (-1914,-227), (-1950,-190), (-1995,-162),
+    (-2044,-146), (-2069,-98), (-2115,-76), (-2170,-78), (-2186,-38), (-2188,236),
+)
+
+_DEMO_LOOP = None
+
+
+def _demo_loop():
+    """§DEMO — DEMO_LOOP_UV as (lat, lon, cumulative km, elevation m) + the lap length and the
+    longitude squeeze at this latitude. Computed once.
+
+    Elevation is tied to POSITION, not to time: the park climbs toward its north end, so a run that
+    laps it climbs the same hill once per lap. A sine against the sample index gave every run the
+    same two bumps whatever its distance, which is the tell of a generated profile."""
+    global _DEMO_LOOP
+    if _DEMO_LOOP is not None:
+        return _DEMO_LOOP
+    clat, clon = (float(x) for x in DEMO_ROUTE_CENTER.split(","))
+    th = math.radians(DEMO_ROUTE_BEARING)
+    kmlat, kmlon = 111.32, max(1e-6, 111.32 * math.cos(math.radians(clat)))
+    lo = min(u for u, _ in DEMO_LOOP_UV)
+    span = (max(u for u, _ in DEMO_LOOP_UV) - lo) or 1
+    pts, cum = [], 0.0
+    for i, (u, v) in enumerate(DEMO_LOOP_UV):
+        x = (u * math.cos(th) - v * math.sin(th)) / 1000.0        # east km
+        y = (u * math.sin(th) + v * math.cos(th)) / 1000.0        # north km
+        if i:
+            cum += math.dist((u, v), DEMO_LOOP_UV[i - 1]) / 1000.0
+        pts.append((clat + y / kmlat, clon + x / kmlon, cum, DEMO_CLIMB_M * (u - lo) / span))
+    lap = cum + math.dist(DEMO_LOOP_UV[-1], DEMO_LOOP_UV[0]) / 1000.0
+    # Where the route TURNS. A 120-point downsample of a 22 km run puts 183 m between samples, and a
+    # straight chord across a corner cuts it: on the notch the route makes around The Pool that cut
+    # went 20 m into the pond. So the corners are named here and the sampler lands on them — which is
+    # also what the real downsampler does, picking the nearest recorded point rather than an even one.
+    corners = []
+    m = len(DEMO_LOOP_UV)
+    for i in range(m):
+        x, y = DEMO_LOOP_UV[(i - 1) % m], DEMO_LOOP_UV[i]
+        z = DEMO_LOOP_UV[(i + 1) % m]
+        v1 = (y[0] - x[0], y[1] - x[1]); v2 = (z[0] - y[0], z[1] - y[1])
+        n1 = math.hypot(*v1) or 1e-9; n2 = math.hypot(*v2) or 1e-9
+        cos = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
+        if math.degrees(math.acos(cos)) > DEMO_CORNER_DEG:
+            corners.append(pts[i][2])
+    _DEMO_LOOP = (pts, lap, math.cos(math.radians(clat)), sorted(corners))
+    return _DEMO_LOOP
 
 
 def _demo_track(aid, km, duration_s, hr_avg):
-    """§DEMO — a plausible GPS loop and its pace/HR/elevation curves for one synthetic run.
+    """§DEMO — one synthetic run's route and its pace/HR/elevation curves.
 
-    Shaped like a route rather than drawn like one: the radius is a small sum of harmonics, which
-    gives an organic closed loop that wanders the way a real out-and-back-and-round does, instead of
-    the circle a naive generator produces. The loop is then SCALED so its measured polyline length is
-    the run's actual distance — the map and the summary must not disagree, and a viewer who reads
-    "15.8 km" under a 3 km lap has caught the app lying about something small.
+    The athlete runs LAPS of the park loop and stops when the distance is done — which is both what
+    a park runner does and the only construction under which the drawn track IS the distance printed
+    beside it, with no scaling and so no distortion. A 22 km long run is 2.4 laps; an 8 km easy run
+    is most of one. Start point and direction vary per run, so two runs of the same distance are not
+    the same picture, while the road under them stays put — which is also true of real traces.
 
-    Deterministic per activity id, so the same run keeps the same route across the hourly reset; two
-    different runs get different routes. Matches the real downsampler's contract exactly (see
-    PROFILE_VERSION): 120 samples of dist/pace/hr/elevation/cadence plus the path."""
-    import math
+    Deterministic per activity id, so a run keeps its route across the hourly reset. Matches the real
+    downsampler's contract exactly (see PROFILE_VERSION): 120 samples of dist/pace/hr/elevation/
+    cadence plus the path."""
     import random
     rnd = random.Random(1000 + int(aid))
-    clat, clon = (float(x) for x in DEMO_ROUTE_CENTER.split(","))
+    loop, lap, _kx, corners = _demo_loop()
     n = DEMO_TRACK_POINTS
-    # 2..5 harmonics with small amplitudes: enough to look walked, not enough to self-intersect
-    harm = [(k, rnd.uniform(0.04, 0.16), rnd.uniform(0, 2 * math.pi)) for k in range(2, 6)]
-    # ⚠ LAPS, NOT ONE BIG LOOP. Scaling a single loop to the run's distance is arithmetically fine and
-    # visually absurd: 15.8 km as one circuit is ~5 km across, wider than Manhattan, so the first
-    # version drew a smooth blob straight over the Hudson. Nobody runs a 15.8 km circle; they run a
-    # park loop several times. Repeating a ~3.2 km circuit keeps the track on land, keeps the total
-    # distance exact, and looks like training instead of like a shape.
-    laps = max(1, round((km or DEMO_TRACK_LAP_KM) / DEMO_TRACK_LAP_KM))
-    unit = []
-    for i in range(n):
-        th = 2 * math.pi * laps * i / n
-        # a hair of outward drift per lap so the circuits sit beside each other rather than exactly
-        # on top — a real GPS trace never retraces itself perfectly either
-        r = (1.0 + sum(a * math.sin(k * th + ph) for k, a, ph in harm)) * (1.0 + 0.02 * (i / n))
-        unit.append((r * math.cos(th), r * math.sin(th)))
-    # Measure the unit path, then scale it so the drawn track IS the run's distance. ⚠ The sum runs
-    # to n-1, not around: with laps the path is an open polyline, and wrapping the last point back to
-    # the first added a phantom segment across the whole loop — it over-measured the route, so every
-    # track came out ~1% short of the distance printed beside it.
-    per = sum(math.dist(unit[i], unit[i + 1]) for i in range(n - 1)) or 1.0
-    scale = (km or 1.0) / per                       # km per unit
-    kmlat = 111.32                                  # km per degree latitude
-    kmlon = max(1e-6, 111.32 * math.cos(math.radians(clat)))
-    path, dist, cum = [], [], 0.0
-    for i, (ux, uy) in enumerate(unit):
-        path.append([round(clat + uy * scale / kmlat, 5), round(clon + ux * scale / kmlon, 5)])
-        dist.append(round(cum, 3))
-        if i < n - 1:
-            cum += math.dist(unit[i], unit[i + 1]) * scale
-    base_pace = int((duration_s or km * 330) / max(km, 0.1))     # sec/km
+    km = max(0.2, km or 1.0)
+    start = rnd.uniform(0, lap)
+    step = 1 if rnd.random() < 0.5 else -1                 # clockwise or anti-, like a real runner
+    wob = [(k, rnd.uniform(0.3, 1.0), rnd.uniform(0, 2 * math.pi)) for k in (2, 3, 5)]
+
+    def at(s):
+        """position + elevation a distance s round the loop, with a metre or two of drift off the line"""
+        s = s - lap * math.floor(s / lap)
+        j = 0
+        while j + 1 < len(loop) and loop[j + 1][2] <= s:
+            j += 1
+        a = loop[j]
+        b = loop[(j + 1) % len(loop)]
+        seg = ((b[2] - a[2]) if j + 1 < len(loop) else (lap - a[2])) or 1e-9
+        t = (s - a[2]) / seg
+        lat = a[0] + t * (b[0] - a[0])
+        lon = a[1] + t * (b[1] - a[1])
+        # drift perpendicular to the road, well inside the clearance the route was solved for
+        ph = 2 * math.pi * s / lap
+        off = sum(amp * math.sin(k * ph + p) for k, amp, p in wob) / len(wob)
+        dlat, dlon = b[0] - a[0], b[1] - a[1]
+        m = math.hypot(dlat, dlon) or 1e-9
+        d = DEMO_ROUTE_WANDER_M * off / 111320.0
+        return lat - dlon / m * d, lon + dlat / m * d, a[3] + t * (b[3] - a[3])
+
+    def snap(a_i, half, used):
+        """pull a sample onto a corner it would otherwise cut across, if one is within half a step"""
+        pos = (start + step * a_i) % lap
+        best, bd = None, half
+        for c in corners:
+            d = (c - pos + lap / 2) % lap - lap / 2
+            if abs(d) < bd and round(c, 4) not in used:
+                best, bd = c, abs(d)
+        if best is None:
+            return a_i, None
+        d = (best - pos + lap / 2) % lap - lap / 2
+        return a_i + d * step, round(best, 4)
+
+    def sample(arc):
+        """n samples over `arc` km of route — evenly spaced, but landing on the corners. Returns the
+        positions, the route distance each one sits at, and what the DRAWN polyline measures."""
+        half = arc / (n - 1) / 2
+        offs, used, prev = [], set(), -1.0
+        for i in range(n):
+            a_i = arc * i / (n - 1)
+            if 0 < i < n - 1:                       # the ends stay put: dist[0] is 0 and dist[-1] is km
+                a_i, c = snap(a_i, half, used)
+                if c is not None:
+                    used.add(c)
+            offs.append(max(a_i, prev + 1e-6)); prev = offs[-1]
+        pts = [at(start + step * o) for o in offs]
+        drawn = sum(math.dist((pts[i][0], pts[i][1] * _kx), (pts[i + 1][0], pts[i + 1][1] * _kx))
+                    for i in range(n - 1)) * 111.32
+        return pts, offs, drawn
+
+    # ⚠ WALK FURTHER THAN THE DISTANCE, so the drawn line measures IT. 120 samples over a 22 km run
+    # is one point per 183 m, and the chords between them cut every corner the route turns: sampling
+    # exactly `km` of route drew a track measuring 3.4% short of the number printed beside it. Solve
+    # for the arc whose SAMPLED polyline is `km` instead — two passes converge to under a metre.
+    arc = km
+    for _ in range(3):
+        pts, offs, drawn = sample(arc)
+        if drawn <= 0:
+            break
+        arc *= km / drawn
+    pts, offs, _ = sample(arc)
+    path, dist, elev = [], [], []
+    for i, (lat, lon, e) in enumerate(pts):
+        path.append([round(lat, 5), round(lon, 5)])
+        dist.append(round(min(km, km * offs[i] / arc), 3))   # the distance this sample actually sits at
+        elev.append(int(round(e)))
+    base_pace = int((duration_s or km * 330) / km)          # sec/km
     hr0 = int(hr_avg or 145)
-    pace, hr, elev, cad = [], [], [], []
+    pace, hr, cad = [], [], []
     for i in range(n):
-        th = 2 * math.pi * i / n
-        # a gentle negative split plus terrain noise — a flat line would be the giveaway
-        drift = 1.0 - 0.06 * (i / n) + 0.035 * math.sin(3 * th + harm[0][2])
+        # a gentle negative split, plus the cost of the hill the route is actually on
+        rise = (elev[i] - elev[i - 1]) if i else 0.0
+        run_m = max(1.0, (dist[i] - dist[i - 1]) * 1000) if i else 1.0
+        drift = 1.0 - 0.06 * (i / n) + 1.6 * (rise / run_m)
         pv = int(base_pace * drift * rnd.uniform(0.985, 1.015))
         pace.append(pv)
         # heart rate follows effort, lagging slightly and rising over the run (cardiac drift)
         hr.append(int(hr0 * (base_pace / max(pv, 1)) ** 0.35 + 5 * (i / n)))
-        elev.append(int(18 + 22 * math.sin(2 * th + harm[1][2])))
         cad.append(None if i == 0 else int(rnd.uniform(170, 182)))
     return {"v": PROFILE_VERSION, "has_gps": True, "has_pace": True, "has_hr": True,
             "has_elevation": True, "has_cadence": True, "hr_avg": hr0,
@@ -9097,7 +9249,7 @@ def demo_reset(db):
     The plan is regenerated afterwards, because a demo whose first screen says "no plan yet" has
     failed at the one job it has."""
     with _DEMO_RESET_LOCK:
-        seed_synthetic_db(db)
+        seed_synthetic_db(db, demo=True)
         set_meta(db, "synthetic_seed", "1")
         db.commit()
         try:
@@ -9253,6 +9405,7 @@ if __name__ == "__main__":
                 sys.exit(2)
             info = seed_synthetic_db(db, with_objective="--no-objective" not in sys.argv,
                                      past_race="--past-race" in sys.argv,
+                                     demo="--demo" in sys.argv,   # §DEMO — the public demo's athlete
                                      cold="--cold" in sys.argv)   # §FT5 — one 10k + objective, no history
         print(f"Seeded {target}: {info['activities']} activities, {info['snapshots']} daily "
               f"snapshots, history {info['from']} → {info['to']}.")

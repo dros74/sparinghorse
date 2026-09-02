@@ -10,6 +10,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.55.0] - 2026-09-02
+
+### Fixed
+
+- **The demo athlete was running through the middle of the Lake (§DEMO2).** The route generator drew
+  a harmonic blob around a centre point and repeated it to reach each run's distance. That is a fine
+  way to draw a closed curve and a hopeless way to draw a route: a 3.2 km circuit is about 1 km
+  across, Central Park is 830 m wide, so every long run crossed the Lake, the Reservoir and both
+  flanking avenues. The shape of a route is a claim about ground, so it is no longer drawn at all.
+  `DEMO_LOOP_UV` is a real 9.14 km park circuit SOLVED against the park: the corridor between the
+  park boundary and every pond, lake and reservoir inside it was measured from public map data
+  (OpenStreetMap, the same source as the tiles under it) and the route is the path that stays in it —
+  threading inside The Pool where the wall leaves no room, swinging around Harlem Meer at the north
+  as the real drive does, and passing the Reservoir on both flanks. It keeps 43 m from the park wall
+  and 46 m from the nearest water.
+- **…and so is the line the map actually draws.** Clearing the water is not enough on its own: the
+  map renders a 120-sample downsample, and its chords cut every corner the route turns. An
+  intermediate solve was entirely on land and still put 75 of 116 drawn tracks in the water. Three
+  things fixed that — the corridor solve now maximises daylight instead of hugging the flank, the
+  sampler lands on the route's corners rather than at even intervals (which is also what the real
+  downsampler does, picking the nearest recorded point), and the walk is scaled so the DRAWN polyline
+  measures the distance printed beside it (it was reading 3.4% short on the longest runs; it is now
+  within 0.6%). ⚠ Past ~2.6 laps there are fewer than 14 samples per circuit and no 14-gon holds a
+  9 km loop's corners — a marathon drawn this way cuts into the Reservoir. That is the downsampler's
+  resolution and is equally true of a real lapped marathon; the demo athlete's longest run is 22.5 km.
+
+### Added
+
+- **The demo athlete now has long runs, and therefore a durability card (§DEMO2).** The durability
+  panel reads long-run aerobic decoupling and needs runs of at least `DURABILITY_MIN_KM` (16 km) that
+  carry a decoupling value. The synthetic athlete had neither: the longest run of the whole 24-week
+  block was 15.8 km — just under the floor — and `raw` held only the fields the planner consumes, so
+  no run carried decoupling at all. The one card whose entire subject is the long run had no long run
+  to read, and said so honestly on the public demo. `seed_synthetic_db(demo=True)` now builds a full
+  marathon block (45 → 70 km/wk, 15 long runs over the floor, longest 22.5 km) and writes the rest of
+  the Runalyze payload: decoupling that rises with distance and falls as the athlete adapts, a
+  seasonal temperature, and a 1–5 subjective feel. The card now reads *durable · improving* over 15
+  charted long runs.
+- **The efficiency card has a trend and weather to plot it against.** Same cause: with a fixed pace
+  per zone the synthetic athlete finished 24 weeks of building at exactly the pace they started
+  (`r = -0.004`, a dead-flat line), and with no `temperature` field the §EF weather panel — the one
+  that exists to show that heat is plotted and never subtracted — had nothing in it. The demo profile
+  improves 5% at the same heart rate across the block and carries a seasonal temperature: +0.9%/30d
+  over 93 runs, 6–25 °C.
+- **Demo elevation comes from the ground now.** A sine against the sample index gave every run the
+  same two bumps whatever its distance. Elevation is tied to position on the loop instead, so a
+  lapped long run climbs the same 26 m hill once per lap — which is what a lapped run's trace
+  actually looks like.
+- **`det/demo-route`** — the invented route is a closed, simple, park-sized circuit; every vertex is
+  inside the park and at least 15 m from every lake and pond; the 120-sample line the map DRAWS is
+  clear too at every distance the demo produces; and re-centring the demo moves it without changing
+  any distance. Checked against simplified park and water polygons carried in the battery. Seen to
+  fail on the original bug: restoring the 3.2 km blob reports *"the route runs -72 m from Reservoir —
+  that is the water"*.
+- **`seed --demo`** — the CLI can now build the public demo's athlete locally, for screenshots.
+
+### Changed
+
+- `det/demo-track`'s "it fits somewhere real" bound was 2.5 km, sized for the old 3.2 km circuit. It
+  now derives the bound from the loop's own span, so it tracks any future re-solve of the route.
+- The shared fixture is untouched: `seed_synthetic_db(db)` with no `demo=True` is byte-identical, and
+  all ten goldens are unchanged. The demo profile is opt-in for exactly that reason.
+
 ## [0.54.0] - 2026-09-02
 
 ### Added
