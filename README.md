@@ -124,7 +124,9 @@ caches only the shell and never the API.
 - **`sparinghorse-public`** (`:8771`) — `SH_READONLY=1`, no tokens, an always-open **read-only** showcase.
   Read-only is enforced server-side (403 on every mutation, query-only connection) and the **medical sections
   — blood markers, readiness, and the per-run effort detail — are withheld** from the public view. Decision:
-  training shape + plan can be public; medical/HR detail stays private.
+  training shape + plan can be public; medical/HR detail stays private. Individual runs are served by number
+  only when the page points at them (the latest run, a run the plan or log references, or one from the last
+  14 days), and with the date only — no time of day, no title.
 - **`sparinghorse-demo`** — `SH_DEMO=1`, the **full private console over a synthetic athlete**. Not the same
   thing as the read-only view: this one lets a stranger regenerate the plan, post a check-in, move the race
   and watch the engine actually respond. It seeds itself into its **own** database (a named volume, never the real one) on first boot and restores it hourly, so whatever a visitor leaves behind is temporary.
@@ -145,18 +147,23 @@ is root-owned, a non-root `docker compose` fails with a permission error before 
 service at all.)
 
 It carries **no credentials**: no Runalyze token, no Claude key, and no secrets-store mount. On top of that,
-`_demo_guard` refuses four families of request, each for its own reason:
+`_demo_guard` refuses these families of request, each for its own reason:
 
 | Refused | Why |
 |---|---|
 | `POST /api/secrets` | a public box must never accept an API key from a stranger, nor hold one to leak |
 | `POST /api/sync`, `/api/suunto/*` | outbound calls against someone's real account |
 | `POST /api/selftest/run` | an anonymous POST that burns ~3 minutes of CPU is a denial-of-service primitive |
+| `GET /api/backup/db`, `GET /api/export/json` | a full-database snapshot per call and a JSON dump of every table — the data is synthetic, the CPU and bandwidth are not |
+| `POST /api/health` | a lab value and its note are shown to the *next* visitor's Body tab (the read stays open so the tab renders) |
 | `private_url`, `house_url`, `house_name` | the only settings displayed to the *next* visitor — the defacement and open-redirect surface |
+| `tz`, `weather_cities`, `athlete_context` | the process clock, the outbound weather target, and prose that reaches the next visitor and every prompt |
 
 Everything else really runs: regenerate, check in, objectives, availability, adjustments, rest-day and
-long-run-day preferences. Status reads (`GET /api/secrets`, `GET /api/suunto/status`) stay open because the
-Settings panel renders them.
+long-run-day preferences, manual LTHR and age. Status reads (`GET /api/secrets`, `GET /api/suunto/status`,
+`GET /api/health`) stay open because the panels render them. On top of the refusals, every box carries the
+same dampers: a 64 KB request-body cap, a per-address rate limit on writes and on the backup/export
+downloads, and one demo reseed per ten seconds across all visitors (see *Configuration*).
 
 **The plan explainer** is the one feature a demo can't run live — it needs a Claude key, and a public host
 should not be holding one. Bake the narration once, wherever your key already lives, and the demo serves that
@@ -182,6 +189,8 @@ than an invented explanation.
 | `SH_READONLY` | public container only (set in docker-compose) |
 | `SH_DEMO` | demo container only — full private console over a self-resetting synthetic athlete |
 | `SH_DEMO_RESET_EVERY_S` | how often the demo restores its synthetic athlete (default 3600) |
+| `SH_MAX_BODY_BYTES` | request-body cap, every box (default 65536; a larger body is a JSON 413) |
+| `SH_RATE_POST` / `SH_RATE_EXPENSIVE` / `SH_RATE_RESET` | per-address requests per minute for writes (120), backup/export downloads (10) and the demo reset (6); `SH_RATE_LIMIT=0` disables the limiter |
 | `SH_DEMO_ROUTE_CENTER` | `lat,lon` the demo's synthetic routes are centred on (default: Central Park) |
 | `SH_DEMO_ROUTE_BEARING` | degrees the demo's loop is rotated to (default 60.565, Central Park's own axis) |
 

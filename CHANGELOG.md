@@ -10,6 +10,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.55.1] - 2026-09-02
+
+### Security
+
+- **The anonymous surface got dampers (§ABUSE, review S2).** The 2026-09-02 review stored a
+  2,000,035-byte "note" on the private box and found the demo's reseed (about a second of CPU) and
+  its full-database download (a `VACUUM INTO` per call) open to anyone in a loop. Now: a request
+  body over **64 KB** answers JSON 413 before it is read (`SH_MAX_BODY_BYTES`; the browser
+  self-check's report gets eight times that, and Werkzeug's own 1 MB ceiling backstops a body that
+  arrives without a length); every state-changing request draws from a **per-address token bucket**
+  (120/min, `SH_RATE_POST` — a bulk entry of lab values is a real burst; a loop is still held to two a second), backup and export downloads from a smaller one (10/min,
+  `SH_RATE_EXPENSIVE`), the demo reset from a smaller one still (6/min, `SH_RATE_RESET`), and the
+  reseed itself runs at most **once every ten seconds across all callers**. The address is
+  `CF-Connecting-IP` behind the tunnel, `X-Forwarded-For` behind a plain proxy, the socket
+  otherwise — a damper, not authentication. Plain GETs are never limited. `SH_RATE_LIMIT=0` turns
+  it off; the self-test battery runs with it off and `det/abuse-limits` turns it on for itself.
+- **The demo hands out less (review S2, S9).** `GET /api/backup/db` and `/api/export/json` are
+  refused on the demo box — the data is synthetic, the CPU and bandwidth are not — and so is
+  `POST /api/health`: a lab value and its free-text note are rendered to the *next* visitor's Body
+  tab, the same defacement surface as `house_name`. The read stays open so the tab renders. Three
+  more settings join the refused list: `tz` (it moves the **whole process clock** via `tzset()`, so
+  one visitor could make "today" wrong for everyone until the reset), `weather_cities` (points
+  outbound Open-Meteo calls wherever a stranger says) and `athlete_context` (prose shown back in
+  Settings and injected into every prompt). The day preferences, manual LTHR and age stay playable.
+- **The public box no longer serves the whole diary by number (§PV, review S3).**
+  `/api/activity/<id>` — and its `/profile` and `/structure` — answered for **every** id on the
+  public box, each row with its start time and title, while `/healthz` went to the trouble of
+  reducing the nightly's timestamp to a boolean because the household routine is private. Now the
+  public box serves a run by id only when the page itself points at it: the latest run, a run the
+  current plan or block log references, or one inside the last 14 days
+  (`PUBLIC_ACTIVITY_WINDOW_DAYS`). Everything else is 404 there. And the public activity payload
+  carries the **date only** — `date_time` and `title` are withheld by allowlist and registered in
+  `_PV_WITHHELD`; the card reads "Tue 1 Sept" on the public box and "Tue 1 Sept · 18:30" on the
+  private console. `det/public-activity-gate` drives all three routes; `runPublicFull` drives it in a
+  browser over a fixture that has a plan.
+
+### Fixed
+
+- **The public objectives strip rendered live controls (review U1).** The date pickers and the
+  "remove" buttons were built into the row template before the read-only early return, so the
+  public showcase's first clickable thing was a control that answered 403. On the public box the
+  date is now text and there is no button; the browser flow asserts it.
+- **Eight concurrent clicks on Generate wrote eight identical plan versions (review A3).** The
+  route is serialised (`_plan_lock`, like `_sync_lock`), and a regeneration that reproduces the
+  latest saved plan — timestamps aside — writes no row and answers `unchanged: true`. A changed
+  input (a moved race, a new sync, a new day) still writes a new row; the nightly never dedupes,
+  because `for_date` is what the staleness label reads. `det/plan-generate-dedupe`.
+- **Every demo reset wrote the plan twice.** `demo_reset` called `regenerate` (which saves) and then
+  `save_plan` again — two identical rows per reseed, every hour since §DEMO landed.
+- **The demo-guard det cleared the instance's own day preferences.** Its "allowances" loop POSTed
+  empty `rest_day_rank` / `long_run_day` values to prove they are writable in demo, and on an inline
+  battery run (`SparingHorse.py selftest` on a real database) that write landed. The values are put
+  back now.
+
+### Documentation
+
+- README: the demo's refused list and the public box's run-by-id rule; the abuse-limit env vars in
+  the configuration table. MANUAL §11: the two new privacy rules.
+
 ## [0.55.0] - 2026-09-02
 
 ### Fixed

@@ -579,6 +579,14 @@ readable by the public container.** Sparing Horse is built around that constrain
   it was given, but never the finish time, because the prediction beside its error would hand the
   result straight back.
 
+- **A run is public only when the page points at it.** The public box serves an individual run by
+  number only for the latest run, a run the current plan or log references, or one from the last 14
+  days — and with the date only, never the time of day or the title. Everything older and
+  unreferenced is 404 there, so the diary cannot be read out by counting ids.
+- **Dampers on every box.** Request bodies are capped at 64 KB, writes and the backup/export downloads
+  are rate-limited per address, and the demo reseeds at most once every ten seconds. These are
+  limits, not authentication — the private console still needs your proxy in front of it.
+
 The decision line: *training shape + plan* can be public; *medical / location / HR detail* stays private.
 
 ---

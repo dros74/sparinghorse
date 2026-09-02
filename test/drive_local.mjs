@@ -791,6 +791,30 @@ async function runPublic() {
   await page.screenshot({ path: `${SHOTS}/10-public.png`, fullPage: true });
 }
 
+async function runPublicFull() {
+  // 0.55.1 — the READONLY shell over the FULL fixture (objectives + a plan). The no-plan public flow
+  // above cannot see an objectives strip, and two review findings live on it: U1 (the public strip
+  // used to render live date pickers and remove buttons that answered 403) and S3 (every run was
+  // served by id with its time of day; now only the runs the page points at, date only).
+  await page.waitForSelector('#plan .objs .obj', { timeout: 15000 });
+  ok('U1 — the public objectives strip carries no date pickers',
+     await page.locator('input.odate').count() === 0);
+  ok('U1 — the public objectives strip carries no remove buttons',
+     await page.locator('#plan button.x').count() === 0);
+  ok('U1 — the race dates still show, as text', await page.locator('.odate-ro').count() >= 1);
+  const oldest = await page.evaluate(() => fetch('/api/activity/1').then(r => r.status));
+  ok('S3 — an old, unreferenced run is not served by id on the public box', oldest === 404);
+  const latest = await page.evaluate(() => fetch('/api/activity/latest').then(r => r.json()));
+  ok('S3 — the latest run is served without its time of day or title',
+     !!(latest && latest.id) && !('date_time' in latest) && !('title' in latest));
+  const byId = await page.evaluate(id => fetch('/api/activity/' + id).then(r => r.status), latest.id);
+  ok('S3 — the latest run IS served by id (the page points at it)', byId === 200);
+  const recentText = await page.locator('#recent').innerText();
+  ok('the latest-activity card still renders its date (any locale order)',   // CI's Chromium says "Tue, Sep 1"; a UK locale "Tue 1 Sept"
+     /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/.test(recentText) && !/Invalid Date/.test(recentText));
+  await page.screenshot({ path: `${SHOTS}/11-public-full.png`, fullPage: true });
+}
+
 try {
   console.log(`\n→ driving ${BASE}  (mode=${MODE})\n`);
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
@@ -800,6 +824,7 @@ try {
   else if (MODE === 'cold') await runCold();
   else if (MODE === 'blocked') await runBlocked();
   else if (MODE === 'public') await runPublic();
+  else if (MODE === 'publicfull') await runPublicFull();
   else await runFull();
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));

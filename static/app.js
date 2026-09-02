@@ -490,9 +490,11 @@ async function loadActivity(aid){
       : `<div class="empty">${aid?"Activity not found.":"No activities synced yet."}</div>`) + crossNote;
     return;
   }
-  const dt=new Date(a.date_time);
+  // 0.55.1 — the public box serves the DATE only (the time of day is the household routine, §PV
+  // S3), so the card reads "Tue 1 Sept" there and "Tue 1 Sept · 18:30" on the private console.
+  const dt=a.date_time ? new Date(a.date_time) : new Date((a.date||"")+"T00:00:00");
   const when=dt.toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"})+
-    " · "+dt.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});
+    (a.date_time ? " · "+dt.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"}) : "");
   const m=(label,val,unit,hover)=>`<div class="metric ${hover?'hovx':''}" ${hover?`data-prof="${hover}"`:""}>
     <div class="ml">${label}</div><div class="mv">${val}${unit?`<small> ${unit}</small>`:""}</div></div>`;
   const kick = aid
@@ -1230,14 +1232,20 @@ function objManager(p){
     ? `<span class="pr ${o.priority}">${o.priority}</span>`
     : `<span class="prsel" role="group" aria-label="priority for ${esc(o.label)}">${['A','B','C'].map(x=>
         `<button type="button" class="prseg ${x===o.priority?'on':''}" data-oid="${o.id}" data-pri="${x}" title="Set priority ${x}">${x}</button>`).join("")}</span>`;
+  // 0.55.1 (review U1) — on the public box the row is TEXT: the date picker and the remove button
+  // used to render there too (the early return below came after the template had already built
+  // them), so a visitor's first click on the showcase was a control that answered 403.
+  const dateCell = o => SH_READONLY
+    ? `<span class="odate-ro mono">${esc(o.date)}</span>`
+    : `<input type="date" class="odate" data-oid="${o.id}" value="${esc(o.date)}"
+        aria-label="date of ${esc(o.label)}" title="Move this race — the plan re-periodizes around the new day">`;
   const rows = OBJECTIVES.filter(o=>o.status==='upcoming').map(o=>{
     const isAnchor = p.objective && o.label===p.objective.label && o.date===p.objective.date;
     return `<div class="obj ${isAnchor?'anchor':''}">
       ${priBadge(o)}
       <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:10px">· anchor</span>':''}</span>
-      <span class="od"><input type="date" class="odate" data-oid="${o.id}" value="${esc(o.date)}"
-        aria-label="date of ${esc(o.label)}" title="Move this race — the plan re-periodizes around the new day"> · ${esc(o.type)} · ${esc(o.target)}</span>
-      <button class="x" data-oid="${o.id}">remove</button>
+      <span class="od">${dateCell(o)} · ${esc(o.type)} · ${esc(o.target)}</span>
+      ${SH_READONLY?'':`<button class="x" data-oid="${o.id}">remove</button>`}
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;
   if(SH_READONLY) return `<div class="objs">${rows}</div>`;   // public: list only, no controls
   // §RL — past races (private-only: results are personal, same posture as the §6s reckoning).

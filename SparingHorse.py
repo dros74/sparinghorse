@@ -4583,7 +4583,17 @@ def resolve_passed_races(db, today=None):
     return out
 
 
-def regenerate(db, baseline=None, today=None):
+_PLAN_VOLATILE = ("generated_at", "diff", "unchanged", "engine_running")
+
+
+def _plan_identity(plan):
+    """The plan with its timestamps and view-only annotations removed — what "the same answer"
+    means for the A3 double-click test. Two regenerations seconds apart over the same inputs are
+    identical here; a day change, a sync, a new objective or a changed setting are not."""
+    return json.dumps({k: v for k, v in plan.items() if k not in _PLAN_VOLATILE}, sort_keys=True)
+
+
+def regenerate(db, baseline=None, today=None, skip_if_unchanged=False):
     """Regenerate the plan, save a new version, and return it with a diff. If `baseline` (a
     plan computed for today BEFORE the triggering change) is given, diff against it so only the
     change's own effect shows. Otherwise fall back to the last saved plan (a manual regenerate
@@ -4593,15 +4603,24 @@ def regenerate(db, baseline=None, today=None):
     fixture built around a fixed date is judged on that date throughout. Production never passes it
     (and then this is byte-for-byte what it always was); without it, `resolve_passed_races` settled
     races against the process's day while `generate_plan` was given none either, which is how a
-    seeded fixture ended up half-pinned (det/clock-purity)."""
+    seeded fixture ended up half-pinned (det/clock-purity).
+
+    `skip_if_unchanged` (0.55.1, review A3) is the manual Generate button's flag: when the freshly
+    computed plan is identical to the latest saved one (timestamps aside) no second row is written
+    and the answer carries `unchanged: True`. The nightly never passes it — a new day is a new row
+    even when nothing moved, because `for_date` is what the staleness label reads."""
     resolve_passed_races(db, today)   # §RL — settle any race that has passed before re-reading objectives
+    prev_row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    prev = json.loads(prev_row["plan"]) if prev_row else None
     if baseline is None:
-        prev = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
-        baseline = json.loads(prev["plan"]) if prev else None
+        baseline = prev
     plan = generate_plan(db, today=today)
     if not plan.get("ok"):
         return plan
-    save_plan(db, plan)
+    if skip_if_unchanged and prev is not None and _plan_identity(plan) == _plan_identity(prev):
+        plan["unchanged"] = True
+    else:
+        save_plan(db, plan)
     plan["diff"] = diff_plans(baseline, plan)
     return plan
 
@@ -5613,6 +5632,11 @@ def today_readiness(db):
 
 # ── Flask app ───────────────────────────────────────────────────────────────
 app = Flask(__name__)
+# §ABUSE (0.55.1) — the HARD ceiling on a request body. Werkzeug refuses to read past it (413, which
+# the blanket handler renders as JSON on /api paths). The limit the app actually applies is
+# MAX_BODY_BYTES in `_abuse_guard`, checked against Content-Length BEFORE any body is read; this one
+# is the backstop for a body that arrives chunked, without a length to check.
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
 
 FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-label="Sparing Horse"><rect width="100" height="100" rx="22" fill="#141210"/><path d="M50.0,16.0 L51.2,16.1 L52.3,16.4 L53.5,16.9 L54.5,17.6 L55.5,18.5 L56.5,19.6 L57.3,20.9 L57.9,22.3 L58.5,23.8 L58.9,25.5 L59.2,27.3 L59.3,29.2 L59.2,31.2 L58.9,33.2 L58.5,35.3 L57.9,37.4 L57.1,39.4 L56.2,41.5 L55.1,43.5 L53.8,45.5 L52.4,47.4 L50.8,49.1 L49.1,50.8 L47.4,52.4 L45.5,53.8 L43.5,55.1 L41.5,56.2 L39.4,57.1 L37.4,57.9 L35.3,58.5 L33.2,58.9 L31.2,59.2 L29.2,59.3 L27.3,59.2 L25.5,58.9 L23.8,58.5 L22.3,57.9 L20.9,57.3 L19.6,56.5 L18.5,55.5 L17.6,54.5 L16.9,53.5 L16.4,52.3 L16.1,51.2 L16.0,50.0 L16.1,48.8 L16.4,47.7 L16.9,46.5 L17.6,45.5 L18.5,44.5 L19.6,43.5 L20.9,42.7 L22.3,42.1 L23.8,41.5 L25.5,41.1 L27.3,40.8 L29.2,40.7 L31.2,40.8 L33.2,41.1 L35.3,41.5 L37.4,42.1 L39.4,42.9 L41.5,43.8 L43.5,44.9 L45.5,46.2 L47.4,47.6 L49.1,49.2 L50.8,50.9 L52.4,52.6 L53.8,54.5 L55.1,56.5 L56.2,58.5 L57.1,60.6 L57.9,62.6 L58.5,64.7 L58.9,66.8 L59.2,68.8 L59.3,70.8 L59.2,72.7 L58.9,74.5 L58.5,76.2 L57.9,77.7 L57.3,79.1 L56.5,80.4 L55.5,81.5 L54.5,82.4 L53.5,83.1 L52.3,83.6 L51.2,83.9 L50.0,84.0 L48.8,83.9 L47.7,83.6 L46.5,83.1 L45.5,82.4 L44.5,81.5 L43.5,80.4 L42.7,79.1 L42.1,77.7 L41.5,76.2 L41.1,74.5 L40.8,72.7 L40.7,70.8 L40.8,68.8 L41.1,66.8 L41.5,64.7 L42.1,62.6 L42.9,60.6 L43.8,58.5 L44.9,56.5 L46.2,54.5 L47.6,52.6 L49.2,50.9 L50.9,49.2 L52.6,47.6 L54.5,46.2 L56.5,44.9 L58.5,43.8 L60.6,42.9 L62.6,42.1 L64.7,41.5 L66.8,41.1 L68.8,40.8 L70.8,40.7 L72.7,40.8 L74.5,41.1 L76.2,41.5 L77.7,42.1 L79.1,42.7 L80.4,43.5 L81.5,44.5 L82.4,45.5 L83.1,46.5 L83.6,47.7 L83.9,48.8 L84.0,50.0 L83.9,51.2 L83.6,52.3 L83.1,53.5 L82.4,54.5 L81.5,55.5 L80.4,56.5 L79.1,57.3 L77.7,57.9 L76.2,58.5 L74.5,58.9 L72.7,59.2 L70.8,59.3 L68.8,59.2 L66.8,58.9 L64.7,58.5 L62.6,57.9 L60.6,57.1 L58.5,56.2 L56.5,55.1 L54.5,53.8 L52.6,52.4 L50.9,50.8 L49.2,49.1 L47.6,47.4 L46.2,45.5 L44.9,43.5 L43.8,41.5 L42.9,39.4 L42.1,37.4 L41.5,35.3 L41.1,33.2 L40.8,31.2 L40.7,29.2 L40.8,27.3 L41.1,25.5 L41.5,23.8 L42.1,22.3 L42.7,20.9 L43.5,19.6 L44.5,18.5 L45.5,17.6 L46.5,16.9 L47.7,16.4 L48.8,16.1 L50.0,16.0 Z" fill="none" stroke="#ece6db" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/><circle cx="50" cy="50" r="3.6" fill="#d4744e"/></svg>'
 
@@ -5792,11 +5816,21 @@ try:
     DEMO_BANNER_HTML = (Path(__file__).resolve().parent / "static" / "demobar.html").read_text(encoding="utf-8")
 except OSError:                      # a trimmed image without the fragment: no banner, not a crash
     DEMO_BANNER_HTML = ""
-DEMO_BLOCKED_PATHS = ("/api/secrets", "/api/sync", "/api/suunto", "/api/selftest", "/selftest")
+DEMO_BLOCKED_PATHS = ("/api/secrets", "/api/sync", "/api/suunto", "/api/selftest", "/selftest",
+                      # 0.55.1 — a full-database download (a VACUUM INTO per call) and the JSON dump
+                      # of every user table are not things a demo has any business handing out: the
+                      # data is synthetic, the CPU and the bandwidth are not (review S2).
+                      "/api/backup", "/api/export")
 # The settings whose value is rendered back to the NEXT visitor — a link and a name in the header.
 # Every other settings key shapes only the plan, which is exactly what a visitor should be able to
 # play with. [[repos-public-private-split]] is why the private URL in particular stays untouchable.
-DEMO_BLOCKED_SETTINGS = ("private_url", "house_url", "house_name")
+DEMO_BLOCKED_SETTINGS = ("private_url", "house_url", "house_name",
+                         # 0.55.1 (review S9) — `tz` moves the WHOLE PROCESS clock (`time.tzset()`), so
+                         # one visitor could make "today" wrong for everyone until the reset;
+                         # `weather_cities` points outbound Open-Meteo calls wherever a stranger says;
+                         # `athlete_context` is prose shown back in Settings to the next visitor and
+                         # injected into every LLM prompt. None of the three shapes the plan.
+                         "tz", "weather_cities", "athlete_context")
 
 
 @app.before_request
@@ -5826,6 +5860,13 @@ def _demo_guard():
                        error="Not available in the demo — this one talks to a real Runalyze, Suunto "
                              "or Claude account, or runs the full self-test battery. It works "
                              "normally when you host it yourself."), 403
+    # 0.55.1 — a lab value and its free-text note are rendered to the NEXT visitor's Body tab, the
+    # same defacement surface as the identity settings. The READ stays open (the tab must render).
+    if p == "/api/health" and request.method == "POST":
+        return jsonify(ok=False, demo=True,
+                       error="Not editable in the demo: health markers are shown to everyone who "
+                             "visits. On your own instance this records a lab value or a body metric "
+                             "against a date."), 403
     if p == "/api/settings" and request.method == "POST":
         body = request.get_json(silent=True) or {}
         touched = [k for k in DEMO_BLOCKED_SETTINGS if k in body]
@@ -5881,6 +5922,97 @@ def _csrf_origin_guard():
     origin = request.headers.get("Origin")
     if origin and urlparse(origin).hostname != request.host.split(":")[0]:
         return jsonify(ok=False, error="cross-origin request refused"), 403
+
+
+# ── §ABUSE (0.55.1) — request-size and rate limits ───────────────────────────────────────────
+# Written after the 2026-09-02 review stored a 2,000,035-byte "note" on the private box and found
+# the demo's reset (~1 s of CPU) and backup (a VACUUM INTO per call) open to anyone. These are not
+# authentication: they are the dampers that make an anonymous loop cost the box less than it costs
+# the caller. Both are env-tunable and the limiter is OFF inside the self-test battery (which fires
+# hundreds of requests from one address by design) except in the det that tests it.
+MAX_BODY_BYTES = int(os.environ.get("SH_MAX_BODY_BYTES", str(64 * 1024)))
+RATE_LIMITING = os.environ.get("SH_RATE_LIMIT", "1").lower() not in ("0", "false", "no")
+RATE_LIMITS = {                       # bucket name → (requests, per seconds), per client address
+    "post":      (int(os.environ.get("SH_RATE_POST", "120")), 60),  # every state-changing request —
+    #                                                                 120/min: a bulk entry of lab
+    #                                                                 values is a real burst; a loop
+    #                                                                 is still held to 2/s
+    "expensive": (int(os.environ.get("SH_RATE_EXPENSIVE", "10")), 60),   # backup / export downloads
+    "reset":     (int(os.environ.get("SH_RATE_RESET", "6")), 60),   # the demo's reseed
+}
+DEMO_RESET_MIN_GAP_S = 10             # global, not per address: one reseed per ten seconds, full stop
+
+
+class _RateLimiter:
+    """A token bucket per (address, bucket name). `clock` is injectable so det/rate-limit can move
+    time instead of sleeping. Entries idle for longer than their window are pruned on the way past,
+    so a scan of addresses cannot grow the table without bound."""
+
+    def __init__(self, clock=time.monotonic):
+        self._buckets = {}            # (ip, name) → [tokens, last_seen]
+        self._lock = threading.Lock()
+        self._clock = clock
+
+    def allow(self, ip, name, limit, per):
+        """(allowed, retry_after_seconds)."""
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get((ip, name), (float(limit), now))
+            tokens = min(float(limit), tokens + (now - last) * limit / per)
+            if tokens >= 1.0:
+                self._buckets[(ip, name)] = [tokens - 1.0, now]
+                ok, retry = True, 0
+            else:
+                self._buckets[(ip, name)] = [tokens, now]
+                ok, retry = False, max(1, int(math.ceil((1.0 - tokens) * per / limit)))
+            if len(self._buckets) > 5000:
+                stale = [k for k, (_, seen) in self._buckets.items() if now - seen > 2 * per]
+                for k in stale:
+                    del self._buckets[k]
+            return ok, retry
+
+
+_rate = _RateLimiter()
+
+
+def _client_ip():
+    """The address a limit is keyed on. Behind the Cloudflare tunnel every request arrives from
+    cloudflared, so the real client is `CF-Connecting-IP`; a plain reverse proxy sets
+    `X-Forwarded-For`. Neither can be trusted for AUTH — a direct caller can forge them — but for a
+    damper the worst a forged header buys is evading one's own bucket, which is what a second
+    address would buy anyway."""
+    h = request.headers
+    return (h.get("CF-Connecting-IP") or (h.get("X-Forwarded-For") or "").split(",")[0].strip()
+            or request.remote_addr or "?")
+
+
+def _rate_bucket_for(method, path):
+    """Which bucket a request draws from, or None for the unlimited majority (every plain GET)."""
+    if method in ("POST", "PUT", "PATCH", "DELETE"):
+        return "reset" if path == "/api/demo/reset" else "post"
+    if path.startswith("/api/backup") or path.startswith("/api/export"):
+        return "expensive"
+    return None
+
+
+@app.before_request
+def _abuse_guard():
+    cl = request.content_length
+    cap = MAX_BODY_BYTES * 8 if request.path == "/api/selftest/client" else MAX_BODY_BYTES
+    if cl is not None and cl > cap:       # the browser self-check posts a whole report; private-only
+        return jsonify(ok=False, error=f"request body too large — the limit is {cap // 1024} KB"), 413
+    if not RATE_LIMITING:
+        return
+    name = _rate_bucket_for(request.method, request.path)
+    if name is None:
+        return
+    limit, per = RATE_LIMITS[name]
+    ok, retry = _rate.allow(_client_ip(), name, limit, per)
+    if not ok:
+        resp = jsonify(ok=False, error="too many requests — slow down", retry_after=retry)
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry)
+        return resp
 
 
 def html_page(html):
@@ -6111,11 +6243,11 @@ _PV_READINESS = {"date": True,
 
 # NOT `hr_avg` / `hr_max` (per-run HR is private, the same posture that drops HR from the public
 # effort-discipline read) and NOT `cross_training` (which sport, and when — personal).
-_PV_ACTIVITY = {"cadence": True, "date": True, "date_time": True, "distance": True,
+_PV_ACTIVITY = {"cadence": True, "date": True, "distance": True,
                 "duration": True, "elapsed": True, "elevation_up": True, "empty_run": True,
                 "id": True, "ignored": True, "pace_min_km": True, "sport": True,
                 "sj": {"ids": True, "index": True, "km": True, "min": True, "parts": True},
-                "title": True, "trimp": True}
+                "trimp": True}
 
 # NOT `counterfactual.reason` (the regime rationale names the athlete's own history) and NOT
 # `scorecard.reckoning` — the settled race result. The public box does not COMPUTE the reckoning
@@ -6237,6 +6369,10 @@ _PV_WITHHELD = {
     "objectives[].created_at",               # when the athlete planned their season
     "objectives[].outcome", "objectives[].resolved_at",      # §RL — a race RESULT is personal
     "activity.hr_avg", "activity.hr_max", "activity.cross_training",
+    "activity.date_time",                    # 0.55.1 (review S3) — the TIME of day is the household
+    #                                          routine /healthz already keeps private; the date stays
+    "activity.title",                        # free text off the watch or Runalyze: may name a place
+    #                                          or a companion; never classified as public
     "drift.scorecard.reckoning",             # the settled race result (also not COMPUTED publicly)
     "drift.counterfactual.reason",           # the regime rationale names the athlete's history
     "healthz.last_sync", "healthz.last_ok",
@@ -7233,11 +7369,18 @@ def api_log_note():
     return jsonify(ok=True, date=date, note=note)
 
 
+_plan_lock = threading.Lock()   # A3 (0.55.1) — one manual regeneration at a time, like _sync_lock
+
+
 @app.post("/api/plan/generate")
 def api_plan_generate():
+    """The Generate button. Serialised, and a regeneration that reproduces the latest saved plan
+    writes no row (0.55.1): eight concurrent clicks used to mean eight identical plan versions and a
+    "last change" diff pointing at nothing."""
     db = get_db()
-    seed_objectives(db)
-    plan = regenerate(db)
+    with _plan_lock:
+        seed_objectives(db)
+        plan = regenerate(db, skip_if_unchanged=True)
     if not plan.get("ok"):
         return jsonify(plan), 400
     # §PRO14 — the UI renders THIS response directly (refreshPlan(p) skips the GET), so it must
@@ -7505,12 +7648,63 @@ def api_activity_latest():
     return jsonify(payload)
 
 
+PUBLIC_ACTIVITY_WINDOW_DAYS = 14   # §PV/S3 — how far back the public box serves a run by number
+
+
+def _walk_activity_ids(obj, out):
+    """Every `activity_id` value anywhere inside a plan or log payload."""
+    if isinstance(obj, dict):
+        v = obj.get("activity_id")
+        if isinstance(v, int):
+            out.add(v)
+        for x in obj.values():
+            _walk_activity_ids(x, out)
+    elif isinstance(obj, list):
+        for x in obj:
+            _walk_activity_ids(x, out)
+    return out
+
+
+def _public_activity_ids(db):
+    """§PV (0.55.1, review S3) — the ids the PUBLIC box may serve by number: the latest run, every
+    run the current plan or the block log references (a completed session's `activity_id`), and
+    anything inside PUBLIC_ACTIVITY_WINDOW_DAYS. Before this, `/api/activity/<id>` answered for every
+    id on the public box — the whole training diary, enumerable by counting, each row with its
+    start time — while /healthz went to the trouble of hiding when the nightly runs. Recomputed on
+    every call (a few milliseconds, and a cache on `g` leaked across requests wherever an outer app
+    context is already pushed — the battery, for one); the private console never consults it."""
+    ids = set()
+    top = db.execute("SELECT id FROM activities WHERE " + RUN_FAMILY_SQL +
+                     " ORDER BY date_time DESC LIMIT 1").fetchone()
+    if top:
+        ids.add(top["id"])
+    since = (datetime.now().date() - timedelta(days=PUBLIC_ACTIVITY_WINDOW_DAYS)).isoformat()
+    ids.update(r["id"] for r in db.execute("SELECT id FROM activities WHERE date >= ?", (since,)))
+    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    if row:
+        try:
+            _walk_activity_ids(json.loads(row["plan"]), ids)
+        except (ValueError, TypeError):
+            pass
+    try:
+        _walk_activity_ids(block_log(db), ids)
+    except Exception:                         # the log is a courtesy here, never a reason to fail
+        pass
+    return ids
+
+
+def _public_activity_hidden(db, aid):
+    """True when the PUBLIC box must answer 404 for this id (see `_public_activity_ids`)."""
+    return READONLY and aid not in _public_activity_ids(db)
+
+
 @app.get("/api/activity/<int:aid>")
 def api_activity_one(aid):
-    """A specific activity by id — for viewing a completed planned session's run in the tile + map."""
+    """A specific activity by id — for viewing a completed planned session's run in the tile + map.
+    On the public box only the runs the page itself points at are served (§PV, 0.55.1)."""
     db = get_db()
     row = db.execute("SELECT raw FROM activities WHERE id=?", (aid,)).fetchone()
-    if not row:
+    if not row or _public_activity_hidden(db, aid):
         return jsonify(None), 404
     return jsonify(_activity_payload(db, json.loads(row["raw"])))
 
@@ -7526,7 +7720,7 @@ def api_activity_structure(aid):
     payload; the pace-based label itself is as public as pace."""
     db = get_db()
     row = db.execute("SELECT date FROM activities WHERE id=?", (aid,)).fetchone()
-    if not row:
+    if not row or _public_activity_hidden(db, aid):
         return jsonify(None), 404
     err = None
     grp = _sj_group_for(db, aid)
@@ -7743,6 +7937,8 @@ def api_activity_profile(aid):
     """Downsampled pace/HR/cadence/elevation profile for the hover backgrounds. Cached locally so we
     hit the MCP at most once per activity. Geo is stripped — the route map is private, served by /map."""
     db = get_db()
+    if _public_activity_hidden(db, aid):      # §PV (0.55.1) — same gate as the activity itself
+        return jsonify(None), 404
     prof, err = _profile_cached(db, aid)
     if prof is None:
         return jsonify(error=str(err), dist=[], pace=[], hr=[]), 502
@@ -9253,10 +9449,9 @@ def demo_reset(db):
         set_meta(db, "synthetic_seed", "1")
         db.commit()
         try:
-            plan = regenerate(db)
-            if plan.get("ok"):
-                save_plan(db, plan)
-                db.commit()
+            plan = regenerate(db)                   # saves the plan itself (0.55.1: it used to be
+            if plan.get("ok"):                      # saved a second time here — two identical rows
+                db.commit()                         # per reset, every hour)
         except Exception as e:                      # a reset that cannot plan is still a reset
             print(f"[demo] reset seeded but could not regenerate: {e}")
         try:
@@ -9284,14 +9479,29 @@ def _demo_reset_loop():
             print(f"[demo] scheduled reset failed: {e}")
 
 
+_demo_last_reset = 0.0          # monotonic time of the last MANUAL reset (0.55.1)
+
+
 @app.post("/api/demo/reset")
 def api_demo_reset():
     """§DEMO — the visible reset. Someone who has just moved the race and regenerated should be able
     to put it back without waiting an hour, and someone arriving mid-experiment should be able to see
-    the intended plan. Demo-only: on any other deployment this route does not exist as an action."""
+    the intended plan. Demo-only: on any other deployment this route does not exist as an action.
+    0.55.1: at most one reseed per DEMO_RESET_MIN_GAP_S across ALL callers — a reseed is a second of
+    CPU, and the per-address bucket alone does not stop a room full of addresses."""
+    global _demo_last_reset
     if not DEMO:
         return jsonify(ok=False, error="not a demo instance"), 404
+    wait = DEMO_RESET_MIN_GAP_S - (time.monotonic() - _demo_last_reset)
+    if wait > 0:
+        resp = jsonify(ok=False, demo=True, retry_after=int(wait) + 1,
+                       error=f"The athlete was reset a moment ago — try again in {int(wait) + 1} s.",
+                       reset_at=get_meta(get_db(), "demo_reset_at"))
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(int(wait) + 1)
+        return resp
     demo_reset(get_db())
+    _demo_last_reset = time.monotonic()
     return jsonify(ok=True, reset_at=get_meta(get_db(), "demo_reset_at"))
 
 

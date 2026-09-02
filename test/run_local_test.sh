@@ -3,7 +3,7 @@
 # with Playwright, then tear down. No Runalyze token or network needed. Two phases:
 #   1. full  — a synthetic-seeded instance (dashboard, #67 dialog cycle, first-run hidden + step ③)
 #   2. empty — a fresh dataless instance (first-run card step ①)
-#   (+ noplan / settled / cold / blocked / public — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
+#   (+ noplan / settled / cold / blocked / public / publicfull — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
 #    and asserts every tile reaches a failure terminus with a working retry, UX-3; "public" runs the
 #    READONLY shell over the no-plan fixture, UX-11)
 #
@@ -94,6 +94,13 @@ PUB_DB="$WORK/public.db"
 echo "▸ seeding $PUB_DB (--no-objective)"
 SH_DB="$PUB_DB" "$PY" SparingHorse.py seed --no-objective >/dev/null
 launch_and_drive "$PUB_DB" "$((PORT + 6))" public "public" 1 || RC=$?
+
+# Phase 8 — public-full (0.55.1): the READONLY shell over a fixture WITH objectives and a plan, so the
+# objectives strip exists to assert on (U1: no controls) and the by-id run gate has old runs to refuse (S3)
+PUBFULL_DB="$WORK/publicfull.db"
+echo "▸ seeding $PUBFULL_DB"
+SH_DB="$PUBFULL_DB" "$PY" SparingHorse.py seed >/dev/null
+launch_and_drive "$PUBFULL_DB" "$((PORT + 7))" publicfull "public-full" 1 || RC=$?
 
 echo "▸ artifacts: $WORK (server logs + screenshots)"
 exit $RC

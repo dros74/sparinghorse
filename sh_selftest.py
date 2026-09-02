@@ -1646,6 +1646,202 @@ def _stc_demo_route():
                got={**detail, "failures": fail or "none"})
 
 
+def _stc_abuse_limits():
+    """§ABUSE (0.55.1, review S2) — request-size and rate limits, driven through the real routes.
+
+    The 2026-09-02 review stored a 2,000,035-byte note on the private box and found the demo's reset
+    and backup open to anyone in a loop. Four teeth:
+      (a) the (N+1)th POST from one address inside the window answers JSON 429 with Retry-After, the
+          first N answer 200; a second address (CF-Connecting-IP) has its own bucket; the window
+          refills — the clock is injected, so no sleeping;
+      (b) plain GETs are never limited; the bucket routing names reset / post / expensive and
+          nothing else;
+      (c) a body over MAX_BODY_BYTES answers JSON 413 before it is read;
+      (d) with the limiter OFF (SH_RATE_LIMIT=0, and what the battery itself runs under) nothing
+          answers 429 — the revert-visibility tooth: delete `_abuse_guard` and (a) fails."""
+    saved = (S.RATE_LIMITING, S._rate)
+    clock = [1000.0]
+    fails, detail = [], {}
+    body = {"note": "", "date": "2000-01-01"}   # a no-op write: deletes a reflection that never existed
+    try:
+        S.RATE_LIMITING = True
+        S._rate = S._RateLimiter(clock=lambda: clock[0])
+        c = S.app.test_client()
+        n = S.RATE_LIMITS["post"][0]
+        codes = {c.post("/api/log/note", json=body).status_code for _ in range(n)}
+        r = c.post("/api/log/note", json=body)
+        detail.update(limit=n, first_n=sorted(codes), n_plus_1=r.status_code,
+                      retry_after=r.headers.get("Retry-After"))
+        if codes != {200}:
+            fails.append(f"(a) the first {n} POSTs answered {sorted(codes)}, want 200")
+        if r.status_code != 429 or not r.is_json or not r.headers.get("Retry-After"):
+            fails.append(f"(a) POST {n + 1} answered {r.status_code} "
+                         f"{'json' if r.is_json else 'non-json'} — want JSON 429 + Retry-After")
+        r2 = c.post("/api/log/note", json=body, headers={"CF-Connecting-IP": "203.0.113.9"})
+        if r2.status_code != 200:
+            fails.append(f"(a) a second address answered {r2.status_code} — buckets are not per address")
+        clock[0] += 61
+        r3 = c.post("/api/log/note", json=body)
+        if r3.status_code != 200:
+            fails.append(f"(a) after the window the same address answered {r3.status_code}")
+        for _ in range(n + 5):
+            g = c.get("/healthz")
+        if g.status_code != 200:
+            fails.append(f"(b) a plain GET was limited ({g.status_code})")
+        for meth, path, want in (("POST", "/api/demo/reset", "reset"), ("POST", "/api/plan/generate", "post"),
+                                 ("POST", "/api/readiness", "post"), ("GET", "/api/backup/db", "expensive"),
+                                 ("GET", "/api/export/json", "expensive"), ("GET", "/api/plan", None),
+                                 ("GET", "/api/activity/latest", None)):
+            got = S._rate_bucket_for(meth, path)
+            if got != want:
+                fails.append(f"(b) {meth} {path} routes to {got!r}, want {want!r}")
+        big = S.json.dumps({"note": "x" * (S.MAX_BODY_BYTES + 1), "date": "2000-01-01"})
+        r4 = c.post("/api/log/note", data=big, content_type="application/json")
+        detail["oversized"] = r4.status_code
+        if r4.status_code != 413 or not r4.is_json:
+            fails.append(f"(c) a {len(big)}-byte body answered {r4.status_code} "
+                         f"{'json' if r4.is_json else 'non-json'} — want JSON 413")
+        S.RATE_LIMITING = False
+        S._rate = S._RateLimiter(clock=lambda: clock[0])
+        off = {c.post("/api/log/note", json=body).status_code for _ in range(n + 1)}
+        if 429 in off:
+            fails.append("(d) the limiter fired with SH_RATE_LIMIT=0")
+    finally:
+        S.RATE_LIMITING, S._rate = saved
+    return _st("det", "abuse-limits",
+               "§ABUSE — the (N+1)th POST from one address in a window is JSON 429 with Retry-After, "
+               "a second address has its own bucket, the window refills, plain GETs are never "
+               "limited, reset/backup/export route to their own buckets, an oversized body is JSON "
+               "413 before it is read, and nothing fires with the limiter off",
+               passed=not fails, expect="200×N then 429; per-address; refill; 413; inert when off",
+               got={**detail, "failures": fails or "none"})
+
+
+def _stc_public_activity_gate():
+    """§PV (0.55.1, review S3) — on the PUBLIC box a run is served by number only when the page
+    itself points at it: the latest run, a run the current plan or block log references, or one
+    inside PUBLIC_ACTIVITY_WINDOW_DAYS. Before this every id answered — the whole diary, enumerable
+    by counting, each row with its start time.
+
+    On a throwaway DB: an old, unreferenced run is 404 on all three by-id routes under READONLY and
+    200 on the private console; a run inside the window is 200; the latest run is 200 even when it
+    is old; a run an old plan references is 200."""
+    import sqlite3 as _sq
+    from datetime import date as _date, timedelta as _td
+    today = _date.today()
+    old = (today - _td(days=40)).isoformat()
+    older = (today - _td(days=60)).isoformat()
+    fresh = today.isoformat()
+
+    def act(i, d):
+        raw = {"id": i, "date_time": d + "T07:30:00", "sport": {"name": S.RUNNING_SPORT},
+               "distance": 8.0, "duration": 2880, "title": "morning loop"}
+        return (i, d, d + "T07:30:00", S.RUNNING_SPORT, 8.0, 2880, S.json.dumps(raw))
+
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    m.executemany("INSERT INTO activities(id,date,date_time,sport,distance,duration,raw) VALUES(?,?,?,?,?,?,?)",
+                  [act(9001, old), act(9002, fresh), act(9003, older)])
+    m.commit()
+    saved_ro, saved_get = S.READONLY, S.get_db
+    fails, detail = [], {}
+    try:
+        S.get_db = lambda: m
+        c = S.app.test_client()
+        S.READONLY = True
+        for path in ("/api/activity/9001", "/api/activity/9001/profile", "/api/activity/9001/structure",
+                     "/api/activity/9003"):
+            r = c.get(path)
+            detail[f"public {path}"] = r.status_code
+            if r.status_code != 404:
+                fails.append(f"public {path} answered {r.status_code} — an unreferenced old run is served")
+        r = c.get("/api/activity/9002")
+        detail["public fresh"] = r.status_code
+        if r.status_code != 200:
+            fails.append(f"public /api/activity/9002 (inside the window) answered {r.status_code}")
+        body = r.get_json() or {}
+        if "date_time" in body or "title" in body:
+            fails.append("the public activity payload still carries date_time/title")
+        # the latest run is served even when it is old
+        m.execute("DELETE FROM activities WHERE id=9002"); m.commit()
+        r = c.get("/api/activity/9001")
+        detail["public latest-old"] = r.status_code
+        if r.status_code != 200:
+            fails.append(f"the latest run (old, id 9001) answered {r.status_code} on the public box")
+        if c.get("/api/activity/9003").status_code != 404:
+            fails.append("an old non-latest run became visible when the latest changed")
+        # a run the current plan references is served
+        m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES('now',?,'{}',?)",
+                  (fresh, S.json.dumps({"ok": True, "base": {"weeks": [{"sessions": [{"activity_id": 9003}]}]}})))
+        m.commit()
+        r = c.get("/api/activity/9003")
+        detail["public plan-referenced"] = r.status_code
+        if r.status_code != 200:
+            fails.append(f"a plan-referenced run (9003) answered {r.status_code} on the public box")
+        S.READONLY = False
+        r = c.get("/api/activity/9003")
+        if r.status_code != 200 or "date_time" not in (r.get_json() or {}):
+            fails.append("the PRIVATE console lost a run or its date_time to the public gate")
+    finally:
+        S.READONLY, S.get_db = saved_ro, saved_get
+        m.close()
+    return _st("det", "public-activity-gate",
+               "§PV — the public box serves a run by id only when the page points at it (latest, "
+               "plan/log-referenced, or inside the window), on all three by-id routes, with no "
+               "date_time or title; the private console is untouched",
+               passed=not fails, expect="404 old/unreferenced · 200 fresh/latest/referenced · private 200",
+               got={**detail, "failures": fails or "none"})
+
+
+def _stc_plan_generate_dedupe():
+    """A3 (0.55.1) — the Generate button writes no second row for the same answer. Eight concurrent
+    POSTs used to mean eight identical plan versions. On a seeded in-memory DB: POST twice; the
+    plans table grows once; the second answer says `unchanged`; and a changed input (a moved race)
+    grows it again — the dedupe must never swallow a real change."""
+    import sqlite3 as _sq
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    S.seed_synthetic_db(m)
+    saved_get = S.get_db
+    fails, detail = [], {}
+    try:
+        S.get_db = lambda: m
+        c = S.app.test_client()
+        n0 = m.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+        r1 = c.post("/api/plan/generate")
+        n1 = m.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+        r2 = c.post("/api/plan/generate")
+        n2 = m.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+        detail.update(before=n0, after_first=n1, after_second=n2,
+                      second_unchanged=bool((r2.get_json() or {}).get("unchanged")))
+        if r1.status_code != 200 or r2.status_code != 200:
+            fails.append(f"generate answered {r1.status_code}/{r2.status_code}")
+        if n2 != n1:
+            fails.append(f"the second identical generate wrote a row ({n1} → {n2})")
+        if not (r2.get_json() or {}).get("unchanged"):
+            fails.append("the second answer does not say `unchanged`")
+        o = m.execute("SELECT id, date FROM objectives WHERE status='upcoming' ORDER BY date DESC LIMIT 1").fetchone()
+        if o:
+            from datetime import date as _date, timedelta as _td
+            moved = (_date.fromisoformat(o["date"]) + _td(days=7)).isoformat()
+            m.execute("UPDATE objectives SET date=? WHERE id=?", (moved, o["id"])); m.commit()
+            r3 = c.post("/api/plan/generate")
+            n3 = m.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+            detail["after_change"] = n3
+            if r3.status_code != 200 or n3 != n2 + 1 or (r3.get_json() or {}).get("unchanged"):
+                fails.append(f"a moved race did not produce a new plan row ({n2} → {n3}, "
+                             f"unchanged={(r3.get_json() or {}).get('unchanged')})")
+        else:
+            detail["after_change"] = "no upcoming objective to move"
+    finally:
+        S.get_db = saved_get
+        m.close()
+    return _st("det", "plan-generate-dedupe",
+               "A3 — two identical Generate clicks write one plan row and the second answers "
+               "`unchanged`; a changed input still writes a new row",
+               passed=not fails, expect="rows +1 then +0 then +1", got={**detail, "failures": fails or "none"})
+
+
 def _stc_demo_guard():
     """§DEMO — the public demo box may be driven, but not taken.
 
@@ -1679,7 +1875,14 @@ def _stc_demo_guard():
                                  ("post", "/api/sync", {}),
                                  ("post", "/api/suunto/push", {}),
                                  ("post", "/api/selftest/run", {}),
-                                 ("get", "/selftest", None)):
+                                 ("get", "/selftest", None),
+                                 # 0.55.1 (review S2) — a full-DB download per call and the JSON dump
+                                 # are CPU/bandwidth primitives, not demo features; a lab value +
+                                 # note is shown to the next visitor (defacement, like house_name)
+                                 ("get", "/api/backup/db", None),
+                                 ("get", "/api/export/json", None),
+                                 ("post", "/api/health", {"marker": "triglycerides",
+                                                          "date": "1999-01-01", "value": 1})):
             r = getattr(client, meth)(path, json=body) if body is not None else getattr(client, meth)(path)
             detail[f"{meth.upper()} {path}"] = r.status_code
             if r.status_code != 403:
@@ -1688,18 +1891,35 @@ def _stc_demo_guard():
         # constant against itself: delete a key from it and the loop simply stops checking that key,
         # so the revert passes and the setting quietly becomes writable. Measured — that is exactly
         # what happened on the first cut of this det. [[revert-tests-must-be-seen-to-fail]]
-        for key in ("private_url", "house_url", "house_name"):
-            r = client.post("/api/settings", json={key: "https://example.com"})
+        for key, val in (("private_url", "https://example.com"), ("house_url", "https://example.com"),
+                         ("house_name", "x"),
+                         # 0.55.1 (review S9): the process clock, the outbound weather target and
+                         # the prose the next visitor reads in Settings and every prompt carries
+                         ("tz", "Europe/Lisbon"), ("weather_cities", "Lisbon,38.72,-9.14"),
+                         ("athlete_context", "x")):
+            r = client.post("/api/settings", json={key: val})
             detail[f"settings:{key}"] = r.status_code
             if r.status_code != 403:
                 fails.append(f"a demo visitor could write the {key} setting ({r.status_code})")
-        # (b) the allowances — the demo is worthless if these are refused
-        for key in ("rest_day_rank", "long_run_day", "athlete_context"):
-            r = client.post("/api/settings", json={key: ""})
-            if r.status_code == 403:
-                fails.append(f"the {key} setting is refused in demo — the engine cannot be driven")
-        # (c) the status reads the Settings panel needs on first paint
-        for path in ("/api/secrets", "/api/suunto/status"):
+        # (b) the allowances — the demo is worthless if these are refused. The POST really lands
+        # (it is the allowance being tested), so the value is put back afterwards: before 0.55.1 this
+        # loop CLEARED the instance's saved day preferences on every inline battery run.
+        hdb = S.connect_db()
+        try:
+            for key in ("rest_day_rank", "long_run_day"):
+                had = hdb.execute("SELECT value FROM meta WHERE key=?", ("set:" + key,)).fetchone()
+                r = client.post("/api/settings", json={key: ""})
+                if r.status_code == 403:
+                    fails.append(f"the {key} setting is refused in demo — the engine cannot be driven")
+                if had is None:
+                    hdb.execute("DELETE FROM meta WHERE key=?", ("set:" + key,))
+                else:
+                    hdb.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", ("set:" + key, had["value"]))
+            hdb.commit()
+        finally:
+            hdb.close()
+        # (c) the status reads the Settings panel needs on first paint — and the Body tab's read
+        for path in ("/api/secrets", "/api/suunto/status", "/api/health"):
             r = client.get(path)
             detail[f"GET {path}"] = r.status_code
             if r.status_code == 403:
@@ -1714,14 +1934,22 @@ def _stc_demo_guard():
             fails.append("the demo guard fired with SH_DEMO unset — every private console would inherit it")
     finally:
         S.DEMO = saved
+        hdb = S.connect_db()          # leave nothing: the marker only lands if the guard is broken
+        try:
+            hdb.execute("DELETE FROM health_markers WHERE marker='triglycerides' AND date='1999-01-01'")
+            hdb.commit()
+        finally:
+            hdb.close()
     return _st("det", "demo-guard",
                "§DEMO the demo box refuses secrets, outbound account calls (sync/Suunto), the "
-               "self-test subprocess and the three visitor-facing identity settings, while the "
-               "plan-shaping settings and the status reads the Settings panel needs stay open — and "
-               "the whole guard is inert unless SH_DEMO is set",
+               "self-test subprocess, the backup/export downloads, health-marker writes and the six "
+               "visitor-facing settings (identity, clock, weather, context), while the day "
+               "preferences and the status reads the Settings panel needs stay open — and the whole "
+               "guard is inert unless SH_DEMO is set",
                passed=not fails,
-               expect="403 on secrets-write/sync/suunto/selftest/identity-settings · 200 on status "
-                      "reads and plan settings · nothing gated when SH_DEMO is off",
+               expect="403 on secrets-write/sync/suunto/selftest/backup/export/health-write/"
+                      "identity+tz+weather+context settings · 200 on status reads, health read and "
+                      "day preferences · nothing gated when SH_DEMO is off",
                got={**detail, "failures": fails or "none"})
 
 
@@ -1830,7 +2058,8 @@ def _stc_public_allowlist():
               "/api/log": ["reflection", "av_dates", "av_shed"],
               "/api/shape": ["raw", "hrv_baseline", "last_sync", "monotony", "training_strain"],
               "/api/objectives": ["outcome", "resolved_at"],
-              "/api/activity/latest": ["hr_avg", "hr_max"],
+              # 0.55.1 (review S3): the time of day is the household routine, the title is free text
+              "/api/activity/latest": ["hr_avg", "hr_max", "date_time", "title"],
               "/healthz": ["last_sync", "last_ok"],
               # §TR — the calibration is public, the RESULT is not: p50 beside err_pct hands back
               # the finish time that `objectives[].outcome` deliberately withholds
@@ -1871,7 +2100,7 @@ def _stc_public_allowlist():
         S.READONLY = False
         kept = {"/api/plan": ["adjustment", "cold_start", "av_dates"],
                 "/api/shape": ["raw", "hrv_baseline", "last_sync"],
-                "/api/objectives": ["outcome"], "/api/activity/latest": ["hr_avg"],
+                "/api/objectives": ["outcome"], "/api/activity/latest": ["hr_avg", "date_time", "title"],
                 "/healthz": ["last_sync"]}
         for path, names in kept.items():
             body = c.get(path).get_json()
@@ -6385,7 +6614,10 @@ def _stc_calibration_inventory():
     # prescription or a projection, so nothing here is calibration.
     PLUMBING = {"PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
                 "MAX_WEATHER_CITIES", "SUUNTO_ACTIVITY_RUNNING", "WEATHER_TTL", "EXPORT_FORMAT",
-                "_EXPLAIN_CACHE_MAX"}
+                "_EXPLAIN_CACHE_MAX",
+                # 0.55.1 — abuse dampers and the public by-id window: seconds and days of plumbing,
+                # not magnitudes the plan is computed from
+                "DEMO_RESET_MIN_GAP_S", "PUBLIC_ACTIVITY_WINDOW_DAYS"}
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -15172,9 +15404,17 @@ def run_server_selftest(db, categories=None):
     what keeps two batteries from interleaving their global swaps."""
     if not _battery_lock.acquire(blocking=False):
         raise SelfTestBusy("a self-test battery is already running")
+    # 0.55.1 — the battery fires hundreds of requests from ONE address through the test client, by
+    # design; the abuse limiter would 429 half of them. Off for the run, on again after, and
+    # det/abuse-limits switches it on for itself with its own clock.
+    saved_rl = getattr(S, "RATE_LIMITING", None)
     try:
+        if saved_rl is not None:
+            S.RATE_LIMITING = False
         return _run_server_selftest(db, categories)
     finally:
+        if saved_rl is not None:
+            S.RATE_LIMITING = saved_rl
         _battery_lock.release()
 
 
@@ -15248,7 +15488,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_demo_guard(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_demo_guard(), lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
+                 lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),

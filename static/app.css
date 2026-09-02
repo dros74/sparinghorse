@@ -718,6 +718,7 @@
      affordance is the hover/focus, not a control competing with the remove button for attention. */
   .obj .odate{font-family:var(--mono);font-size:11px;color:var(--muted);background:none;
     border:1px solid transparent;border-radius:5px;padding:1px 3px;margin:-1px -3px;cursor:pointer}
+  .obj .odate-ro{font-family:var(--mono);font-size:11px;color:var(--muted)}   /* 0.55.1 — the public box's date is text, not a control (U1) */
   .obj .odate:hover{border-color:var(--line);color:var(--text)}
   .obj .odate:focus{border-color:var(--accent);color:var(--text);background:var(--surface-2)}
   /* no outline:none here — the global :focus-visible ring is the keyboard affordance (det/keyboard-reach) */
