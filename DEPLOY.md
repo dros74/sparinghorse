@@ -41,6 +41,12 @@ the quick start; MANUAL.md covers using the app.
 
 ## 2a. Access to the private console (0.56.0)
 
+- **Upgrading an existing box to 0.56.0+:** `sh prepare_env.sh --check` in the compose directory
+  previews, `sh prepare_env.sh` writes — it backs up `.env`, generates `SH_SECRET_KEY` from
+  `/dev/urandom` when absent, and adds the Cloudflare Access bypass variables after checking their
+  shape (`--team myteam --aud <64 hex>`, or it asks; blank means no bypass and the console asks for
+  its passphrase, which also works). It never prints a secret and never overwrites a value that is
+  already set. Keep a copy of the new `.env` somewhere safe: the key is what decrypts the token store.
 - **First boot.** With no passphrase in the secrets store the console serves only `/setup`. Either
   open it and set one (12+ characters), or put `SH_PASSPHRASE=…` in `.env` before the first start and
   the page never appears. `/healthz`, the static assets and the icons are the only other things
