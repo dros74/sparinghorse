@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.58.0] - 2026-09-02
+
+### Added
+
+- **The body's limits as one object per week (§LIMITS, PRODUCT_PLAN §4.2).** Every laid week now
+  publishes `limits`: for each governor axis — the load ratio (ACWR), the long-run step, the
+  damage-equivalent km per week and per session, the near-ceiling streak, the fitness gain per
+  week — its ceiling, what the week was laid at, the headroom, whether it **bound** the week, and
+  the evidence basis of the ceiling (**L** literature, **A** fitted to this athlete, **S**
+  structural, from ENGINE_SCIENCE §10). `binding` names the axis that held the week, or the
+  tightest one. The week card renders it as a strip ("This week is held by the long-run step"), and
+  the Today page carries the binding limit under the why-line. Additive: no prescription moved —
+  the goldens changed by 6,877 added lines and none removed, all inside `limits`.
+- **An injury-risk read, not a probability.** The long-run-step axis carries a `risk` read against
+  the one cohort behind it (Nielsen et al., Aarhus, n≈5000: sharp longest-run jumps predicted injury
+  where weekly-mileage jumps did not): whether this week's long run sits within the +10 % step. No
+  percentage is printed — one athlete with one injury event cannot calibrate one, and the decision
+  record says the plan must not pretend to. The cohort's hazard ratios join the read when they are
+  transcribed from the primary paper into ENGINE_SCIENCE.
+- **The ledger scores more (§4.3).** Weekly fitness checkpoints at **7 and 14 days** beside the 28;
+  **prescription rows** (the session sheet the plan standing at the week's start asked for, against
+  what was run — decision (a): the sheet is the adherence denominator, the intent bar rides in the
+  payload); **readiness calls** (the verdict a stored check-in implies — stop → red, heavy legs or
+  poor sleep → amber — against that day's planned and run km); and **override rows** when a week was
+  run at ≥ 1.5 × its intent with no race in it (decision (e)), with the week's check-in mix. All
+  write-once. The track-record card shows bias by horizon, prescription adherence, green vs
+  amber/red completion rates and the banked overrides; the public box publishes the calibration and
+  the override count, never a week's own km.
+
+- **Distance units (U5).** Settings → Distance units (`SH_UNITS`): `km` or `mi`. A display choice
+  made at the edge — the engine plans in kilometres and every API stays metric; the page converts
+  distances, paces and the server's own pace strings, on every box. The browser suite's new `units`
+  phase sets miles and demands that no kilometre survives on Today, the dashboard or the runs
+  explorer.
+
+### Tests
+
+- `det/limits` (structure, the hard-cap inequalities, the risk read, caution publishing only ACWR,
+  L/A/S bases; lived weeks carry no ceiling and are skipped); `det/track-record` (e) — the 7/14-day
+  checkpoints, prescription and override rows, readiness calls, write-once on all of them; the
+  goldens rewritten with the additive block (6,889 added lines, none removed); the `units` browser
+  phase.
+
 ## [0.57.0] - 2026-09-02
 
 ### Added

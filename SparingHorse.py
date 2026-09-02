@@ -55,7 +55,8 @@ from requests.adapters import HTTPAdapter, Retry
 # Re-imported by name (not `*`) so this list IS the surface: the routes, the scheduler,
 # the seed and every `S.<name>` in the battery keep resolving exactly where they did.
 # ⚠ ENGINE_VERSION moved with the engine it stamps — bump it in sh_engine.py.
-from sh_engine import (   # noqa: F401 — re-exported for the app and the battery
+from sh_engine import (
+    LIMITS_LAID_TOL,   # noqa: F401 — re-exported for the app and the battery
     ACWR_HARD, ACWR_SOFT, ACWR_SOFT_CTL_FLOOR, AV_HORIZON_DAYS, AV_MAX_STREAK, BANK_PLAN_SCAN,
     BASE_DOWN_EVERY, BASE_DOWN_FRAC, BASE_LONG_FRAC, BASE_QUALITY_CYCLE, BASE_RUNS,
     BASE_TEMPO_FRAC, BASE_THR_FRAC, BASE_VO2_LONG_REP_MIN,
@@ -1710,6 +1711,14 @@ def current_settings(db):
     return out
 
 
+def _units_pref(db=None):
+    """0.58.0 (U5) — 'km' or 'mi': the DISPLAY choice the page boots with (`window.SH.units`). The
+    engine plans in kilometres and every API stays metric; the page converts at the edge."""
+    spec = next(sp for sp in SETTINGS_SPEC if sp["key"] == "units")
+    v, _ = _resolve_setting(db if db is not None else get_db(), spec)
+    return "mi" if str(v or "").strip().lower() == "mi" else "km"
+
+
 def validate_setting(key, value):
     """(ok, error) for one setting's raw string, BEFORE persisting. house_* land in header HTML (now
     escaped at the render site too — this is the friendlier first line of defence + a real http(s)
@@ -1722,6 +1731,8 @@ def validate_setting(key, value):
         return False, "must start with http:// or https://"
     if key.startswith("ai_") and value.strip() and value.strip() not in ("0", "1"):
         return False, "1 (on) or 0 (off)"
+    if key == "units" and value.strip() and value.strip().lower() not in ("km", "mi"):
+        return False, "km or mi"
     if key == "tz" and value.strip():
         try:
             ZoneInfo(value.strip())
@@ -4228,6 +4239,7 @@ TR_T8_DAYS = 56          # the second horizon a race band is scored at: eight we
 TR_T8_TOL_DAYS = 14      # …and how near that horizon the scored plan must actually sit
 TR_SCAN_WEEKS = 52       # how far back a scan reaches for unscored weekly checkpoints
 TR_CTL_CLOSE = 2.0       # CTL points: within this, the weekly forecast "landed" (≈ 4% at CTL 50)
+TR_OVERRIDE_RATIO = 1.5  # 0.58.0 — a week run at ≥ this × its intent (no race) is banked as an override (symmetry (e))
 
 
 def score_ctl_week(predicted, actual):
@@ -4338,28 +4350,34 @@ def track_record_scan(db, today=None):
     useful and still hard."""
     td = _date(today) if today else datetime.now().date()
     now = _now_iso()
-    added = {"ctl_week": 0, "race_final": 0, "race_t8": 0}
+    added = {"ctl_week": 0, "ctl_week14": 0, "ctl_week7": 0, "prescription": 0, "readiness_call": 0,
+             "override": 0, "race_final": 0, "race_t8": 0}
     have = {(r["kind"], r["key"]) for r in db.execute("SELECT kind, key FROM track_record").fetchall()}
 
-    # ── weekly fitness checkpoints ────────────────────────────────────────
+    # ── weekly fitness checkpoints, at three horizons (0.58.0: 7 and 14 days beside the 28) ──
+    # The same rule at each horizon: the newest plan at least `lead` days older than the week's end.
+    # A 7-day forecast can be the very plan that scored at 28 days when nothing newer exists — that
+    # is the honest reading of "the forecast standing seven days out".
     this_monday = _monday(td)
     weeks = [this_monday - timedelta(weeks=n) for n in range(1, TR_SCAN_WEEKS + 1)]
-    todo = [m for m in weeks if ("ctl_week", m.isoformat()) not in have]
-    if todo:
-        curve = {p["date"]: p["ctl"] for p in reconstruct_history(db, end=(this_monday - timedelta(days=1)).isoformat())}
+    horizons = (("ctl_week", TR_LEAD_DAYS), ("ctl_week14", 14), ("ctl_week7", 7))
+    todo = [(kind, lead, m) for kind, lead in horizons for m in weeks if (kind, m.isoformat()) not in have]
+    parsed = []
+    if todo or True:
         plans = db.execute("SELECT id, for_date, plan FROM plans ORDER BY id DESC").fetchall()
-        parsed = []
         for r in plans:
             try:
                 parsed.append((r["id"], r["for_date"], _tr_plan_weeks(json.loads(r["plan"]))))
             except (ValueError, TypeError):
                 continue
-        for m in todo:
+    if todo:
+        curve = {p["date"]: p["ctl"] for p in reconstruct_history(db, end=(this_monday - timedelta(days=1)).isoformat())}
+        for kind, lead_days, m in todo:
             end = m + timedelta(days=6)
             actual = curve.get(end.isoformat())
             if actual is None:
                 continue                              # the week is not covered by the history yet
-            cutoff = end - timedelta(days=TR_LEAD_DAYS)
+            cutoff = end - timedelta(days=lead_days)
             for pid, for_date, byweek in parsed:      # newest first ⇒ the newest plan old ENOUGH
                 if not for_date or _date(for_date) > cutoff:
                     continue
@@ -4367,13 +4385,116 @@ def track_record_scan(db, today=None):
                 if pred is None:
                     continue
                 sc = score_ctl_week(pred, actual)
-                sc.update({"plan_id": pid, "for_date": for_date, "week": m.isoformat()})
+                sc.update({"plan_id": pid, "for_date": for_date, "week": m.isoformat(), "horizon": lead_days})
                 lead = (end - _date(for_date)).days
                 before = db.total_changes
-                _tr_write(db, "ctl_week", m.isoformat(), lead, sc["predicted"], sc["actual"],
+                _tr_write(db, kind, m.isoformat(), lead, sc["predicted"], sc["actual"],
                           sc["err"], None, sc, now)
-                added["ctl_week"] += (db.total_changes > before)
+                added[kind] += (db.total_changes > before)
                 break
+
+    # ── the prescription itself, and the overrides (0.58.0, PRODUCT_PLAN §4.3 / symmetry (a),(e)) ──
+    # One row per COMPLETED week: what the plan standing at the week's start asked (the session sheet,
+    # `km`, which is the adherence denominator by decision (a); the intent bar rides in the payload),
+    # and what was run. An override row is written when the week was run at ≥ TR_OVERRIDE_RATIO ×
+    # the intent on a week that held no race — the corpus decision (e) asked for.
+    race_weeks = set()
+    for o in db.execute("SELECT date FROM objectives WHERE date IS NOT NULL").fetchall():
+        try:
+            race_weeks.add(_monday(_date(o["date"])).isoformat())
+        except (ValueError, TypeError):
+            pass
+    for m in weeks:
+        mk = m.isoformat()
+        if ("prescription", mk) in have and ("override", mk) in have:
+            continue
+        laid = intent = pid_used = None
+        for pid, for_date, byweek in parsed:        # newest plan standing at (or before) the week's start
+            if not for_date or _date(for_date) > m:
+                continue
+            row = db.execute("SELECT plan FROM plans WHERE id=?", (pid,)).fetchone()
+            try:
+                pl = json.loads(row["plan"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            for blk, v in pl.items():
+                if isinstance(v, dict) and "weeks" in v:
+                    for w in v["weeks"] or []:
+                        if w.get("start") == mk:
+                            laid, intent, pid_used = w.get("km"), w.get("intent_km", w.get("km")), pid
+                            break
+                if laid is not None:
+                    break
+            if laid is not None:
+                break
+        if laid is None:
+            continue
+        _, ran = _tr_prescription(db, None, mk)
+        if ran is None:
+            continue
+        ratio = round(ran / laid, 3) if laid else None
+        payload = {"week": mk, "plan_id": pid_used, "laid_km": laid, "intent_km": intent, "ran_km": ran,
+                   "ratio": ratio, "race_week": mk in race_weeks}
+        if ("prescription", mk) not in have:
+            before = db.total_changes
+            _tr_write(db, "prescription", mk, (m + timedelta(days=6) - m).days, laid, ran,
+                      (None if ratio is None else round(ratio - 1.0, 3)), None, payload, now)
+            added["prescription"] += (db.total_changes > before)
+        if ("override", mk) not in have and intent and ran >= TR_OVERRIDE_RATIO * intent and mk not in race_weeks:
+            ci = db.execute("SELECT energy, sleep, stop_symptom FROM readiness WHERE date >= ? AND date < date(?, '+7 day')",
+                            (mk, mk)).fetchall()
+            payload_o = {**payload, "checkins": len(ci),
+                         "any_heavy_or_poor": any((r["energy"] == "heavy" or r["sleep"] == "poor") for r in ci),
+                         "any_stop": any(bool(r["stop_symptom"]) for r in ci)}
+            before = db.total_changes
+            _tr_write(db, "override", mk, 0, intent, ran, round(ran / intent - 1.0, 3), None, payload_o, now)
+            added["override"] += (db.total_changes > before)
+
+    # ── readiness calls (0.58.0) — did the check-in's own signal precede what happened that day? ──
+    # Deterministic: the verdict the stored check-in implies (stop → red; heavy legs or poor sleep →
+    # amber; else green), against the day's planned km and the km actually run. The first evidence
+    # the readiness gate has ever produced about itself.
+    for r in db.execute("SELECT date, energy, sleep, stop_symptom FROM readiness WHERE date < ? ORDER BY date",
+                        (td.isoformat(),)).fetchall():
+        d = r["date"]
+        if ("readiness_call", d) in have or not d:
+            continue
+        try:
+            dd = _date(d)
+        except (ValueError, TypeError):
+            continue
+        if (td - dd).days > TR_SCAN_WEEKS * 7:
+            continue
+        verdict = 2 if r["stop_symptom"] else (1 if (r["energy"] == "heavy" or r["sleep"] == "poor") else 0)
+        planned = None
+        for pid, for_date, byweek in parsed:
+            if not for_date or _date(for_date) > dd:
+                continue
+            row = db.execute("SELECT plan FROM plans WHERE id=?", (pid,)).fetchone()
+            try:
+                pl = json.loads(row["plan"] or "{}")
+            except (ValueError, TypeError):
+                continue
+            for blk, v in pl.items():
+                if isinstance(v, dict) and "weeks" in v:
+                    for w in v["weeks"] or []:
+                        for sess in w.get("sessions") or []:
+                            if sess.get("date") == d:
+                                planned = float(sess.get("km") or 0.0)
+                if planned is not None:
+                    break
+            if planned is not None:
+                break
+        rr = db.execute("SELECT COALESCE(SUM(distance), 0) AS km FROM activities WHERE " + RUN_FAMILY_SQL +
+                        " AND date = ?", (d,)).fetchone()
+        ran = round(rr["km"], 1) if rr else 0.0
+        completion = (None if planned is None else (1.0 if planned == 0 else round(min(ran / planned, 2.0), 3)))
+        payload = {"date": d, "verdict": ["green", "amber", "red"][verdict], "energy": r["energy"],
+                   "sleep": r["sleep"], "stop": bool(r["stop_symptom"]), "planned_km": planned, "ran_km": ran,
+                   "completion": completion}
+        before = db.total_changes
+        _tr_write(db, "readiness_call", d, 0, verdict, completion, None, None, payload, now)
+        added["readiness_call"] += (db.total_changes > before)
 
     # ── races: the final word, and the word eight weeks out ───────────────
     for o in db.execute("SELECT id, type, label, date, outcome FROM objectives "
@@ -4477,6 +4598,19 @@ def track_record(db):
             r["payload"] = {}
     ctl = [r for r in rows if r["kind"] == "ctl_week"]
     races = [r for r in rows if r["kind"] in ("race_final", "race_t8")]
+    # 0.58.0 — the wider ledger: bias per horizon, the prescription rows, the readiness calls, the overrides
+    leads = {str(h): _tr_ctl_bias([r for r in rows if r["kind"] == k])
+             for k, h in (("ctl_week7", 7), ("ctl_week14", 14), ("ctl_week", TR_LEAD_DAYS))}
+    presc = [r for r in rows if r["kind"] == "prescription"]
+    pratios = [r["payload"].get("ratio") for r in presc if r["payload"].get("ratio") is not None]
+    rcalls = [r for r in rows if r["kind"] == "readiness_call"]
+    def _rate(sel):
+        xs = [r for r in rcalls if r["payload"].get("completion") is not None and sel(r)]
+        return {"n": len(xs), "completed_rate": (round(sum(1 for r in xs if r["payload"]["completion"] >= 0.9) / len(xs), 3) if xs else None)}
+    readiness = {"n": len(rcalls),
+                 "green": _rate(lambda r: r["predicted"] == 0),
+                 "amber_or_red": _rate(lambda r: r["predicted"] >= 1)}
+    overrides = [r for r in rows if r["kind"] == "override"]
     # §TR-A — the prescription half of every scored week, derived beside the projection half.
     for r in ctl:
         laid, ran = _tr_prescription(db, r["payload"].get("plan_id"), r["key"])
@@ -4517,6 +4651,16 @@ def track_record(db):
                       "lo_hms": r["payload"].get("lo_hms"), "hi_hms": r["payload"].get("hi_hms"),
                       "plan_id": r["payload"].get("plan_id"), "scored_at": r["scored_at"]}
                      for r in races],
+           "leads": leads,
+           "prescription_rows": {"n": len(presc),
+                                 "median_ratio": (round(sorted(pratios)[len(pratios) // 2], 3) if pratios else None),
+                                 "over_run": sum(1 for x in pratios if x > 1.05),
+                                 "under_run": sum(1 for x in pratios if x < 0.95)},
+           "readiness": readiness,
+           "overrides": {"n": len(overrides), "rows": [{"week": r["key"], "ratio": round((r["err"] or 0) + 1.0, 2),
+                                                        "checkins": r["payload"].get("checkins"),
+                                                        "any_heavy_or_poor": r["payload"].get("any_heavy_or_poor"),
+                                                        "any_stop": r["payload"].get("any_stop")} for r in overrides]},
            "summary": {"races_scored": len(races), "banded": len(banded),
                        "in_band": sum(1 for r in banded if r["in_band"]),
                        "in_band_rate": (round(sum(1 for r in banded if r["in_band"]) / len(banded), 3)
@@ -6732,6 +6876,7 @@ _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "compo
 # NOT `av_dates` / `av_shed`: away days are an empty-house broadcast (§AV). The 0.27.1 recursive
 # strip stays in place for anything outside these views; here the allowlist makes them unreachable
 # by construction — a new phase key or a new payload cannot outrun it.
+_PV_LIMIT_AXIS = {"ceiling": True, "laid": True, "headroom": True, "binds": True, "basis": True, "unit": True}
 _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pulled": True,
             "elapsed": True, "eq_km": True, "freq_actual": True, "frequency_met": True,
             "frozen": True, "intent": True, "intent_km": True, "intent_runs": True, "km": True,
@@ -6754,6 +6899,13 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             # reason the flag travels with the lighter km (§100): a number withheld from the box that
             # publishes what it explains is how the public view states something the private one doesn't.
             "rest_gated": True, "rest_shed_km": True,
+            # §LIMITS (0.58.0) — the governors' ceilings and headroom per axis: they describe the
+            # PRESCRIPTION (the same class as proj_acwr and eq_km above), never the athlete's body.
+            "limits": {"regime": True, "binding": True,
+                       "acwr": _PV_LIMIT_AXIS, "long_step": _PV_LIMIT_AXIS, "eq_week": _PV_LIMIT_AXIS,
+                       "eq_session": _PV_LIMIT_AXIS, "chronic": _PV_LIMIT_AXIS,
+                       "tissue": {"streak": True, "limit": True, "headroom": True, "binds": True, "basis": True, "unit": True},
+                       "risk": {"axis": True, "cohort": True, "note": True, "n": True, "basis": True, "read": True}},
             "runs_ahead": True, "runs_done": True, "sessions": _PV_SESSION, "start": True,
             "strides": True, "trimp_total": True, "volume_met": True, "wk": True}
 _PV_PHASE = {"builds": True, "clipped_by_acwr": True, "end_atl": True, "end_ctl": True,
@@ -6915,6 +7067,8 @@ _PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True
 # band we gave, at what horizon, for a race whose name and date were already public. The weekly CTL
 # checkpoints publish in full — both sides of that comparison are already public (`shape.history`
 # carries measured fitness, the plan carries `proj_ctl`).
+_PV_TRACK_BIAS = {"n": True, "median_err": True, "median_err_pct": True, "lead_days": True, "lead_span": True,
+                  "direction": True, "close_within": True}
 _PV_TRACK = {"ok": True,
              "ctl": {"n": True, "mae": True, "bias": True, "close_rate": True, "close_within": True,
                      # §SYM-A — the median reading of the same errors the mean above already publishes
@@ -6929,6 +7083,13 @@ _PV_TRACK = {"ok": True,
                                 "lead_days": True, "ran_ratio": True}},
              "races": {"key": True, "kind": True, "label": True, "date": True, "type": True,
                        "horizon_days": True, "in_band": True, "scored_at": True},
+             # 0.58.0 — bias per horizon, prescription adherence, readiness-call rates and the override
+             # COUNT are calibration; a week's own km stay private (§TR-A), so `overrides.rows` is not here
+             "leads": {"7": _PV_TRACK_BIAS, "14": _PV_TRACK_BIAS, "28": _PV_TRACK_BIAS},
+             "prescription_rows": {"n": True, "median_ratio": True, "over_run": True, "under_run": True},
+             "readiness": {"n": True, "green": {"n": True, "completed_rate": True},
+                           "amber_or_red": {"n": True, "completed_rate": True}},
+             "overrides": {"n": True},
              "summary": {"races_scored": True, "banded": True, "in_band": True, "in_band_rate": True,
                          "lead_days": True, "t8_days": True}}
 
@@ -6938,6 +7099,7 @@ _PV_WITHHELD = {
     "track.races[].log_score",               # ditto, invertible given sigma
     "track.races[].lo_hms", "track.races[].hi_hms",   # the band brackets the result too
     "track.races[].plan_id",                 # internal
+    "track.overrides.rows",                  # 0.58.0 — a week's km, intent and check-in mix: private (§TR-A)
     "track.ctl.points[].laid_km",            # §TR-A — the week's prescribed volume …
     "track.ctl.points[].ran_km",             #   … and what was run in it: private, the ratio is public
     "plan.adjustment",                       # free-text / medical context
@@ -8920,6 +9082,7 @@ def _render_app(page="dash"):
             # The CSS is fixed too; this makes the question moot rather than merely answered.
             .replace("__SH_DEMOBAR__", DEMO_BANNER_HTML if DEMO else "")
             .replace("__SH_STALE_HOURS__", str(SCHED_STALE_HOURS))
+            .replace("__SH_UNITS__", json.dumps(_units_pref()))       # 0.58.0 (U5) — a display choice
             # json.dumps escapes quotes/backslashes but NOT "/", so neutralise "</" → a value with
             # "</script>" (e.g. a raw env SH_PRIVATE_URL that bypassed validate_setting) can't close
             # the inline <script> and inject markup into the (public) page.

@@ -20,6 +20,18 @@
         "intent_km": 19,
         "intent_runs": 5,
         "km": 19.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.27,
+            "laid": 0.98,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 1.022,
         "phase": "base",
@@ -94,6 +106,18 @@
         "intent_km": 20,
         "intent_runs": 5,
         "km": 26.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.23,
+            "laid": 1.02,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 1.543,
         "phase": "base",
@@ -170,6 +194,18 @@
         "intent_km": 21,
         "intent_runs": 5,
         "km": 20.7,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.3,
+            "laid": 0.95,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 1.206,
         "phase": "base",
@@ -284,6 +320,18 @@
         "intent_km": 16,
         "intent_runs": 5,
         "km": 16.0,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.38,
+            "laid": 0.87,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 4,
         "peak_acwr": 0.941,
         "phase": "base",
@@ -369,6 +417,18 @@
         "intent_km": 16,
         "intent_runs": 2,
         "km": 15.2,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.16,
+            "laid": 1.09,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 4,
         "peak_acwr": 1.086,
         "phase": "build",
@@ -504,6 +564,18 @@
         "intent_km": 17,
         "intent_runs": 4,
         "km": 16.3,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.4,
+            "laid": 0.85,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 1.319,
         "phase": "build",
@@ -658,6 +730,18 @@
         "intent_km": 17,
         "intent_runs": 4,
         "km": 16.3,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.41,
+            "laid": 0.84,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 1.222,
         "phase": "build",
@@ -913,6 +997,18 @@
         "intent_km": 17,
         "intent_runs": 4,
         "km": 16.6,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.34,
+            "laid": 0.91,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 1.15,
         "phase": "peak",
@@ -1106,6 +1202,18 @@
         "km": 8.6,
         "km_ahead": 8.6,
         "km_done": 0,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.72,
+            "laid": 0.53,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "long_flat": true,
         "partial": true,
@@ -1163,6 +1271,18 @@
         "intent_km": 15,
         "intent_runs": 4,
         "km": 14.8,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.73,
+            "laid": 0.52,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 6,
         "peak_acwr": 0.524,
         "phase": "rebase",
@@ -1225,6 +1345,18 @@
         "intent_km": 17,
         "intent_runs": 4,
         "km": 17.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.56,
+            "laid": 0.69,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 6,
         "peak_acwr": 0.687,
         "phase": "rebase",
@@ -1288,6 +1420,18 @@
         "intent_km": 13,
         "intent_runs": 3,
         "km": 13.0,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.66,
+            "laid": 0.59,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 5,
         "peak_acwr": 0.647,
         "phase": "rebase",
@@ -1341,6 +1485,18 @@
         "intent_km": 18,
         "intent_runs": 4,
         "km": 18.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.32,
+            "laid": 0.93,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 7,
         "peak_acwr": 0.925,
         "phase": "rebase",
@@ -1404,6 +1560,18 @@
         "intent_km": 19,
         "intent_runs": 5,
         "km": 19.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.25,
+            "laid": 1.0,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 7,
         "peak_acwr": 1.003,
         "phase": "rebase",
@@ -1509,6 +1677,18 @@
         "intent_km": 13,
         "intent_runs": 5,
         "km": 13.0,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.48,
+            "laid": 0.77,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 4,
         "peak_acwr": 1.127,
         "phase": "taper",
@@ -1643,6 +1823,18 @@
         "intent_km": 10,
         "intent_runs": 5,
         "km": 9.6,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.6,
+            "laid": 0.65,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 3,
         "peak_acwr": 0.991,
         "phase": "taper",
@@ -1759,6 +1951,18 @@
         "intent_km": 7,
         "intent_runs": 2,
         "km": 43.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.59,
+            "laid": 0.66,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "regime": "caution"
+        },
         "long": 2,
         "peak_acwr": 3.101,
         "phase": "taper",

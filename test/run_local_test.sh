@@ -112,5 +112,9 @@ launch_and_drive "$PUBFULL_DB" "$((PORT + 7))" publicfull "public-full" 1 || RC=
 MAP_DB="$WORK/map.db"
 launch_and_drive "$MAP_DB" "$((PORT + 8))" map "map" 0 1 || RC=$?
 
+# Phase 10 — units (0.58.0, U5): the private console over the full fixture again, driven to miles
+# through the settings API — no kilometre may survive on Today, the dashboard or the runs explorer.
+launch_and_drive "$FULL_DB" "$((PORT + 9))" units "units" || RC=$?
+
 echo "▸ artifacts: $WORK (server logs + screenshots)"
 exit $RC

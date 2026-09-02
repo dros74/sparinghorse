@@ -4,6 +4,29 @@ const SH_READONLY = !!(window.SH && window.SH.readonly);   // public read-only m
 const SH_DEMO = !!(window.SH && window.SH.demo);   // §DEMO — synthetic athlete, shared, self-resetting
 const SH_PRIVATE_URL = (window.SH && window.SH.privateUrl) || "";   // public→private console link
 const SH_STALE_HOURS = (window.SH && window.SH.staleHours) || 26;    // scheduler + /healthz source of truth
+// 0.58.0 (U5) — distance units are a DISPLAY choice: the engine and every API stay metric, and the page
+// converts at the edge. `U.d` converts a distance, `U.p` a pace string ("4:35" per km → per mile), `U.t`
+// a server-baked string ("4:35/km easy", "12.0 km") — the three shapes the API emits. `U.k` is the short
+// suffix ("12k" → "7.5mi"). The setting is read once at boot; a save says "reload".
+const SH_UNITS = ((window.SH && window.SH.units) === "mi") ? "mi" : "km";
+const KM_PER_MI = 1.609344;
+const U = {
+  mi: SH_UNITS === "mi", unit: SH_UNITS, k: SH_UNITS === "mi" ? "mi" : "k",
+  d: (km, dec = 1) => (km == null || isNaN(km)) ? km : +(SH_UNITS === "mi" ? km / KM_PER_MI : +km).toFixed(dec),
+  pmin: (minPerKm) => (minPerKm == null) ? minPerKm : (SH_UNITS === "mi" ? minPerKm * KM_PER_MI : minPerKm),
+  p: (str) => {
+    if (SH_UNITS !== "mi" || !str) return str;
+    return String(str).replace(/(\d+):(\d{2})/g, (_, m, sec) => {
+      const t = Math.round((+m * 60 + +sec) * KM_PER_MI);
+      return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; });
+  },
+  t: (str) => {
+    if (SH_UNITS !== "mi" || !str) return str;
+    return String(str)
+      .replace(/(\d+):(\d{2})\s*\/km\b/g, (_, m, sec) => U.p(`${m}:${sec}`) + "/mi")
+      .replace(/(\d+(?:\.\d+)?)\s*km\b/g, (_, n) => `${U.d(+n, /\./.test(n) ? 1 : 0)} mi`);
+  },
+};
 const SH_PAGE = document.body.dataset.page || "dash";   // §RB — "dash" (status) or "runs" (explorer)
 const $ = s => document.querySelector(s);
 const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
@@ -231,8 +254,8 @@ function renderWeekly(){
   const win=Math.min(WEEKLY_WIN, WEEKLY_ALL.length);
   const start=Math.max(0, WEEKLY_END-win);
   const rows=WEEKLY_ALL.slice(start, WEEKLY_END);
-  const bars=rows.map(x=>`<div class="col" title="${x.week}: ${x.km} km">
-    <div class="vlbl">${x.km>=1?Math.round(x.km):""}</div>
+  const bars=rows.map(x=>`<div class="col" title="${x.week}: ${U.d(x.km)} ${U.unit}">
+    <div class="vlbl">${x.km>=1?Math.round(U.d(x.km)):""}</div>
     <div class="barb" style="height:${Math.round(x.km/WEEKLY_MAX*120)}px"></div>
   </div>`).join("");
   // month/year ruler below: mark where the month changes
@@ -344,7 +367,7 @@ function metric(label, val, unit){
   return `<div class="metric"><div class="ml">${label}</div>
     <div class="mv">${val}${unit?`<small> ${unit}</small>`:""}</div></div>`;
 }
-function paceStr(minkm){ if(minkm==null) return "—"; const m=Math.floor(minkm), s=Math.round((minkm-m)*60);
+function paceStr(minkm){ if(minkm==null) return "—"; minkm=U.pmin(minkm); const m=Math.floor(minkm), s=Math.round((minkm-m)*60);
   return `${m}:${String(s).padStart(2,"0")}`; }
 function durStr(sec){ if(!sec) return "—"; const h=Math.floor(sec/3600), m=Math.round(sec%3600/60);
   return h?`${h}h${String(m).padStart(2,"0")}`:`${m} min`; }
@@ -520,9 +543,9 @@ async function loadActivity(aid){
       <div class="mrow">
         <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}${a.sj?` <span class="sjchip" title="This recording is part ${a.sj.index} of ${a.sj.parts} of a deliberately split session (${a.sj.km} km · ${a.sj.min} min total) — the read-back line below joins the parts. Numbers on this card are THIS part's own.">1+1 · part ${a.sj.index}/${a.sj.parts}</span>`:""}</span>
         ${m("When", when, "")}
-        ${m("Distance", fmt(a.distance,2), "km")}
+        ${m("Distance", fmt(U.d(a.distance,2),2), U.unit)}
         ${m("Duration", durStr(a.duration), "")}
-        ${m("Pace", paceStr(a.pace_min_km), "/km", "pace")}
+        ${m("Pace", paceStr(a.pace_min_km), "/"+U.unit, "pace")}
         ${SH_READONLY?"":m("Avg HR", a.hr_avg||"—", "bpm", "hr")}
         ${SH_READONLY?"":m("Max HR", a.hr_max||"—", "bpm", "hr")}
         ${a.cadence?m("Cadence", a.cadence, "spm", "cadence"):""}
@@ -634,11 +657,11 @@ async function loadRunsCal(month){
     const dots=runs.slice(0,3).map(r=>rcalDot(r.z)).join("")+(runs.length>3?`<span class="rcal-more">+${runs.length-3}</span>`:"")
       +(!runs.length&&other.has(date)?`<span class="rcal-tick" title="Activity, but not a run (counts toward load; the viewer below is run-centric)"></span>`:"");
     const cls=["rcal-day", runs.length?"has":"", date===todayIso?"today":"", date===RCAL.sel?"sel":""].filter(Boolean).join(" ");
-    const tip=runs.length?` title="${runs.length===1?`${runs[0].km} km${runs[0].pace?` @ ${runs[0].pace}/km`:""}${runs[0].sj?` (1+1 split recording, ${runs[0].sj} parts)`:""} — view this run`:`${runs.length} runs — pick one`}"`:"";
+    const tip=runs.length?` title="${runs.length===1?`${U.d(runs[0].km)} ${U.unit}${runs[0].pace?` @ ${U.p(runs[0].pace)}/${U.unit}`:""}${runs[0].sj?` (1+1 split recording, ${runs[0].sj} parts)`:""} — view this run`:`${runs.length} runs — pick one`}"`:"";
     // UX-9: only a cell that opens something takes the role — a focus stop that does nothing is
     // worse than no focus stop, and blank/empty days are exactly that.
     const kb = runs.length
-      ? ` role="button" tabindex="0" aria-label="${day}: ${runs.length===1?`${runs[0].km} km`:`${runs.length} runs`}"` : "";
+      ? ` role="button" tabindex="0" aria-label="${day}: ${runs.length===1?`${U.d(runs[0].km)} ${U.unit}`:`${runs.length} runs`}"` : "";
     cells+=`<div class="${cls}" data-date="${date}"${tip}${kb}>${day}<div class="rcal-dots">${dots}</div></div>`;
   }
   const zl=["Z1","Z2","Z3","Z4","Z5"].map((z,i)=>`<span><span class="rcal-dot" style="background:${HRZONE_COLORS[i]}"></span>${z}</span>`).join("");
@@ -650,7 +673,9 @@ async function loadRunsCal(month){
   // empty when unitless) and thousands get a narrow space so 121 130 reads at a glance
   const fmtN=v=>{const [i,f]=String(v).split("."); return i.replace(/\B(?=(\d{3})+(?!\d))/g," ")+(f?"."+f:"");};
   const c3=(k,f,u,tip)=>`<div class="rst3"${tip?` title="${tip}"`:""}><span>${k}</span>`+
-    cols.map(s=>{const v=s[f]; return `<i>${v==null?"—":(typeof v==="number"?fmtN(v):v)}<small>${v!=null&&u?u:""}</small></i>`;}).join("")+`</div>`;
+    cols.map(s=>{const v0=s[f]; const v=(u==="km"&&typeof v0==="number")?U.d(v0):(u==="/km"&&typeof v0==="string")?U.p(v0):v0;
+      const uu=u==="km"?U.unit:u==="/km"?"/"+U.unit:u;
+      return `<i>${v==null?"—":(typeof v==="number"?fmtN(v):v)}<small>${v!=null&&uu?uu:""}</small></i>`;}).join("")+`</div>`;
   const statsHtml =
     `<div class="rcal-stats"><div class="rst-title">Totals &amp; averages</div>`+
     `<div class="rst3 rst3-head"><span></span><i>Month<small></small></i><i title="The 12 calendar months ending with the browsed month">12 mo<small></small></i><i${since?` title="Since ${since}"`:""}>All time<small></small></i></div>`+
@@ -683,7 +708,7 @@ async function loadRunsCal(month){
       if(runs.length===1){ rcalPick(runs[0].id, cell.dataset.date, cell); return; }
       const pop=document.createElement("div");
       pop.className="rcal-pop";
-      pop.innerHTML=runs.map(r=>`<button type="button" class="rcal-chip" data-id="${r.id}">${rcalDot(r.z)}${esc(r.t||"—")} · ${r.km} km${r.pace?` · ${esc(r.pace)}/km`:""}${r.sj?` · 1+1`:""}</button>`).join("");
+      pop.innerHTML=runs.map(r=>`<button type="button" class="rcal-chip" data-id="${r.id}">${rcalDot(r.z)}${esc(r.t||"—")} · ${U.d(r.km)} ${U.unit}${r.pace?` · ${esc(U.p(r.pace))}/${U.unit}`:""}${r.sj?` · 1+1`:""}</button>`).join("");
       pop.addEventListener("click", ev2=>{
         const c=ev2.target.closest(".rcal-chip"); if(!c) return;
         ev2.stopPropagation(); rcalCloseAllPops();
@@ -775,7 +800,7 @@ function plannedSession(s, easyPace){
   if(s.kind==="post") return `<div class="planned"><div class="rkick">Today's session</div>
     <div class="mrow"><span class="ttl">Road complete</span><span class="muted" style="font-size:13px">Regenerate to periodize the next phase.</span></div></div>`;
   if(s.kind==="rest") return `<div class="planned"><div class="rkick">Today's session</div>
-    <div class="mrow"><span class="ttl">${s.optional?"Optional — week complete":"Rest day"}</span><span class="muted" style="font-size:13px">${esc(s.note)}</span></div></div>`;
+    <div class="mrow"><span class="ttl">${s.optional?"Optional — week complete":"Rest day"}</span><span class="muted" style="font-size:13px">${esc(U.t(s.note))}</span></div></div>`;
   const act=s.actual||{};
   const q=s.reps&&s.reps.length;
   // §RACE — race day carries the RACE's pace, and the engine publishes it as `pace_zone`
@@ -783,23 +808,23 @@ function plannedSession(s, easyPace){
   // prescribed the marathon at the week's easy pace and labelled it "easy" — a misprescription on
   // the one day of the block that cannot be re-run. A race has no `reps`, so it took the plain-run
   // branch and nothing flagged it.
-  const pz=(s.pace_zone||"").match(/^(\S+)\/km\s+(.+)$/);
+  const pz=(s.pace_zone||"").match(/^(\S+)\/km\s+(.+)$/);   // the API is metric; U.p converts the pace
   const paceMetric = s.race
-    ? metric("Race pace", pz?esc(pz[1]):"—", pz?`/km ${esc(pz[2])}`:"/km")
-    : metric("Pace", (s.easy_pace||easyPace||"").replace("/km",""), "/km easy");
+    ? metric("Race pace", pz?esc(U.p(pz[1])):"—", pz?`/${U.unit} ${esc(pz[2])}`:`/${U.unit}`)
+    : metric("Pace", U.p((s.easy_pace||easyPace||"").replace("/km","")), `/${U.unit} easy`);
   const kick=`Today's session · ${PHASEN[s.pk]||"plan"} week ${s.week}`+
     (s.done?` · <span style="color:var(--ok);font-weight:600">done ✓</span>`:"");
   const actLine=s.done
-    ? `<div style="font-size:12px;margin-top:6px;color:var(--ok)">✓ Ran ${act.km}k${act.pace?` @ ${act.pace}/km`:""} today — session complete.</div>`
+    ? `<div style="font-size:12px;margin-top:6px;color:var(--ok)">✓ Ran ${U.d(act.km)}${U.k}${act.pace?` @ ${U.p(act.pace)}/${U.unit}`:""} today — session complete.</div>`
     : "";
   // a structured session carries its own per-segment paces in the card — the single easy pace
   // metric would misprescribe the day, so it only renders for plain easy/long runs.
   const noteParts=(s.note||"").split(" — ");
-  const noteTxt=(q&&noteParts.length>1)?noteParts.slice(0,-1).join(" — "):s.note;   // card replaces the cramped structure string
+  const noteTxt=U.t((q&&noteParts.length>1)?noteParts.slice(0,-1).join(" — "):s.note);   // card replaces the cramped structure string
   return `<div class="planned"${s.done?' style="opacity:.85"':''}><div class="rkick">${kick}</div>
     <div class="mrow">
       <span class="ttl">${KINDT[s.kind]||esc(s.kind)+" run"}</span>
-      ${metric("Distance", s.km, "km")}
+      ${metric("Distance", U.d(s.km), U.unit)}
       ${metric("Duration", `~${s.minutes}`, "min")}
       ${q?"":paceMetric}
       ${metric("Target load", s.trimp!=null?Math.round(s.trimp):"—", "TRIMP")}
@@ -849,9 +874,9 @@ function whyLine(s){
   if(!s) return `<div class="whyline"><b>Why nothing:</b> no plan covers today — add a race in the Objectives panel and generate a plan.</div>`;
   const pk=String(s.pk||""), phase=PHASE_NAMES[pk] || (pk.startsWith("bridge")?"Bridge":pk.startsWith("peak")?"Peak":pk.startsWith("taper")?"Taper":pk?pk:"");
   const where = phase ? `${phase}${s.week?`, week ${esc(String(s.week))}`:""}` : "";
-  const what = s.kind==="rest" ? "a rest day" : `${esc(String(s.kind||"run").replace(/_/g," "))}${s.km?` · ${esc(String(s.km))} km`:""}${s.pace_zone?` at ${esc(String(s.pace_zone))}`:""}`;
+  const what = s.kind==="rest" ? "a rest day" : `${esc(String(s.kind||"run").replace(/_/g," "))}${s.km?` · ${esc(String(U.d(s.km)))} ${U.unit}`:""}${s.pace_zone?` at ${esc(U.t(String(s.pace_zone)))}`:""}`;
   const comp = s.component && COMPT[s.component] ? COMPT[s.component].split(/(?<=\.)\s/)[0] : (s.kind==="rest" ? "Recovery is part of the plan — adaptation happens between the sessions." : "");
-  return `<div class="whyline"><b>Why this session:</b> ${where?where+" — ":""}${what}.${comp?" "+esc(comp):""}${s.note?` <span class="muted">${esc(String(s.note))}</span>`:""}</div>`;
+  return `<div class="whyline"><b>Why this session:</b> ${where?where+" — ":""}${what}.${comp?" "+esc(comp):""}${s.note?` <span class="muted">${esc(U.t(String(s.note)))}</span>`:""}</div>`;
 }
 function renderReadiness(d){
   RDY=d;
@@ -945,7 +970,7 @@ function effPlot(pts, key, cls, fit){
   const r=cls==="ef"?7:5;
   const dots=pts.filter(p=>p[key]!=null).map(p=>{
     const tip=cls==="ef"
-      ? `${p.date} · ${p.ef} · ${p.km} km @ ${p.pace}/km · HR ${p.hr}`
+      ? `${p.date} · ${p.ef} · ${U.d(p.km)} ${U.unit} @ ${U.p(p.pace)}/${U.unit} · HR ${p.hr}`
       : `${p.date} · ${p.temp_c}°C`;
     const cx=x(p.date).toFixed(1), cy=y(p[key]).toFixed(1);
     return `<line class="dot" x1="${cx}" y1="${cy}" x2="${cx}" y2="${cy}" stroke-width="${r}"><title>${esc(tip)}</title></line>`;
@@ -982,7 +1007,7 @@ function renderEfficiency(d){
   host.innerHTML=`
     <p class="effhero"><b class="${vcls}">${esc(d.verdict)}</b>${gain!=null?`<span class="d">${gain>0?"+":""}${gain.toFixed(1)}% over ${esc(dates)}</span>`:""}</p>
     <p class="muted" style="font-size:11px;margin:6px 0 0;line-height:1.5">Metres per minute per heartbeat, one point per aerobic run
-      (average HR at or below the top of Z2${d.z2_top?`, ${d.z2_top} bpm`:""}) of ${Math.round(d.min_km)} km or more. Running the same pace at a lower
+      (average HR at or below the top of Z2${d.z2_top?`, ${d.z2_top} bpm`:""}) of ${Math.round(U.d(d.min_km))} ${U.unit} or more. Running the same pace at a lower
       heart rate <em>is</em> the adaptation — no model in between, just the watch. Measure-first: shown and trended, governing nothing.</p>
     <div class="effrow"><span class="k">Efficiency · ${d.n} runs</span><span class="k">${tr.pct_per_30d!=null?`${tr.pct_per_30d>0?"+":""}${tr.pct_per_30d}%/month${tr.r!=null?` · r ${tr.r}`:""}`:""}</span></div>
     <div class="effplot ef">${effPlot(pts,"ef","ef",tr)}</div>
@@ -1013,7 +1038,7 @@ function durChartSvg(series, goodPct, highPct){
   const bars=pts.map((p,i)=>{
     const x=pad+slot*i+(slot-bw)/2, top=y(p.decoupling_pct);
     return `<rect class="${band(p.decoupling_pct)}" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${(H-pad-top).toFixed(1)}">`+
-      `<title>${esc(p.date)} · ${p.km} km · ${p.decoupling_pct}%</title></rect>`;
+      `<title>${esc(p.date)} · ${U.d(p.km)} ${U.unit} · ${p.decoupling_pct}%</title></rect>`;
   }).join("");
   const dash=(v,cls)=>vmax>v?`<line class="thresh ${cls}" x1="${pad}" x2="${W-pad}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`:"";
   return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${dash(goodPct,"ok")}${dash(highPct,"danger")}${bars}</svg>`;
@@ -1021,7 +1046,7 @@ function durChartSvg(series, goodPct, highPct){
 function renderDurability(d){
   const host=$("#durbody"); if(!host) return;
   if(!d || d.ok===false){
-    host.innerHTML=`<div class="empty">No long runs with decoupling yet — the tracker starts once a run of ${d&&d.min_km?Math.round(d.min_km):16}&nbsp;km or more lands with HR data.</div>`;
+    host.innerHTML=`<div class="empty">No long runs with decoupling yet — the tracker starts once a run of ${Math.round(U.d(d&&d.min_km?d.min_km:16))}&nbsp;${U.unit} or more lands with HR data.</div>`;
     return;
   }
   const SCALE=15;                                    // % full-scale — gauge, scale and chart agree (the one-definition rule)
@@ -1045,13 +1070,13 @@ function renderDurability(d){
       <div class="gyou" style="--gx:${pct(med)}%"><span class="${pillCls}">you: ${med.toFixed(1)}%</span></div></div>
     <div class="gauge-scale"><span>0%</span><span><b>${good}%</b></span><span><b>${high}%</b></span><span>${SCALE}%</span></div>
     <p class="durverdict"><b class="${wordCls}">${esc(d.verdict)}</b> — median of your last 6 long runs
-      (≥${Math.round(d.min_km)} km)${esc(priorTxt)} · ${d.n_long} tracked</p>
+      (≥${Math.round(U.d(d.min_km))} ${U.unit})${esc(priorTxt)} · ${d.n_long} tracked</p>
     <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Aerobic decoupling — how much your
       pace:HR drifts from the first half of a long run to the second. Low means your running economy holds up over
       the distance; high or rising means it decays. Measure-first: tracked and trended, governing nothing. Compare
       like distances — decoupling drifts with distance, so the trend voids itself when the long-run mix changes.</p>
     <div class="acwr-foot">
-      <span class="k">Long-run tracker · ${pts.length} runs ≥${Math.round(d.min_km)} km${datesTxt}</span>
+      <span class="k">Long-run tracker · ${pts.length} runs ≥${Math.round(U.d(d.min_km))} ${U.unit}${datesTxt}</span>
       <div class="durchart">${durChartSvg(pts,good,high)}</div>
       <span class="v">${esc(vTrend)}</span>
       <span class="cap">${esc(trendCap)} · dashes at ${good}% / ${high}% · hover a bar for its distance</span>
@@ -1266,7 +1291,7 @@ function objManager(p){
   const pastChip = o => {
     let oc = {}; try{ oc = JSON.parse(o.outcome||"{}"); }catch(e){}
     if(o.status==='lapsed') return `<span class="muted">lapsed — no race-day run</span>`;
-    if(oc.status==='dnf') return `<span>DNF at ${oc.dnf_km} km</span>`;
+    if(oc.status==='dnf') return `<span>DNF at ${U.d(oc.dnf_km)} ${U.unit}</span>`;
     if(oc.status==='finished'){
       const vs = oc.beat===true ? ' · beat the goal' : oc.beat===false ? ` · goal ${esc(oc.goal)} missed` : '';
       return `<span>✓ ${esc(oc.actual||'finished')}${vs}</span>`;
@@ -1502,7 +1527,7 @@ const COMPT={
   vo2max:"Builds VO₂max — central aerobic power (blood volume + cardiac output drive most of the variance). Developed by ≥2-min reps near 5k pace; red-cell persistence keeps it for months once built, so the plan develops it EARLY and then merely maintains it.",
   ssmax:"Builds SSmax/LT2 — the steady-state ceiling (mitochondrial respiratory power, capillaries, lactate shuttling), raised by threshold and high-end aerobic work.",
   economy:"Builds running economy — the energy-per-km skill. Grows with accumulated mileage and race-pace specificity over years; the long easy run is its main lever here.",
-  resilience:"Builds physiological resilience — how little your VO₂max, SSmax and economy decay over 42 km (the marathon's modern fourth component). Built by long runs with marathon-pace segments, which the assertive plan extends at CONSTANT speed — longer, not faster."};
+  resilience:"Builds physiological resilience — how little your VO₂max, SSmax and economy decay over "+U.d(42.2,U.mi?1:0)+" "+U.unit+" (the marathon's modern fourth component). Built by long runs with marathon-pace segments, which the assertive plan extends at CONSTANT speed — longer, not faster."};
 function compChip(s){
   return s.component?` <span class="scomp" title="${COMPT[s.component]||''}">${COMPL[s.component]||s.component}</span>`:"";
 }
@@ -1514,7 +1539,7 @@ function logLine(s,today,planLabel){
     : s.done ? '<span class="smk done">✓</span>'
     : s.missed ? '<span class="smk missed">✕</span>'
     : (s.date===today ? '<span class="smk today">•</span>' : '<span class="smk">○</span>');
-  const act = s.actual ? `<span class="sact">${s.actual.km}k${s.actual.pace?` @ ${s.actual.pace}`:''}</span>` : "";
+  const act = s.actual ? `<span class="sact">${U.d(s.actual.km)}${U.k}${s.actual.pace?` @ ${U.p(s.actual.pace)}`:''}</span>` : "";
   const refl = s.reflection ? `<div class="srefl">📓 ${esc(s.reflection)}</div>` : "";
   const clk = !SH_READONLY && (s.done||s.unplanned) && s.activity_id;   // a completed/extra run → view its run + map
   const plan = s.unplanned ? '<span class="splan exu">unplanned</span>' : planLabel;
@@ -1522,7 +1547,7 @@ function logLine(s,today,planLabel){
   const brk = (s.runs && s.runs.length>1)
     ? `<div class="srun" title="${s.runs.length} runs this day">↳ ${s.runs.map(r=>{
           const rc = !SH_READONLY && r.activity_id;
-          return `<span class="brkrun"${rc?` data-act-id="${r.activity_id}" role="button" tabindex="0" title="View this run on the map"`:''}>${r.km}k${r.pace?` @ ${r.pace}`:''}</span>`;
+          return `<span class="brkrun"${rc?` data-act-id="${r.activity_id}" role="button" tabindex="0" title="View this run on the map"`:''}>${U.d(r.km)}${U.k}${r.pace?` @ ${U.p(r.pace)}`:''}</span>`;
         }).join(" · ")}</div>`
     : "";
   return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" role="button" tabindex="0" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
@@ -1536,10 +1561,10 @@ function logLine(s,today,planLabel){
 function zrow(zone){ return ((ZONESD&&ZONESD.rows)||[]).find(r=>r.key===zone)||null; }
 function segPace(zone, rep){
   const r=zrow(zone);
-  if(r&&r.pace_slower_than&&r.pace_slower_than.fmt) return `slower than ${r.pace_slower_than.fmt}/km`;
-  if(r&&r.pace_target&&r.pace_target.fmt) return `≈ ${r.pace_target.fmt}/km`;
+  if(r&&r.pace_slower_than&&r.pace_slower_than.fmt) return `slower than ${U.p(r.pace_slower_than.fmt)}/${U.unit}`;
+  if(r&&r.pace_target&&r.pace_target.fmt) return `≈ ${U.p(r.pace_target.fmt)}/${U.unit}`;
   const p=((rep&&rep.pace_zone)||"").split("/km")[0];   // fallback: the plan's own pace at generation time
-  return p?`≈ ${p}/km`:"—";
+  return p?`≈ ${U.p(p)}/${U.unit}`:"—";
 }
 function segHR(zone){
   const h=(zrow(zone)||{}).hr;
@@ -1557,7 +1582,7 @@ function workoutCard(s, open){
         work=grp("work"), rec=grp("recovery");
   const rows=[], cue=[];
   const row=(what,zone,min,km,rep)=>rows.push(
-    `<tr><td>${esc(what)}</td><td>${min}′</td><td>${km?`~${km.toFixed(1)}k`:"—"}</td>`+
+    `<tr><td>${esc(what)}</td><td>${min}′</td><td>${km?`~${U.d(km).toFixed(1)}${U.k}`:"—"}</td>`+
     `<td>${esc(segPace(zone,rep))}</td><td>${esc(segHR(zone))||"—"}</td></tr>`);
   if(wu.length){ row("Warm-up · easy","easy",sum(wu,"minutes"),sum(wu,"km"),wu[0]); cue.push(`${sum(wu,"minutes")}′ easy`); }
   if(base.length){ row("Easy aerobic base","easy",sum(base,"minutes"),sum(base,"km"),base[0]); cue.push(`${sum(base,"minutes")}′ easy base`); }
@@ -1576,7 +1601,7 @@ function workoutCard(s, open){
   return `<div class="wcard${open?" open":""}"><div class="wcue">${esc(cue.join("  →  "))}</div>
     <div class="wctbl-wrap"><table class="wctbl"><thead><tr><th>Segment</th><th>Time</th><th>Dist</th><th>Pace</th><th>HR</th></tr></thead>
     <tbody>${rows.join("")}</tbody></table></div>
-    <div class="wctot">Total ${s.km} km · ~${s.minutes}′ · load ${s.trimp!=null?Math.round(s.trimp):"—"} TRIMP${ZONESD?"":" · paces from plan"+(SH_READONLY?"":"; HR bands load with zones")}</div></div>`;
+    <div class="wctot">Total ${U.d(s.km)} ${U.unit} · ~${s.minutes}′ · load ${s.trimp!=null?Math.round(s.trimp):"—"} TRIMP${ZONESD?"":" · paces from plan"+(SH_READONLY?"":"; HR bands load with zones")}</div></div>`;
 }
 // §6f Step F — compact label for a planned session. Structured quality sessions (intervals / MP
 // long run / tempo, carried as `reps`) read their structure; plain runs show distance.
@@ -1589,20 +1614,20 @@ function sessSummary(s){
   if(s.reps&&s.reps.length){
     const work=s.reps.filter(r=>r.effort==='work');
     if(s.kind==='interval'&&work.length) return `${work.length}×${work[0].minutes}′ ${work[0].zone}`;
-    if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${s.km}k +${mp?mp.minutes:0}′ MP`; }
-    if(s.kind==='tempo'&&work.length) return `${s.km}k · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
+    if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${U.d(s.km)}${U.k} +${mp?mp.minutes:0}′ MP`; }
+    if(s.kind==='tempo'&&work.length) return `${U.d(s.km)}${U.k} · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
   }
   // strides ride a specific run (the week's first short easy one) — say so on THAT line, where
   // they're executed, instead of the old orphaned "strides×2" note floating under the week.
   // Plans stored before the s.strides flag carry the fact only in the engine-authored note text,
   // so fall back to that until the nightly re-plan refreshes the JSON.
   const st = s.strides || +(((s.note||"").match(/(\d+)×4–6 strides/)||[])[1]||0);
-  if(st) return `${s.km}k <span class="strid" title="Finish this run with ${st} × 4–6 strides: ~20-second relaxed-fast accelerations with full walk-back recovery. A neuromuscular touch-up, not a workout — it adds no training load.">+ ${st}× strides</span>`;
+  if(st) return `${U.d(s.km)}${U.k} <span class="strid" title="Finish this run with ${st} × 4–6 strides: ~20-second relaxed-fast accelerations with full walk-back recovery. A neuromuscular touch-up, not a workout — it adds no training load.">+ ${st}× strides</span>`;
   // §RACE — the race is a session now, and it must READ as one. Without this the row printed a bare
   // distance, indistinguishable from a long run, on the day the whole block points at; the flag is
   // published for exactly this (§PV `sessions[].race`) and nothing was reading it.
-  if(s.race) return `${s.km}k <span class="racemk" title="${esc(s.note||"Race day")} — the race itself, at ${esc(s.pace_zone||"race pace")}. A fixed prescription: the distance and the pace are the race's, so the governor sizes the training around it rather than trimming it.">· race day</span>`;
-  return `${s.km}k`;
+  if(s.race) return `${U.d(s.km)}${U.k} <span class="racemk" title="${esc(s.note||"Race day")} — the race itself, at ${esc(U.t(s.pace_zone||"race pace"))}. A fixed prescription: the distance and the pace are the race's, so the governor sizes the training around it rather than trimming it.">· race day</span>`;
+  return `${U.d(s.km)}${U.k}`;
 }
 // One plan week (used for every phase but the re-base, which carries the journal/actuals overlay).
 // Tags down weeks (3:1 mesocycle), frozen weeks (§6f Step E — completed, carried verbatim), and the
@@ -1619,6 +1644,32 @@ const weekDates = mon => { const d=new Date(mon+"T00:00:00Z"), out=[];
   for(let i=0;i<7;i++){ out.push(d.toISOString().slice(0,10)); d.setUTCDate(d.getUTCDate()+1); }
   return out; };
 // week containing today. Quality sessions are accented; the ACWR badge rides the right rail.
+// §LIMITS (0.58.0) — the body's limits as one strip per week: each axis with its ceiling, what the
+// week was laid at, the headroom, and which one HELD the week. `basis` says where the ceiling comes
+// from (L literature · A this athlete · S structural), so a reader can tell a consensus from an
+// inheritance. The risk line is a cohort READ on the long-run step, never a probability.
+const LIMIT_NAMES={acwr:"load ratio (ACWR)",long_step:"long-run step",eq_week:"damage-eq "+U.unit+", week",eq_session:"damage-eq "+U.unit+", session",tissue:"near-ceiling streak",chronic:"fitness gain / week"};
+const BASIS_NAMES={L:"literature",A:"fitted to this athlete",S:"structural"};
+const limV=(v,u)=>(v==null)?v:(u==="km"||u==="eq-km")?U.d(v):v;            // a limit's number, in the display unit
+const limU=u=>u==="km"?U.unit:u==="eq-km"?"eq-"+U.unit:u;
+function limitsHtml(L){
+  if(!L) return "";
+  const rows=[];
+  for(const k of ["acwr","long_step","eq_week","eq_session","chronic"]){
+    const ax=L[k]; if(!ax) continue;
+    const held = ax.binds ? " held" : "";
+    rows.push(`<div class="lim${held}${L.binding===k?' binding':''}" title="${esc(LIMIT_NAMES[k])} — ceiling ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit))}, laid ${limV(ax.laid,ax.unit)}; basis: ${esc(BASIS_NAMES[ax.basis]||ax.basis)}">
+      <span class="lk">${esc(LIMIT_NAMES[k])}</span><span class="lv mono">${limV(ax.laid,ax.unit)} <span class="muted">/ ${limV(ax.ceiling,ax.unit)}</span></span>
+      <span class="lh mono ${ax.headroom<0?'over':''}">${ax.headroom>=0?"+":""}${limV(ax.headroom,ax.unit)}</span><span class="lb">${esc(ax.basis)}</span></div>`);
+  }
+  if(L.tissue) rows.push(`<div class="lim${L.tissue.binds?' held':''}${L.binding==='tissue'?' binding':''}" title="consecutive near-ceiling weeks before a forced deload; basis: literature">
+      <span class="lk">${esc(LIMIT_NAMES.tissue)}</span><span class="lv mono">${L.tissue.streak} <span class="muted">/ ${L.tissue.limit}</span></span><span class="lh mono">+${L.tissue.headroom}</span><span class="lb">${esc(L.tissue.basis)}</span></div>`);
+  if(!rows.length) return "";
+  const head = L.binding ? `This week is held by <b>${esc(LIMIT_NAMES[L.binding]||L.binding)}</b>` : "No limit binds this week";
+  const risk = L.risk ? `<div class="limrisk">Injury-risk read: the long run sits <b>${esc(L.risk.read)}</b> — in the ${esc(L.risk.cohort)} cohort (n≈${L.risk.n}) sharp longest-run jumps predicted injury where weekly-mileage jumps did not. A read against published evidence, not a probability for you.</div>` : "";
+  return `<details class="limits"><summary><span class="limhead">${head}</span><span class="muted mono" style="font-size:11px"> · limits</span></summary>${rows.join("")}${risk}
+    <div class="help">ceiling / laid / headroom · basis: L literature, A fitted to this athlete, S structural</div></details>`;
+}
 function weekHtml(w,p,today){
   const down=/down/i.test(w.intent||'');
   let cur=false;
@@ -1664,19 +1715,19 @@ function weekHtml(w,p,today){
                w.adjusted?'<span class="eased">eased</span>':'',
                w.frozen?'<span class="wfz">✓ done</span>':''].filter(Boolean).join(" · ");
   // §3.1 — surface the biomechanical eq_km on quality weeks (where it exceeds raw km); calm/muted.
-  const eqkm=(w.eq_km&&w.eq_km>w.km+0.5)?` · <span class="muted mono" title="Biomechanical load: pace-weighted damage-equivalent km (fast running does several times more tissue damage per km than easy). The biomechanical/tissue-damage axis (informed by John Davis), which heart-rate load can't see.">${w.eq_km} eq-km</span>`:'';
+  const eqkm=(w.eq_km&&w.eq_km>w.km+0.5)?` · <span class="muted mono" title="Biomechanical load: pace-weighted damage-equivalent km (fast running does several times more tissue damage per km than easy). The biomechanical/tissue-damage axis (informed by John Davis), which heart-rate load can't see.">${U.d(w.eq_km)} eq-${U.unit}</span>`:'';
   // §CARD2 — the straddling week's total = actuals so far + prescription ahead; show the split so
   // the number explains itself (the old prescription-sum header made an over-run week LOOK smaller).
-  const kmSplit=(w.partial&&w.km_done!=null)?` · <span class="muted mono" title="This week straddles today, so its total counts days you've already run at their REAL distance (${w.km_done} km in ${w.runs_done} run${w.runs_done===1?'':'s'}) plus what's still prescribed ahead (${w.km_ahead} km in ${w.runs_ahead}). Days you out-run no longer shrink the week's headline.">${w.km_done} run + ${w.km_ahead} ahead</span>`:'';
+  const kmSplit=(w.partial&&w.km_done!=null)?` · <span class="muted mono" title="This week straddles today, so its total counts days you've already run at their REAL distance (${U.d(w.km_done)} ${U.unit} in ${w.runs_done} run${w.runs_done===1?'':'s'}) plus what's still prescribed ahead (${U.d(w.km_ahead)} ${U.unit} in ${w.runs_ahead}). Days you out-run no longer shrink the week's headline.">${U.d(w.km_done)} run + ${U.d(w.km_ahead)} ahead</span>`:'';
   return `<div class="wk ${down?'wdown':''} ${w.frozen?'wfrozen':''} ${cur?'wcur':''}">
       <div class="wn">${w.wk}${w.frozen?'<span class="wlock" title="completed — carried verbatim">🔒</span>':''}</div>
       <div class="wbody">
-        <div><span class="wkm">${w.km} km</span>${eqkm} · ${w.runs} runs${kmSplit}${flags?' · '+flags:''}</div>
+        <div><span class="wkm">${U.d(w.km)} ${U.unit}</span>${eqkm} · ${w.runs} runs${kmSplit}${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
         <div class="wsesslog">${sess}</div>
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
-    </div>`;
+    ${limitsHtml(w.limits)}</div>`;
 }
 // Map a phase's display name → the stable key shared by its bar segment and its weeks panel.
 function phaseKey(name){
@@ -1702,8 +1753,8 @@ function weekStrip(weeks,pk,sel){
     const down=/down/i.test(w.intent||'')||w.wk===4;
     return `<div class="weekseg${w.wk===sel?' active':''}${down?' wsdown':''}" data-pk="${pk}" data-wk="${w.wk}"
        role="button" tabindex="0" aria-pressed="${w.wk===sel}"
-       aria-label="W${w.wk}: ${w.km} km, ${w.runs} runs${w.frozen?', done':''}"
-       title="Week ${w.wk} · ${w.km} km · ${w.runs} runs${w.frozen?' · done':''}">W${w.wk}${w.frozen?'<span class="wlock">🔒</span>':''}</div>`;
+       aria-label="W${w.wk}: ${U.d(w.km)} ${U.unit}, ${w.runs} runs${w.frozen?', done':''}"
+       title="Week ${w.wk} · ${U.d(w.km)} ${U.unit} · ${w.runs} runs${w.frozen?' · done':''}">W${w.wk}${w.frozen?'<span class="wlock">🔒</span>':''}</div>`;
   }).join("")+`</div>`;
 }
 // Wrap a week's already-rendered detail so the strip can show/hide it (scoped by phase key + week).
@@ -1721,11 +1772,11 @@ function phaseSection(title,block,p,today,pk){
   // §T2 — what this phase builds, summed from the session component tags (can't drift from the plan)
   const builds=(block.builds&&block.builds.length)
     ?` · <span class="muted" style="font-size:11px">builds ${block.builds.map(c=>COMPL[c]||c).join(" + ")}</span>`+
-      qhint("Marathon fitness decomposes into four components: VO₂max × running economy × SSmax/LT2 (the classic three-factor model) plus physiological resilience — how little the first three decay over 42 km. Each quality session is tagged with the component it chiefly builds (hover a session's chip); this line sums what the phase is FOR. The assertive plan periodizes them: VO₂max developed early then merely maintained (red-cell persistence makes it cheap to hold), marathon-pace work growing through the build, and the peak pivoting to resilience — the long run's MP segment extends at constant speed. Framing follows John Davis; the fractions are our operationalization.")
+      qhint("Marathon fitness decomposes into four components: VO₂max × running economy × SSmax/LT2 (the classic three-factor model) plus physiological resilience — how little the first three decay over "+U.d(42.2,U.mi?1:0)+" "+U.unit+". Each quality session is tagged with the component it chiefly builds (hover a session's chip); this line sums what the phase is FOR. The assertive plan periodizes them: VO₂max developed early then merely maintained (red-cell persistence makes it cheap to hold), marathon-pace work growing through the build, and the peak pivoting to resilience — the long run's MP segment extends at constant speed. Framing follows John Davis; the fractions are our operationalization.")
     :"";
   return `<h3 class="phasehdr">
       <span>${title} <span class="muted mono" style="font-size:11px">(${block.weeks.length}w · start ${block.start} · ends CTL ${block.end_ctl}/ATL ${block.end_atl})${fz}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}${builds}</span>
-      <span class="muted mono" style="font-size:12px;font-weight:600;white-space:nowrap" title="Total planned distance across the phase">Σ ${km.toFixed(0)} km</span>
+      <span class="muted mono" style="font-size:12px;font-weight:600;white-space:nowrap" title="Total planned distance across the phase">Σ ${U.d(km,0)} ${U.unit}</span>
     </h3>
     ${weekStrip(block.weeks,pk,sel)}
     <div class="weekdetails">${block.weeks.map(w=>weekDetail(weekHtml(w,p,today),pk,w.wk,sel)).join("")}</div>`;
@@ -1747,7 +1798,7 @@ function renderPlan(p){
     : "";
   const totalw=p.phases.reduce((s,x)=>s+x.weeks,0);
   const zoneChips=Object.entries(p.pace_zones).map(([k,v])=>
-    `<span class="zone ${k==='easy_top'?'hl':''}">${k.replace('_',' ')} <b>${v}</b></span>`).join("");
+    `<span class="zone ${k==='easy_top'?'hl':''}">${k.replace('_',' ')} <b>${U.t(v)}</b></span>`).join("");
   // Prefer the log's weeks (sessions enriched with done/actual/reflection); fall back to the
   // raw plan weeks when the log isn't loaded yet. The log weeks are a superset of plan weeks.
   const today = (LOG&&LOG.today) || new Date().toISOString().slice(0,10);
@@ -1787,9 +1838,9 @@ function renderPlan(p){
   const easySec = (m=>m?(+m[1]*60+ +m[2]):0)(/(\d+):(\d+)/.exec(p.pace_zones.easy_top||""));
   const fmtDur = m => m>=60 ? `${Math.floor(m/60)}h${String(m%60).padStart(2,"0")}m` : `${m}m`;
   const phaseMin = easySec ? Math.round(phaseKm*easySec/60) : 0;
-  const phaseTot = `Σ ${phaseKm.toFixed(0)} km${phaseMin?` · ~${fmtDur(phaseMin)} easy`:""}`;
+  const phaseTot = `Σ ${U.d(phaseKm,0)} ${U.unit}${phaseMin?` · ~${fmtDur(phaseMin)} easy`:""}`;
   const ran = LOG&&LOG.ran;   // actually run across the block so far (dups excluded)
-  const ranTot = ran&&ran.km>0 ? `▸ ran ${ran.km.toFixed(0)} km${ran.min?` · ${fmtDur(ran.min)}`:""}` : "";
+  const ranTot = ran&&ran.km>0 ? `▸ ran ${U.d(ran.km,0)} ${U.unit}${ran.min?` · ${fmtDur(ran.min)}`:""}` : "";
   // Last refreshed = when the plan was regenerated (auto-replan runs nightly; paces & totals are
   // recomputed from that snapshot's VO₂max, so this is how fresh the pills below are).
   const refreshed = p.generated_at
@@ -1807,7 +1858,7 @@ function renderPlan(p){
     const inner = `<div class="wk ${w.wk===4?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
-        <div><span class="wkm">${w.km} km</span> · ${w.runs} runs${w.clipped?' · <span class="down">clipped to fit ACWR</span>':''}${w.adjusted?' · <span class="eased">eased</span>':''}</div>
+        <div><span class="wkm">${U.d(w.km)} ${U.unit}</span> · ${w.runs} runs${w.clipped?' · <span class="down">clipped to fit ACWR</span>':''}${w.adjusted?' · <span class="eased">eased</span>':''}</div>
         <div class="wintent">${w.intent}</div>
         ${sess}
       </div>
@@ -1969,7 +2020,7 @@ function renderPlan(p){
     ${tuneTxt}
     <div class="zones">${zoneChips}</div>
     ${refreshed}
-    <p class="feas" style="border-color:var(--warn)">${esc(p.note).replace(/THRESHOLD/,'<b>THRESHOLD</b>')}</p>
+    <p class="feas" style="border-color:var(--warn)">${esc(U.t(p.note)).replace(/THRESHOLD/,'<b>THRESHOLD</b>')}</p>
     ${grad}${earnedNote}${freqNote}
     <div class="phasepanels">
       ${panel('rebase',rebaseInner)}
@@ -2236,7 +2287,7 @@ function scorecardHTML(sc, r){
       : Math.abs(rf.gap)<=2 ? `CTL ${Math.round(rf.arrived)} · on target`
       : `CTL ${Math.round(rf.arrived)} · ${Math.abs(rf.gap)} ${rf.gap<0?"short":"above"}`;
     let resMain, resCls="level", resSub="";
-    if(rr.status==="dnf"){ resMain=`${rr.dnf_km} km`; resCls="behind"; resSub="DNF"; }
+    if(rr.status==="dnf"){ resMain=`${U.d(rr.dnf_km)} ${U.unit}`; resCls="behind"; resSub="DNF"; }
     else if(!rr.found){ resMain="—"; resCls="unknown"; resSub="not synced yet"; }
     else if(rr.goal_seconds==null){ resMain=esc(rr.actual||"finished"); resSub="finished"; }
     else { resMain=`${esc(rr.goal)} → ${esc(rr.actual)}`; resCls=rr.beat?"ahead":"behind";
@@ -2256,7 +2307,7 @@ function scorecardHTML(sc, r){
       `</div><div class="sc-verdict">${esc(sc.headline)}</div></div>`;
   }
   const v=sc.volume, f=sc.fitness, rc=sc.race;
-  const volMain = v.state==="unknown"?"—" : v.state==="level"?"on the road" : `${sign(v.gap)} km ${v.state}`;
+  const volMain = v.state==="unknown"?"—" : v.state==="level"?"on the road" : `${sign(U.d(v.gap))} ${U.unit} ${v.state}`;
   const fitMain = f.state==="unknown"?"—" : f.state==="level"?"CTL on track" : `CTL ${sign(f.gap)} ${f.state}`;
   let raceMain, raceCls, raceSub="";
   if(rc.now==null){ raceMain="—"; raceCls="unknown"; }
@@ -2331,13 +2382,13 @@ async function loadEffort(){
     rows=(d.runs||[]).map(r=>{
       const [col,lbl]=EFFV[r.verdict]||EFFV.unknown;
       return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
-        `<td class="mono">${r.km}k</td><td class="mono">${EFFP(r.gap_pace)}</td>`+
+        `<td class="mono">${U.d(r.km)}${U.k}</td><td class="mono">${EFFP(r.gap_pace)}</td>`+
         `<td style="color:${col};font-weight:600">${lbl}</td></tr>`;
     }).join("");
     headCols=`<th>date</th><th>session</th><th>dist</th>`+
       `<th>GAP ${qhint("Grade Adjusted Pace — pace corrected for hills so efforts compare fairly across terrain (from Runalyze).")}</th>`+
       `<th>vs easy ${qhint("Whether the grade-adjusted pace stayed at or below the easy-pace ceiling. The public read judges on pace; heart rate stays private.")}</th>`;
-    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed at easy pace (≤ <b>${esc(d.easy_pace_ceiling||"—")}</b>/km, grade-adjusted).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran quicker than easy.`:""}`;
+    capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed at easy pace (≤ <b>${esc(U.p(d.easy_pace_ceiling||"—"))}</b>/${U.unit}, grade-adjusted).${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran quicker than easy.`:""}`;
     note=`Judged on grade-adjusted pace, not heart rate (HR stays private). Pace is a rough proxy — a run that looks easy on pace can still have been hard on heart rate (heat, hills, fatigue it can't see), so a verdict here can differ from the private HR-led console on the same run.`;
   }else{
     // private read — full HR-led detail
@@ -2349,7 +2400,7 @@ async function loadEffort(){
         ? ` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Graded on the DETECTED work reps only (§RD) — warm-up, floats and cool-down excluded${r.seg?`: ${r.seg.n_work} rep${r.seg.n_work>1?"s":""}${r.seg.work_hr?` @ ~${r.seg.work_hr} bpm`:` @ ${r.seg.work_pace}/km`} vs the ${r.seg.zone} band`:""}.">·reps read</span>`
         : (r.confidence==="low"?` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Low confidence in this VERDICT — not in your effort: a structured session's whole-run average heart rate blends work reps with warm-up, recovery jogs and cool-down, so the 'did you hit it' read is approximate (once this run's structure is detected, the verdict upgrades to a per-rep read). Quality sessions never count toward the easy-run discipline score.">·rough read</span>`:"");
       return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
-        `<td class="mono">${r.km}k</td><td class="mono col-sec">${EFFP(r.gap_pace)}</td>`+
+        `<td class="mono">${U.d(r.km)}${U.k}</td><td class="mono col-sec">${EFFP(r.gap_pace)}</td>`+
         `<td class="mono">${r.hr_avg}<span class="muted hrpct"> ${r.hr_pct}%</span></td>`+
         `<td class="mono col-sec">${r.te==null?"—":r.te}</td>`+
         `<td class="mono col-sec">${r.feeling==null?"—":r.feeling+"/5"}</td>`+
@@ -2364,7 +2415,7 @@ async function loadEffort(){
     const basis = d.anchor==="lthr" ? `(85% of LTHR ${d.lthr})`
                 : d.anchor==="lt1_pace" ? `(pace-anchored LT1)` : `(78% of HRmax ${d.hrmax})`;
     const ceil = d.anchor==="lt1_pace"
-      ? `easy-pace ceiling ≈ <b>${esc(d.easy_pace_ceiling||"—")}</b>/km ${basis}`
+      ? `easy-pace ceiling ≈ <b>${esc(U.p(d.easy_pace_ceiling||"—"))}</b>/${U.unit} ${basis}`
       : `easy-HR ceiling ≈ <b>${d.easy_hr_ceiling}</b> bpm ${basis}`;
     capLine=`Last ${d.window_days} days · <b>${c.on}/${c.judged}</b> easy runs stayed aerobic · ${ceil}.${c.too_hard?` <b style="color:var(--danger)">${c.too_hard}</b> ran at threshold effort.`:""}`;
     note=`Judged by heart rate, not pace — terrain &amp; heat already live in your HR. Pace shown is grade-adjusted (GAP). Each run is matched to its nearest prescribed session within a couple of days, so an anticipated or postponed session is judged against its real prescription, not the day it landed on; a run with no session in range falls back to the easy default. One mismatch is an observation, not a verdict.`;
@@ -2385,7 +2436,7 @@ async function loadEffort(){
   if(!d.public && L && L.ok){
     const manualBadge=(L.hr&&L.hr.source==="manual")?` <span class="muted">(manual LTHR${L.hr.age_days!=null?`, set ${Math.round(L.hr.age_days/7)}wk ago`:""})</span>`:"";
     lt1Line=`<div class="muted" style="font-size:11px;margin-top:4px${L.detrained?";color:var(--warn)":""}">`+
-      `LT1 ${qhint("Your aerobic-threshold pace, which we set at ≈80% of your 5k pace (a pace-first anchor informed by John Davis) — the ceiling your easy days should stay under. It's derived from your CURRENT fitness, so it moves as you get fitter or detrain, and heart rate is the cross-check.")}: easy ceiling ≈ <b>${esc(L.lt1_pace_fmt)}</b>/km`+
+      `LT1 ${qhint("Your aerobic-threshold pace, which we set at ≈80% of your 5k pace (a pace-first anchor informed by John Davis) — the ceiling your easy days should stay under. It's derived from your CURRENT fitness, so it moves as you get fitter or detrain, and heart rate is the cross-check.")}: easy ceiling ≈ <b>${esc(U.p(L.lt1_pace_fmt))}</b>/${U.unit}`+
       `${(L.hr&&L.hr.easy_ceiling)?` · HR cross-check ≤ <b>${L.hr.easy_ceiling}</b> bpm${manualBadge}`:""}.`+
       `${L.detrained?" You're running easy a touch faster than LT1 for the heart rate it costs right now — normal on a rebuild, it self-corrects, so we don't police easy pace here.":""}</div>`;
     // §HR slice #2 — the 30-min-TT suggestion, shown ONLY when every clearance holds (assertive regime,
@@ -2430,11 +2481,17 @@ async function loadTrack(){
       ${c.close_rate!=null?` · <b>${Math.round(c.close_rate*100)}%</b> landed within ${c.close_within}`:""}</div>` : "";
   const bandLine = sm.banded ? `<div class="trrow"><b>${sm.in_band}</b> of <b>${sm.banded}</b> finish
       band${sm.banded===1?"":"s"} contained the race</div>` : "";
+  // 0.58.0 — the wider ledger
+  const L=d.leads||{}, leadLine = Object.keys(L).some(h=>L[h]&&L[h].n) ? `<div class="trrow">Forecast bias by horizon: ${["7","14","28"].map(h=>{
+      const b=L[h]||{}; return b.n ? `<b>${h} d</b> ${b.median_err_pct>0?"+":""}${b.median_err_pct}% <span class="muted">(n=${b.n})</span>` : `<b>${h} d</b> <span class="muted">—</span>`; }).join(" · ")}</div>` : "";
+  const pr=d.prescription_rows||{}, prLine = pr.n ? `<div class="trrow"><b>${pr.n}</b> week${pr.n===1?"":"s"} of prescription scored · median ran ${Math.round((pr.median_ratio||0)*100)}% of the sheet · <b>${pr.over_run}</b> over-run, <b>${pr.under_run}</b> under-run</div>` : "";
+  const rc=d.readiness||{}, rcLine = rc.n ? `<div class="trrow"><b>${rc.n}</b> readiness call${rc.n===1?"":"s"} scored · green days completed ${rc.green&&rc.green.completed_rate!=null?Math.round(rc.green.completed_rate*100)+"%":"—"} <span class="muted">(n=${rc.green?rc.green.n:0})</span> · amber/red days completed ${rc.amber_or_red&&rc.amber_or_red.completed_rate!=null?Math.round(rc.amber_or_red.completed_rate*100)+"%":"—"} <span class="muted">(n=${rc.amber_or_red?rc.amber_or_red.n:0})</span></div>` : "";
+  const ov=d.overrides||{}, ovLine = ov.n ? `<div class="trrow"><b>${ov.n}</b> override week${ov.n===1?"":"s"} banked (run at ≥1.5× the intent, no race)${ov.rows?": "+ov.rows.map(r=>`${esc(r.week)} ×${r.ratio}${r.any_heavy_or_poor?" ⚠":""}`).join(", "):""}</div>` : "";
   const rows = races.map(r=>`<tr><td>${esc(r.label||r.type||"race")}</td><td class="mono">${esc(r.date||"")}</td>
       <td>${r.kind==="race_t8"?`T−${Math.round((r.horizon_days||0)/7)} weeks`:"final call"}</td>
       <td class="${r.in_band?"ok":"bad"}">${r.in_band==null?"—":r.in_band?"inside the band":"outside"}</td>
       ${r.err_pct!=null?`<td class="mono">${sign(r.err_pct)}%</td>`:"<td></td>"}</tr>`).join("");
-  host.innerHTML = ctlLine + bandLine + (rows?`<table class="trtbl"><thead><tr><th>Race</th><th>Date</th>
+  host.innerHTML = ctlLine + leadLine + prLine + rcLine + ovLine + bandLine + (rows?`<table class="trtbl"><thead><tr><th>Race</th><th>Date</th>
       <th>Scored at</th><th>Band</th><th>Error</th></tr></thead><tbody>${rows}</tbody></table>`:"")
     + `<div class="help">Every row was written when the outcome settled and is never rewritten — a
        forecast that can be re-scored after the fact is not a forecast.</div>`;
@@ -2512,7 +2569,7 @@ async function loadDrift(){
     const nout=$("#note-out"); if(nout) nout.textContent=FOUND_OUT_NOTE;
     const hout=$("#h-out"); if(hout) hout.textContent="Projected race-day fitness";
     const ob=$("#drift-out"); if(ob) ob.innerHTML="";
-    mkChart($("#drift-dist"), distLines, {zeroBase:true, fmt:v=>v.toFixed(0)+" km", nowT:ISO2T(d.today)});
+    mkChart($("#drift-dist"), distLines, {zeroBase:true, fmt:v=>U.d(v,0)+" "+U.unit, nowT:ISO2T(d.today)});
     mkChart($("#drift-eff"), effLines, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     mkChart($("#drift-ctl"), ctlLines, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     mkChart($("#drift-out"), outLines, {fmt:v=>v.toFixed(0), dots:true});
@@ -2551,7 +2608,7 @@ async function loadDrift(){
     ];
     setLg("#lg-dist",dl); setLg("#lg-eff",el); setLg("#lg-ctl",cl); setLg("#lg-out",[]);
     const fb=$("#drift-fin"); if(fb) fb.innerHTML=""; setLg("#lg-fin",[]);   // §FT4 ledger is founding-mode only
-    mkChart($("#drift-dist"), dl, {zeroBase:true, fmt:v=>v.toFixed(0)+" km", nowT:ISO2T(d.today)});
+    mkChart($("#drift-dist"), dl, {zeroBase:true, fmt:v=>U.d(v,0)+" "+U.unit, nowT:ISO2T(d.today)});
     mkChart($("#drift-eff"), el, {zeroBase:true, fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     mkChart($("#drift-ctl"), cl, {fmt:v=>v.toFixed(0), nowT:ISO2T(d.today)});
     const o=cf.outcome||{};
@@ -3061,8 +3118,8 @@ async function loadZones(){
   const noteHint=qhint("Pace and HR are two INDEPENDENT estimators of the same fitness (VDOT from VO₂max vs the LTHR grid), deliberately not averaged into one number. On a rebuild they can visibly disagree — cardiac decoupling: a given easy pace costs more HR than VDOT predicts. The Pace↔HR line under Effort discipline tracks that divergence; when they disagree on an easy day, heart rate is the honest read of how easy it really was. On short intervals the opposite caveat applies: HR lags the effort, so pace leads there.");
   const paceCell=r=>{
     const st=r.pace_slower_than, tg=r.pace_target;
-    if(st && st.fmt) return `slower than <b>${esc(st.fmt)}</b>/km`;
-    if(tg && tg.fmt) return `≈ <b>${esc(tg.fmt)}</b>/km`;
+    if(st && st.fmt) return `slower than <b>${esc(U.p(st.fmt))}</b>/${U.unit}`;
+    if(tg && tg.fmt) return `≈ <b>${esc(U.p(tg.fmt))}</b>/${U.unit}`;
     return "—"; };
   const hrCell=r=>{
     const h=r.hr||{};
@@ -3079,7 +3136,7 @@ async function loadZones(){
     ? `LTHR <b>${ha.ref}</b> (${ha.source==="manual"?`manual${ha.age_days!=null?`, set ${Math.round(ha.age_days/7)}wk ago`:""}`:`derived, ${esc(ha.confidence||"")} confidence`})`
     : ha.anchor==="hrmax" ? `%HRmax of <b>${ha.ref}</b> (no trustworthy LTHR yet)` : "no HR model yet";
   const paceAnchorTxt = pa.vo2max!=null
-    ? `VO₂max <b>${pa.vo2max}</b>${pa.p5k_fmt?` (5k-equiv ${esc(pa.p5k_fmt)}/km)`:""}` : "no VO₂max snapshot";
+    ? `VO₂max <b>${pa.vo2max}</b>${pa.p5k_fmt?` (5k-equiv ${esc(U.p(pa.p5k_fmt))}/${U.unit})`:""}` : "no VO₂max snapshot";
   host.innerHTML=`
     <div class="efftbl-wrap"><table class="efftbl">
       <thead><tr><th>Intent</th><th>Pace ${paceHint}</th><th>HR ${hrHint}</th></tr></thead>
@@ -3155,6 +3212,16 @@ if(SH_READONLY){
   const l=$("#todayLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the dashboard"; }
   const mt=document.querySelector('.mnav-btn[data-goto="today"]'); if(mt) mt.setAttribute("aria-current","page");
   loadReadiness();
+  // §LIMITS (0.58.0) — this week's binding limit, from the plan's own limits block
+  getJSON("/api/plan").then(p=>{
+    const today=new Date().toISOString().slice(0,10);
+    let cur=null;
+    for(const k of Object.keys(p||{})){ const v=p[k]; if(v&&typeof v==="object"&&Array.isArray(v.weeks)) for(const w of v.weeks){ if(w.start&&w.start<=today&&today<=weekEndIso(w.start)) cur=w; } }
+    if(!cur||!cur.limits) return;
+    const L=cur.limits, b=L.binding, ax=b?L[b]:null;
+    const line = b ? `This week is held by <b>${esc(LIMIT_NAMES[b]||b)}</b>${ax&&ax.ceiling!=null?` — ${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit||""))}`:""}${ax&&ax.basis?` <span class="muted">(${esc(BASIS_NAMES[ax.basis]||ax.basis)})</span>`:""}.` : "No limit binds this week.";
+    const host=$("#readiness"); if(host) host.insertAdjacentHTML("beforeend", `<div class="whyline"><b>Binding limit:</b> ${line}</div>`);
+  }).catch(()=>{});
 }else if(SH_PAGE==="runs"){
   // §RB — explorer chrome: the header link points back home; the mobile Runs tab reads active.
   document.title="Sparing Horse — run browser";

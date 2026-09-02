@@ -1972,6 +1972,88 @@ def _stc_ai_gates():
                passed=not fails, expect="no call unless the switch is on", got={**detail, "failures": fails or "none"})
 
 
+def _stc_limits(db):
+    """§LIMITS (0.58.0, PRODUCT_PLAN §4.2) — every laid week publishes the body's limits as ONE object:
+    per axis the ceiling, what the week was laid at, the headroom, whether it bound the week, and the
+    evidence basis of the ceiling (L/A/S). Structural teeth on the golden marathon fixture (assertive)
+    and on a caution plan built from the host DB:
+      (a) every week carries `limits` with a regime, an `acwr` axis and a `binding` that names an axis
+          the block actually has (or None), and every axis's headroom is ceiling − laid;
+      (b) the two HARD caps hold as inequalities: the laid long run never exceeds the +10 % step and
+          the week's CTL gain never exceeds the ramp cap (a governor that published a ceiling it did
+          not enforce would be worse than none);
+      (c) the risk read is present exactly when the long-run axis is, names the cohort with its n, and
+          reads "within" whenever the long run is at or under the step;
+      (d) the caution regime publishes only the ACWR axis — its biomechanical governors are dormant by
+          design, and an axis with no ceiling must not appear with one;
+      (e) every basis tag is one of L/A/S, and the ACWR ceiling equals the cap the regime rides."""
+    fails, detail = [], {}
+    fx, fx_today = _race_fixture_db("marathon")
+    plan = S.generate_plan(fx, today=fx_today)
+    weeks = [w for k, v in plan.items() if isinstance(v, dict) and "weeks" in v for w in v["weeks"]]
+    detail["assertive_weeks"] = len(weeks)
+    seen_axes, risk_ok = set(), True
+    for w in weeks:
+        if w.get("frozen"):                     # a lived week is the road behind: nothing is laid, no ceiling to publish
+            continue
+        L = w.get("limits")
+        if not L:
+            fails.append(f"(a) week {w.get('start')} has no limits block"); continue
+        if L.get("regime") != "assertive":
+            fails.append(f"(a) week {w.get('start')} regime {L.get('regime')!r} on an assertive plan")
+        if "acwr" not in L:
+            fails.append(f"(a) week {w.get('start')} publishes no ACWR axis")
+        if L.get("binding") is not None and L["binding"] not in L:
+            fails.append(f"(a) week {w.get('start')} binding={L['binding']!r} names an absent axis")
+        for k in ("acwr", "long_step", "eq_week", "eq_session", "chronic"):
+            ax = L.get(k)
+            if not ax:
+                continue
+            seen_axes.add(k)
+            if abs(ax["headroom"] - round(ax["ceiling"] - ax["laid"], 2)) > 0.011:
+                fails.append(f"(a) week {w.get('start')} {k}: headroom {ax['headroom']} ≠ ceiling−laid")
+            if ax.get("basis") not in ("L", "A", "S"):
+                fails.append(f"(e) week {w.get('start')} {k}: basis {ax.get('basis')!r}")
+        if "long_step" in L and L["long_step"]["laid"] > L["long_step"]["ceiling"] + S.LIMITS_LAID_TOL:   # the sheet rounds bouts AFTER the cap
+            fails.append(f"(b) week {w.get('start')}: long run {L['long_step']['laid']} above the step cap {L['long_step']['ceiling']}")
+        if "chronic" in L and L["chronic"]["laid"] > L["chronic"]["ceiling"] + 0.05:
+            fails.append(f"(b) week {w.get('start')}: CTL gain {L['chronic']['laid']} above the ramp cap {L['chronic']['ceiling']}")
+        if ("risk" in L) != ("long_step" in L):
+            fails.append(f"(c) week {w.get('start')}: risk read present={('risk' in L)} but long axis present={('long_step' in L)}")
+        if "risk" in L:
+            r = L["risk"]
+            if r.get("axis") != "long_step" or "Aarhus" not in str(r.get("cohort")) or not r.get("n"):
+                risk_ok = False
+            if L["long_step"]["laid"] <= L["long_step"]["ceiling"] + S.LIMITS_LAID_TOL and r.get("read") != "within the +10 % step":
+                risk_ok = False
+        if "acwr" in L and abs(L["acwr"]["ceiling"] - (plan.get("regime") or {}).get("ride_cap", L["acwr"]["ceiling"])) > 0.011 \
+                and abs(L["acwr"]["ceiling"] - S.ACWR_SOFT) > 0.011:
+            fails.append(f"(e) week {w.get('start')}: ACWR ceiling {L['acwr']['ceiling']} is neither the ride cap nor ACWR_SOFT")
+    if not risk_ok:
+        fails.append("(c) the risk read does not name the Aarhus cohort with n, or reads wrong against the step")
+    detail["axes_seen"] = sorted(seen_axes)
+    if not {"acwr", "long_step", "eq_week"} <= seen_axes:
+        fails.append(f"(a) the assertive fixture never published the core axes: saw {sorted(seen_axes)}")
+    # (d) caution
+    cp = S.generate_plan(db, force_regime="caution")
+    cweeks = [w for k, v in cp.items() if isinstance(v, dict) and "weeks" in v for w in v["weeks"]] if cp.get("ok") else []
+    detail["caution_weeks"] = len(cweeks)
+    for w in cweeks:
+        if w.get("frozen"):
+            continue
+        L = w.get("limits") or {}
+        if L.get("regime") != "caution":
+            fails.append(f"(d) caution week {w.get('start')} regime {L.get('regime')!r}"); break
+        if any(k in L for k in ("long_step", "eq_week", "eq_session", "tissue", "chronic")):
+            fails.append(f"(d) caution week {w.get('start')} publishes a dormant governor's axis"); break
+    return _st("det", "limits",
+               "§LIMITS — every week publishes its limits as one object (ceiling/laid/headroom/binds/basis "
+               "per axis, a binding axis, a cohort risk read on the long-run step); the hard caps hold as "
+               "inequalities; caution publishes only ACWR; bases are L/A/S",
+               passed=not fails, expect="structure + inequalities on the marathon golden and a caution plan",
+               got={**detail, "failures": fails or "none"})
+
+
 def _stc_abuse_limits():
     """§ABUSE (0.55.1, review S2) — request-size and rate limits, driven through the real routes.
 
@@ -6973,6 +7055,96 @@ def _stc_track_record():
     if not pt or "actual" not in pt[0] or "predicted" not in pt[0]:
         fails.append(f"the weekly CTL checkpoints must publish BOTH sides — each is already public "
                      f"(shape.history carries measured fitness, the plan carries proj_ctl): {pt[:1]}")
+    # (e) 0.58.0 — the WIDER ledger (PRODUCT_PLAN §4.3): the 7/14-day fitness checkpoints beside the
+    # 28, one prescription row per completed week (the sheet is the denominator, decision (a)), an
+    # override row when a week was run at ≥ TR_OVERRIDE_RATIO × its intent and held no race (decision
+    # (e)), and a readiness call per stored check-in. From a fixture with a sheet, two check-ins and
+    # a race: a 40 km sheet run at 70 km banks an override; the same ratio on the race week does not;
+    # a heavy-legs check-in on a 10 km day fully run scores amber/1.0; a stop with nothing on the
+    # sheet scores red with no completion; and every row is write-once.
+    mem3 = _sq.connect(":memory:"); mem3.row_factory = _sq.Row
+    mem3.executescript(S.SCHEMA)
+    for i in range(200):
+        day = (today - _td(days=200 - i)).isoformat()
+        mem3.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw) "
+                     "VALUES(?,?,?,?,?,?,?,'{}')", (i + 1, day, day + "T18:00", S.RUNNING_SPORT, 10.0, 3600, 60.0))
+    w1 = S._monday(today) - _td(weeks=2)                 # the overridden week: 70 km run on a 40 km sheet
+    w0 = w1 - _td(weeks=1)                               # the race week: same ratio, must NOT bank an override
+    sess_day = (w1 + _td(days=2)).isoformat()
+    stop_day = (w1 + _td(days=3)).isoformat()
+    plan3 = {"objective": {}, "base": {"weeks": [
+        {"wk": 1, "start": w0.isoformat(), "km": 40.0, "intent_km": 40.0, "proj_ctl": 50.0, "sessions": []},
+        {"wk": 2, "start": w1.isoformat(), "km": 40.0, "intent_km": 40.0, "proj_ctl": 50.0,
+         "sessions": [{"date": sess_day, "km": 10.0, "kind": "easy"}]}]}}
+    mem3.execute("INSERT INTO plans(id,created_at,for_date,inputs,plan) VALUES(1,'now',?,'{}',?)",
+                 ((w0 - _td(days=2)).isoformat(), S.json.dumps(plan3)))     # 15 days before w1 ends, 8 before w0
+    mem3.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                 "VALUES('10k','Fixture 10k',?,'00:45:00','A','done','now')", ((w0 + _td(days=5)).isoformat(),))
+    mem3.execute("INSERT INTO readiness(date,energy,sleep,stop_symptom,created_at) VALUES(?,?,?,?,?)",
+                 (sess_day, "heavy", "ok", 0, "now"))
+    mem3.execute("INSERT INTO readiness(date,energy,sleep,stop_symptom,created_at) VALUES(?,?,?,?,?)",
+                 (stop_day, "good", "good", 1, "now"))
+    mem3.commit()
+    S.track_record_scan(mem3, today=today.isoformat())
+
+    def _rows3(kind):
+        out = {}
+        for r in mem3.execute("SELECT * FROM track_record WHERE kind=?", (kind,)).fetchall():
+            d = dict(r)
+            d["payload"] = S.json.loads(d["payload"]) if isinstance(d.get("payload"), str) else (d.get("payload") or {})
+            out[d["key"]] = d
+        return out
+    pr, ov, rc = _rows3("prescription"), _rows3("override"), _rows3("readiness_call")
+    c28, c14, c7 = _rows3("ctl_week"), _rows3("ctl_week14"), _rows3("ctl_week7")
+    k1, k0 = w1.isoformat(), w0.isoformat()
+    if set(pr) != {k0, k1}:
+        fails.append(f"(e) prescription rows for {sorted(pr)}, expected the two completed sheet weeks {[k0, k1]}")
+    p1 = pr.get(k1)
+    if p1 and not (abs((p1["predicted"] or 0) - 40.0) < 0.05 and abs((p1["actual"] or 0) - 70.0) < 0.05
+                   and abs((p1["err"] or 0) - 0.75) < 0.01):
+        fails.append(f"(e) the 40 km sheet run at 70 km scored predicted={p1['predicted']} actual={p1['actual']} err={p1['err']}")
+    if pr.get(k0) and not pr[k0]["payload"].get("race_week"):
+        fails.append("(e) the race week's prescription row does not say race_week")
+    if set(ov) != {k1}:
+        fails.append(f"(e) override rows for {sorted(ov)}: expected exactly the non-race week {k1} (70 ≥ 1.5 × 40)")
+    o1 = ov.get(k1)
+    if o1 and not (abs((o1["err"] or 0) - 0.75) < 0.01 and o1["payload"].get("checkins") == 2
+                   and o1["payload"].get("any_heavy_or_poor") is True and o1["payload"].get("any_stop") is True):
+        fails.append(f"(e) the override row's payload is wrong: err={o1['err']} payload={o1['payload']}")
+    if set(rc) != {sess_day, stop_day}:
+        fails.append(f"(e) readiness calls for {sorted(rc)}, expected the two check-ins")
+    a = rc.get(sess_day)
+    if a and not (a["predicted"] == 1 and abs((a["actual"] or 0) - 1.0) < 0.001):
+        fails.append(f"(e) heavy legs on a 10 km day fully run: verdict={a['predicted']} completion={a['actual']} (expected amber, 1.0)")
+    b = rc.get(stop_day)
+    if b and not (b["predicted"] == 2 and b["actual"] is None):
+        fails.append(f"(e) a stop with nothing on the sheet: verdict={b['predicted']} completion={b['actual']} (expected red, None)")
+    if c28:
+        fails.append(f"(e) a plan 15 days before the week ended was scored at the 28-day horizon: {sorted(c28)}")
+    if set(c14) != {k1}:
+        fails.append(f"(e) 14-day checkpoints for {sorted(c14)}, expected only {k1} (lead 15 ≥ 14; the race week's lead is 8)")
+    if not {k0, k1} <= set(c7):
+        fails.append(f"(e) 7-day checkpoints for {sorted(c7)}, expected both {k0} and {k1}")
+    # write-once, again, on the new kinds: shrink the sheet and the check-in, re-scan, nothing moves
+    plan3["base"]["weeks"][1]["km"] = 20.0
+    mem3.execute("UPDATE plans SET plan=? WHERE id=1", (S.json.dumps(plan3),))
+    mem3.execute("UPDATE readiness SET stop_symptom=1 WHERE date=?", (sess_day,))
+    mem3.commit()
+    S.track_record_scan(mem3, today=today.isoformat())
+    pr2, rc2, ov2 = _rows3("prescription"), _rows3("readiness_call"), _rows3("override")
+    if pr2.get(k1, {}).get("predicted") != p1["predicted"] if p1 else False:
+        fails.append("(e) a prescription row was REWRITTEN after the plan changed — the ledger must be write-once")
+    if rc2.get(sess_day, {}).get("predicted") != 1:
+        fails.append("(e) a readiness call was REWRITTEN after the check-in changed — the ledger must be write-once")
+    if len(ov2) != len(ov):
+        fails.append("(e) the override rows changed on a re-scan")
+    tr3 = S.track_record(mem3)
+    wider = {"prescription_rows": (tr3.get("prescription_rows") or {}).get("n"), "overrides": (tr3.get("overrides") or {}).get("n"),
+             "leads": sorted((tr3.get("leads") or {}).keys()), "readiness": tr3.get("readiness")}
+    if wider["prescription_rows"] != 2 or wider["overrides"] != 1:
+        fails.append(f"(e) the summary counts do not match the rows: {wider}")
+    mem3.close()
+
     ctl_rows = mem.execute("SELECT COUNT(*) FROM track_record WHERE kind='ctl_week'").fetchone()[0]
     mem.close(); mem2.close()
 
@@ -6983,7 +7155,8 @@ def _stc_track_record():
                "the public view publishes the calibration without handing back the race result",
                passed=not fails, expect="scored once, honestly, and published without the result",
                got={"ctl_rows": ctl_rows, "race_final_lead": fin["lead_days"] if fin else None,
-                    "race_t8_lead": t8["lead_days"] if t8 else None, "failures": fails or "none"})
+                    "race_t8_lead": t8["lead_days"] if t8 else None, "wider_ledger": wider,
+                    "failures": fails or "none"})
 
 
 def _stc_calibration_inventory():
@@ -7010,7 +7183,7 @@ def _stc_calibration_inventory():
                    expect="run on a checkout", got={"engine_science": "absent"})
     # Plumbing: rate limits, cache lifetimes, schema versions, HTTP headers. Nothing here shapes a
     # prescription or a projection, so nothing here is calibration.
-    PLUMBING = {"PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
+    PLUMBING = {"LIMITS_LAID_TOL","PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
                 "SUUNTO_ACTIVITY_RUNNING", "EXPORT_FORMAT",
                 "_EXPLAIN_CACHE_MAX",
                 # 0.55.1 — abuse dampers and the public by-id window: seconds and days of plumbing,
@@ -15906,7 +16079,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(),
+                 lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(), lambda: _stc_limits(db),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),

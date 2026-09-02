@@ -86,6 +86,16 @@ The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB
 physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
 server-side (not just hidden in the UI).
 
+**The limits (0.58.0).** Every laid week publishes the body's limits as one object: per governor axis
+(load ratio, long-run step, damage-equivalent km per week and per session, near-ceiling streak, fitness
+gain per week) the ceiling, what the week was laid at, the headroom, whether it bound the week, and the
+evidence basis of the ceiling (literature, fitted to this athlete, or structural). The week card renders
+it as a strip ("This week is held by the long-run step") and Today carries the binding limit. The
+long-run step carries an injury-risk read against the Aarhus cohort — a read, not a percentage: one
+athlete cannot calibrate one. The ledger scores more too: fitness checkpoints at 7 and 14 days, the
+session sheet against what was run, readiness calls against the day, and the weeks run far past their
+intent. Distances and paces can be shown in miles (Settings → Distance units; the engine stays metric).
+
 **The day (0.57.0).** `/today` is the daily surface — the readiness verdict, the session, the check-in and one
 line saying why this session — and the page the installed app opens on. The dashboard is plan-first, with
 the analytics collapsed until opened (remembered per device); the public and demo boxes open on the track
@@ -210,6 +220,7 @@ than an invented explanation.
 | `SH_TRUST_PROXY_AUTH` / `SH_CF_ACCESS_TEAM` / `SH_CF_ACCESS_AUD` / `SH_PROXY_CIDR` | skip the login for a verified proxy identity (Cloudflare Access JWT, or a forwarded user from inside the CIDR) |
 | `SH_COOKIE_SECURE` | `0` only for a plain-http LAN box; the session cookie is Secure by default |
 | `SH_AI_NARRATION` / `SH_AI_PARSING` / `SH_AI_JUDGMENT` | env fallbacks for the three AI switches (1/0; Settings overrides; judgment defaults to 0) |
+| `SH_UNITS` | `km` (default) or `mi` — how distances and paces are SHOWN, on every page and box; the engine and the API stay metric (0.58.0; Settings overrides) |
 | `SH_BACKUP_DIR` / `SH_BACKUP_KEEP` / `SH_BACKUP_PUSH` | private box: where nightly snapshots go (compose: `./backups`), how many to keep (7), a command to run after each (inside the container, file in `$SH_BACKUP_FILE`) |
 | `SH_MAX_BODY_BYTES` | request-body cap, every box (default 65536; a larger body is a JSON 413) |
 | `SH_RATE_POST` / `SH_RATE_EXPENSIVE` / `SH_RATE_RESET` | per-address requests per minute for writes (120), backup/export downloads (10) and the demo reset (6); `SH_RATE_LIMIT=0` disables the limiter |

@@ -314,6 +314,19 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   or fatigue-capped session loses its chip — a session that no longer happens builds nothing, and the app
   won't claim otherwise.
 
+**The limits strip (0.58.0).** Under each week's sessions a collapsed line says what held the week:
+"This week is held by the long-run step", or "No limit binds this week". Open it and every governor
+axis the regime runs is listed — the load ratio (ACWR), the long-run step, the damage-equivalent km
+for the week and for the single session, the near-ceiling streak, the fitness gain per week — each as
+*laid / ceiling* with the headroom and a letter for the ceiling's basis: **L** from the literature,
+**A** fitted to your own history, **S** a structural choice. A held axis is marked; the binding one is
+the axis that actually decided the week's size. Below the axes, the injury-risk read: whether the
+long run sits within the +10 % step, against the one cohort behind that rule (Nielsen et al., Aarhus).
+It is a read, not a probability — the app never prints an injury percentage, because one runner's
+history cannot calibrate one. In a race week the axis reads the longest *training* bout; the race
+distance is the goal, not a step. The caution regime lists only the load ratio: its biomechanical
+governors are dormant by design. Today carries the same binding limit under the why-line.
+
 ### Race chain strip (multi-A only)
 When you chain ≥ 2 A-races, a strip shows each race with its **role**, date, **projected race-day CTL**, and
 its own **feasibility verdict** — so you see where *each* peak lands, not just the final one. (A single
@@ -358,6 +371,14 @@ first time its outcome is knowable, written down, and **never rewritten**.
 - It appears on the **public** box too, with one deliberate difference: the public view publishes
   whether a band contained the race, never what you ran. (Publishing the prediction beside its error
   would hand the finish time back, and your results are private.)
+
+**What else the ledger scores (0.58.0).** Beside the 28-day fitness checkpoint, the card shows the
+bias at 7 and 14 days; **prescription adherence** (the session sheet the plan standing at a week's start
+asked for, against what was run — the intent bar rides with the row); **readiness calls** (the verdict
+a stored check-in implied — stop → red, heavy legs or poor sleep → amber — against that day's planned
+and run km, split into green vs amber/red completion rates); and the **overrides** — weeks run at 1.5×
+their intent or more with no race in them, with the week's check-in mix. Every row is written once and
+never rewritten. The public box publishes the calibration and the override count, never a week's km.
 
 ### Effort discipline
 *Are your easy days actually easy?* Graded against a *moving*, fitness-tracking easy bar — HR-led on a
@@ -640,6 +661,9 @@ The **Settings** window (private container only) is where you configure the app 
   easy ceiling. Re-test rather than re-typing the same value (re-saving the same number deliberately does
   not re-freshen it). Empty = derive from your runs (the default).
 
+- **Distance units** (0.58.0) — `km` or `mi`. The engine plans in kilometres whatever you choose and the
+  API stays metric; this changes how every distance and pace is *shown*, on every page and every box
+  (the public box follows it too). Reload after saving.
 - **Long run day** and **Rest days, most wanted first** — the shape of your training week. By default
   the plan rests midweek and runs long on Sunday; these two settings hand that decision to you.
   **Long run day** is a single weekday (`sat`, `wednesday`, …) and it anchors the week: hard sessions

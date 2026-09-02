@@ -22,6 +22,49 @@
         "km": 10.1,
         "km_ahead": 0,
         "km_done": 10.1,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": -0.98,
+            "laid": 2.23,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 6.5,
+            "headroom": 3.8,
+            "laid": 2.7,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 16.9,
+            "headroom": 11.8,
+            "laid": 5.1,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.5,
+            "headroom": 2.8,
+            "laid": 2.7,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          }
+        },
         "long": 5,
         "partial": true,
         "peak_acwr": 3.334,
@@ -70,6 +113,65 @@
         "intent_km": 14.2,
         "intent_runs": 4,
         "km": 14.2,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.93,
+            "laid": 0.32,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 6.5,
+            "headroom": 1.5,
+            "laid": 5.0,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 35.93,
+            "headroom": 21.73,
+            "laid": 14.2,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 11.1,
+            "headroom": 6.1,
+            "laid": 5.0,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 1,
+            "limit": 3,
+            "streak": 2,
+            "unit": "weeks"
+          }
+        },
         "long": 5,
         "peak_acwr": 2.712,
         "phase": "base",
@@ -134,6 +236,65 @@
         "intent_km": 17.2,
         "intent_runs": 5,
         "km": 17.3,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.72,
+            "laid": 0.53,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 6.5,
+            "headroom": 0.4,
+            "laid": 6.1,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 35.93,
+            "headroom": 18.63,
+            "laid": 17.3,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 11.1,
+            "headroom": 5.0,
+            "laid": 6.1,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 0,
+            "limit": 3,
+            "streak": 3,
+            "unit": "weeks"
+          }
+        },
         "long": 5,
         "peak_acwr": 2.385,
         "phase": "base",
@@ -228,6 +389,65 @@
         "intent_km": 16.0,
         "intent_runs": 5,
         "km": 15.8,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.72,
+            "laid": 0.53,
+            "unit": "ratio"
+          },
+          "binding": "eq_session",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 1.92,
+            "laid": 3.08,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 7.93,
+            "headroom": 2.33,
+            "laid": 5.6,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 35.93,
+            "headroom": 20.13,
+            "laid": 15.8,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 11.1,
+            "headroom": 5.5,
+            "laid": 5.6,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 3,
+            "limit": 3,
+            "streak": 0,
+            "unit": "weeks"
+          }
+        },
         "long": 4,
         "peak_acwr": 2.031,
         "phase": "base",
@@ -300,6 +520,65 @@
         "intent_km": 22.5,
         "intent_runs": 5,
         "km": 22.2,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.57,
+            "laid": 0.68,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 7.93,
+            "headroom": 0.13,
+            "laid": 7.8,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 35.93,
+            "headroom": 13.73,
+            "laid": 22.2,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 11.1,
+            "headroom": 3.3,
+            "laid": 7.8,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 2,
+            "limit": 3,
+            "streak": 1,
+            "unit": "weeks"
+          }
+        },
         "long": 6,
         "peak_acwr": 1.801,
         "phase": "base",
@@ -390,6 +669,65 @@
         "intent_km": 25.9,
         "intent_runs": 5,
         "km": 25.8,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.44,
+            "laid": 0.81,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 10.14,
+            "headroom": 1.54,
+            "laid": 8.6,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 28.86,
+            "headroom": 3.06,
+            "laid": 25.8,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 8.6,
+            "headroom": 0.0,
+            "laid": 8.6,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 1,
+            "limit": 3,
+            "streak": 2,
+            "unit": "weeks"
+          }
+        },
         "long": 6,
         "peak_acwr": 1.761,
         "phase": "base",
@@ -484,6 +822,65 @@
         "intent_km": 29.3,
         "intent_runs": 5,
         "km": 29.2,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.31,
+            "laid": 0.94,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 11.18,
+            "headroom": 1.78,
+            "laid": 9.4,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 33.54,
+            "headroom": 4.34,
+            "laid": 29.2,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 9.5,
+            "headroom": 0.1,
+            "laid": 9.4,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 0,
+            "limit": 3,
+            "streak": 3,
+            "unit": "weeks"
+          }
+        },
         "long": 6,
         "peak_acwr": 1.657,
         "phase": "base",
@@ -574,6 +971,65 @@
         "intent_km": 23.4,
         "intent_runs": 5,
         "km": 23.5,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.4,
+            "laid": 0.85,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 3.96,
+            "laid": 1.04,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 12.22,
+            "headroom": 5.22,
+            "laid": 7.0,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 37.96,
+            "headroom": 14.46,
+            "laid": 23.5,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 10.3,
+            "headroom": 3.3,
+            "laid": 7.0,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 3,
+            "limit": 3,
+            "streak": 0,
+            "unit": "weeks"
+          }
+        },
         "long": 5,
         "peak_acwr": 1.488,
         "phase": "base",
@@ -660,6 +1116,65 @@
         "intent_km": 32.7,
         "intent_runs": 5,
         "km": 31.1,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.3,
+            "laid": 0.95,
+            "unit": "ratio"
+          },
+          "binding": "long_step",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 0.33,
+            "laid": 4.67,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 12.22,
+            "headroom": 1.12,
+            "laid": 11.1,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 37.96,
+            "headroom": 0.06,
+            "laid": 37.9,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 10.3,
+            "headroom": 0.0,
+            "laid": 10.3,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 2,
+            "limit": 3,
+            "streak": 1,
+            "unit": "weeks"
+          }
+        },
         "long": 8,
         "peak_acwr": 1.478,
         "phase": "build",
@@ -859,6 +1374,65 @@
         "intent_km": 36.6,
         "intent_runs": 5,
         "km": 36.4,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.12,
+            "laid": 1.13,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 14.43,
+            "headroom": 3.23,
+            "laid": 11.2,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 49.27,
+            "headroom": 12.87,
+            "laid": 36.4,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 11.3,
+            "headroom": 0.1,
+            "laid": 11.2,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 1,
+            "limit": 3,
+            "streak": 2,
+            "unit": "weeks"
+          }
+        },
         "long": 9,
         "peak_acwr": 1.486,
         "phase": "build",
@@ -952,6 +1526,65 @@
         "intent_km": 39.8,
         "intent_runs": 5,
         "km": 39.7,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.0,
+            "laid": 1.25,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 14.56,
+            "headroom": 2.26,
+            "laid": 12.3,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 49.27,
+            "headroom": 9.57,
+            "laid": 39.7,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 12.3,
+            "headroom": 0.0,
+            "laid": 12.3,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 0,
+            "limit": 3,
+            "streak": 3,
+            "unit": "weeks"
+          }
+        },
         "long": 9,
         "peak_acwr": 1.467,
         "phase": "build",
@@ -1045,6 +1678,65 @@
         "intent_km": 31.8,
         "intent_runs": 5,
         "km": 32.0,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.16,
+            "laid": 1.09,
+            "unit": "ratio"
+          },
+          "binding": "long_step",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 4.63,
+            "laid": 0.37,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 15.99,
+            "headroom": 3.79,
+            "laid": 12.2,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 51.61,
+            "headroom": 19.61,
+            "laid": 32.0,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 13.5,
+            "headroom": 1.3,
+            "laid": 12.2,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 3,
+            "limit": 3,
+            "streak": 0,
+            "unit": "weeks"
+          }
+        },
         "long": 8,
         "peak_acwr": 1.317,
         "phase": "build",
@@ -1118,6 +1810,65 @@
         "intent_km": 43.4,
         "intent_runs": 5,
         "km": 41.0,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.06,
+            "laid": 1.19,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 15.99,
+            "headroom": 1.13,
+            "laid": 14.86,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 51.61,
+            "headroom": 0.25,
+            "laid": 51.36,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 13.5,
+            "headroom": 0.0,
+            "laid": 13.5,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 2,
+            "limit": 3,
+            "streak": 1,
+            "unit": "weeks"
+          }
+        },
         "long": 9,
         "peak_acwr": 1.418,
         "phase": "build",
@@ -1354,6 +2105,65 @@
         "intent_km": 46.6,
         "intent_runs": 5,
         "km": 44.2,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.04,
+            "laid": 1.21,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 19.32,
+            "headroom": 2.82,
+            "laid": 16.5,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 66.77,
+            "headroom": 11.97,
+            "laid": 54.8,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 14.9,
+            "headroom": 0.0,
+            "laid": 14.9,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 1,
+            "limit": 3,
+            "streak": 2,
+            "unit": "weeks"
+          }
+        },
         "long": 10,
         "peak_acwr": 1.44,
         "phase": "build",
@@ -1590,6 +2400,65 @@
         "intent_km": 49.9,
         "intent_runs": 5,
         "km": 47.1,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.05,
+            "laid": 1.2,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 21.45,
+            "headroom": 3.35,
+            "laid": 18.1,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 71.24,
+            "headroom": 11.84,
+            "laid": 59.4,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 16.4,
+            "headroom": 0.1,
+            "laid": 16.3,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 0,
+            "limit": 3,
+            "streak": 3,
+            "unit": "weeks"
+          }
+        },
         "long": 10,
         "peak_acwr": 1.442,
         "phase": "build",
@@ -1955,6 +2824,65 @@
         "intent_km": 53.3,
         "intent_runs": 5,
         "km": 50.5,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.06,
+            "laid": 1.19,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": -0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 23.53,
+            "headroom": 3.85,
+            "laid": 19.68,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 77.22,
+            "headroom": 14.34,
+            "laid": 62.88,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 17.9,
+            "headroom": 0.1,
+            "laid": 17.8,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": -1,
+            "limit": 3,
+            "streak": 4,
+            "unit": "weeks"
+          }
+        },
         "long": 14,
         "peak_acwr": 1.408,
         "phase": "peak",
@@ -2208,6 +3136,65 @@
         "intent_km": 56.3,
         "intent_runs": 5,
         "km": 53.5,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.08,
+            "laid": 1.17,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 25.58,
+            "headroom": 3.66,
+            "laid": 21.92,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 81.74,
+            "headroom": 15.42,
+            "laid": 66.32,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 19.6,
+            "headroom": 0.0,
+            "laid": 19.6,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": -2,
+            "limit": 3,
+            "streak": 5,
+            "unit": "weeks"
+          }
+        },
         "long": 14,
         "peak_acwr": 1.378,
         "phase": "peak",
@@ -2461,6 +3448,65 @@
         "intent_km": 59.6,
         "intent_runs": 5,
         "km": 55.9,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.09,
+            "laid": 1.16,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": 0.0,
+            "laid": 5.0,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 28.5,
+            "headroom": 4.28,
+            "laid": 24.22,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 86.22,
+            "headroom": 15.6,
+            "laid": 70.62,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 21.6,
+            "headroom": 0.1,
+            "laid": 21.5,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": -3,
+            "limit": 3,
+            "streak": 6,
+            "unit": "weeks"
+          }
+        },
         "long": 13,
         "peak_acwr": 1.377,
         "phase": "peak",
@@ -2808,6 +3854,65 @@
         "intent_km": 42.0,
         "intent_runs": 5,
         "km": 41.8,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.23,
+            "laid": 1.02,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 9.25,
+            "laid": -4.25,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 31.49,
+            "headroom": 21.09,
+            "laid": 10.4,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 91.81,
+            "headroom": 49.05,
+            "laid": 42.76,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 23.7,
+            "headroom": 13.3,
+            "laid": 10.4,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 3,
+            "limit": 3,
+            "streak": 0,
+            "unit": "weeks"
+          }
+        },
         "long": 13,
         "peak_acwr": 1.299,
         "phase": "taper",
@@ -3014,6 +4119,65 @@
         "intent_km": 32.0,
         "intent_runs": 5,
         "km": 31.7,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.44,
+            "laid": 0.81,
+            "unit": "ratio"
+          },
+          "binding": "acwr",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 12.32,
+            "laid": -7.32,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 31.49,
+            "headroom": 23.69,
+            "laid": 7.8,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 91.81,
+            "headroom": 59.47,
+            "laid": 32.34,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 23.7,
+            "headroom": 15.9,
+            "laid": 7.8,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 3,
+            "limit": 3,
+            "streak": 0,
+            "unit": "weeks"
+          }
+        },
         "long": 10,
         "peak_acwr": 0.972,
         "phase": "taper",
@@ -3184,6 +4348,66 @@
         "intent_km": 22.0,
         "intent_runs": 2,
         "km": 45.7,
+        "limits": {
+          "acwr": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 1.25,
+            "headroom": 0.6,
+            "laid": 0.65,
+            "unit": "ratio"
+          },
+          "binding": "chronic",
+          "chronic": {
+            "basis": "L",
+            "binds": true,
+            "ceiling": 5.0,
+            "headroom": -2.14,
+            "laid": 7.14,
+            "unit": "CTL/wk"
+          },
+          "eq_session": {
+            "basis": "S",
+            "binds": false,
+            "ceiling": 31.49,
+            "headroom": -10.71,
+            "laid": 42.2,
+            "unit": "eq-km"
+          },
+          "eq_week": {
+            "basis": "A",
+            "binds": false,
+            "ceiling": 91.81,
+            "headroom": 31.91,
+            "laid": 59.9,
+            "unit": "eq-km"
+          },
+          "long_step": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 23.7,
+            "headroom": 17.1,
+            "laid": 6.6,
+            "unit": "km"
+          },
+          "regime": "assertive",
+          "risk": {
+            "axis": "long_step",
+            "basis": "L",
+            "cohort": "Nielsen et al., Aarhus",
+            "n": 5000,
+            "note": "race week: the race distance is the goal, not a step; the long-run read is the longest training bout",
+            "read": "within the +10 % step"
+          },
+          "tissue": {
+            "basis": "L",
+            "binds": false,
+            "headroom": 3,
+            "limit": 3,
+            "streak": 0,
+            "unit": "weeks"
+          }
+        },
         "long": 7,
         "peak_acwr": 1.899,
         "phase": "taper",

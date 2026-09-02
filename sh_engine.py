@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.57.0"
+ENGINE_VERSION = "0.58.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -151,6 +151,9 @@ SETTINGS_SPEC = [
              "switch that ships your own words about your body, so it is OFF until you turn it on. "
              "Off, the deterministic readiness gate and the stop-symptom catch still run; only the "
              "narration of the call and the free-text adjustment chat are unavailable."},
+    {"key": "units", "env": "SH_UNITS", "label": "Distance units", "kind": "line", "default": "km",
+     "help": "km or mi. The engine plans in kilometres whatever you choose; this changes how every "
+             "distance and pace is SHOWN, on every page and box. Reload after saving."},
     {"key": "long_run_day", "env": "SH_LONG_RUN_DAY", "label": "Long run day", "kind": "line",
      "help": "The weekday your long run should fall on — mon, tue, wed, thu, fri, sat or sun. "
              "Empty = the house default, Sunday. This day anchors the week: hard sessions keep a "
@@ -3498,6 +3501,69 @@ def _hard_share(sessions, total_trimp):
     return hard / total_trimp
 
 
+# ── §LIMITS (0.58.0, PRODUCT_PLAN §4.2) — the body's limits as ONE object per week ──────────────
+# The plan is "the most load the limits allow", and until now the limits were six boolean chips and
+# an eq_km figure scattered across the week card. This publishes them as one block: each axis with
+# its ceiling, what the week was laid at, the headroom, whether it BOUND the week, and the evidence
+# basis of the ceiling (ENGINE_SCIENCE §10: L literature, A athlete-fitted, S structural) — so the
+# page can say WHICH limit held this week and which numbers are inherited from one athlete.
+# Additive: nothing here changes a prescription; every number is read off the values the governors
+# already decided (det/golden-plans is byte-identical on the sessions).
+# `risk` is a READ, not a model: the long-run-step axis is the one with a cohort behind it (Nielsen
+# et al., Aarhus, n≈5000 — sharp longest-run jumps predicted injury where weekly-mileage jumps did
+# not), and the read says whether this week's long run sits inside that step. No probability is
+# printed: one athlete with one injury event cannot calibrate one, and the plan must not pretend to.
+LIMITS_LAID_TOL = 0.15  # km — the sheet rounds a capped bout to 0.1 km AFTER the cap; within this it still reads "within"
+LIMITS_BASIS = {"acwr": "L", "long_step": "L", "eq_week": "A", "eq_session": "S", "tissue": "L", "chronic": "L"}
+
+
+def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid, long_bound,
+                 eq_week_cap, eq_week_laid, eq_week_bound, eq_sess_cap, eq_sess_laid,
+                 streak, streak_bound, ramp_cap, ctl_gain, race_week=False):
+    def axis(name, ceiling, laid, bound, unit):
+        if ceiling is None or laid is None:
+            return None
+        head = round(ceiling - laid, 2)
+        return {"ceiling": round(ceiling, 2), "laid": round(laid, 2), "headroom": head,
+                "binds": bool(bound), "basis": LIMITS_BASIS[name], "unit": unit}
+    out = {"regime": "assertive" if assertive else "caution"}
+    a = axis("acwr", eff_cap, acwr_laid, clipped, "ratio")
+    if a:
+        out["acwr"] = a
+    if assertive:
+        for name, ceiling, laid, bound, unit in (("long_step", long_cap, long_laid, long_bound, "km"),
+                                                 ("eq_week", eq_week_cap, eq_week_laid, eq_week_bound, "eq-km"),
+                                                 ("eq_session", eq_sess_cap, eq_sess_laid, False, "eq-km")):
+            ax = axis(name, ceiling, laid, bound, unit)
+            if ax:
+                out[name] = ax
+        if streak is not None:
+            out["tissue"] = {"streak": int(streak), "limit": MESO_MAX_HARD, "headroom": MESO_MAX_HARD - int(streak),
+                             "binds": bool(streak_bound), "basis": LIMITS_BASIS["tissue"], "unit": "weeks"}
+        if ramp_cap is not None and ctl_gain is not None:
+            out["chronic"] = {"ceiling": round(ramp_cap, 2), "laid": round(ctl_gain, 2),
+                              "headroom": round(ramp_cap - ctl_gain, 2),
+                              "binds": ctl_gain >= ramp_cap - 0.05, "basis": LIMITS_BASIS["chronic"], "unit": "CTL/wk"}
+    # the binding axis: the one that held this week, else the one with the least relative headroom
+    bound = [k for k in ("long_step", "eq_week", "acwr", "tissue", "chronic") if k in out and out[k].get("binds")]
+    if bound:
+        out["binding"] = bound[0]
+    else:
+        rel = {}
+        for k in ("acwr", "long_step", "eq_week", "eq_session", "chronic"):
+            ax = out.get(k)
+            if ax and ax["ceiling"]:
+                rel[k] = ax["headroom"] / abs(ax["ceiling"])
+        out["binding"] = min(rel, key=rel.get) if rel else None
+    if "long_step" in out:
+        ls = out["long_step"]
+        out["risk"] = {"axis": "long_step", "cohort": "Nielsen et al., Aarhus", "n": 5000, "basis": "L",
+                       "read": "above the +10 % step" if ls["laid"] > ls["ceiling"] + LIMITS_LAID_TOL else "within the +10 % step"}
+        if race_week:                         # the race bout is the goal, not a training step — the axis
+            out["risk"]["note"] = "race week: the race distance is the goal, not a step; the long-run read is the longest training bout"
+    return out
+
+
 def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None,
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
@@ -3868,6 +3934,13 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "clipped": False, "partial": True,
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
+            pweek["limits"] = _week_limits(          # §LIMITS (0.58.0) — the straddling week's read; the
+                assertive=assertive, eff_cap=eff_cap,   # streak/ramp governors are not reproduced here (§PRO13)
+                acwr_laid=(eow_flat if eow_flat is not None else eow), clipped=False,
+                long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions), long_bound=bool(long_km_cap and any(s.get("long_step_capped") for s in sessions)),
+                eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=False,
+                eq_sess_cap=_session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
+                streak=None, streak_bound=False, ramp_cap=None, ctl_gain=None)
             # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to
             # done+ahead below: the honest record of what was PRESCRIBED, kept distinct from what
             # was run (the header). Display/history provenance only since §FORM1 — no decision
@@ -4039,6 +4112,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
         _race_seed = (ctl, atl)   # §RACE — the seed to re-publish from once the race is laid
+        _ctl_start = ctl                                   # §LIMITS — CTL at the start of the week
         ctl_n, atl_n, eow, peak, eow_flat, m_ctl_n = _project_week(ctl, atl, wk_start, dt,
                                                                    actual_floor=act_floor)   # §PRO20b
         # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
@@ -4216,6 +4290,16 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
         if bio_over:                                 # §3.1 — the soft bio ceiling reshaped this week to easy
             week["bio_capped"] = round(bio_cap, 1)
+        week["limits"] = _week_limits(               # §LIMITS (0.58.0) — the limits as one object
+            assertive=assertive, eff_cap=eff_cap,
+            acwr_laid=(week.get("proj_acwr_soft") if week.get("proj_acwr_soft") is not None
+                       else (eow_flat if eow_flat is not None else eow)),
+            clipped=bool(clipped), long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions),
+            long_bound=bool(week.get("long_step_capped")),
+            eq_week_cap=bio_cap, eq_week_laid=week["eq_km"], eq_week_bound=bool(bio_over),
+            eq_sess_cap=session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
+            streak=consec_hard, streak_bound=bool(forced_deload),
+            ramp_cap=ramp, ctl_gain=(ctl - _ctl_start))
         if av_dates:                                 # §AV — laid around away days (PRIVATE-only field;
             week["av_dates"] = av_dates              # the public plan view strips it)
             if av_shed:

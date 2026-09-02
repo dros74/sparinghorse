@@ -1151,3 +1151,14 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
   .rail a:hover,.rail a.on{color:var(--text);border-left-color:var(--accent);background:var(--surface)}
   .rail a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 }
+
+/* §LIMITS (0.58.0) — the week's limits strip */
+details.limits{margin:8px 0 2px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:var(--surface)}
+details.limits > summary{cursor:pointer;list-style:none;font-size:12px}
+details.limits > summary::-webkit-details-marker{display:none}
+details.limits .limhead b{color:var(--accent-ink)}
+.lim{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:baseline;padding:4px 0;border-top:1px solid var(--line);font-size:12px}
+.lim .lk{color:var(--muted)} .lim .lv{font-variant-numeric:tabular-nums} .lim .lh{font-variant-numeric:tabular-nums;color:var(--ok-ink)}
+.lim .lh.over{color:var(--danger)} .lim .lb{font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 5px}
+.lim.held .lk{color:var(--text);font-weight:600} .lim.binding .lk::after{content:" · holds this week";color:var(--accent-ink);font-weight:400}
+.limrisk{margin-top:8px;font-size:12px;line-height:1.5;color:var(--muted)} .limrisk b{color:var(--text)}

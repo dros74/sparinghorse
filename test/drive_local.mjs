@@ -872,6 +872,44 @@ async function runPublicFull() {
   await axeCheck('public-full');
 }
 
+async function runUnits() {
+  // 0.58.0 (U5) — distance units are a DISPLAY choice. Set miles through the settings API, then read
+  // the pages a runner reads (Today, the dashboard with every section open, the runs explorer) and
+  // demand that NO kilometre survives: a value still printed in km beside one converted to miles is a
+  // lie on the page, and the API staying metric is what makes that possible. The settings form is
+  // excluded from the scan (its help text names both units).
+  const set = async (u) => page.evaluate(u => fetch('/api/settings', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ units: u }) }).then(r => r.json()), u);
+  const r = await set('mi');
+  ok('units=mi saved through the settings API', !!(r && r.ok));
+  const survivors = async () => page.evaluate(() => {
+    const c = document.body.cloneNode(true);
+    c.querySelectorAll('.setform, #settings, script, style, [hidden]').forEach(n => n.remove());
+    const t = (c.innerText || '').replace(/\s+/g, ' ');
+    return [...t.matchAll(/\d\s?km\b|\/km\b|\d\s?eq-km\b/g)].slice(0, 12)
+      .map(m => '…' + t.slice(Math.max(0, m.index - 40), m.index + m[0].length + 6) + '…');   // with context: WHERE it survived
+  });
+  const settle = async () => { await page.waitForLoadState('networkidle').catch(() => {}); await page.waitForTimeout(1500); };
+  await page.goto(BASE + '/today', { waitUntil: 'domcontentloaded' }); await settle();
+  let left = await survivors();
+  ok(`Today reads in miles — ${left.length} km survivors`, left.length === 0);
+  if (left.length) console.log('    today: ' + left.join(' | '));
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' }); await settle();
+  await page.evaluate(() => document.querySelectorAll('details').forEach(d => { d.open = true; }));
+  await page.waitForTimeout(800);
+  left = await survivors();
+  ok(`dashboard reads in miles with every section open — ${left.length} km survivors`, left.length === 0);
+  ok('the plan weeks print miles', /\d\s?mi\b/.test(await page.locator('#plan').innerText()));   // a rest day on Today may print no distance; a week always does
+  if (left.length) console.log('    dashboard: ' + left.join(' | '));
+  await page.goto(BASE + '/runs', { waitUntil: 'domcontentloaded' }); await settle();
+  left = await survivors();
+  ok(`runs explorer reads in miles — ${left.length} km survivors`, left.length === 0);
+  if (left.length) console.log('    runs: ' + left.join(' | '));
+  const back = await set('km');
+  ok('units restored to km', !!(back && back.ok));
+  await page.screenshot({ path: `${SHOTS}/40-units-mi.png`, fullPage: false }).catch(() => {});
+}
+
 async function runMap() {
   // 0.55.2 — Leaflet is served from /static/vendor and the CSP names no third-party script host.
   // Driven over the `--demo` fixture (the only seed whose runs carry a route): the map must still
@@ -922,6 +960,7 @@ try {
   else if (MODE === 'public') await runPublic();
   else if (MODE === 'publicfull') await runPublicFull();
   else if (MODE === 'map') await runMap();
+  else if (MODE === 'units') await runUnits();
   else await runFull();
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));
