@@ -560,7 +560,13 @@ async function runFull() {
      await page.evaluate(() => { localStorage.clear(); return [...document.querySelectorAll('details.section')].length; }) >= 8);
   await page.goto(BASE + '/today', { waitUntil: 'networkidle' }); await page.waitForTimeout(800);
   ok('/today shows the readiness card and the check-in', await page.locator('#readiness .statuscard').count() === 1 && await page.locator('#ciBtn').count() === 1);
-  ok('/today carries the why-this-session line', await page.locator('.whyline').count() === 1);
+  // The why-line arrives with the readiness fetch (slower on CI than the 800 ms grace above), and since
+  // 0.58.0 the binding-limit line shares the class — so wait for it, and match the text, not the count.
+  // (innerText reflects the CSS text-transform — the label is uppercased — so match case-insensitively.)
+  await page.waitForFunction(() => [...document.querySelectorAll('.whyline')].some(e => /^why /i.test(e.innerText)), { timeout: 15000 }).catch(() => {});
+  const whyLines = await page.evaluate(() => [...document.querySelectorAll('.whyline')].map(e => e.innerText.replace(/\s+/g, ' ').slice(0, 90)));
+  ok('/today carries the why-this-session line', whyLines.filter(t => /^why /i.test(t)).length === 1);
+  if (whyLines.filter(t => /^why /i.test(t)).length !== 1) console.log('    whylines: ' + JSON.stringify(whyLines));
   ok('/today shows no plan, no analytics, no latest-run tile', await page.evaluate(() =>
      ['#sec-plan', '#sec-recent', '#sec-shape', '#sec-track'].every(sel => { const e = document.querySelector(sel); return !e || e.offsetParent === null; })));
   ok('/today links back to the dashboard', (await page.locator('#todayLink').getAttribute('href')) === '/');
