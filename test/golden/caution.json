@@ -1700,7 +1700,7 @@
           {
             "component": "ssmax",
             "frac": 0.06,
-            "kind": "tempo",
+            "kind": "race_pace",
             "label": "short race-pace touch",
             "rec_min": 2,
             "rep_min": 2,
@@ -1723,7 +1723,7 @@
           {
             "component": "ssmax",
             "date": "2026-10-06",
-            "kind": "tempo",
+            "kind": "race_pace",
             "km": 5.2,
             "minutes": 26,
             "note": "short race-pace touch \u2014 10min easy wu + 2\u00d72min @ marathon w/ 2min jog + 10min easy cd",
@@ -1846,7 +1846,7 @@
           {
             "component": "ssmax",
             "frac": 0.06,
-            "kind": "tempo",
+            "kind": "race_pace",
             "label": "short race-pace touch",
             "rec_min": 2,
             "rep_min": 2,
@@ -1869,7 +1869,7 @@
           {
             "component": "ssmax",
             "date": "2026-10-13",
-            "kind": "tempo",
+            "kind": "race_pace",
             "km": 4.4,
             "minutes": 22,
             "note": "short race-pace touch \u2014 10min easy wu + 1\u00d72min @ marathon w/ 2min jog + 10min easy cd",

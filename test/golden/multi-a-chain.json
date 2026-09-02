@@ -6181,7 +6181,7 @@
           {
             "component": "ssmax",
             "frac": 0.06,
-            "kind": "tempo",
+            "kind": "race_pace",
             "label": "short race-pace touch",
             "rec_min": 2,
             "rep_min": 2,
@@ -6204,7 +6204,7 @@
           {
             "component": "ssmax",
             "date": "2026-11-24",
-            "kind": "tempo",
+            "kind": "race_pace",
             "km": 10.8,
             "minutes": 54,
             "note": "short race-pace touch \u2014 10min easy wu + 9\u00d72min @ marathon w/ 2min jog + 10min easy cd",

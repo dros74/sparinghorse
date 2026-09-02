@@ -3214,7 +3214,8 @@ EFFORT_SEG_HR_MIN_S = 180   # reps SHORTER than this are judged on PACE even whe
 #                             out of phase), so a within-rep average systematically under-reads
 #                             and would call every 2-min VO₂ rep 'sandbagged'. The zones card's
 #                             own caveat ('Z5 — HR lags short reps'), applied to the verdict.
-KIND_ZONE = {"interval": "interval", "tempo": "threshold", "long_mp": "marathon"}  # prescription zone
+KIND_ZONE = {"interval": "interval", "tempo": "threshold", "long_mp": "marathon",
+             "race_pace": "marathon"}  # prescription zone (race_pace: the taper's MP touch, §TT3 0.58.1)
 
 
 def _seg_band(cutoffs, zone):
@@ -5514,7 +5515,7 @@ def _deterministic_stop_symptom(note):
 
 _SOFTENING_RE = re.compile(r"\b(easy|easily|conversational|gentle|gently|relaxed|comfortable|"
                            r"comfortably|steady|recovery)\b", re.I)
-_HARD_KINDS = ("interval", "tempo", "threshold", "long_mp", "race", "quality", "fartlek", "hills")
+_HARD_KINDS = ("interval", "tempo", "threshold", "long_mp", "race", "quality", "fartlek", "hills", "race_pace")
 
 
 def _guard_session_action(text, verdict, session, engine_action):

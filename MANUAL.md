@@ -314,6 +314,10 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   or fatigue-capped session loses its chip — a session that no longer happens builds nothing, and the app
   won't claim otherwise.
 
+**The taper's touch.** In the last weeks before a marathon the plan lays a "Race-pace touch": short
+reps at marathon pace, the pace every long run has rehearsed. It is structured, not hard — the
+sharpening is in the freshness. Shorter races sharpen with a short tempo at threshold.
+
 **The limits strip (0.58.0).** Under each week's sessions a collapsed line says what held the week:
 "This week is held by the long-run step", or "No limit binds this week". Open it and every governor
 axis the regime runs is listed — the load ratio (ACWR), the long-run step, the damage-equivalent km

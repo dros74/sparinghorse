@@ -786,7 +786,7 @@ async function toggleIgnore(id, on){
 // re-base at all), so the week tag names its actual phase (same caution-era family as the log fix).
 const PHASEN={rebase:"re-base", base:"Base", build:"Build", peak:"Peak", taper:"Taper"};
 const KINDT={easy:"Easy run", long:"Long run", long_mp:"Long run · MP finish",
-             interval:"Interval session", tempo:"Tempo run", race:"Race day"};   // §RACE
+             interval:"Interval session", tempo:"Tempo run", race_pace:"Race-pace touch", race:"Race day"};   // §RACE · §TT3
 function plannedSession(s, easyPace){
   if(!s) return `<div class="planned muted" style="font-size:13px">${SH_READONLY
       ? "No active plan."   /* the public box has no Generate button to point at (UX-11) */
@@ -1615,7 +1615,7 @@ function sessSummary(s){
     const work=s.reps.filter(r=>r.effort==='work');
     if(s.kind==='interval'&&work.length) return `${work.length}×${work[0].minutes}′ ${work[0].zone}`;
     if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${U.d(s.km)}${U.k} +${mp?mp.minutes:0}′ MP`; }
-    if(s.kind==='tempo'&&work.length) return `${U.d(s.km)}${U.k} · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
+    if((s.kind==='tempo'||s.kind==='race_pace')&&work.length) return `${U.d(s.km)}${U.k} · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
   }
   // strides ride a specific run (the week's first short easy one) — say so on THAT line, where
   // they're executed, instead of the old orphaned "strides×2" note floating under the week.

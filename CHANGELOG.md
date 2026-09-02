@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.58.1] - 2026-09-02
+
+### Fixed
+
+- **The taper's marathon-pace touch is no longer called "tempo" (§TT3, PRODUCT_PLAN §4.6).** Since
+  §TT the touch runs at the race's pace — the marathon zone for a marathon — but it kept the kind
+  `tempo`, a name that means threshold. Two consequences: the plan called a session tempo that was
+  not one, and the effort monitor graded it against the *threshold* band (`KIND_ZONE`), so a
+  correctly-run marathon-pace session read "too easy". The kind is now `race_pace` when the zone
+  is marathon (every shorter race keeps `tempo` at threshold); it counts as structured, not as
+  hard — marathon pace is exempt from the hard share by design, so the 0 % it contributes to the
+  20 % taper cap was never the defect, the label was. Goldens: only the `kind` strings of those
+  sessions change (diff quoted in the commit). The page labels it "Race-pace touch".
+- **Three engine questions recorded as decided-not-now** in ENGINE_SCIENCE §10.8: the straddle-week
+  residual, `NEAR_CEILING_ACWR` with the three down weeks, and Davis's race-week short touch.
+
 ## [0.58.0] - 2026-09-02
 
 ### Added

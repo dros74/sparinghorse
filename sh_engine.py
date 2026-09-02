@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.58.0"
+ENGINE_VERSION = "0.58.1"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1398,7 +1398,7 @@ HARD_ZONES = ("threshold", "interval")  # zones that count toward the "hard" (po
 # faster"). Caution keeps the legacy shapes byte-identical: the component periodization is earned the
 # same way every other assertive lever is.
 COMPONENT_BY_KIND = {      # primary component per session kind (quality + the plain long run)
-    "interval": "vo2max", "tempo": "ssmax", "long_mp": "resilience", "long": "economy"}
+    "interval": "vo2max", "tempo": "ssmax", "race_pace": "ssmax", "long_mp": "resilience", "long": "economy"}
 DAVIS_BASE_VO2_FRAC = 0.05   # Base (assertive): the quality slot becomes a SHORT VO₂ touch. Halved
                              # from the tempo slot's .10 (calibrated 2026-07-04 on my live corpus):
                              # during the steep post-restart volume rebuild the ramp-back week's plain
@@ -1770,7 +1770,12 @@ def taper_shape(n_weeks, start_km, runs=BASE_RUNS, race_zone="threshold"):
         this_km = max(1, round(start_km * frac))
         race_week = (wk == n_weeks)
         quality = [] if race_week else [
-            {"kind": "tempo", "zone": race_zone, "frac": TAPER_SHARP_FRAC,
+            # §TT3 (0.58.1) — the KIND is honest about the zone: a marathon's touch is laid as
+            # `race_pace` (marathon zone, counts as structured, not as hard — MP is exempt from
+            # HARD_ZONES by design), every shorter race keeps `tempo` at threshold. Under "tempo"
+            # the effort monitor graded a marathon-pace session against the THRESHOLD band
+            # (KIND_ZONE), and the plan called a session tempo that was not one.
+            {"kind": "race_pace" if race_zone == "marathon" else "tempo", "zone": race_zone, "frac": TAPER_SHARP_FRAC,
              "structure": "intervals", "rep_min": 2, "rec_min": 2, "label": "short race-pace touch",
              "component": "ssmax"}]
         shape.append({"wk": wk, "km": this_km, "runs": runs,
@@ -1896,7 +1901,7 @@ def _build_long_mp(date, easy_trimp, work_trimp, spec, zones, easy_pace_sec):
 # ⚠ §6o-QF's `q_ahead` at the remainder re-lay still tests the older ("tempo", "interval") pair and so
 # cannot see a progression run. Pre-existing, and deliberately NOT widened here: which weeks get zone
 # paces decides what is PRESCRIBED, and that is a training call, not a tidy-up.
-QUALITY_KINDS = ("tempo", "interval", "progression")
+QUALITY_KINDS = ("tempo", "interval", "progression", "race_pace")   # race_pace: §TT3 (0.58.1)
 
 # §TT2 — days before a TUNE-UP race whose quality work is cleared. The race IS that week's hard
 # session; a workout stacked into its run-up makes the result measure fatigue rather than fitness,
@@ -3802,7 +3807,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §AV (template quality = Tue, always past once a week straddles); §AV's relocation
                 # made a future quality day normal, and the card must not lie about it.
                 q_ahead = sorted({(_date(s["date"]) - wk_start_d).days for s in full
-                                  if s.get("kind") in ("tempo", "interval")
+                                  if s.get("kind") in ("tempo", "interval", "race_pace")
                                   and s["date"] >= today.isoformat()})
                 q_ahead = [o for o in q_ahead if o in rem] or None
                 use_zones = zones if q_ahead else None

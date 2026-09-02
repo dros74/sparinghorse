@@ -875,7 +875,7 @@ def _stc_day_spacing():
     # (one light tempo) and Build (interval + long-MP) week, not just the day grid.
     easy = 430
     zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
-    mon, HARD = date(2026, 8, 3), {"tempo", "interval", "long_mp"}     # 2026-08-03 is a Monday
+    mon, HARD = date(2026, 8, 3), {"tempo", "interval", "long_mp", "race_pace"}     # 2026-08-03 is a Monday
     six = {}
     # (§FORM1 — the earned 6th-run lever is gone, but §PRO9's cap spread still lays 6-run weeks, so
     # the 6-run LAYOUT invariant stays live: construct the 6-run week directly.)
@@ -1139,7 +1139,7 @@ def _stc_availability():
     tue = (mon + timedelta(days=1)).isoformat()
     wk1 = S.generate_block(shape, mon, 35.0, 30.0, easy, zones=zones, blocked={tue})[0][0]
     days = sorted(S._date(s["date"]).weekday() for s in wk1["sessions"])
-    HARD = {"tempo", "interval", "long_mp", "long"}
+    HARD = {"tempo", "interval", "long_mp", "long", "race_pace"}
     hards = sorted(S._date(s["date"]).weekday() for s in wk1["sessions"] if s["kind"] in HARD)
     if 1 in days:
         bad.append("tue:laid-on-blocked-day")
@@ -8490,7 +8490,7 @@ def _stc_peak_acwr_floor():
         fail.append(f"low-CTL peak {round(lo_peak, 3)} > hard cap {S.ACWR_HARD}")
     # (b) healthy CTL — quality must survive (self-healing: the drop only fires when unaffordable).
     hi_weeks, _ = S.generate_block(S.base_shape(8, 30), bs, 45.0, 40.0, 360.0, zones=z)
-    has_quality = any(any(s.get("kind") in ("threshold", "interval", "tempo", "long_mp")
+    has_quality = any(any(s.get("kind") in ("threshold", "interval", "tempo", "long_mp", "race_pace")
                           or s.get("reps") for s in w["sessions"]) for w in hi_weeks)
     if not has_quality:
         fail.append("quality globally suppressed even at a healthy CTL")
