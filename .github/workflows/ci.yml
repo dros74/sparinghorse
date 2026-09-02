@@ -125,6 +125,31 @@ jobs:
           h=$(docker exec sh python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8770/'); print(r.headers.get('Content-Security-Policy',''))")
           echo "$h" | grep -q "strict-dynamic" && ! echo "$h" | grep -q "unpkg" || { echo "::error::CSP is not the 0.55.2 policy: $h"; exit 1; }
           docker exec sh python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8770/static/vendor/leaflet-1.9.4/leaflet.js'); assert r.status==200 and len(r.read())>100000"
+      - name: The console locks itself (0.56.0) — /api is 401 until a passphrase is set, then a session opens it
+        run: |
+          docker exec sh python - <<'PY'
+          import urllib.request, urllib.error, urllib.parse
+          base = "http://127.0.0.1:8770"
+          def code(path, **kw):
+              try:
+                  return urllib.request.urlopen(urllib.request.Request(base + path, **kw)).status
+              except urllib.error.HTTPError as e:
+                  return e.code
+          assert code("/api/plan") == 401, "fresh box served /api/plan without a passphrase"
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *a, **k): return None
+          opener = urllib.request.build_opener(NoRedirect)
+          data = urllib.parse.urlencode({"passphrase": "ci passphrase for the image job", "confirm": "ci passphrase for the image job"}).encode()
+          try:
+              r = opener.open(urllib.request.Request(base + "/setup", data=data)); cookie = r.headers.get("Set-Cookie", "")
+          except urllib.error.HTTPError as e:
+              assert e.code == 302, f"/setup answered {e.code}"; cookie = e.headers.get("Set-Cookie", "")
+          assert "sh_session=" in cookie and "HttpOnly" in cookie and "Secure" in cookie, f"cookie flags: {cookie}"
+          sess = cookie.split(";")[0]
+          assert code("/api/plan", headers={"Cookie": sess}) == 200, "the session cookie did not open /api/plan"
+          assert code("/api/plan") == 401, "/api/plan is open without the cookie"
+          print("auth: 401 → setup → 200 with the session cookie; flags:", cookie.split(";", 1)[1].strip())
+          PY
       - if: always()
         run: docker rm -f sh >/dev/null 2>&1 || true
 

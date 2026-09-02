@@ -1694,6 +1694,266 @@ def _stc_demo_route():
                got={**detail, "failures": fail or "none"})
 
 
+def _stc_auth():
+    """§AUTH (0.56.0, review S1) — the private console locks itself. Driven through the real routes
+    with the guard ON and a throwaway secrets store:
+      (a) fresh store: pages redirect to /setup, /api answers JSON 401 with the setup hint, /healthz
+          answers 200 without the private timestamps, static assets are served, /login sends to /setup;
+      (b) /setup sets the passphrase and signs in: /api answers 200, /setup is gone;
+      (c) logout: 401 again;
+      (d) lockout: LOGIN_MAX_FAILS wrong passphrases lock the address (429), the RIGHT passphrase is
+          refused while locked, and the injected clock lifts it;
+      (e) a passphrase change signs every OTHER device out and keeps this one;
+      (f) proxy identity: X-Forwarded-User counts only from inside SH_PROXY_CIDR and only with the
+          flag on; a Cloudflare Access JWT is verified for real — a key generated here, a token
+          signed with it, then tampered, wrong-audience and expired copies are refused;
+      (g) the guard is inert on the public and demo boxes and when the battery has it off."""
+    import tempfile, shutil as _sh, ipaddress as _ip, time as _time
+    snap = dict(db=S.SECRETS_DB, kf=S.SECRETS_KEY_FILE, fern=S._fernet, active=S._AUTH_ACTIVE,
+                ro=S.READONLY, demo=S.DEMO, secure=S.app.config.get("SESSION_COOKIE_SECURE"),
+                skey=S.app.secret_key, tp=S.TRUST_PROXY_AUTH, team=S.CF_ACCESS_TEAM,
+                aud=S.CF_ACCESS_AUD, cidr=list(S.PROXY_CIDRS), clock=S._auth_clock,
+                jwks=dict(S._jwks_cache), fails=dict(S._login_fail), glob=list(S._login_global))
+    tmp = S.Path(tempfile.mkdtemp(prefix="sh-auth-"))
+    fails, detail = [], {}
+    clock = [1_000_000.0]
+    PP = "correct horse battery staple"
+    try:
+        S.SECRETS_DB = tmp / "secrets.db"; S.SECRETS_KEY_FILE = tmp / "secrets.key"; S._fernet = None
+        S._AUTH_ACTIVE, S.READONLY, S.DEMO = True, False, False
+        S.TRUST_PROXY_AUTH, S.CF_ACCESS_TEAM, S.CF_ACCESS_AUD = False, "", ""
+        S.PROXY_CIDRS[:] = []
+        S._auth_clock = lambda: clock[0]
+        S._login_fail.clear(); S._login_global[:] = [0, 0.0]
+        S.app.config["SESSION_COOKIE_SECURE"] = False      # the test client speaks plain http
+        S.app.secret_key = S._session_signing_key()
+        c = S.app.test_client()
+        # (a)
+        r = c.get("/"); detail["fresh /"] = f"{r.status_code} → {r.headers.get('Location')}"
+        if r.status_code != 302 or not (r.headers.get("Location") or "").endswith("/setup"):
+            fails.append(f"(a) a fresh box served / as {r.status_code} instead of redirecting to /setup")
+        r = c.get("/api/plan")
+        if r.status_code != 401 or not r.is_json or (r.get_json() or {}).get("setup") != "/setup":
+            fails.append(f"(a) /api/plan on a fresh box answered {r.status_code} (want JSON 401 + setup)")
+        r = c.get("/healthz")
+        if r.status_code != 200 or "last_sync" in (r.get_json() or {}):
+            fails.append("(a) /healthz is not open-but-projected for an anonymous caller")
+        if c.get("/static/app.js").status_code != 200:
+            fails.append("(a) static assets are gated")
+        r = c.get("/login")
+        if r.status_code != 302 or not (r.headers.get("Location") or "").endswith("/setup"):
+            fails.append("(a) /login before a passphrase exists does not send to /setup")
+        # (b)
+        r = c.post("/setup", data={"passphrase": "short", "confirm": "short"})
+        if r.status_code != 400:
+            fails.append(f"(b) a 5-character passphrase was accepted ({r.status_code})")
+        r = c.post("/setup", data={"passphrase": PP, "confirm": PP})
+        detail["setup"] = r.status_code
+        if r.status_code != 302:
+            fails.append(f"(b) /setup answered {r.status_code}")
+        r = c.get("/api/objectives")
+        if r.status_code != 200:
+            fails.append(f"(b) after setup /api/objectives answered {r.status_code}")
+        if c.get("/setup").status_code != 404:
+            fails.append("(b) /setup is still served after a passphrase exists")
+        if "last_sync" not in (c.get("/healthz").get_json() or {}):
+            fails.append("(b) an authenticated /healthz lost its private fields")
+        # (c)
+        c.post("/logout")
+        if c.get("/api/objectives").status_code != 401:
+            fails.append("(c) logout did not end the session")
+        r = c.get("/runs")
+        if r.status_code != 302 or "/login?next=" not in (r.headers.get("Location") or ""):
+            fails.append("(c) a page after logout does not redirect to /login with next")
+        # (d)
+        codes = [c.post("/login", data={"passphrase": "wrong " * 3}).status_code for _ in range(S.LOGIN_MAX_FAILS)]
+        r = c.post("/login", data={"passphrase": PP})
+        detail["lockout"] = {"wrong": codes, "right_while_locked": r.status_code}
+        if not set(codes) <= {401, 429} or 401 not in codes:
+            fails.append(f"(d) wrong passphrases answered {codes}, want 401s (then 429)")
+        if r.status_code != 429:
+            fails.append(f"(d) the right passphrase was accepted while locked ({r.status_code})")
+        clock[0] += S.LOGIN_LOCK_BASE_S + 2
+        r = c.post("/login", data={"passphrase": PP, "next": "/runs"})
+        if r.status_code != 302 or not (r.headers.get("Location") or "").endswith("/runs"):
+            fails.append(f"(d) after the lock lifted the right passphrase answered {r.status_code}")
+        if c.get("/api/objectives").status_code != 200:
+            fails.append("(d) logged in after the lockout but /api still 401")
+        r = c.post("/login", data={"passphrase": PP, "next": "//evil.example/x"})
+        if (r.headers.get("Location") or "").startswith("//"):
+            fails.append("(d) next= is an open redirect")
+        # (e)
+        c2 = S.app.test_client()
+        c2.post("/login", data={"passphrase": PP})
+        if c2.get("/api/objectives").status_code != 200:
+            fails.append("(e) a second device could not log in")
+        r = c.post("/api/auth/passphrase", json={"current": PP, "new": PP + " rotated"})
+        if r.status_code != 200:
+            fails.append(f"(e) passphrase change answered {r.status_code}")
+        if c2.get("/api/objectives").status_code != 401:
+            fails.append("(e) the other device survived the passphrase change")
+        if c.get("/api/objectives").status_code != 200:
+            fails.append("(e) the device that changed the passphrase was signed out")
+        r = c.post("/api/auth/passphrase", json={"current": "nope", "new": "whatever whatever"})
+        if r.status_code != 403:
+            fails.append("(e) a passphrase change without the current one was accepted")
+        # (f) proxy: forwarded user from a trusted network
+        c3 = S.app.test_client()
+        S.TRUST_PROXY_AUTH = True
+        S.PROXY_CIDRS[:] = [_ip.ip_network("127.0.0.0/8")]
+        if c3.get("/api/objectives", headers={"X-Forwarded-User": "someone@example.com"}).status_code != 200:
+            fails.append("(f) X-Forwarded-User from inside SH_PROXY_CIDR was not accepted")
+        if c3.get("/api/objectives").status_code != 401:
+            fails.append("(f) a request without the forwarded user passed")
+        S.PROXY_CIDRS[:] = [_ip.ip_network("10.9.0.0/16")]
+        if c3.get("/api/objectives", headers={"X-Forwarded-User": "someone@example.com"}).status_code != 401:
+            fails.append("(f) X-Forwarded-User from OUTSIDE SH_PROXY_CIDR was accepted")
+        S.PROXY_CIDRS[:] = []
+        # (f) proxy: a real Cloudflare Access JWT, signed here
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa, padding as _pad
+        from cryptography.hazmat.primitives import hashes as _hashes
+        key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pub = key.public_key().public_numbers()
+        b64u = lambda b: S.base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+        S.CF_ACCESS_TEAM, S.CF_ACCESS_AUD = "testteam", "aud-abc"
+        S._jwks_cache.clear(); S._jwks_cache.update(at=_time.time(), keys={"k1": {
+            "kid": "k1", "kty": "RSA", "alg": "RS256",
+            "n": b64u(pub.n.to_bytes((pub.n.bit_length() + 7) // 8, "big")),
+            "e": b64u(pub.e.to_bytes((pub.e.bit_length() + 7) // 8, "big"))}})
+
+        def jwt(claims, kid="k1"):
+            h = b64u(S.json.dumps({"alg": "RS256", "kid": kid, "typ": "JWT"}).encode())
+            p_ = b64u(S.json.dumps(claims).encode())
+            sig = key.sign(f"{h}.{p_}".encode(), _pad.PKCS1v15(), _hashes.SHA256())
+            return f"{h}.{p_}.{b64u(sig)}"
+        now = int(_time.time())
+        good = {"iss": "https://testteam.cloudflareaccess.com", "aud": ["aud-abc"], "email": "me@example.com",
+                "exp": now + 600, "iat": now}
+        tok = jwt(good)
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": tok}).status_code != 200:
+            fails.append("(f) a valid Cloudflare Access JWT was refused")
+        st = c3.get("/api/auth/status", headers={"Cf-Access-Jwt-Assertion": tok}).get_json() or {}
+        if st.get("mode") != "proxy" or st.get("user") != "me@example.com":
+            fails.append(f"(f) auth status does not report the proxy identity: {st}")
+        bad = tok[:-6] + ("AAAAAA" if not tok.endswith("AAAAAA") else "BBBBBB")
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": bad}).status_code != 401:
+            fails.append("(f) a JWT with a tampered signature was accepted")
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": jwt({**good, "aud": ["other"]})}).status_code != 401:
+            fails.append("(f) a JWT for another audience was accepted")
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": jwt({**good, "exp": now - 5})}).status_code != 401:
+            fails.append("(f) an expired JWT was accepted")
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": jwt({**good, "iss": "https://other.cloudflareaccess.com"})}).status_code != 401:
+            fails.append("(f) a JWT from another issuer was accepted")
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": jwt(good, kid="unknown")}).status_code != 401:
+            fails.append("(f) a JWT signed by an unknown key was accepted")
+        S.TRUST_PROXY_AUTH = False
+        if c3.get("/api/objectives", headers={"Cf-Access-Jwt-Assertion": tok}).status_code != 401:
+            fails.append("(f) a valid JWT passed with SH_TRUST_PROXY_AUTH off")
+        # (g)
+        S.READONLY = True
+        if c3.get("/api/plan").status_code == 401:
+            fails.append("(g) the public box asks for a login")
+        S.READONLY = False; S.DEMO = True
+        if c3.get("/api/plan").status_code == 401:
+            fails.append("(g) the demo box asks for a login")
+        S.DEMO = False; S._AUTH_ACTIVE = False
+        if c3.get("/api/plan").status_code == 401:
+            fails.append("(g) the guard fired with _AUTH_ACTIVE off")
+    finally:
+        S.SECRETS_DB, S.SECRETS_KEY_FILE, S._fernet = snap["db"], snap["kf"], snap["fern"]
+        S._AUTH_ACTIVE, S.READONLY, S.DEMO = snap["active"], snap["ro"], snap["demo"]
+        S.app.config["SESSION_COOKIE_SECURE"] = snap["secure"]; S.app.secret_key = snap["skey"]
+        S.TRUST_PROXY_AUTH, S.CF_ACCESS_TEAM, S.CF_ACCESS_AUD = snap["tp"], snap["team"], snap["aud"]
+        S.PROXY_CIDRS[:] = snap["cidr"]; S._auth_clock = snap["clock"]
+        S._jwks_cache.clear(); S._jwks_cache.update(snap["jwks"])
+        S._login_fail.clear(); S._login_fail.update(snap["fails"]); S._login_global[:] = snap["glob"]
+        _sh.rmtree(tmp, ignore_errors=True)
+    return _st("det", "auth",
+               "§AUTH — a fresh console serves only /setup (pages redirect, /api is JSON 401, /healthz "
+               "projected, static served); setup signs in; logout signs out; wrong passphrases lock "
+               "the address and the right one waits for the clock; a passphrase change signs other "
+               "devices out; X-Forwarded-User counts only from inside SH_PROXY_CIDR; a Cloudflare "
+               "Access JWT is verified (tampered/wrong-aud/expired/wrong-iss/unknown-key refused, and "
+               "nothing passes with the flag off); the guard is inert on public/demo boxes",
+               passed=not fails, expect="fail closed everywhere; open only with a session or a verified proxy identity",
+               got={**detail, "failures": fails or "none"})
+
+
+def _stc_ai_gates():
+    """§S5 (0.56.0) — the AI switches decide whether a call leaves the box at all. A fake Anthropic
+    client records calls; with judgment OFF (the default) a check-in with a note and a free-text
+    adjustment make NO call and the adjustment answers 403; with judgment ON the check-in makes one;
+    narration and parsing off answer 403 without a call. `llm_available()` is true throughout, so
+    the switch, not the key, is what is being tested."""
+    import sqlite3 as _sq
+    calls = []
+
+    class _Blk:
+        def __init__(self, text):
+            self.type, self.text = "text", text
+
+    class _Resp:
+        def __init__(self, text):
+            self.stop_reason, self.content = "end_turn", [_Blk(text)]
+
+    class _Msgs:
+        def create(self, **kw):
+            calls.append(kw.get("system", "")[:40])
+            return _Resp(S.json.dumps({"verdict": "green", "action": "run as planned", "reasons": ["fine"],
+                                       "stop_symptom_detected": False}))
+
+    class _Fake:
+        messages = _Msgs()
+
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    saved_get, saved_anth, saved_ro, saved_demo = S.get_db, S._anthropic, S.READONLY, S.DEMO
+    fails, detail = [], {}
+    try:
+        S.get_db = lambda: m; S._anthropic = lambda: _Fake(); S.READONLY = False; S.DEMO = False
+        c = S.app.test_client()
+        if not S.llm_available():
+            fails.append("the fake client does not count as an available LLM")
+        r = c.post("/api/readiness", json={"note": "legs heavy, slept badly", "energy": "heavy"})
+        detail["checkin_off"] = (r.status_code, len(calls))
+        if r.status_code != 200 or calls:
+            fails.append(f"judgment OFF: a check-in made {len(calls)} call(s) / answered {r.status_code}")
+        r = c.post("/api/adjustment/propose", json={"text": "knee is sore"})
+        detail["propose_off"] = (r.status_code, len(calls))
+        if r.status_code != 403 or calls or (r.get_json() or {}).get("ai_off") != "judgment":
+            fails.append(f"judgment OFF: the adjustment chat answered {r.status_code} with {len(calls)} call(s)")
+        S.set_meta(m, "set:ai_judgment", "1"); m.commit()
+        r = c.post("/api/readiness", json={"note": "legs heavy, slept badly", "energy": "heavy"})
+        detail["checkin_on"] = (r.status_code, len(calls))
+        if r.status_code != 200 or len(calls) != 1:
+            fails.append(f"judgment ON: a check-in made {len(calls)} call(s) (want 1) / {r.status_code}")
+        n = len(calls)
+        S.set_meta(m, "set:ai_narration", "0"); S.set_meta(m, "set:ai_parsing", "0"); m.commit()
+        r = c.post("/api/plan/explain", json={})
+        if r.status_code != 403 or len(calls) != n:
+            fails.append(f"narration OFF: explain answered {r.status_code}, calls {len(calls) - n}")
+        r = c.post("/api/objectives/parse", json={"text": "sub-45 10k in October"})
+        if r.status_code != 403 or len(calls) != n:
+            fails.append(f"parsing OFF: parse answered {r.status_code}, calls {len(calls) - n}")
+        r = c.post("/api/objectives/adjudicate", json={})
+        if r.status_code != 403 or len(calls) != n:
+            fails.append(f"parsing OFF: adjudicate answered {r.status_code}, calls {len(calls) - n}")
+        h = c.get("/healthz").get_json() or {}
+        if h.get("ai") != {"narration": False, "parsing": False, "judgment": True}:
+            fails.append(f"/healthz does not report the switches: {h.get('ai')}")
+        r = c.post("/api/settings", json={"ai_judgment": "maybe"})
+        if r.status_code != 400:
+            fails.append("a switch accepted a value other than 0/1")
+    finally:
+        S.get_db, S._anthropic, S.READONLY, S.DEMO = saved_get, saved_anth, saved_ro, saved_demo
+        m.close()
+    return _st("det", "ai-gates",
+               "§S5 — with judgment off a check-in and the free-text chat make no LLM call (the chat "
+               "answers 403); on, the check-in makes one; narration/parsing off answer 403 with no "
+               "call; /healthz reports the switches; a switch takes only 0/1",
+               passed=not fails, expect="no call unless the switch is on", got={**detail, "failures": fails or "none"})
+
+
 def _stc_abuse_limits():
     """§ABUSE (0.55.1, review S2) — request-size and rate limits, driven through the real routes.
 
@@ -3216,14 +3476,15 @@ def _stc_readiness_provenance():
     # (e) the narrator is handed "not reported", never a fabricated "ok" (the §H6 lesson: a narrator
     # told something that is not a fact will state it as one)
     seen = {}
-    real_av, real_json = S.llm_available, S.llm_json
+    real_av, real_json, real_ai = S.llm_available, S.llm_json, S.ai_enabled
     try:
         S.llm_available = lambda: True
+        S.ai_enabled = lambda db, f: True      # 0.56.0 — the judgment switch is off by default; this det is about the narrator's INPUT
         S.llm_json = lambda system, user, schema, **kw: (seen.update(user=user)
                                                          or {"ok": True, "verdict": "green"})
         S.assess_readiness(m, None)
     finally:
-        S.llm_available, S.llm_json = real_av, real_json
+        S.llm_available, S.llm_json, S.ai_enabled = real_av, real_json, real_ai
     u = (seen.get("user") or "")
     if "not reported" not in u:
         fails.append(f"the narrator was handed a fabricated value instead of 'not reported': {u!r}")
@@ -4790,6 +5051,7 @@ def _stc_secrets():
     import sqlite3 as _sq, os as _os, tempfile, json as _json
     pass   # the rebinds below land on the app module (S.<name> = …), TECH-1
     snap = dict(db=S.SECRETS_DB, ro=S.READONLY, cfg=S.config(),   # TECH-4: one snapshot, restored whole
+                kf=S.SECRETS_KEY_FILE, fern=S._fernet,             # 0.56.0: the key file + cached Fernet
                 e_rt=_os.environ.get("RUNALYZE_TOKEN"),
                 e_ak=_os.environ.get("ANTHROPIC_API_KEY"), e_sch=_os.environ.get("SH_SCHEDULE"))
     fails = []
@@ -4798,6 +5060,7 @@ def _stc_secrets():
     cfg = lambda k: next(s["configured"] for s in S.secret_status() if s["key"] == k)
     try:
         S.SECRETS_DB = S.Path(tempfile.mktemp(suffix=".db"))
+        S.SECRETS_KEY_FILE = S.Path(str(S.SECRETS_DB) + ".key"); S._fernet = None   # 0.56.0: own key
         S.READONLY = False
         _os.environ["SH_SCHEDULE"] = "0"     # stop save_secret→start_scheduler spawning a real thread
         _os.environ.pop("RUNALYZE_TOKEN", None); _os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -4822,6 +5085,17 @@ def _stc_secrets():
         if "ENVTOKEN".startswith(fp("runalyze_token")) or fp("runalyze_token") in "ENVTOKEN":
             fails.append("the fingerprint is a piece of the value, not a digest of it")
         ok, _ = S.save_secret("runalyze_token", "WINDOWTOKEN")
+        # 0.56.0 (review S6) — encrypted AT REST: the row is ciphertext, the plaintext is nowhere in
+        # the file's bytes, and the read path still returns the value
+        _raw = S.sqlite3.connect(str(S.SECRETS_DB)).execute("SELECT value FROM secret WHERE key='runalyze_token'").fetchone()
+        if not _raw or not str(_raw[0]).startswith("enc:v1:"):
+            fails.append("the stored token is not encrypted at rest (no enc:v1: prefix)")
+        if b"WINDOWTOKEN" in S.Path(S.SECRETS_DB).read_bytes():
+            fails.append("the plaintext token is in the store's bytes")
+        if S._stored_secret("runalyze_token") != "WINDOWTOKEN":
+            fails.append("the encrypted token does not read back")
+        if not S.SECRETS_KEY_FILE.exists() or (S.os.stat(S.SECRETS_KEY_FILE).st_mode & 0o077):
+            fails.append("the key file is missing or not 0600")
         if not (ok and src("runalyze_token") == "saved"):
             fails.append("a window-set value should win over env")
         if leaked("WINDOWTOKEN"):
@@ -4871,6 +5145,7 @@ def _stc_secrets():
         try: _os.remove(S.SECRETS_DB)
         except Exception: pass
         S.SECRETS_DB, S.READONLY = snap["db"], snap["ro"]
+        S.SECRETS_KEY_FILE, S._fernet = snap["kf"], snap["fern"]   # 0.56.0
         S._config_swap(runalyze_token=snap["cfg"].runalyze_token,
                        anthropic_api_key=snap["cfg"].anthropic_api_key)
         for var, val in (("RUNALYZE_TOKEN", snap["e_rt"]), ("ANTHROPIC_API_KEY", snap["e_ak"]),
@@ -6665,7 +6940,12 @@ def _stc_calibration_inventory():
                 "_EXPLAIN_CACHE_MAX",
                 # 0.55.1 — abuse dampers and the public by-id window: seconds and days of plumbing,
                 # not magnitudes the plan is computed from
-                "DEMO_RESET_MIN_GAP_S", "PUBLIC_ACTIVITY_WINDOW_DAYS"}
+                "DEMO_RESET_MIN_GAP_S", "PUBLIC_ACTIVITY_WINDOW_DAYS",
+                # 0.56.0 — §AUTH: passphrase length, lockout counts/seconds, session and key-cache
+                # lifetimes; none of them is a magnitude the plan is computed from
+                "PASSPHRASE_MIN", "LOGIN_MAX_FAILS", "LOGIN_LOCK_BASE_S", "LOGIN_LOCK_MAX_S",
+                "LOGIN_GLOBAL_FAILS", "LOGIN_GLOBAL_WINDOW_S", "SESSION_DAYS", "JWKS_TTL_S",
+                "_SCRYPT_LOG_N", "_SCRYPT_R", "_SCRYPT_P"}   # (_SCRYPT_MAXMEM is 2**27 — an expression, uncounted)
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -15456,13 +15736,18 @@ def run_server_selftest(db, categories=None):
     # design; the abuse limiter would 429 half of them. Off for the run, on again after, and
     # det/abuse-limits switches it on for itself with its own clock.
     saved_rl = getattr(S, "RATE_LIMITING", None)
-    try:
+    saved_auth = getattr(S, "_AUTH_ACTIVE", None)   # 0.56.0 — the battery's own requests carry no
+    try:                                             # session; det/auth switches the guard back on
         if saved_rl is not None:
             S.RATE_LIMITING = False
+        if saved_auth is not None:
+            S._AUTH_ACTIVE = False
         return _run_server_selftest(db, categories)
     finally:
         if saved_rl is not None:
             S.RATE_LIMITING = saved_rl
+        if saved_auth is not None:
+            S._AUTH_ACTIVE = saved_auth
         _battery_lock.release()
 
 
@@ -15536,7 +15821,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_strides_day(),
                  lambda: _stc_post_race_reckoning(),
                  lambda: _stc_error_shape(), lambda: _stc_accent2_fallback(),
-                 lambda: _stc_demo_guard(), lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
+                 lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(),
+                 lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),

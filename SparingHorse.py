@@ -16,6 +16,8 @@ Production:    waitress-serve --listen=0.0.0.0:8770 SparingHorse:app
 import base64
 import functools
 import hashlib
+import hmac
+import ipaddress
 import html
 import io
 import json
@@ -36,11 +38,12 @@ import zlib
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, g, jsonify, redirect, request, send_file
+from flask import session as flask_session   # §AUTH — never bare `session`: the engine uses that name for a workout
 from werkzeug.exceptions import HTTPException
 from requests.adapters import HTTPAdapter, Retry
 
@@ -1726,6 +1729,8 @@ def validate_setting(key, value):
             return False, "could not parse — use Name,lat,lon;Name,lat,lon"
         if len(parsed) > MAX_WEATHER_CITIES:
             return False, f"at most {MAX_WEATHER_CITIES} cities — remove one to add another"
+    if key.startswith("ai_") and value.strip() and value.strip() not in ("0", "1"):
+        return False, "1 (on) or 0 (off)"
     if key == "tz" and value.strip():
         try:
             ZoneInfo(value.strip())
@@ -1855,6 +1860,103 @@ def save_settings(db, updates):
 # WRITE-ONLY at the API: status (configured + provenance) is returned, never the value back. In
 # READONLY the store is never touched — even a mis-mounted file is ignored on the public box.
 SECRETS_DB = Path(os.environ.get("SH_SECRETS_DB", "secrets.db"))
+# 0.56.0 (review S6) — values in the store are ENCRYPTED at rest (Fernet: AES-128-CBC + HMAC-SHA256).
+# The key comes from SH_SECRET_KEY (scrypt-derived; keeps the key off the volume) or, absent that,
+# from a random key file beside the store, created once with mode 0600. Theft of the store alone
+# now yields ciphertext; theft of the store AND the key file (or the env) is the same exposure as
+# before. Rows written by earlier releases are plaintext and are encrypted in place at boot.
+SECRETS_KEY_FILE = Path(os.environ.get("SH_SECRETS_KEY_FILE") or str(SECRETS_DB.with_name("secrets.key")))
+_ENC_PREFIX = "enc:v1:"
+_fernet = None
+
+
+def _secrets_fernet():
+    global _fernet
+    if _fernet is None:
+        from cryptography.fernet import Fernet
+        env = os.environ.get("SH_SECRET_KEY", "")
+        if env:
+            raw = hashlib.scrypt(env.encode("utf-8"), salt=b"sparinghorse/secrets/v1",
+                                 n=2 ** 14, r=8, p=1, dklen=32, maxmem=2 ** 26)
+        elif SECRETS_KEY_FILE.exists():
+            raw = base64.urlsafe_b64decode(SECRETS_KEY_FILE.read_text(encoding="utf-8").strip())
+        else:
+            raw = os.urandom(32)
+            fd = os.open(str(SECRETS_KEY_FILE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(base64.urlsafe_b64encode(raw).decode("ascii"))
+            print(f"[secrets] new encryption key written to {SECRETS_KEY_FILE} — set SH_SECRET_KEY "
+                  f"to keep the key off the volume")
+        _fernet = Fernet(base64.urlsafe_b64encode(raw))
+    return _fernet
+
+
+def _enc(value):
+    return _ENC_PREFIX + _secrets_fernet().encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def _dec(stored):
+    if not stored.startswith(_ENC_PREFIX):
+        return stored                       # a row from before 0.56.0; _secrets_migrate rewrites it
+    return _secrets_fernet().decrypt(stored[len(_ENC_PREFIX):].encode("ascii")).decode("utf-8")
+
+
+def _secrets_get(key):
+    """One decrypted value from the store, or None. Unlike `_stored_secret` this does NOT consult
+    READONLY — it is the raw read the auth layer uses; the public box never calls it."""
+    try:
+        conn = _secrets_conn()
+        row = conn.execute("SELECT value FROM secret WHERE key=?", (key,)).fetchone()
+        conn.close()
+    except Exception as e:
+        print(f"[secrets] read {key} failed: {e}")
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        return _dec(row[0])
+    except Exception:
+        print(f"[secrets] cannot decrypt {key!r} — SH_SECRET_KEY changed or the key file was "
+              f"replaced; the stored value is unreadable and must be entered again")
+        return None
+
+
+def _secrets_put(key, value):
+    """Write (or, for an empty value, delete) one value, encrypted."""
+    conn = _secrets_conn()
+    try:
+        if value is None or value == "":
+            conn.execute("DELETE FROM secret WHERE key=?", (key,))
+        else:
+            conn.execute("INSERT INTO secret(key,value) VALUES(?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, _enc(value)))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _secrets_migrate():
+    """Encrypt every plaintext row in place (the store as earlier releases wrote it). Returns the
+    count. Rows that are encrypted but unreadable are reported, not touched."""
+    conn = _secrets_conn()
+    try:
+        rows = conn.execute("SELECT key, value FROM secret").fetchall()
+        n = 0
+        for key, value in rows:
+            if not value:
+                continue
+            if value.startswith(_ENC_PREFIX):
+                try:
+                    _dec(value)
+                except Exception:
+                    print(f"[secrets] {key!r} cannot be decrypted with the current key")
+                continue
+            conn.execute("UPDATE secret SET value=? WHERE key=?", (_enc(value), key))
+            n += 1
+        conn.commit()
+        return n
+    finally:
+        conn.close()
 
 SECRET_SPEC = [
     {"key": "runalyze_token", "env": "RUNALYZE_TOKEN", "label": "Runalyze API token",
@@ -1892,14 +1994,7 @@ def _stored_secret(key):
     read a secret even if the store is somehow present beside it."""
     if READONLY:
         return None
-    try:
-        conn = _secrets_conn()
-        row = conn.execute("SELECT value FROM secret WHERE key=?", (key,)).fetchone()
-        conn.close()
-        return row[0] if row and row[0] else None
-    except Exception as e:
-        print(f"[secrets] read {key} failed: {e}")
-        return None
+    return _secrets_get(key)
 
 
 def _resolve_secret(spec):
@@ -1970,7 +2065,7 @@ def save_secret(key, value):
         conn = _secrets_conn()
         if value:
             conn.execute("INSERT INTO secret(key,value) VALUES(?,?) "
-                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, _enc(value)))
         else:
             conn.execute("DELETE FROM secret WHERE key=?", (key,))   # clear → env fallback
         conn.commit()
@@ -2076,7 +2171,7 @@ def _save_suunto_tokens(tok):
         if tok:
             conn.execute("INSERT INTO secret(key,value) VALUES(?,?) "
                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                         (SUUNTO_TOKENS_KEY, json.dumps(tok)))
+                         (SUUNTO_TOKENS_KEY, _enc(json.dumps(tok))))
         else:
             conn.execute("DELETE FROM secret WHERE key=?", (SUUNTO_TOKENS_KEY,))
         conn.commit()
@@ -4689,6 +4784,23 @@ def llm_available():
     return _anthropic() is not None
 
 
+def ai_enabled(db, feature):
+    """§S5 (0.56.0) — is this AI feature switched on? Settings window → SH_AI_* env → the spec's
+    default (narration and parsing on, judgment OFF: that is the switch that ships the athlete's own
+    words about their body)."""
+    spec = SETTINGS_BY_KEY.get("ai_" + feature)
+    if spec is None:
+        return False
+    v, _ = _resolve_setting(db, spec)
+    return (v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ai_off(feature):
+    return jsonify(ok=False, ai_off=feature,
+                   error=f"This AI feature ({feature}) is switched off in Settings → AI features. "
+                         f"Nothing was sent."), 403
+
+
 def llm_json(system, user, schema, effort="low", max_tokens=1024):
     """One structured-output call: returns a dict validated against `schema` (Claude's JSON is
     constrained by output_config.format), or {"ok": False, "error": ...} on any failure. Kept
@@ -5370,8 +5482,8 @@ def assess_readiness(db, checkin, session=None):
     note = (checkin or {}).get("note", "")
     # §H7 — "not reported" rather than a fabricated "ok": handing the narrator an undeclared value
     # is the §H6 defect again (a narrator told something that is not a fact will state it as one).
-    llm = llm_readiness(hrv, energy or "not reported", sleep or "not reported",
-                        note, session) if llm_available() else None
+    llm = (llm_readiness(hrv, energy or "not reported", sleep or "not reported", note, session)
+           if (llm_available() and ai_enabled(db, "judgment")) else None)   # §S5 — off by default
     if not (llm and llm.get("ok")):
         return base
     if llm.get("stop_symptom_detected"):  # free-text safety catch — the §H2 backstop to the check-in stop control
@@ -6015,6 +6127,479 @@ def _abuse_guard():
         return resp
 
 
+# ── §AUTH (0.56.0, review S1) — the private console locks itself ─────────────────────────────
+# Until this release the private box had no authentication of its own: the Runalyze token, the
+# Claude key, the Suunto tokens, the blood markers, the readiness notes and a one-click full-database
+# download were protected only by whatever the operator put in front of the container. One published
+# port was the whole exposure. Now: an owner passphrase (scrypt, stdlib), a signed HttpOnly SameSite
+# session cookie, a login page, a first-boot page that serves nothing else until a passphrase exists,
+# a lockout on wrong attempts, and — with SH_TRUST_PROXY_AUTH — a bypass for a request that carries a
+# VERIFIED proxy identity: a Cloudflare Access JWT checked against the team's signing keys, or an
+# X-Forwarded-User header from an address inside SH_PROXY_CIDR. The public and demo boxes have no
+# auth: they hold nothing. The battery flips `_AUTH_ACTIVE` off for its own requests; there is
+# deliberately no environment variable that does the same.
+PASSPHRASE_MIN = 12
+LOGIN_MAX_FAILS = 5          # wrong passphrases from one address before it is locked …
+LOGIN_LOCK_BASE_S = 60       # … for a minute, doubling per further failure …
+LOGIN_LOCK_MAX_S = 900       # … up to fifteen minutes
+LOGIN_GLOBAL_FAILS = 30      # wrong passphrases from ANY address inside the window …
+LOGIN_GLOBAL_WINDOW_S = 900  # … after which every address waits LOGIN_LOCK_BASE_S per attempt
+SESSION_DAYS = 30
+JWKS_TTL_S = 3600
+TRUST_PROXY_AUTH = os.environ.get("SH_TRUST_PROXY_AUTH", "").lower() in ("1", "true", "yes")
+CF_ACCESS_TEAM = (os.environ.get("SH_CF_ACCESS_TEAM") or "").strip()
+CF_ACCESS_AUD = (os.environ.get("SH_CF_ACCESS_AUD") or "").strip()
+COOKIE_SECURE = os.environ.get("SH_COOKIE_SECURE", "1").lower() not in ("0", "false", "no")
+PROXY_CIDRS = []
+for _c in (os.environ.get("SH_PROXY_CIDR") or "").split(","):
+    if _c.strip():
+        try:
+            PROXY_CIDRS.append(ipaddress.ip_network(_c.strip(), strict=False))
+        except ValueError:
+            print(f"[auth] SH_PROXY_CIDR entry {_c.strip()!r} is not a network — ignored")
+_AUTH_ACTIVE = True
+_auth_clock = time.time      # injectable, so det/auth can move the lockout clock instead of sleeping
+AUTH_EXEMPT_PATHS = frozenset({"/healthz", "/login", "/logout", "/setup", "/favicon.svg",
+                               "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png",
+                               "/manifest.webmanifest", "/sw.js"})
+AUTH_EXEMPT_PREFIXES = ("/static/",)
+
+
+# scrypt needs 128·n·r bytes; OpenSSL's default cap is 32 MiB, which n=2¹⁵·r=8 exceeds by a hair,
+# so `maxmem` is passed explicitly (a ValueError from hashlib is exactly how the first cut of /setup
+# answered 500). The exponent rides in the stored string, so the parameters can move later.
+_SCRYPT_LOG_N, _SCRYPT_R, _SCRYPT_P, _SCRYPT_MAXMEM = 15, 8, 1, 2 ** 27
+
+
+def _pp_hash(pp):
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(pp.encode("utf-8"), salt=salt, n=2 ** _SCRYPT_LOG_N, r=_SCRYPT_R,
+                            p=_SCRYPT_P, dklen=32, maxmem=_SCRYPT_MAXMEM)
+    return (f"scrypt${_SCRYPT_LOG_N}${_SCRYPT_R}${_SCRYPT_P}$" + base64.b64encode(salt).decode("ascii")
+            + "$" + base64.b64encode(digest).decode("ascii"))
+
+
+def _pp_verify(pp, stored):
+    try:
+        algo, ln, r, p_, salt, digest = stored.split("$")
+        if algo != "scrypt":
+            return False
+        calc = hashlib.scrypt(pp.encode("utf-8"), salt=base64.b64decode(salt),
+                              n=2 ** int(ln), r=int(r), p=int(p_), dklen=32, maxmem=_SCRYPT_MAXMEM)
+        return hmac.compare_digest(calc, base64.b64decode(digest))
+    except Exception:
+        return False
+
+
+def passphrase_is_set():
+    return bool(_secrets_get("passphrase"))
+
+
+def passphrase_set(pp):
+    """Store a new passphrase and revoke every existing session. (ok, error)."""
+    pp = pp or ""
+    if len(pp) < PASSPHRASE_MIN:
+        return False, f"a passphrase needs at least {PASSPHRASE_MIN} characters"
+    _secrets_put("passphrase", _pp_hash(pp))
+    _secrets_put("passphrase_set_on", _now_iso())
+    _bump_session_generation()
+    return True, None
+
+
+def passphrase_clear():
+    _secrets_put("passphrase", None)
+    _secrets_put("passphrase_set_on", None)
+    _bump_session_generation()
+
+
+def _session_generation():
+    """A counter every session cookie carries; bumping it signs every device out at once."""
+    try:
+        return int(_secrets_get("session_generation") or "1")
+    except ValueError:
+        return 1
+
+
+def _bump_session_generation():
+    _secrets_put("session_generation", str(_session_generation() + 1))
+
+
+def _session_signing_key():
+    k = _secrets_get("session_key")
+    if not k:
+        k = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii")
+        _secrets_put("session_key", k)
+    return k
+
+
+def _configure_sessions():
+    app.config.update(SESSION_COOKIE_NAME="sh_session", SESSION_COOKIE_HTTPONLY=True,
+                      SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=COOKIE_SECURE,
+                      PERMANENT_SESSION_LIFETIME=timedelta(days=SESSION_DAYS))
+    if READONLY or DEMO:
+        app.secret_key = secrets.token_bytes(32)   # no sessions on these boxes; Flask insists on a key
+        return
+    try:
+        app.secret_key = _session_signing_key()
+    except Exception as e:
+        print(f"[auth] session key unavailable ({e}) — using a per-process key; logins will not "
+              f"survive a restart")
+        app.secret_key = secrets.token_bytes(32)
+
+
+def _secrets_boot():
+    """0.56.0 — at start, on a box that holds secrets: refuse a world-readable store, encrypt what
+    is still plaintext, honour SH_PASSPHRASE. READONLY never opens the store."""
+    if READONLY:
+        return
+    try:
+        _secrets_conn().close()
+    except Exception as e:
+        print(f"[secrets] store unavailable: {e}")
+        return
+    if os.name == "posix":
+        mode = os.stat(SECRETS_DB).st_mode & 0o777
+        if mode & 0o077:
+            print(f"[secrets] REFUSING TO START: {SECRETS_DB} is mode {mode:o}, readable by other "
+                  f"users on the host. chmod 600 it (or fix the volume's ownership) and start again.")
+            raise SystemExit(3)
+    try:
+        n = _secrets_migrate()
+        if n:
+            print(f"[secrets] encrypted {n} stored value(s) at rest")
+    except Exception as e:
+        print(f"[secrets] migration skipped: {e}")
+    if DEMO:
+        return
+    pp = os.environ.get("SH_PASSPHRASE", "")
+    if pp and not passphrase_is_set():
+        ok, err = passphrase_set(pp)
+        print("[auth] passphrase set from SH_PASSPHRASE" if ok else f"[auth] SH_PASSPHRASE rejected: {err}")
+    if not passphrase_is_set():
+        print("[auth] no passphrase yet — the console serves only /setup until one is set")
+
+
+# — proxy identity: Cloudflare Access JWT, or a forwarded user from a trusted network —
+_jwks_cache = {"at": 0.0, "keys": {}}
+_jwks_lock = threading.Lock()
+
+
+def _cf_issuer():
+    team = CF_ACCESS_TEAM
+    if not team:
+        return ""
+    if not team.startswith("http"):
+        team = "https://" + team
+    if ".cloudflareaccess.com" not in team:
+        team = team.rstrip("/") + ".cloudflareaccess.com"
+    return team.rstrip("/")
+
+
+def _jwks(refresh=False):
+    with _jwks_lock:
+        age = time.time() - _jwks_cache["at"]
+        if _jwks_cache["keys"] and age < JWKS_TTL_S and not refresh:
+            return _jwks_cache["keys"]
+        if refresh and age < 60:            # an unknown kid must not become a refetch per request
+            return _jwks_cache["keys"]
+        try:
+            r = requests.get(f"{_cf_issuer()}/cdn-cgi/access/certs", timeout=8)
+            r.raise_for_status()
+            keys = {k["kid"]: k for k in r.json().get("keys", []) if k.get("kty") == "RSA" and k.get("kid")}
+            _jwks_cache.update(at=time.time(), keys=keys)
+        except Exception as e:
+            print(f"[auth] Cloudflare Access key fetch failed: {e}")
+        return _jwks_cache["keys"]
+
+
+def _b64url(s):
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _cf_access_verify(token, now=None):
+    """The claims of a valid Cloudflare Access JWT for THIS application, else None. RS256 against
+    the team's published keys; issuer, audience and expiry all checked. Fails closed on anything."""
+    try:
+        h_b64, p_b64, s_b64 = token.split(".")
+        header, claims, sig = json.loads(_b64url(h_b64)), json.loads(_b64url(p_b64)), _b64url(s_b64)
+    except Exception:
+        return None
+    if header.get("alg") != "RS256":
+        return None
+    key = _jwks().get(header.get("kid")) or _jwks(refresh=True).get(header.get("kid"))
+    if not key:
+        return None
+    try:
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        from cryptography.hazmat.primitives import hashes
+        n = int.from_bytes(_b64url(key["n"]), "big")
+        e = int.from_bytes(_b64url(key["e"]), "big")
+        rsa.RSAPublicNumbers(e, n).public_key().verify(sig, f"{h_b64}.{p_b64}".encode("ascii"),
+                                                       padding.PKCS1v15(), hashes.SHA256())
+    except Exception:
+        return None
+    now = now if now is not None else time.time()
+    if claims.get("iss") != _cf_issuer():
+        return None
+    aud = claims.get("aud")
+    if CF_ACCESS_AUD not in (aud if isinstance(aud, list) else [aud]):
+        return None
+    if not isinstance(claims.get("exp"), (int, float)) or claims["exp"] < now:
+        return None
+    if isinstance(claims.get("nbf"), (int, float)) and claims["nbf"] > now + 60:
+        return None
+    return claims
+
+
+def _proxy_user():
+    """The identity a trusted proxy vouches for on this request, or None."""
+    if not TRUST_PROXY_AUTH:
+        return None
+    if CF_ACCESS_TEAM and CF_ACCESS_AUD:
+        tok = request.headers.get("Cf-Access-Jwt-Assertion") or request.cookies.get("CF_Authorization")
+        if tok:
+            claims = _cf_access_verify(tok)
+            if claims:
+                return claims.get("email") or claims.get("sub") or "access"
+    if PROXY_CIDRS:
+        try:
+            ip = ipaddress.ip_address(request.remote_addr or "")
+        except ValueError:
+            return None
+        if any(ip in net for net in PROXY_CIDRS):
+            user = (request.headers.get("X-Forwarded-User") or "").strip()
+            if user:
+                return user
+    return None
+
+
+def _auth_user():
+    """Who this request is, or None: a valid session cookie of the current generation, else a
+    verified proxy identity."""
+    if flask_session.get("auth") is True and flask_session.get("gen") == _session_generation():
+        return {"via": "session"}
+    u = _proxy_user()
+    if u:
+        return {"via": "proxy", "user": u}
+    return None
+
+
+@app.before_request
+def _auth_guard():
+    if READONLY or DEMO or not _AUTH_ACTIVE:
+        return
+    p = request.path
+    if p in AUTH_EXEMPT_PATHS or p.startswith(AUTH_EXEMPT_PREFIXES):
+        return
+    is_api = p.startswith("/api/")
+    if not passphrase_is_set():
+        if is_api:
+            return jsonify(ok=False, error="no passphrase set yet — open /setup", setup="/setup"), 401
+        return redirect("/setup")
+    u = _auth_user()
+    if u:
+        g.auth = u
+        return
+    if is_api:
+        return jsonify(ok=False, error="login required", login="/login"), 401
+    nxt = request.full_path if request.query_string else request.path
+    return redirect("/login?next=" + quote(nxt, safe=""))
+
+
+# — lockout —
+_login_fail = {}             # address → (count, locked_until)
+_login_global = [0, 0.0]     # [count, window_start]
+_login_lock = threading.Lock()
+
+
+def _login_locked(ip):
+    """Seconds this address must still wait, or 0."""
+    now = _auth_clock()
+    with _login_lock:
+        cnt, until = _login_fail.get(ip, (0, 0.0))
+        if until > now:
+            return int(until - now) + 1
+        gcount, gstart = _login_global
+        if now - gstart < LOGIN_GLOBAL_WINDOW_S and gcount >= LOGIN_GLOBAL_FAILS:
+            return LOGIN_LOCK_BASE_S
+    return 0
+
+
+def _login_note(ip, ok):
+    now = _auth_clock()
+    with _login_lock:
+        if ok:
+            _login_fail.pop(ip, None)
+            return
+        cnt, until = _login_fail.get(ip, (0, 0.0))
+        cnt += 1
+        if cnt >= LOGIN_MAX_FAILS:
+            until = now + min(LOGIN_LOCK_BASE_S * (2 ** (cnt - LOGIN_MAX_FAILS)), LOGIN_LOCK_MAX_S)
+        _login_fail[ip] = (cnt, until)
+        gcount, gstart = _login_global
+        if now - gstart >= LOGIN_GLOBAL_WINDOW_S:
+            gcount, gstart = 0, now
+        _login_global[:] = [gcount + 1, gstart]
+        if len(_login_fail) > 5000:
+            for k in [k for k, (c, u) in _login_fail.items() if u < now and c < LOGIN_MAX_FAILS]:
+                del _login_fail[k]
+
+
+def _safe_next(n):
+    return n if n and n.startswith("/") and not n.startswith("//") and "\\" not in n else "/"
+
+
+def _cookie_will_stick():
+    """Will the browser keep a Secure session cookie from this request? Loopback counts as a secure
+    context in every current browser."""
+    if not COOKIE_SECURE or request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        return True
+    return request.host.split(":")[0] in ("localhost", "127.0.0.1", "::1")
+
+
+_AUTH_CSS = (
+    "body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg,#f4f1ea);"
+    "color:var(--text,#2a2620);font-family:var(--sans,Inter,system-ui,sans-serif)}"
+    ".authcard{width:min(440px,92vw);background:var(--surface,#fbf9f4);border:1px solid var(--line,#ddd6c7);"
+    "border-radius:14px;padding:28px 28px 24px;box-shadow:0 12px 40px rgba(0,0,0,.08)}"
+    ".authcard h1{font-family:var(--serif,Georgia,serif);font-weight:500;font-size:26px;margin:0 0 4px}"
+    ".authcard .eyebrow{font-family:var(--mono,monospace);font-size:11px;letter-spacing:.12em;text-transform:uppercase;"
+    "color:var(--muted,#6f6857);margin:0 0 18px}"
+    ".authcard p{font-size:14px;line-height:1.5;color:var(--muted,#6f6857);margin:0 0 14px}"
+    ".authcard label{display:block;font-size:12px;font-family:var(--mono,monospace);letter-spacing:.06em;"
+    "text-transform:uppercase;color:var(--muted,#6f6857);margin:12px 0 6px}"
+    ".authcard input{width:100%;box-sizing:border-box;font:inherit;font-size:16px;padding:10px 12px;"
+    "border:1px solid var(--line,#ddd6c7);border-radius:8px;background:var(--bg,#f4f1ea);color:inherit}"
+    ".authcard input:focus-visible{outline:2px solid var(--accent,#b9542c);outline-offset:2px}"
+    ".authcard button{margin-top:18px;width:100%;font:inherit;font-size:15px;font-weight:600;padding:11px;"
+    "border:0;border-radius:8px;background:var(--accent,#b9542c);color:#fff;cursor:pointer}"
+    ".authcard .err{color:var(--danger,#b5563f);font-size:13px;margin-top:12px}"
+    ".authcard .foot{font-size:12px;color:var(--muted,#6f6857);margin-top:16px;line-height:1.5}"
+)
+
+
+def _auth_page(title, inner, status=200):
+    doc = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+           '<meta name="viewport" content="width=device-width,initial-scale=1">'
+           f'<title>Sparing Horse — {html.escape(title)}</title>'
+           '<link rel="icon" href="/favicon.svg" type="image/svg+xml">'
+           f'<link rel="stylesheet" href="/static/app.css?v={ENGINE_VERSION}">'
+           f'<style>{_AUTH_CSS}</style></head><body><main class="authcard">'
+           '<p class="eyebrow">Sparing Horse · private console</p>'
+           f'{inner}</main></body></html>')
+    return html_page(doc), status, {"Cache-Control": "no-store"}
+
+
+def _setup_form(err=""):
+    return (f'<h1>Set a passphrase</h1><p>This console holds the Runalyze token, the API keys and the '
+            f'health data. Nothing else is served until it has a passphrase.</p>'
+            f'<form method="post" action="/setup">'
+            f'<label for="passphrase">Passphrase (at least {PASSPHRASE_MIN} characters)</label>'
+            f'<input id="passphrase" name="passphrase" type="password" autocomplete="new-password" '
+            f'minlength="{PASSPHRASE_MIN}" required autofocus>'
+            f'<label for="confirm">Once more</label>'
+            f'<input id="confirm" name="confirm" type="password" autocomplete="new-password" required>'
+            f'<button type="submit">Set it and open the console</button>'
+            f'{"<div class=err>" + html.escape(err) + "</div>" if err else ""}</form>'
+            f'<p class="foot">Forgotten later: <code>python SparingHorse.py passphrase --reset</code> '
+            f'inside the container clears it and this page comes back.</p>')
+
+
+def _login_form(nxt, err=""):
+    return (f'<h1>Passphrase</h1>'
+            f'<form method="post" action="/login">'
+            f'<input type="hidden" name="next" value="{html.escape(_safe_next(nxt), quote=True)}">'
+            f'<label for="passphrase">Passphrase</label>'
+            f'<input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required autofocus>'
+            f'<button type="submit">Open the console</button>'
+            f'{"<div class=err>" + html.escape(err) + "</div>" if err else ""}</form>'
+            f'<p class="foot">Sessions last {SESSION_DAYS} days on this device.</p>')
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def auth_setup():
+    if READONLY or DEMO or passphrase_is_set():
+        return jsonify(ok=False, error="not found"), 404
+    if request.method == "GET":
+        return _auth_page("set a passphrase", _setup_form())
+    pp, confirm = request.form.get("passphrase", ""), request.form.get("confirm", "")
+    if pp != confirm:
+        return _auth_page("set a passphrase", _setup_form("the two entries differ"), 400)
+    ok, err = passphrase_set(pp)
+    if not ok:
+        return _auth_page("set a passphrase", _setup_form(err), 400)
+    flask_session.permanent = True
+    flask_session.update(auth=True, gen=_session_generation(), at=_now_iso())
+    print("[auth] passphrase set through /setup")
+    return redirect("/")
+
+
+@app.route("/login", methods=["GET", "POST"])
+def auth_login():
+    if READONLY or DEMO:
+        return redirect("/")
+    if not passphrase_is_set():
+        return redirect("/setup")
+    nxt = request.values.get("next", "/")
+    if request.method == "GET":
+        if _auth_user():
+            return redirect(_safe_next(nxt))
+        return _auth_page("log in", _login_form(nxt))
+    ip = _client_ip()
+    wait = _login_locked(ip)
+    if wait:
+        return _auth_page("log in", _login_form(nxt, f"too many attempts — try again in {wait} s"), 429)
+    if not _pp_verify(request.form.get("passphrase", ""), _secrets_get("passphrase") or ""):
+        _login_note(ip, False)
+        print(f"[auth] wrong passphrase from {ip}")
+        return _auth_page("log in", _login_form(nxt, "that is not the passphrase"), 401)
+    _login_note(ip, True)
+    flask_session.permanent = True
+    flask_session.update(auth=True, gen=_session_generation(), at=_now_iso())
+    if not _cookie_will_stick():
+        return _auth_page("logged in, but",
+                          '<h1>Logged in — but the cookie will not stick</h1>'
+                          f'<p>This console is reached over plain http on <code>{html.escape(request.host)}</code>, '
+                          'and the session cookie is marked Secure, so the browser will drop it. Put TLS in '
+                          'front (see DEPLOY.md), or for a LAN-only box set <code>SH_COOKIE_SECURE=0</code>.</p>')
+    return redirect(_safe_next(nxt))
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def auth_logout():
+    flask_session.clear()
+    return redirect("/login")
+
+
+@app.get("/api/auth/status")
+def api_auth_status():
+    if READONLY or DEMO:
+        return jsonify(ok=True, mode="none")
+    u = getattr(g, "auth", None) or {}
+    return jsonify(ok=True, mode=u.get("via", "session"), user=u.get("user"),
+                   passphrase_set_on=_secrets_get("passphrase_set_on"), cookie_secure=COOKIE_SECURE,
+                   trust_proxy=TRUST_PROXY_AUTH, cf_access=bool(CF_ACCESS_TEAM and CF_ACCESS_AUD),
+                   proxy_cidr=[str(n) for n in PROXY_CIDRS], session_days=SESSION_DAYS)
+
+
+@app.post("/api/auth/passphrase")
+def api_auth_passphrase():
+    """Change the passphrase: the current one must be given, every other session is revoked, this
+    one carries on."""
+    if READONLY or DEMO:
+        return jsonify(ok=False, error="no passphrase on this box"), 403
+    d = body()
+    stored = _secrets_get("passphrase") or ""
+    if stored and not _pp_verify(str(d.get("current") or ""), stored):
+        return jsonify(ok=False, error="the current passphrase is wrong"), 403
+    ok, err = passphrase_set(str(d.get("new") or ""))
+    if not ok:
+        return jsonify(ok=False, error=err), 400
+    flask_session.permanent = True
+    flask_session.update(auth=True, gen=_session_generation(), at=_now_iso())
+    return jsonify(ok=True)
+
+
 def html_page(html):
     """Serve an HTML document with a per-request CSP nonce stamped onto every inline <script>.
     The nonce is handed to `_security_headers` (via g) so the Content-Security-Policy can lock
@@ -6452,11 +7037,16 @@ def healthz():
     fails = int(get_meta(db, "sched:fail_count", "0") or 0)
     out = dict(ok=True, token_configured=bool(config().runalyze_token), db=DB_PATH.exists(),
                llm=llm_available(), readonly=READONLY, consecutive_failures=fails)
-    if READONLY:
+    # 0.56.0 — /healthz stays open (the container's healthcheck and an uptime probe carry no cookie)
+    # but an UNAUTHENTICATED caller on the private box gets the same booleans the public box serves.
+    anon = READONLY or (not DEMO and _AUTH_ACTIVE and _auth_user() is None)
+    if anon:
         out.update(sync_ok=bool(last_ok),
                    sync_stale=(not last_ok) or _seconds_since(last_ok) > SCHED_STALE_HOURS * 3600)
         return jsonify(public_view("healthz", out))    # §PV — the booleans are the whole allowlist
-    out.update(last_sync=last_sync, last_ok=last_ok)
+    out.update(last_sync=last_sync, last_ok=last_ok,
+               ai={"narration": ai_enabled(db, "narration"), "parsing": ai_enabled(db, "parsing"),
+                   "judgment": ai_enabled(db, "judgment")})
     return jsonify(out)
 
 
@@ -7199,6 +7789,8 @@ def api_objectives_parse():
     text = (d.get("text") or "").strip()
     if not text:
         return jsonify(ok=False, error="say what the goal is"), 400
+    if not ai_enabled(get_db(), "parsing"):            # §S5
+        return _ai_off("parsing")
     out = parse_objective_nl(text)
     return jsonify(out), (200 if out.get("ok") else 502)
 
@@ -7206,6 +7798,8 @@ def api_objectives_parse():
 @app.post("/api/objectives/adjudicate")
 def api_objectives_adjudicate():
     """§6c — advise which competing A-race should be the peak (advisory; not applied)."""
+    if not ai_enabled(get_db(), "parsing"):            # §S5
+        return _ai_off("parsing")
     out = adjudicate_objectives(get_db())
     return jsonify(out), (200 if out.get("ok") or out.get("error") == "no A-race conflict to adjudicate" else 502)
 
@@ -7316,6 +7910,8 @@ def api_adjustment_propose():
     text = (d.get("text") or "").strip()
     if not text:
         return jsonify(ok=False, error="tell me how it's going"), 400
+    if not ai_enabled(get_db(), "judgment"):          # §S5 — the note stays on this box
+        return _ai_off("judgment")
     out = propose_adjustment(text, easy_pace=latest_easy_pace(get_db()))
     return jsonify(out), (200 if out.get("ok") else 502)
 
@@ -7428,6 +8024,8 @@ def api_plan_explain():
                              "an API key. Everything else you see — the whole plan, the governors, "
                              "the projections — is computed by the deterministic engine with no AI "
                              "involved at all."), 200
+    if not ai_enabled(get_db(), "narration"):          # §S5
+        return _ai_off("narration")
     out = explain_plan(get_db(), d.get("diff"), fresh=bool(d.get("fresh")))
     return jsonify(out), (200 if out.get("ok") else 502)
 
@@ -9525,7 +10123,9 @@ try:
         apply_settings_overrides(get_db())   # overlay any saved meta settings onto the env defaults
 except Exception as e:
     print(f"[settings] startup overlay skipped: {e}")
+_secrets_boot()            # 0.56.0 — store permissions, encryption at rest, SH_PASSPHRASE
 apply_secret_overrides()   # overlay window-set secrets (Runalyze token / Claude key) before the scheduler
+_configure_sessions()      # 0.56.0 — the signed session cookie's key and flags
 start_scheduler()   # runs under waitress (import) and the dev server alike (logs the effective TZ)
 if DEMO:
     # Seed on boot when the mounted volume is empty (a fresh container, or a wiped one), so the
@@ -9544,6 +10144,30 @@ if DEMO:
           f"reset every {DEMO_RESET_EVERY_S}s")
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "passphrase":  # CLI: python SparingHorse.py passphrase --set | --reset
+        # 0.56.0 — runs against the same store the server reads on every request, so it takes effect
+        # at once: no restart. Inside the container: `docker compose exec sparinghorse python
+        # SparingHorse.py passphrase --reset`.
+        if READONLY or DEMO:
+            print("This box has no passphrase (read-only or demo).")
+            sys.exit(2)
+        if "--reset" in sys.argv:
+            passphrase_clear()
+            print("Passphrase cleared and every session revoked. The console now serves only /setup "
+                  "until a new one is set (or set SH_PASSPHRASE and restart).")
+            sys.exit(0)
+        if "--set" in sys.argv:
+            import getpass
+            a = getpass.getpass("New passphrase: ")
+            b = getpass.getpass("Once more: ")
+            if a != b:
+                print("The two entries differ. Nothing changed.")
+                sys.exit(1)
+            ok, err = passphrase_set(a)
+            print("Passphrase set; every existing session is revoked." if ok else f"Refused: {err}")
+            sys.exit(0 if ok else 1)
+        print("Usage: python SparingHorse.py passphrase --set | --reset")
+        sys.exit(2)
     if len(sys.argv) > 1 and sys.argv[1] == "selftest":   # CLI: python SparingHorse.py selftest
         with app.app_context():
             db = get_db()

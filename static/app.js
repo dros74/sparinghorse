@@ -11,6 +11,10 @@ const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
 const sessDate = iso => { if(!iso) return ""; const d=new Date(iso+"T00:00:00");
   return d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+" - "+d.toLocaleDateString("en-US",{weekday:"short"}); };
 const getJSON = (url, opts) => fetch(url, opts).then(r => r.json().then(d => {
+  if(r.status===401 && !SH_READONLY && !SH_DEMO){   // 0.56.0 — the session ended (or none yet): go and log in
+    location.href = (d && d.setup) || ("/login?next=" + encodeURIComponent(location.pathname + location.search));
+    return new Promise(()=>{});                       // never resolves; the navigation takes over
+  }
   if(!r.ok) throw new Error((d && d.error) || ("http " + r.status));   // an error body is a failure, not renderable data
   return d;
 }));   // fetch + parse; callers keep their own try/catch
@@ -863,7 +867,7 @@ function renderReadiness(d){
     aiLine=`🩺 AI judgment${a.engine_floor&&a.engine_floor!==a.verdict?` · engine floor was ${a.engine_floor}`:""}`;
   else if(a.source && a.source.startsWith("engine ("))
     aiLine=`engine floor held — AI suggested ${a.ai_verdict}`;
-  const notePh = LLM_OK ? "Anything else? e.g. “slight cold coming on”, “legs heavy but slept great” — the AI reads this"
+  const notePh = (LLM_OK&&AI.judgment) ? "Anything else? e.g. “slight cold coming on”, “legs heavy but slept great” — the AI reads this"
                         : "Note (optional)";
   const foot=[(a.reasons||[]).join(" · "), hrvTxt, aiLine].filter(Boolean).join("  ·  ");
   $("#readiness").innerHTML=
@@ -1174,6 +1178,7 @@ document.addEventListener("click", e=>{
   e.stopPropagation();
   t.classList.toggle("open", c.classList.toggle("open"));
 });
+let AI={narration:true,parsing:true,judgment:false};   // 0.56.0 §S5 — the switches, from /healthz
 let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, WX=null, RDY=null,
     ZONESD=null;   // §W1 — current training_zones payload (rides /api/readiness + /api/zones); null on public
 let TOKEN_OK=false, HAS_SHAPE=false;   // first-run signals (from /healthz + /api/shape)
@@ -1271,14 +1276,14 @@ function objManager(p){
   const aCount = OBJECTIVES.filter(o=>o.status==='upcoming' && o.priority==='A').length;
   const conflictRow = aCount>=2 ? `
     <div class="conflictrow">
-      <button id="adjBtn" ${LLM_OK?'':'disabled'}>⚖ ${aCount} A-races compete — get advice${LLM_OK?'':' (add a Claude API key in Settings)'}</button>
+      <button id="adjBtn" ${(LLM_OK&&AI.parsing)?'':'disabled'}>⚖ ${aCount} A-races compete — get advice${LLM_OK?(AI.parsing?'':' (switched off in Settings → AI)'):' (add a Claude API key in Settings)'}</button>
       <div id="objAdjudicate"></div>
     </div>` : "";
   const nlRow = `
     <div class="nlobj">
-      <input id="ao_nl" ${LLM_OK?'':'disabled'} placeholder="Describe a goal — e.g. &quot;sub-45 10k in October&quot;, &quot;spring marathon, want to BQ&quot;" style="flex:1">
-      <button id="ao_parse" ${LLM_OK?'':'disabled'} style="font-size:12px;padding:6px 11px">✨ Parse</button>
-      <span id="ao_interp" class="nlinterp${LLM_OK?'':' guess'}">${LLM_OK?'':'⚙ Add a Claude API key in Settings to enable AI parsing'}</span>
+      <input id="ao_nl" ${(LLM_OK&&AI.parsing)?'':'disabled'} placeholder="Describe a goal — e.g. &quot;sub-45 10k in October&quot;, &quot;spring marathon, want to BQ&quot;" style="flex:1">
+      <button id="ao_parse" ${(LLM_OK&&AI.parsing)?'':'disabled'} style="font-size:12px;padding:6px 11px">✨ Parse</button>
+      <span id="ao_interp" class="nlinterp${(LLM_OK&&AI.parsing)?'':' guess'}">${LLM_OK?(AI.parsing?'':'⚙ Goal parsing is switched off in Settings → AI features'):'⚙ Add a Claude API key in Settings to enable AI parsing'}</span>
     </div>`;
   return `<div class="objs">${rows}</div>
     ${conflictRow}
@@ -1404,10 +1409,10 @@ function adjustmentUI(p){
       <button id="adj_clear" style="font-size:11px;padding:4px 9px;margin-top:8px">Clear adjustment</button>
     </div>` : "";
   const ask = `<div class="adjask">
-      <input id="adj_text" ${LLM_OK?'':'disabled'} placeholder="How'd it go / how are you? e.g. “felt great today”, “knee’s a bit sore”, “travelling Mon–Fri”">
-      <button id="adj_propose" ${LLM_OK?'':'disabled'}>💬 Tell the horse</button>
+      <input id="adj_text" ${(LLM_OK&&AI.judgment)?'':'disabled'} placeholder="How'd it go / how are you? e.g. “felt great today”, “knee’s a bit sore”, “travelling Mon–Fri”">
+      <button id="adj_propose" ${(LLM_OK&&AI.judgment)?'':'disabled'}>💬 Tell the horse</button>
       <div class="adjhint">A run that's done → I'll <b>log it</b> · something ahead (a niggle, travel, a cold) → I'll <b>propose easing</b> the plan. I only ever ease or hold — never push harder.</div>
-      <div id="adj_preview" class="adjpreview">${LLM_OK?'':'<div class="adjclamp">⚙ Add a Claude API key in Settings to enable — the engine still clamps every suggestion.</div>'}</div>
+      <div id="adj_preview" class="adjpreview">${LLM_OK?(AI.judgment?'':'<div class="adjclamp">⚙ Free-text adjustments are switched off in Settings → AI features — your words stay on this box</div>'):'<div class="adjclamp">⚙ Add a Claude API key in Settings to enable — the engine still clamps every suggestion.</div>'}</div>
     </div>`;
   return banner + ask;
 }
@@ -1945,7 +1950,7 @@ function renderPlan(p){
     ${header}
     ${adjustmentUI(p)}
     ${SH_READONLY?'':`<div class="explainrow">
-      <button id="explainBtn" ${LLM_OK?'':'disabled'}>📖 Explain this plan${LLM_OK?'':' — add a Claude API key in Settings'}</button>
+      <button id="explainBtn" ${(LLM_OK&&AI.narration)?'':'disabled'}>📖 Explain this plan${LLM_OK?(AI.narration?'':' — switched off in Settings → AI'):' — add a Claude API key in Settings'}</button>
     </div>
     <div id="planExplain"></div>`}
     <p class="feas">${esc(p.feasibility.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')}</p>
@@ -2756,6 +2761,14 @@ async function loadSettings(){
   const field=s=>{
     if(s.key==="weather_cities") return cityField(s);
     const id="set_"+s.key;
+    if(s.kind==="flag"){   // 0.56.0 §S5 — an on/off switch; the value is "1"/"0"
+      const on = String(s.value||"").trim()==="1";
+      return `<div class="setrow flagrow">
+        <label for="${id}" class="flaglbl"><input id="${id}" type="checkbox" data-key="${s.key}" data-flag="1" data-orig="${on?"1":"0"}" ${on?"checked":""}> ${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
+        <div class="help">${esc(s.help)}</div>
+        <div class="err" id="err_${s.key}"></div>
+      </div>`;
+    }
     const ctl = s.kind==="text"
       ? `<textarea id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}">${esc(s.value||"")}</textarea>`
       : `<input id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}" type="text" value="${esc(s.value||"")}">`;
@@ -2882,7 +2895,8 @@ async function saveSettings(e){
   $("#setok").textContent="";
   const payload={};
   document.querySelectorAll("#setform [data-key]").forEach(n=>{
-    if(n.value !== n.dataset.orig) payload[n.dataset.key]=n.value;   // changed fields only
+    const val = n.dataset.flag ? (n.checked ? "1" : "0") : n.value;   // a switch saves "1"/"0"
+    if(val !== n.dataset.orig) payload[n.dataset.key]=val;             // changed fields only
   });
   if(Object.keys(payload).length===0){ $("#setok").textContent="No changes"; return; }
   const r=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
@@ -2894,6 +2908,7 @@ async function saveSettings(e){
   }
   $("#setok").textContent="Saved ✓";
   loadSettings();          // refresh provenance badges (env → saved)
+  fetch("/healthz").then(r=>r.json()).then(h=>{ if(h.ai) AI=h.ai; }).catch(()=>{});   // the AI switches gate the buttons on the next render
   if(typeof loadWeather==="function") loadWeather();   // weather cities take effect live
 }
 // Keys block — the two secrets (Runalyze token / Claude key). WRITE-ONLY: the value is never sent back,
@@ -2902,6 +2917,35 @@ async function saveSettings(e){
 // §SG — `justSaved` is the key whose field should come back EMPTY; every other field keeps whatever
 // the user had typed into it. Re-rendering the whole block used to wipe unsaved siblings, which with
 // five keys means pasting three Suunto credentials and losing two of them to the first Save.
+// 0.56.0 §AUTH — the Console access block in Settings: how this session is signed in, change the
+// passphrase (signs every other device out), log out. Absent on the public and demo boxes.
+async function loadAuth(){
+  const host=$("#authBox"); if(!host) return;
+  let d; try{ d=await getJSON("/api/auth/status"); }catch(e){ host.innerHTML=""; return; }
+  if(!d.ok || d.mode==="none"){ host.innerHTML=""; return; }
+  const via = d.mode==="proxy"
+    ? `Signed in through the proxy in front of this console${d.user?` as <b>${esc(d.user)}</b>`:""}; the passphrase is the fallback when that proxy is not there.`
+    : `Signed in with the passphrase${d.passphrase_set_on?` (set ${esc(String(d.passphrase_set_on).slice(0,10))})`:""}. Sessions last ${d.session_days||30} days per device.`;
+  host.innerHTML=`<div class="secblock"><div class="sectitle">Console access</div>
+    <div class="help">${via} Changing the passphrase signs every other device out.${d.cookie_secure?"":" ⚠ SH_COOKIE_SECURE=0 — the session cookie travels over plain http."}</div>
+    <form class="setform" id="ppform" autocomplete="off" style="margin-top:8px">
+      <div class="setrow"><label for="pp_cur">Current passphrase</label><input id="pp_cur" type="password" autocomplete="current-password"></div>
+      <div class="setrow"><label for="pp_new">New passphrase (12+ characters)</label><input id="pp_new" type="password" autocomplete="new-password" minlength="12"></div>
+      <div class="setrow"><label for="pp_new2">Once more</label><input id="pp_new2" type="password" autocomplete="new-password"></div>
+      <div class="setbar"><button class="primary" type="submit">Change passphrase</button>
+        <button class="ghost" type="button" id="logoutBtn">Log out</button><span class="ok" id="ppok"></span></div>
+    </form></div>`;
+  $("#ppform").addEventListener("submit", async e=>{
+    e.preventDefault();
+    if($("#pp_new").value!==$("#pp_new2").value){ $("#ppok").textContent="⚠ the two new entries differ"; return; }
+    const r=await fetch("/api/auth/passphrase",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({current:$("#pp_cur").value, new:$("#pp_new").value})});
+    const j=await r.json();
+    $("#ppok").textContent = j.ok ? "Changed ✓ — other devices are signed out" : "⚠ "+(j.error||"could not change");
+    if(j.ok){ $("#pp_cur").value=""; $("#pp_new").value=""; $("#pp_new2").value=""; }
+  });
+  $("#logoutBtn").addEventListener("click", async ()=>{ try{ await fetch("/logout",{method:"POST"}); }catch(e){} location.href="/login"; });
+}
 async function loadSecrets(probe, justSaved){
   const host=$("#secretsBox"); if(!host) return;
   const drafts={}; host.querySelectorAll("input[id^='sec_']").forEach(i=>{ if(i.value) drafts[i.id]=i.value; });
@@ -2932,6 +2976,7 @@ async function loadSecrets(probe, justSaved){
     </div>`;
   host.innerHTML=`<div class="secblock"><div class="sectitle">Connections &amp; keys</div>
     ${d.secrets.map(row).join("")}<div id="suuntoBox"></div>
+    <div class="help aidisc" style="margin-top:6px"><b>What a Claude key sends to Anthropic</b> — plan narration: the computed plan summary and your athlete context; goal parsing: the goal text you type, and your objectives list for race advice; check-in judgment: your check-in note, energy and sleep answers, HRV state, today's session, and anything typed into “Tell the horse”. Each is a switch under <i>AI features</i> below; judgment is off until you turn it on.</div>
     <div class="help" style="margin-top:2px">Keys are write-only — the value never comes back to this
       page. <code>fp</code> is the first 8 hex of its sha256, so you can confirm which value is stored:
       <code>printf %s "$KEY" | sha256sum | cut -c1-8</code>.</div></div>`;
@@ -3024,7 +3069,7 @@ async function saveSecret(key, clear){
   if(inp) inp.value="";
   loadSecrets(true, key);   // refresh badges + re-validate; siblings keep their unsaved drafts
   // a freshly-set token/key changes what the app can do — refresh the affected surfaces live
-  fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; TOKEN_OK=!!h.token_configured; SYNC_LAST=h.last_sync||null; paintFreshness(); refreshFirstRun(); }).catch(()=>{});
+  fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; if(h.ai) AI=h.ai; TOKEN_OK=!!h.token_configured; SYNC_LAST=h.last_sync||null; paintFreshness(); refreshFirstRun(); }).catch(()=>{});
 }
 
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render.
@@ -3037,7 +3082,7 @@ if(SH_PAGE==="runs"){
   fetch("/healthz").then(r=>r.json()).then(d=>{ SYNC_LAST=d.last_sync||null; noteSync(d.last_sync);
     footSync(d.last_sync); }).catch(()=>{});
 }else{
-fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; TOKEN_OK=!!d.token_configured; SYNC_LAST=d.last_sync||null; noteSync(d.last_sync); paintFreshness(); _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
+fetch("/healthz").then(r=>r.json()).then(d=>{ LLM_OK=!!d.llm; if(d.ai) AI=d.ai; TOKEN_OK=!!d.token_configured; SYNC_LAST=d.last_sync||null; noteSync(d.last_sync); paintFreshness(); _frSeen.tok=true; refreshFirstRun(); loadPlan(); }).catch(()=>{ _frSeen.tok=true; refreshFirstRun(); loadPlan(); });
 loadShape(); loadRecent(); loadProjector(); loadWeekly(); loadWeather(); loadEffort(); loadZones(); loadTrack();
 }
 // §HR — the 'Current zones' card: training-intent rows, pace (VDOT, prescription anchor) + HR
@@ -3111,7 +3156,7 @@ if(SH_READONLY){
   const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
   const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
 }else{
-  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadDurability(); loadEfficiency();
+  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadAuth(); loadDurability(); loadEfficiency();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 

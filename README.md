@@ -85,6 +85,14 @@ The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB
 physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
 server-side (not just hidden in the UI).
 
+**Access (0.56.0).** The private console locks itself: on first boot it serves only a *set a passphrase*
+page (or takes `SH_PASSPHRASE` from the environment and never shows one), then a login page and a 30-day
+session cookie per device. With `SH_TRUST_PROXY_AUTH=1` a request carrying a **verified** proxy identity —
+a Cloudflare Access JWT checked against the team's keys, or `X-Forwarded-User` from inside
+`SH_PROXY_CIDR` — skips the login. The secrets store is encrypted at rest (`SH_SECRET_KEY`, or a key file
+beside it). The AI layer has three switches in Settings that name what each one sends; check-in judgment is
+off until switched on. Details in [`DEPLOY.md`](DEPLOY.md) and MANUAL §12.
+
 ## Manual
 A full how-to — setup, the first-run checklist, daily/weekly workflow, and how to read every panel — lives
 in [`MANUAL.md`](MANUAL.md). The sections below are the quick-start.
@@ -192,6 +200,11 @@ than an invented explanation.
 | `SH_READONLY` | public container only (set in docker-compose) |
 | `SH_DEMO` | demo container only — full private console over a self-resetting synthetic athlete |
 | `SH_DEMO_RESET_EVERY_S` | how often the demo restores its synthetic athlete (default 3600) |
+| `SH_PASSPHRASE` | private box: set the console passphrase non-interactively on first boot (else `/setup` asks) |
+| `SH_SECRET_KEY` | private box: encrypts the secrets store; unset = a random `secrets.key` beside the store |
+| `SH_TRUST_PROXY_AUTH` / `SH_CF_ACCESS_TEAM` / `SH_CF_ACCESS_AUD` / `SH_PROXY_CIDR` | skip the login for a verified proxy identity (Cloudflare Access JWT, or a forwarded user from inside the CIDR) |
+| `SH_COOKIE_SECURE` | `0` only for a plain-http LAN box; the session cookie is Secure by default |
+| `SH_AI_NARRATION` / `SH_AI_PARSING` / `SH_AI_JUDGMENT` | env fallbacks for the three AI switches (1/0; Settings overrides; judgment defaults to 0) |
 | `SH_MAX_BODY_BYTES` | request-body cap, every box (default 65536; a larger body is a JSON 413) |
 | `SH_RATE_POST` / `SH_RATE_EXPENSIVE` / `SH_RATE_RESET` | per-address requests per minute for writes (120), backup/export downloads (10) and the demo reset (6); `SH_RATE_LIMIT=0` disables the limiter |
 | `SH_DEMO_ROUTE_CENTER` | `lat,lon` the demo's synthetic routes are centred on (default: Central Park) |

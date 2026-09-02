@@ -10,6 +10,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.56.0] - 2026-09-02
+
+### Added
+
+- **The private console locks itself (§AUTH, review S1).** Until now the box that holds the
+  Runalyze token, the Claude key, the Suunto tokens, the blood markers, the readiness notes and a
+  one-click full-database download had no authentication of its own: it was protected only by
+  whatever sat in front of the container, and one published port was the whole exposure. Now:
+  - **An owner passphrase** (12+ characters, scrypt-hashed in the secrets store), a **login page**,
+    and a signed `HttpOnly; Secure; SameSite=Lax` session cookie that lasts 30 days per device.
+    Every page and every `/api` route needs it; `/healthz`, the static assets, the icons, the
+    manifest and the service worker do not (an anonymous `/healthz` gets the same booleans the
+    public box serves).
+  - **A first-boot page.** With no passphrase set the console serves only `/setup` — fail closed,
+    even behind a proxy. `SH_PASSPHRASE` in the environment sets it non-interactively so there is
+    never an open window; `python SparingHorse.py passphrase --set | --reset` inside the container
+    changes or clears it, and takes effect at once.
+  - **Lockout.** Five wrong passphrases lock the address for a minute, doubling per further
+    attempt up to fifteen; thirty wrong ones from anywhere inside fifteen minutes make every
+    address wait. The right passphrase is refused while locked.
+  - **Change passphrase and log out** in Settings → Console access; a change signs every other
+    device out and keeps the one that made it.
+  - **A verified proxy bypass** (`SH_TRUST_PROXY_AUTH=1`): a request that carries a **Cloudflare
+    Access JWT** is checked against the team's published signing keys (RS256, issuer, the
+    application's audience tag, expiry) and skips the login; so does `X-Forwarded-User` from an
+    address inside `SH_PROXY_CIDR` for a proxy on a dedicated network. Neither is on unless set;
+    the passphrase remains the fallback when the proxy is not there.
+  - The public and demo boxes have no login: they hold nothing.
+- **The AI layer has switches, and says what it sends (§S5, review S5).** A Claude key alone used
+  to enable all four features, and the check-in judgment shipped the athlete's own words about
+  their body to a third party. Settings → AI features now carries three switches, each naming
+  exactly what leaves the box: **plan narration** (the computed plan summary and the athlete
+  context — on by default), **goal parsing and race advice** (the typed goal, the objectives list —
+  on by default), and **check-in judgment and free-text adjustments** (the check-in note, energy and
+  sleep answers, HRV state, today's session, anything typed into "Tell the horse" — **off until
+  switched on**). Off, the deterministic readiness gate and the stop-symptom catch still run; the
+  buttons say why they are disabled; the routes answer 403 and make no call. A disclosure beside
+  the key field lists the same.
+
+### Security
+
+- **The secrets store is encrypted at rest (review S6).** Values in `secrets.db` — the Runalyze
+  token, the Claude key, the Suunto credentials and OAuth tokens, now the passphrase hash and the
+  session key — are Fernet-encrypted (AES-128-CBC + HMAC-SHA256, `cryptography`). The key comes
+  from `SH_SECRET_KEY` (scrypt-derived; keeps the key off the volume) or, absent that, from a random
+  `secrets.key` written once beside the store with mode 0600. Rows written by earlier releases are
+  encrypted in place at boot. The box **refuses to start** if the store is readable by other users.
+  `det/secrets` now reads the raw row and the file's bytes.
+- `cryptography` is the project's first compiled dependency (Fernet, and RSA verification of the
+  Access JWT); its wheels are in `requirements.lock`.
+
+### Tests
+
+- `det/auth` drives the whole thing through the real routes with an injected clock: fresh box →
+  `/setup` only; setup signs in; logout; the lockout and its lifting; a passphrase change signing
+  the other device out; the open-redirect guard on `next`; `X-Forwarded-User` from inside and
+  outside the CIDR; a Cloudflare Access JWT signed with a key generated in the test, then
+  tampered, wrong-audience, expired, wrong-issuer and unknown-key copies, and nothing passing with
+  the flag off; and the guard inert on the public and demo boxes. `det/ai-gates` counts calls to a
+  fake client. The battery runs with the guard off for its own requests; the browser driver signs
+  in on every private flow; the CI image job proves a fresh container answers 401 until a passphrase
+  is set and 200 with the session cookie.
+
+### Documentation
+
+- README, MANUAL §12, DEPLOY.md: first boot, the passphrase, the proxy bypass, `SH_SECRET_KEY`, the
+  AI switches, and what to expect on the deploy.
+
 ## [0.55.2] - 2026-09-02
 
 ### Security

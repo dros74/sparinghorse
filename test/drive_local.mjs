@@ -513,6 +513,7 @@ async function runFull() {
   // stops treating the current week as current on its own final Sunday. Northern zones never see it,
   // which is exactly why it survived: nobody who runs this app was ever in one of those zones.
   const nzCtx = await browser.newContext({ timezoneId: 'Pacific/Auckland' });
+  await nzCtx.addCookies(await page.context().cookies());   // 0.56.0 — a fresh context has no session; carry it over or the page is /login
   const nzPage = await nzCtx.newPage();
   await nzPage.goto(page.url(), { waitUntil: 'domcontentloaded' });
   const nz = await nzPage.evaluate(() => ({
@@ -833,8 +834,28 @@ async function runMap() {
   await page.screenshot({ path: `${SHOTS}/12-map.png`, fullPage: false });
 }
 
+// 0.56.0 §AUTH — the private console locks itself. A fresh instance lands on /setup; a later visit
+// on /login. The driver sets and uses one passphrase, so every private flow below runs signed in —
+// which is also the assertion that the login pages work in a real browser.
+const PASSPHRASE = 'driver passphrase for the flows';
+async function ensureLoggedIn() {
+  await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+  if (page.url().includes('/setup')) {
+    await page.fill('#passphrase', PASSPHRASE); await page.fill('#confirm', PASSPHRASE);
+    await page.click('button[type=submit]');
+    await page.waitForURL(u => !u.toString().includes('/setup'), { timeout: 15000 });
+    ok('§AUTH — a fresh private box asked for a passphrase and opened after setting one', !page.url().includes('/login'));
+  } else if (page.url().includes('/login')) {
+    await page.fill('#passphrase', PASSPHRASE); await page.click('button[type=submit]');
+    await page.waitForURL(u => !u.toString().includes('/login'), { timeout: 15000 });
+    ok('§AUTH — the login page signed the driver in', true);
+  }
+  ok('§AUTH — the console is open after signing in', await page.evaluate(() => fetch('/api/objectives').then(r => r.status)) === 200);
+}
+
 try {
   console.log(`\n→ driving ${BASE}  (mode=${MODE})\n`);
+  if (!['public', 'publicfull', 'map'].includes(MODE)) await ensureLoggedIn();   // public boxes and the demo have no login
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   if (MODE === 'empty') await runEmpty();
   else if (MODE === 'noplan') await runNoplan();

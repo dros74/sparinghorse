@@ -46,6 +46,7 @@ book_summaries.txt
 JohnDavis-*/
 page_*.png
 sleep_full.json
+secrets.key     # 0.56.0: the secrets store's encryption key when SH_SECRET_KEY is unset
 
 # private dev notes — never in the public mirror
 PROJECT_LOG.md

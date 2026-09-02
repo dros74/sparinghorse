@@ -10,9 +10,9 @@ the quick start; MANUAL.md covers using the app.
                     the internet
                          │
           ┌──────────────┴──────────────┐
-          │  your reverse proxy / tunnel │   TLS ends here. Access control for the PRIVATE box
-          │  (Cloudflare Tunnel + Access,│   lives here too until the app has a login of its own
-          │   Caddy, nginx, Traefik …)   │   (planned for 0.56.0).
+          │  your reverse proxy / tunnel │   TLS ends here. The PRIVATE box has its own
+          │  (Cloudflare Tunnel + Access,│   passphrase login since 0.56.0 (§2a); a proxy
+          │   Caddy, nginx, Traefik …)   │   in front of it stays the first wall.
           └───┬──────────┬──────────┬───┘
    owner only │   anyone │   anyone │
               ▼          ▼          ▼
@@ -26,16 +26,47 @@ the quick start; MANUAL.md covers using the app.
           ./secrets (private only)
 ```
 
-- **The private box has no authentication of its own.** Everything it holds — the Runalyze token,
-  the Claude key, Suunto tokens, blood markers, readiness notes, a one-click full-database download —
-  is protected only by what you put in front of it. **Never publish port 8770 to a network you do
-  not fully trust.** The compose file publishes no ports at all; the proxy reaches the containers by
-  service name over the `sparinghorse-edge` network.
+- **The private box locks itself (0.56.0)** — a passphrase, a login page, a 30-day session cookie,
+  and a first-boot page that serves nothing else until a passphrase exists (§2a). That is a second
+  wall, not a reason to expose it: everything it holds — the Runalyze token, the Claude key, Suunto
+  tokens, blood markers, readiness notes, a one-click full-database download — still deserves a
+  proxy in front. **Never publish port 8770 to a network you do not fully trust.** The compose file
+  publishes no ports at all; the proxy reaches the containers by service name over the
+  `sparinghorse-edge` network.
 - **The public box** serves a read-only projection over the same database file. It cannot write
   (query-only connection, every mutation refused), holds no token, and withholds the medical,
   location and personal fields server-side. It is safe to expose.
 - **The demo box** is the full console over a synthetic athlete on its own named volume. It is safe
   to expose; visitors can drive the engine but not the box (see the README's refused list).
+
+## 2a. Access to the private console (0.56.0)
+
+- **First boot.** With no passphrase in the secrets store the console serves only `/setup`. Either
+  open it and set one (12+ characters), or put `SH_PASSPHRASE=…` in `.env` before the first start and
+  the page never appears. `/healthz`, the static assets and the icons are the only other things
+  served until then.
+- **Sessions.** A signed `HttpOnly; Secure; SameSite=Lax` cookie, 30 days per device. Changing the
+  passphrase (Settings → Console access) signs every other device out. `SH_COOKIE_SECURE=0` only for
+  a plain-http LAN box — browsers drop a Secure cookie over http, and the login page says so if it
+  happens.
+- **Lockout.** Five wrong passphrases lock the address for a minute, doubling per further attempt
+  up to fifteen; thirty wrong ones from anywhere inside fifteen minutes make every address wait.
+- **Forgotten.** `docker compose exec sparinghorse python SparingHorse.py passphrase --reset` clears
+  it (every session is revoked, `/setup` comes back at once); `--set` sets one from the terminal.
+- **Skipping the login behind a proxy that already authenticates.** Set `SH_TRUST_PROXY_AUTH=1` and
+  one of:
+  - **Cloudflare Access:** `SH_CF_ACCESS_TEAM=yourteam` (the team name, or
+    `yourteam.cloudflareaccess.com`) and `SH_CF_ACCESS_AUD=` the application's audience tag from the
+    Access application's overview. The `Cf-Access-Jwt-Assertion` header on every tunnelled request is
+    verified against the team's published keys (RS256, issuer, audience, expiry); a request without a
+    valid one falls back to the passphrase.
+  - **A proxy on a dedicated network:** `SH_PROXY_CIDR=` the network the proxy speaks from; a request
+    from inside it carrying `X-Forwarded-User` is trusted. Anything on that network can forge the
+    header, so use this only where the proxy is the only thing there.
+- **The secrets store is encrypted at rest.** Put a long random `SH_SECRET_KEY` in `.env` to keep the
+  key off the `./secrets` volume; without it a random `secrets.key` (0600) is written beside the
+  store on first start. Losing the key means re-entering the tokens in Settings — the passphrase is
+  unaffected. The box refuses to start if the store is readable by other users.
 
 ## 2. What the image does to protect the host (0.55.2)
 
@@ -67,8 +98,9 @@ Docker network (`sparinghorse-edge`) and point three public hostnames at `http:/
 on the private hostname (an email allowlist is enough). The tunnel sets `CF-Connecting-IP` and
 `X-Forwarded-Proto`, which the rate limiter and the HSTS header read.
 
-**Caddy on the host (any VPS or home server).** Until the app has its own login, protect the private
-hostname with Caddy's `basic_auth` (or `forward_auth` to an identity provider):
+**Caddy on the host (any VPS or home server).** The console has its own login since 0.56.0; Caddy's
+`basic_auth` (or `forward_auth` to an identity provider) stays a good second wall on the private
+hostname, and with `forward_auth` + `SH_PROXY_CIDR` the console can trust the identity Caddy sets:
 
 ```
 private.example.com {
@@ -130,7 +162,8 @@ a major upgrade (§7).
 - The private box writes a consistent snapshot beside the database after every successful nightly
   (`./data/sparinghorse-backup-YYYY-MM-DD.db`, seven kept). **Settings → Backup & export** downloads a
   snapshot or a portable JSON export on demand. Copy `./data` and `./secrets` off the host on a
-  schedule; the secrets store is plaintext until 0.56.0.
+  schedule; the secrets store is encrypted at rest since 0.56.0 (keep `SH_SECRET_KEY` or
+  `secrets.key` with the copy, or the tokens must be re-entered).
 - **Restore:** stop the stack, drop the snapshot into `./data` as `sparinghorse.db` (remove any
   `-wal`/`-shm` files beside it), start the stack. The entrypoint re-owns the file.
 - **Rollback:** `git checkout <previous tag>` and `docker compose up -d --build`. The database from a

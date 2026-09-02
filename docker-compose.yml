@@ -81,6 +81,20 @@ services:
       - SH_SEED_OBJECTIVE=${SH_SEED_OBJECTIVE:-}
       # "More info" link on pushed Suunto guides (default: the project repo).
       - SH_GUIDE_URL=${SH_GUIDE_URL:-}
+      # §AUTH (0.56.0) — the console locks itself. On first boot it serves only a set-a-passphrase
+      # page; SH_PASSPHRASE sets it non-interactively instead (no open window, ever). With
+      # SH_TRUST_PROXY_AUTH=1 a request that carries a VERIFIED proxy identity skips the login:
+      # a Cloudflare Access JWT (team + application AUD tag), or X-Forwarded-User from an address
+      # inside SH_PROXY_CIDR. SH_SECRET_KEY encrypts the secrets store; without it a random key file
+      # sits beside the store (set it here to keep the key off the volume). SH_COOKIE_SECURE=0 only
+      # for a plain-http LAN box (the session cookie is Secure by default).
+      - SH_PASSPHRASE=${SH_PASSPHRASE:-}
+      - SH_SECRET_KEY=${SH_SECRET_KEY:-}
+      - SH_TRUST_PROXY_AUTH=${SH_TRUST_PROXY_AUTH:-}
+      - SH_CF_ACCESS_TEAM=${SH_CF_ACCESS_TEAM:-}
+      - SH_CF_ACCESS_AUD=${SH_CF_ACCESS_AUD:-}
+      - SH_PROXY_CIDR=${SH_PROXY_CIDR:-}
+      - SH_COOKIE_SECURE=${SH_COOKIE_SECURE:-}
     volumes:
       # Locally-owned data copy lives on the NAS — back it up by copying this folder.
       # This is the single writer of the DB. Since 0.55.2 the files in it are owned by the app

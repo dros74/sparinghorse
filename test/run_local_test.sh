@@ -40,8 +40,10 @@ launch_and_drive() {
   local db="$1" port="$2" mode="$3" label="$4" ro="${5:-0}" demo="${6:-0}"
   local kind="PRIVATE"; [ "$ro" = "1" ] && kind="PUBLIC"; [ "$demo" = "1" ] && kind="DEMO"
   echo "▸ [$label] launching tokenless $kind instance on :$port"
-  SH_DB="$db" RUNALYZE_TOKEN= SH_PORT="$port" SH_READONLY="$ro" SH_DEMO="$demo" SH_DEMO_RESET_EVERY_S=100000 \
-    "$PY" SparingHorse.py >"$WORK/server-$mode.log" 2>&1 &
+  # Each instance gets its OWN secrets store (0.56.0): the passphrase the driver sets must never land
+  # in the checkout's secrets.db, and a stored token there must never reach a test server.
+  SH_DB="$db" SH_SECRETS_DB="$WORK/secrets-$mode.db" RUNALYZE_TOKEN= SH_PORT="$port" SH_READONLY="$ro" SH_DEMO="$demo" \
+    SH_DEMO_RESET_EVERY_S=100000 "$PY" SparingHorse.py >"$WORK/server-$mode.log" 2>&1 &
   PIDS+=("$!")
   local up=0
   for _ in $(seq 1 40); do

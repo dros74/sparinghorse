@@ -133,7 +133,9 @@ iOS the home-screen icon is lower-fidelity (Safari doesn't render the SVG app ic
 
 ## 3. First run — the five-minute checklist
 
-On a fresh database the private dashboard shows a three-step guided card. In order:
+On a fresh database the private console first asks for a **passphrase** (12+ characters) — nothing else is
+served until one exists; `SH_PASSPHRASE` in the environment sets it without the page. Then the dashboard
+shows a three-step guided card. In order:
 
 1. **Connect Runalyze.** Open **Settings → Connections & keys** and paste your Personal API token. (It is
    stored in a private-only secrets store, never the shared DB — see [§12](#12-settings-and-secrets).)
@@ -598,10 +600,23 @@ The decision line: *training shape + plan* can be public; *medical / location / 
 
 The **Settings** window (private container only) is where you configure the app without editing files:
 
+- **Console access** (0.56.0) — how this session is signed in (the passphrase, or a proxy identity when
+  `SH_TRUST_PROXY_AUTH` is on), **Change passphrase** (signs every other device out, keeps this one) and
+  **Log out**. Sessions last 30 days per device. Forgotten passphrase: `python SparingHorse.py passphrase
+  --reset` inside the container clears it and the first-boot page comes back; `--set` sets one from the
+  terminal. Five wrong attempts lock the address for a minute, doubling up to fifteen.
+- **AI features** (0.56.0) — three switches, each saying what it sends to Anthropic when a Claude key is
+  set: *plan narration* (the computed plan summary and the athlete context), *goal parsing and race
+  advice* (the typed goal and the objectives list), and *check-in judgment and free-text adjustments* (the
+  check-in note, energy and sleep answers, HRV state, today's session, and anything typed into "Tell the
+  horse"). The last one is **off until switched on**; off, the deterministic readiness gate and the
+  stop-symptom catch still run and the buttons say why they are disabled.
+
 - **Connections & keys** — set your **Runalyze token**, (optional) **Claude API key**, and — if you
   want the plan on your wrist ([§8](#8-sending-the-plan-to-a-suunto-watch-optional)) — the three
   **Suunto** values (client id, client secret, subscription key) plus the **Connect** button. They are
-  written to the private-only secrets store, applied live (no restart), and **write-only**: the UI shows
+  written to the private-only secrets store — **encrypted at rest** since 0.56.0 (`SH_SECRET_KEY`, or a
+  key file beside the store) — applied live (no restart), and **write-only**: the UI shows
   whether a key is configured and whether it currently **validates** ("✓ in use · valid" / "✗ key rejected"),
   but never echoes the secret back. The Claude key check uses a zero-token metadata call. Each stored
   key also shows a short **fingerprint** (`fp a1b2c3d4`) — the first eight hex characters of its

@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.55.2"
+ENGINE_VERSION = "0.56.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -137,6 +137,25 @@ SETTINGS_SPEC = [
     {"key": "athlete_age", "env": "SH_ATHLETE_AGE", "label": "Age (years)", "kind": "line",
      "help": "Used only as a cold-start PRIOR before real data exists (HRmax ≈ 208 − 0.7×age, "
              "Tanaka); measured heart-rate data takes over as it lands. Empty = no prior."},
+    # 0.56.0 (review S5) — the AI layer's switches. A Claude key alone used to enable all four
+    # features, and the check-in judgment ships the athlete's own words about their body to a third
+    # party. Each switch names exactly what leaves the box; judgment is OFF until switched on.
+    {"key": "ai_narration", "env": "SH_AI_NARRATION", "label": "AI — plan narration", "kind": "flag",
+     "default": "1",
+     "help": "\"Explain this plan\" sends Anthropic the computed plan summary (phases, weekly loads, "
+             "the projection, any active adjustment) and your athlete context. Nothing from your runs "
+             "or check-ins. On by default once a key is set."},
+    {"key": "ai_parsing", "env": "SH_AI_PARSING", "label": "AI — goal parsing and race advice", "kind": "flag",
+     "default": "1",
+     "help": "Parsing a typed goal sends Anthropic the text you typed; multi-race advice sends your "
+             "objectives list (labels, dates, priorities). On by default once a key is set."},
+    {"key": "ai_judgment", "env": "SH_AI_JUDGMENT", "label": "AI — check-in judgment and free-text adjustments", "kind": "flag",
+     "default": "0",
+     "help": "Sends Anthropic your check-in note, energy and sleep answers, HRV state, today's session, "
+             "the text you type into \"Tell the horse\", and your athlete context. This is the one "
+             "switch that ships your own words about your body, so it is OFF until you turn it on. "
+             "Off, the deterministic readiness gate and the stop-symptom catch still run; only the "
+             "narration of the call and the free-text adjustment chat are unavailable."},
     {"key": "long_run_day", "env": "SH_LONG_RUN_DAY", "label": "Long run day", "kind": "line",
      "help": "The weekday your long run should fall on — mon, tue, wed, thu, fri, sat or sun. "
              "Empty = the house default, Sunday. This day anchors the week: hard sessions keep a "
