@@ -47,18 +47,32 @@ showcase deliberately shows a slice; the real console has the full set.
   is governed*). No "train harder" button — the safety is in the governors.
 - **Injury brakes beyond ACWR** — long-run-jump cap, a biomechanical damage-equivalent lens, a tissue
   limiter and a chronic-growth cap, so the ACWR ceiling isn't the only guardrail.
+- **Which limit holds the week** — every planned week publishes its limits as one object: per governor
+  axis (load ratio, long-run step, damage-equivalent km per week and per session, near-ceiling streak,
+  fitness gain per week) the ceiling, what the week was laid at, the headroom, whether it bound the week
+  and the evidence behind the ceiling. The week card shows it as a strip ("This week is held by the
+  long-run step"); Today carries the binding limit.
+- **A down week that is not owed** — a scheduled deload can be cancelled by evidence: when the block
+  before it was not run, the load ratio has headroom, fatigue sits under fitness and a fresh check-in says
+  legs good, the week is offered as a level week instead — owner-confirmed until the engine's own ledger
+  earns it the right to decide alone. Readiness is a bounded permission: it can cancel a brake, never add load.
 - **Plan drift** — distance / effort / CTL / race-outcome charts comparing your founding road to where
   it stands now, plus a settle-the-score verdict.
+- **Track record** — the engine keeps score on itself: every 28-day fitness forecast is scored against
+  what Runalyze then measured, with 7- and 14-day checkpoints, the session sheet against what was run,
+  readiness calls against the day, and the weeks run far past their intent.
 - **Effort discipline** — grades whether your easy days are actually easy against a *moving*,
   fitness-tracking threshold: HR-led on a derived lactate-threshold HR where that's trustworthy, otherwise
   your grade-adjusted pace vs an aerobic-threshold (LT1) bar — with an HR-redline backstop either way.
 - **Readiness gate** — a daily green/amber/red verdict that flags stop-the-run / cardiac-type symptoms.
-- **Today** — a one-screen daily surface (`/today`): the readiness verdict, the session, the check-in and why this session; the installed app starts there.
+- **Today** — a one-screen daily surface (`/today`): the readiness verdict, the session, the check-in and
+  why this session; the installed app starts there. The dashboard is plan-first, with the analytics
+  collapsed until opened (remembered per device).
+- **Two themes, two unit systems** — Daylight and Charcoal, following the system unless a choice is
+  saved; distances and paces in kilometres or miles (a display choice — the engine and the API stay metric).
 - **Latest running activity** — stats + per-point trace (pace/HR/cadence/elevation), an HR-zone band, and a route map.
 - **Race lifecycle** — a passed race resolves on its own: the race-day run is matched and the objective
   settles as done (result + goal comparison recorded) or lapsed, with a private *Past races* history.
-- **Backup & export** — one-click consistent database snapshot + a portable JSON export of everything
-  that can't be rebuilt from Runalyze, with a fresh-instance restore command. Keys are never included.
 - **Suunto watch push** *(optional)* — upcoming planned sessions land on a Suunto watch as SuuntoPlus
   Guides (steps with pace + HR bands), via your own Suunto partner-app keys. The nightly push updates
   guides in place; if you delete them on the watch itself, use **Rebuild on watch** in Settings — the
@@ -67,6 +81,19 @@ showcase deliberately shows a slice; the real console has the full set.
 **AI layer** *(optional — set `ANTHROPIC_API_KEY`; blank = dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), multi-A adjudication advice, plain-language
   plan narration, and qualitative check-ins ("knee's a bit sore" → the engine eases, never pushes).
+
+**Self-hosting**
+- **Owner login** — the private console locks itself: on first boot it serves only a *set a passphrase*
+  page (or takes `SH_PASSPHRASE` from the environment), then a login page and a 30-day session per device.
+  A verified proxy identity — a Cloudflare Access JWT checked against the team's keys, or `X-Forwarded-User`
+  from inside `SH_PROXY_CIDR` — skips the login (`SH_TRUST_PROXY_AUTH=1`).
+- **Keys stay encrypted** — the secrets store is encrypted at rest (`SH_SECRET_KEY`, or a key file beside
+  it). The AI layer has three switches in Settings that name what each one sends; check-in judgment is off
+  until switched on.
+- **Backup & export** — one-click consistent database snapshot + a portable JSON export of everything
+  that can't be rebuilt from Runalyze, with a fresh-instance restore command. Keys are never included.
+- **Hardened image** — unprivileged, read-only root, a healthcheck, hash-pinned dependencies. The
+  operator's page is [`DEPLOY.md`](DEPLOY.md); access is MANUAL §12.
 
 **Public showcase vs. private console**
 
@@ -85,36 +112,6 @@ showcase deliberately shows a slice; the real console has the full set.
 The public container runs `SH_READONLY=1` with **no tokens** and a query-only DB connection — it
 physically cannot sync, write, or call the AI, and the medical/location endpoints are withheld
 server-side (not just hidden in the UI).
-
-**The symmetry (0.59.0).** The engine has always braked on evidence and deloaded on a schedule. Now
-a scheduled deload can be cancelled by evidence: when the block before it was not run, the load
-ratio has headroom, fatigue sits under fitness and a fresh check-in says legs good, the week is
-offered as a level week instead — owner-confirmed until the engine's own ledger earns it the right
-to decide alone. Both denominators of a week (the ramp's bar and the session sheet) are published,
-and readiness is a bounded permission token: it can cancel a brake, never add load.
-
-**The limits (0.58.0).** Every laid week publishes the body's limits as one object: per governor axis
-(load ratio, long-run step, damage-equivalent km per week and per session, near-ceiling streak, fitness
-gain per week) the ceiling, what the week was laid at, the headroom, whether it bound the week, and the
-evidence basis of the ceiling (literature, fitted to this athlete, or structural). The week card renders
-it as a strip ("This week is held by the long-run step") and Today carries the binding limit. The
-long-run step carries an injury-risk read against the Aarhus cohort — a read, not a percentage: one
-athlete cannot calibrate one. The ledger scores more too: fitness checkpoints at 7 and 14 days, the
-session sheet against what was run, readiness calls against the day, and the weeks run far past their
-intent. Distances and paces can be shown in miles (Settings → Distance units; the engine stays metric).
-
-**The day (0.57.0).** `/today` is the daily surface — the readiness verdict, the session, the check-in and one
-line saying why this session — and the page the installed app opens on. The dashboard is plan-first, with
-the analytics collapsed until opened (remembered per device); the public and demo boxes open on the track
-record. Two themes, following the system unless a choice is saved.
-
-**Access (0.56.0).** The private console locks itself: on first boot it serves only a *set a passphrase*
-page (or takes `SH_PASSPHRASE` from the environment and never shows one), then a login page and a 30-day
-session cookie per device. With `SH_TRUST_PROXY_AUTH=1` a request carrying a **verified** proxy identity —
-a Cloudflare Access JWT checked against the team's keys, or `X-Forwarded-User` from inside
-`SH_PROXY_CIDR` — skips the login. The secrets store is encrypted at rest (`SH_SECRET_KEY`, or a key file
-beside it). The AI layer has three switches in Settings that name what each one sends; check-in judgment is
-off until switched on. Details in [`DEPLOY.md`](DEPLOY.md) and MANUAL §12.
 
 ## Manual
 A full how-to — setup, the first-run checklist, daily/weekly workflow, and how to read every panel — lives
@@ -147,7 +144,7 @@ caches only the shell and never the API.
 ## Run with Docker — optional public + private split
 `docker compose` runs the **same image twice off one shared `./data` DB**. The operator's page —
 the trust model, what must never be reachable, the proxy examples, upgrade, backup and rollback — is
-[`DEPLOY.md`](DEPLOY.md); the quick version follows. Since 0.55.2 the image runs unprivileged on a
+[`DEPLOY.md`](DEPLOY.md); the quick version follows. The image runs unprivileged on a
 read-only root with a healthcheck, and installs a hash-pinned `requirements.lock`.
 
     mkdir -p data secrets backups && cp .env.example .env   # fill RUNALYZE_TOKEN (+ optional keys)
@@ -227,7 +224,7 @@ than an invented explanation.
 | `SH_TRUST_PROXY_AUTH` / `SH_CF_ACCESS_TEAM` / `SH_CF_ACCESS_AUD` / `SH_PROXY_CIDR` | skip the login for a verified proxy identity (Cloudflare Access JWT, or a forwarded user from inside the CIDR) |
 | `SH_COOKIE_SECURE` | `0` only for a plain-http LAN box; the session cookie is Secure by default |
 | `SH_AI_NARRATION` / `SH_AI_PARSING` / `SH_AI_JUDGMENT` | env fallbacks for the three AI switches (1/0; Settings overrides; judgment defaults to 0) |
-| `SH_UNITS` | `km` (default) or `mi` — how distances and paces are SHOWN, on every page and box; the engine and the API stay metric (0.58.0; Settings overrides) |
+| `SH_UNITS` | `km` (default) or `mi` — how distances and paces are SHOWN, on every page and box; the engine and the API stay metric (Settings can override) |
 | `SH_BACKUP_DIR` / `SH_BACKUP_KEEP` / `SH_BACKUP_PUSH` | private box: where nightly snapshots go (compose: `./backups`), how many to keep (7), a command to run after each (inside the container, file in `$SH_BACKUP_FILE`) |
 | `SH_MAX_BODY_BYTES` | request-body cap, every box (default 65536; a larger body is a JSON 413) |
 | `SH_RATE_POST` / `SH_RATE_EXPENSIVE` / `SH_RATE_RESET` | per-address requests per minute for writes (120), backup/export downloads (10) and the demo reset (6); `SH_RATE_LIMIT=0` disables the limiter |

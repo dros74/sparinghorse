@@ -314,7 +314,7 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   or fatigue-capped session loses its chip — a session that no longer happens builds nothing, and the app
   won't claim otherwise.
 
-**A deload that is not owed (0.59.0).** The plan lays a down week every fourth week to absorb the
+**A deload that is not owed.** The plan lays a down week every fourth week to absorb the
 block before it. If the block was not actually run — a work trip, a cold — that deload is not owed,
 and the week card says so: the block's km against its bar, the load ratio, fatigue against fitness,
 and whether you checked in fresh. All four must hold, and the last is the one that matters: the
@@ -325,7 +325,7 @@ the volume the block was carrying, still under every cap, with no quality sessio
 answer is recorded once and stands. The engine will decide on its own only after its own ledger
 shows ten 28-day forecasts that under-predicted your fitness by 20 % or more.
 
-**Two numbers for a week (0.59.0).** A week has an *intent bar* (what the ramp asked for) and a
+**Two numbers for a week.** A week has an *intent bar* (what the ramp asked for) and a
 *sheet* (the sessions you read). They agree within a few percent on a normal week; where they do
 not, the card prints both — a race week's sheet includes the race, and a week already lived keeps
 the bar it was laid with. The adherence figures read the sheet; the governors read the bar.
@@ -334,7 +334,7 @@ the bar it was laid with. The adherence figures read the sheet; the governors re
 reps at marathon pace, the pace every long run has rehearsed. It is structured, not hard — the
 sharpening is in the freshness. Shorter races sharpen with a short tempo at threshold.
 
-**The limits strip (0.58.0).** Under each week's sessions a collapsed line says what held the week:
+**The limits strip.** Under each week's sessions a collapsed line says what held the week:
 "This week is held by the long-run step", or "No limit binds this week". Open it and every governor
 axis the regime runs is listed — the load ratio (ACWR), the long-run step, the damage-equivalent km
 for the week and for the single session, the near-ceiling streak, the fitness gain per week — each as
@@ -392,7 +392,7 @@ first time its outcome is knowable, written down, and **never rewritten**.
   whether a band contained the race, never what you ran. (Publishing the prediction beside its error
   would hand the finish time back, and your results are private.)
 
-**What else the ledger scores (0.58.0).** Beside the 28-day fitness checkpoint, the card shows the
+**What else the ledger scores.** Beside the 28-day fitness checkpoint, the card shows the
 bias at 7 and 14 days; **prescription adherence** (the session sheet the plan standing at a week's start
 asked for, against what was run — the intent bar rides with the row); **readiness calls** (the verdict
 a stored check-in implied — stop → red, heavy legs or poor sleep → amber — against that day's planned
