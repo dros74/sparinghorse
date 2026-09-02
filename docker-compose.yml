@@ -95,6 +95,13 @@ services:
       - SH_CF_ACCESS_AUD=${SH_CF_ACCESS_AUD:-}
       - SH_PROXY_CIDR=${SH_PROXY_CIDR:-}
       - SH_COOKIE_SECURE=${SH_COOKIE_SECURE:-}
+      # 0.56.1 — backups on their OWN volume (./backups), not beside the live database; the newest
+      # SH_BACKUP_KEEP (7) are kept. SH_BACKUP_PUSH runs inside the container after each snapshot
+      # with the file in $SH_BACKUP_FILE — the image has python and sh, not rclone, so a push that
+      # needs a tool must mount it or run on the host against ./backups. See DEPLOY.md §7.
+      - SH_BACKUP_DIR=/backups
+      - SH_BACKUP_KEEP=${SH_BACKUP_KEEP:-7}
+      - SH_BACKUP_PUSH=${SH_BACKUP_PUSH:-}
     volumes:
       # Locally-owned data copy lives on the NAS — back it up by copying this folder.
       # This is the single writer of the DB. Since 0.55.2 the files in it are owned by the app
@@ -104,6 +111,9 @@ services:
       # Private-only key store (Runalyze token / Claude key set in the Settings window). Deliberately
       # NOT under ./data and NOT mounted on the public container — keeps secrets off the open box.
       - ./secrets:/secrets
+      # Nightly snapshots (0.56.1) — a separate folder so a loss of ./data does not take its own
+      # backups with it. Copy it off the host on a schedule.
+      - ./backups:/backups
     networks:
       - edge
     # NO host-published port. This instance has the tokens + medical data and NO app-level auth —

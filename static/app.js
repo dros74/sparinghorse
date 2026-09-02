@@ -9,7 +9,7 @@ const $ = s => document.querySelector(s);
 const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
 // Per-workout calendar date, e.g. "Jun 23 - Tue" — so the runner can schedule life around the plan.
 const sessDate = iso => { if(!iso) return ""; const d=new Date(iso+"T00:00:00");
-  return d.toLocaleDateString("en-US",{month:"short",day:"numeric"})+" - "+d.toLocaleDateString("en-US",{weekday:"short"}); };
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" - "+d.toLocaleDateString(undefined,{weekday:"short"}); };   // 0.56.1: the one hard-coded en-US literal (review U5) — the browser's locale, like every other date on the page
 const getJSON = (url, opts) => fetch(url, opts).then(r => r.json().then(d => {
   if(r.status===401 && !SH_READONLY && !SH_DEMO){   // 0.56.0 — the session ended (or none yet): go and log in
     location.href = (d && d.setup) || ("/login?next=" + encodeURIComponent(location.pathname + location.search));
@@ -510,9 +510,9 @@ async function loadActivity(aid){
         <div class="rkick">${kick}</div>
         ${SH_READONLY||!a.id?"":`<div class="dqtools">`+
           (a.ignored
-            ? `<span class="muted">⊘ ignored</span> <a href="#" id="igntog" data-id="${a.id}" data-on="0">undo</a>`
-            : `<a href="#" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ ignore</a>`)+
-          `<a href="#" id="delact" data-id="${a.id}" class="delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ ignore instead.">🗑 delete</a></div>`}
+            ? `<span class="muted">⊘ ignored</span> <button type="button" class="linkbtn" id="igntog" data-id="${a.id}" data-on="0">undo</button>`
+            : `<button type="button" class="linkbtn" id="igntog" data-id="${a.id}" data-on="1" title="Exclude this activity from the fitness/fatigue reconstruction — for a duplicate or mis-tagged upload the auto-detector missed">⊘ ignore</button>`)+
+          `<button type="button" id="delact" data-id="${a.id}" class="linkbtn delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ ignore instead.">🗑 delete</button></div>`}
       </div>
       <div class="mrow">
         <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}${a.sj?` <span class="sjchip" title="This recording is part ${a.sj.index} of ${a.sj.parts} of a deliberately split session (${a.sj.km} km · ${a.sj.min} min total) — the read-back line below joins the parts. Numbers on this card are THIS part's own.">1+1 · part ${a.sj.index}/${a.sj.parts}</span>`:""}</span>
@@ -860,7 +860,7 @@ function renderReadiness(d){
   const hrv=a.hrv||{};
   const hrvTxt = hrv.state==null ? "HRV: no data"
     : `HRV ${hrv.baseline} vs ${hrv.band[0]}–${hrv.band[1]} — ${hrv.state}`;
-  const sel=(name,val,opts)=>`<label>${name}</label><select id="ci_${name}">`+
+  const sel=(name,val,opts)=>`<label>${name}</label><select id="ci_${name}" aria-label="${name==="energy"?"Legs":"Sleep"}">`+
     opts.map(([v,t])=>`<option value="${v}" ${v===val?"selected":""}>${t}</option>`).join("")+`</select>`;
   let aiLine="";
   if(a.source && a.source.startsWith("llm"))
@@ -1250,7 +1250,7 @@ function objManager(p){
     const isAnchor = p.objective && o.label===p.objective.label && o.date===p.objective.date;
     return `<div class="obj ${isAnchor?'anchor':''}">
       ${priBadge(o)}
-      <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:10px">· anchor</span>':''}</span>
+      <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:11px">· anchor</span>':''}</span>
       <span class="od">${dateCell(o)} · ${esc(o.type)} · ${esc(o.target)}</span>
       ${SH_READONLY?'':`<button class="x" data-oid="${o.id}">remove</button>`}
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;
@@ -1290,9 +1290,9 @@ function objManager(p){
     ${nlRow}
     <div class="addobj">
       <input id="ao_label" placeholder="race name" style="width:130px">
-      <select id="ao_type"><option>5k</option><option>10k</option><option>half</option><option selected>marathon</option><option>custom</option></select>
-      <input id="ao_date" type="date">
-      <select id="ao_pri"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
+      <select id="ao_type" aria-label="Race type"><option>5k</option><option>10k</option><option>half</option><option selected>marathon</option><option>custom</option></select>
+      <input id="ao_date" type="date" aria-label="Race date">
+      <select id="ao_pri" aria-label="Priority"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
       <input id="ao_target" placeholder="goal (finish / 3:55)" style="width:120px">
       <button class="primary" id="ao_add" style="font-size:12px;padding:6px 11px">Add objective</button>
     </div>
@@ -1309,7 +1309,7 @@ function renderAdjudicate(d){
   const recs=(d.recommendations||[]).map(r=>{
     const cur=OBJECTIVES.find(o=>o.id===r.id);
     const changed=cur && cur.priority!==r.suggested_priority;
-    return `<li><b>${esc(r.label)}</b> → <span class="pr ${r.suggested_priority}">${r.suggested_priority}</span>${r.id===d.primary_id?' <span class="muted mono" style="font-size:10px">· peak</span>':''}
+    return `<li><b>${esc(r.label)}</b> → <span class="pr ${r.suggested_priority}">${r.suggested_priority}</span>${r.id===d.primary_id?' <span class="muted mono" style="font-size:11px">· peak</span>':''}
       <div class="adjmeta">${esc(r.reason)}</div>
       ${changed?`<button class="applyrec" data-id="${r.id}" data-pri="${r.suggested_priority}" style="font-size:11px;padding:3px 9px;margin-top:4px">Set ${r.suggested_priority}</button>`:''}</li>`;
   }).join("");
@@ -2799,9 +2799,9 @@ async function loadSettings(){
     <label>Away / can't run</label>
     <ul class="avlist" id="avlist" style="list-style:none;margin:0 0 8px;padding:0"></ul>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input id="avfrom" type="date" style="max-width:150px">
+      <input id="avfrom" type="date" style="max-width:150px" aria-label="Away from">
       <span class="muted">→</span>
-      <input id="avto" type="date" style="max-width:150px">
+      <input id="avto" type="date" style="max-width:150px" aria-label="Away until">
       <input id="avnote" type="text" placeholder="note (optional) — e.g. flight" style="flex:1;min-width:120px">
       <button type="button" class="ghost" id="avadd">Add</button>
     </div>
@@ -2945,6 +2945,26 @@ async function loadAuth(){
     if(j.ok){ $("#pp_cur").value=""; $("#pp_new").value=""; $("#pp_new2").value=""; }
   });
   $("#logoutBtn").addEventListener("click", async ()=>{ try{ await fetch("/logout",{method:"POST"}); }catch(e){} location.href="/login"; });
+}
+// 0.56.1 (review O1) — the System block in Settings: the operational telemetry that already lived in
+// `meta` (last sync, the nightly's outcome, failures in a row, the watch push, the newest backup),
+// on the page instead of in `docker logs`.
+async function loadSystem(){
+  const host=$("#systemBox"); if(!host) return;
+  let d; try{ d=await getJSON("/api/system"); }catch(e){ host.innerHTML=""; return; }
+  if(!d.ok){ host.innerHTML=""; return; }
+  const when = iso => iso ? new Date(iso).toLocaleString() : "never";
+  const age = h => h==null ? "—" : h<1 ? "under an hour ago" : h<48 ? `${Math.round(h)} h ago` : `${Math.round(h/24)} d ago`;
+  const row = (k,v,warn) => `<div class="sysrow${warn?' warn':''}"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
+  host.innerHTML=`<div class="secblock"><div class="sectitle">System</div>
+    ${row("Engine", esc(d.engine_version||"")+(d.tz?` · clock ${esc(d.tz)}`:""))}
+    ${row("Last sync", esc(when(d.last_sync)), d.sync_stale)}
+    ${row("Nightly", d.sched.last_ok ? `ok ${esc(when(d.sched.last_ok))}` : "no successful run yet", !d.sched.last_ok)}
+    ${row("Failures in a row", String(d.sched.fail_count||0), (d.sched.fail_count||0)>0)}
+    ${row("Watch push", d.suunto.connected ? (d.suunto.last_push ? `pushed ${esc(when(d.suunto.last_push))}` : "connected") : "not connected")}
+    ${row("Newest backup", d.backup.latest ? `${esc(d.backup.latest)} · ${age(d.backup.age_h)}` : "none yet", !d.backup.latest || (d.backup.age_h||0)>48)}
+    ${row("Backups kept in", esc(d.backup.dir||""))}
+    <div class="help">Backups are written after each successful nightly; ${d.backup.push?"a push hook is configured":"no push hook (SH_BACKUP_PUSH)"} — see DEPLOY.md §7.</div></div>`;
 }
 async function loadSecrets(probe, justSaved){
   const host=$("#secretsBox"); if(!host) return;
@@ -3156,7 +3176,7 @@ if(SH_READONLY){
   const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
   const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
 }else{
-  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadAuth(); loadDurability(); loadEfficiency();
+  loadReadiness(); loadHealth(); loadSettings(); loadSecrets(); loadAuth(); loadSystem(); loadDurability(); loadEfficiency();
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 

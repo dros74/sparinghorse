@@ -19,7 +19,7 @@ APP_UID="${SH_UID:-10001}"
 APP_GID="${SH_GID:-10001}"
 
 if [ "$(id -u)" = "0" ]; then
-  for d in /data /secrets; do
+  for d in /data /secrets /backups; do
     [ -d "$d" ] || continue
     if ! chown -R "$APP_UID:$APP_GID" "$d" 2>/dev/null; then
       echo "[entrypoint] could not chown $d to $APP_UID:$APP_GID — the app may be unable to write there" >&2

@@ -605,6 +605,8 @@ The **Settings** window (private container only) is where you configure the app 
   **Log out**. Sessions last 30 days per device. Forgotten passphrase: `python SparingHorse.py passphrase
   --reset` inside the container clears it and the first-boot page comes back; `--set` sets one from the
   terminal. Five wrong attempts lock the address for a minute, doubling up to fifteen.
+- **System** (0.56.1) — last sync, the nightly's outcome and failures in a row, the watch push, the
+  newest backup and its age. What `docker logs` used to be for.
 - **AI features** (0.56.0) — three switches, each saying what it sends to Anthropic when a Claude key is
   set: *plan narration* (the computed plan summary and the athlete context), *goal parsing and race
   advice* (the typed goal and the objectives list), and *check-in judgment and free-text adjustments* (the
@@ -685,8 +687,12 @@ ever laid — the effort monitor reads from it). Back those up.
 Two downloads, both in **Settings → Backup & export** (private console only):
 
 - **Database snapshot (.db)** — a complete, consistent copy of the database (safe to take while the
-  app runs). Restore: stop the container, drop the file into `./data` as `sparinghorse.db`, start it.
-  This is the recommended backup.
+  app runs). This is the recommended backup. The private box also writes one to `./backups` after
+  every successful nightly (seven kept; `SH_BACKUP_PUSH` can carry each one off the host).
+  **Restore:** stop the container and run `python SparingHorse.py restore <snapshot>` (inside the
+  stack: `docker compose stop sparinghorse && docker compose run --rm sparinghorse python
+  SparingHorse.py restore /backups/<file> && docker compose start sparinghorse`). It refuses a file
+  that is not a Sparing Horse database and keeps the previous file beside the restored one.
 - **Data export (.json)** — a portable export of just the non-rebuildable tables. Restore into a
   *fresh* instance with `python SparingHorse.py import <file>` (it refuses to import over existing
   data), then **Sync** + **Backfill all** to rebuild activities from Runalyze.

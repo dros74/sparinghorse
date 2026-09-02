@@ -22,18 +22,18 @@ document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.we
 <script>if("serviceWorker" in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/sw.js").catch(function(){})})}</script>
 <link rel="stylesheet" href="/static/app.css?v=__SH_VER__"></head>
 <body data-mtab="today" data-page="__SH_PAGE__">
-  <div class="topbar">
+  <div class="topbar" role="banner">
     __SH_HUBLINK__
     <div class="topctl">
-      <span class="themes" id="themes">
-        <button class="swatch" data-theme="light" title="Daylight" style="--sw:linear-gradient(90deg,#f4f1ea 50%,#b9542c 50%)"></button>
-        <button class="swatch" data-theme="dark"  title="Charcoal" style="--sw:linear-gradient(90deg,#191a1d 50%,#fa7d42 50%)"></button>
-        <button class="swatch" data-theme="aurora" title="Aurora" style="--sw:linear-gradient(90deg,#121226 50%,#7b61ff 50%)"></button>
+      <span class="themes" id="themes" role="group" aria-label="Theme">
+        <button class="swatch" data-theme="light" title="Daylight" aria-label="Daylight theme" style="--sw:linear-gradient(90deg,#f4f1ea 50%,#b9542c 50%)"></button>
+        <button class="swatch" data-theme="dark"  title="Charcoal" aria-label="Charcoal theme" style="--sw:linear-gradient(90deg,#191a1d 50%,#fa7d42 50%)"></button>
+        <button class="swatch" data-theme="aurora" title="Aurora" aria-label="Aurora theme" style="--sw:linear-gradient(90deg,#121226 50%,#7b61ff 50%)"></button>
       </span>
     </div>
   </div>
 __SH_DEMOBAR__
-  <div class="wrap">
+  <main class="wrap">
     <header>
       <div class="brand">
         <span class="dotmark"><svg class="" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="46" fill="none" stroke="var(--text)" stroke-width="1.1" opacity=".22"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(45 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(135 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(225 50 50)"/><path d="M50,50 L47.5,30 L50,11 L52.5,30 Z" fill="var(--text)" opacity=".28" transform="rotate(315 50 50)"/><path d="M50.0,16.0 L51.2,16.1 L52.3,16.4 L53.5,16.9 L54.5,17.6 L55.5,18.5 L56.5,19.6 L57.3,20.9 L57.9,22.3 L58.5,23.8 L58.9,25.5 L59.2,27.3 L59.3,29.2 L59.2,31.2 L58.9,33.2 L58.5,35.3 L57.9,37.4 L57.1,39.4 L56.2,41.5 L55.1,43.5 L53.8,45.5 L52.4,47.4 L50.8,49.1 L49.1,50.8 L47.4,52.4 L45.5,53.8 L43.5,55.1 L41.5,56.2 L39.4,57.1 L37.4,57.9 L35.3,58.5 L33.2,58.9 L31.2,59.2 L29.2,59.3 L27.3,59.2 L25.5,58.9 L23.8,58.5 L22.3,57.9 L20.9,57.3 L19.6,56.5 L18.5,55.5 L17.6,54.5 L16.9,53.5 L16.4,52.3 L16.1,51.2 L16.0,50.0 L16.1,48.8 L16.4,47.7 L16.9,46.5 L17.6,45.5 L18.5,44.5 L19.6,43.5 L20.9,42.7 L22.3,42.1 L23.8,41.5 L25.5,41.1 L27.3,40.8 L29.2,40.7 L31.2,40.8 L33.2,41.1 L35.3,41.5 L37.4,42.1 L39.4,42.9 L41.5,43.8 L43.5,44.9 L45.5,46.2 L47.4,47.6 L49.1,49.2 L50.8,50.9 L52.4,52.6 L53.8,54.5 L55.1,56.5 L56.2,58.5 L57.1,60.6 L57.9,62.6 L58.5,64.7 L58.9,66.8 L59.2,68.8 L59.3,70.8 L59.2,72.7 L58.9,74.5 L58.5,76.2 L57.9,77.7 L57.3,79.1 L56.5,80.4 L55.5,81.5 L54.5,82.4 L53.5,83.1 L52.3,83.6 L51.2,83.9 L50.0,84.0 L48.8,83.9 L47.7,83.6 L46.5,83.1 L45.5,82.4 L44.5,81.5 L43.5,80.4 L42.7,79.1 L42.1,77.7 L41.5,76.2 L41.1,74.5 L40.8,72.7 L40.7,70.8 L40.8,68.8 L41.1,66.8 L41.5,64.7 L42.1,62.6 L42.9,60.6 L43.8,58.5 L44.9,56.5 L46.2,54.5 L47.6,52.6 L49.2,50.9 L50.9,49.2 L52.6,47.6 L54.5,46.2 L56.5,44.9 L58.5,43.8 L60.6,42.9 L62.6,42.1 L64.7,41.5 L66.8,41.1 L68.8,40.8 L70.8,40.7 L72.7,40.8 L74.5,41.1 L76.2,41.5 L77.7,42.1 L79.1,42.7 L80.4,43.5 L81.5,44.5 L82.4,45.5 L83.1,46.5 L83.6,47.7 L83.9,48.8 L84.0,50.0 L83.9,51.2 L83.6,52.3 L83.1,53.5 L82.4,54.5 L81.5,55.5 L80.4,56.5 L79.1,57.3 L77.7,57.9 L76.2,58.5 L74.5,58.9 L72.7,59.2 L70.8,59.3 L68.8,59.2 L66.8,58.9 L64.7,58.5 L62.6,57.9 L60.6,57.1 L58.5,56.2 L56.5,55.1 L54.5,53.8 L52.6,52.4 L50.9,50.8 L49.2,49.1 L47.6,47.4 L46.2,45.5 L44.9,43.5 L43.8,41.5 L42.9,39.4 L42.1,37.4 L41.5,35.3 L41.1,33.2 L40.8,31.2 L40.7,29.2 L40.8,27.3 L41.1,25.5 L41.5,23.8 L42.1,22.3 L42.7,20.9 L43.5,19.6 L44.5,18.5 L45.5,17.6 L46.5,16.9 L47.7,16.4 L48.8,16.1 L50.0,16.0 Z" fill="color-mix(in oklab,var(--accent),transparent 86%)" stroke="color-mix(in oklab,var(--accent),transparent 50%)" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/><path d="M50,4 L52.3,9.6 L50,7.7 L47.7,9.6 Z" fill="var(--accent)"/><circle cx="50" cy="50" r="3.2" fill="var(--accent)"/></svg></span>
@@ -55,22 +55,22 @@ __SH_DEMOBAR__
     <div id="dqbanner"></div>
     <div id="objbar" class="objbar" data-mtab="today"></div>
 
-    <div class="section" id="sec-readiness" data-mtab="today">
-      <h2>Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
+    <div class="section" id="sec-readiness" role="region" aria-labelledby="h-readiness" data-mtab="today">
+      <h2 id="h-readiness">Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
       <div class="rgrid">
         <div id="readiness"><div class="empty">Loading…</div></div>
         <div class="panel acwrcard">
-          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:10px;font-weight:400">— this week's load against your base</span></div>
+          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:11px;font-weight:400">— this week's load against your base</span></div>
           <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
           <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
-          <p class="muted" style="font-size:11px;margin:10px 0 0;line-height:1.5">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine sizes every planned week against 1.25 — but on a shape-neutral reading of the ratio, not the raw sample shown here, which reads higher and may print above 1.30 with nothing breached; the governed number is published beside it. Race week is the deliberate outlier: it carries the race itself, which is fixed. It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
+          <p class="muted" style="font-size:12px;margin:10px 0 0;line-height:1.5">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine sizes every planned week against 1.25 — but on a shape-neutral reading of the ratio, not the raw sample shown here, which reads higher and may print above 1.30 with nothing breached; the governed number is published beside it. Race week is the deliberate outlier: it carries the race itself, which is fixed. It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
           <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
         </div>
         <!-- §3.3 / 0.32.0 — the durability tracker. PRIVATE-only (decoupling is HR-adjacent): app.js
              removes this card on the public box, where the ACWR card then takes the whole second
              row (.rgrid:not(:has(.durcard))). Populated by loadDurability from /api/durability. -->
         <div class="panel acwrcard durcard" id="durcard">
-          <div class="acwr-title">Durability <span class="muted mono" style="font-size:10px;font-weight:400">— how your running economy holds up over long runs</span></div>
+          <div class="acwr-title">Durability <span class="muted mono" style="font-size:11px;font-weight:400">— how your running economy holds up over long runs</span></div>
           <div id="durbody"><div class="empty">Loading…</div></div>
         </div>
       </div>
@@ -83,22 +83,22 @@ __SH_DEMOBAR__
            shared frame would assert a relationship the corpus has not earned. Populated by
            loadEfficiency from /api/efficiency. -->
       <div class="panel effcard" id="effcard">
-        <div class="acwr-title">Aerobic efficiency <span class="muted mono" style="font-size:10px;font-weight:400">— speed per heartbeat, and the weather it was earned in</span></div>
+        <div class="acwr-title">Aerobic efficiency <span class="muted mono" style="font-size:11px;font-weight:400">— speed per heartbeat, and the weather it was earned in</span></div>
         <div id="effbody"><div class="empty">Loading…</div></div>
       </div>
     </div>
 
-    <div class="section" id="sec-runs">
-      <h2>Run browser <span class="muted mono" style="font-size:12px">— pick a day, the run opens below</span></h2>
+    <div class="section" id="sec-runs" role="region" aria-labelledby="h-runs">
+      <h2 id="h-runs">Run browser <span class="muted mono" style="font-size:12px">— pick a day, the run opens below</span></h2>
       <div class="panel" id="runscal"><div class="empty">Loading calendar…</div></div>
     </div>
 
-    <div class="section" id="sec-recent" data-mtab="today">
+    <div class="section" id="sec-recent" data-mtab="today" role="region" aria-label="Latest running activity">
       <div class="panel" id="recent"><div class="empty">Loading latest activity…</div></div>
     </div>
 
-    <div class="section" id="sec-plan" data-mtab="plan">
-      <h2>Training plan <span class="muted mono" style="font-size:12px">— objective-driven, bounded by your fitness</span>
+    <div class="section" id="sec-plan" role="region" aria-labelledby="h-plan" data-mtab="plan">
+      <h2 id="h-plan">Training plan <span class="muted mono" style="font-size:12px">— objective-driven, bounded by your fitness</span>
         <button class="primary" id="planBtn" style="float:right;font-size:12px;padding:6px 12px">Generate plan</button></h2>
       <div class="panel" id="plan"><div class="empty">No plan yet.</div></div>
     </div>
@@ -113,18 +113,18 @@ __SH_DEMOBAR__
       <div class="panel" id="track"><div class="empty">Loading…</div></div>
     </details>
 
-    <div class="section" id="sec-shape" data-mtab="fitness">
-      <h2>Current shape <span class="muted mono" style="font-size:12px">— your headline fitness numbers, right now</span></h2>
+    <div class="section" id="sec-shape" role="region" aria-labelledby="h-shape" data-mtab="fitness">
+      <h2 id="h-shape">Current shape <span class="muted mono" style="font-size:12px">— your headline fitness numbers, right now</span></h2>
       <div class="grid" id="tiles"><div class="empty">Loading current shape…</div></div>
     </div>
 
-    <div class="section" id="sec-effort" data-mtab="fitness">
-      <h2>Effort discipline <span class="muted mono" style="font-size:12px">— are your easy days actually easy?</span></h2>
+    <div class="section" id="sec-effort" role="region" aria-labelledby="h-effort" data-mtab="fitness">
+      <h2 id="h-effort">Effort discipline <span class="muted mono" style="font-size:12px">— are your easy days actually easy?</span></h2>
       <div class="panel" id="effort"><div class="empty">Loading…</div></div>
     </div>
 
-    <div class="section" id="sec-zones" data-mtab="fitness">
-      <h2>Current zones <span class="muted mono" style="font-size:12px">— today's pace &amp; HR targets, tracking your fitness</span></h2>
+    <div class="section" id="sec-zones" role="region" aria-labelledby="h-zones" data-mtab="fitness">
+      <h2 id="h-zones">Current zones <span class="muted mono" style="font-size:12px">— today's pace &amp; HR targets, tracking your fitness</span></h2>
       <div class="panel" id="zones"><div class="empty">Loading…</div></div>
     </div>
 
@@ -145,13 +145,13 @@ __SH_DEMOBAR__
       <div class="panel"><div class="chart" id="chart"><div class="empty">No activities synced yet.</div></div></div>
     </details>
 
-    <div class="section" id="sec-health" data-mtab="body">
-      <h2>Health markers <span class="muted mono" style="font-size:12px">— metabolism &amp; the body behind the engine</span></h2>
+    <div class="section" id="sec-health" role="region" aria-labelledby="h-health" data-mtab="body">
+      <h2 id="h-health">Health markers <span class="muted mono" style="font-size:12px">— metabolism &amp; the body behind the engine</span></h2>
       <div class="hgrid" id="health"><div class="empty">No markers yet — add one below.</div></div>
       <form class="hform" id="hform">
-        <select id="hmarker" required></select>
-        <input id="hdate" type="date" required>
-        <input id="hvalue" type="number" step="any" placeholder="value" required>
+        <select id="hmarker" required aria-label="Marker"></select>
+        <input id="hdate" type="date" required aria-label="Reading date">
+        <input id="hvalue" type="number" step="any" placeholder="value" required aria-label="Value">
         <button class="primary" type="submit">Add reading</button>
       </form>
     </div>
@@ -164,6 +164,7 @@ __SH_DEMOBAR__
       <div class="modal-body">
         <div id="secretsBox"></div>
         <div id="authBox"></div>
+        <div id="systemBox"></div>
         <div id="settings"><div class="empty">Loading…</div></div>
       </div>
     </dialog>
@@ -189,7 +190,7 @@ __SH_DEMOBAR__
       <a class="ralink" href="https://runalyze.com" target="_blank" rel="noopener noreferrer"
          title="Sparing Horse runs on your Runalyze training data">powered by __RUNALYZE_LOGO__</a>
     </footer>
-  </div>
+  </main>
 
   <!-- Bottom tab bar — shown only ≤760px (CSS). Buttons use data-goto (not data-mtab) so the
        view-toggle never hides them; the wiring lives at the end of the main script. -->

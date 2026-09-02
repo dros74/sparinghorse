@@ -21,9 +21,36 @@ const ok = (name, cond) => { cond ? (pass++, console.log('  ✓ ' + name))
                                   : (fail++, console.log('  ✗ ' + name)); };
 
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1280, height: 1700 } });
+// bypassCSP: axe-core is injected as an inline script (0.56.1); the CSP itself is pinned by det/csp-worker
+const page = await browser.newPage({ viewport: { width: 1280, height: 1700 }, bypassCSP: true });
 const errors = [];
 page.on('pageerror', e => errors.push(String(e)));
+
+// 0.56.1 (review U2/U3) — axe-core on every surface the flows already reach. Two hard rules: no
+// CRITICAL violation (unlabelled controls, missing names) and no colour-contrast violation, in every
+// theme the page offers. Everything else is printed, not enforced.
+const AXE_SRC = require('fs').readFileSync(new URL('./vendor/axe.min.js', import.meta.url), 'utf8');
+async function axeCheck(label, pg = page) {
+  await pg.addScriptTag({ content: AXE_SRC });
+  const r = await pg.evaluate(async () => {
+    const res = await axe.run(document, { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa', 'best-practice'] } });
+    return res.violations.map(v => ({ id: v.id, impact: v.impact, n: v.nodes.length,
+      sample: v.nodes.slice(0, 2).map(x => x.target.join(' ') + ' — ' + (x.any[0] ? x.any[0].message : x.failureSummary || '').slice(0, 120)) }));
+  });
+  const critical = r.filter(v => v.impact === 'critical');
+  const contrast = r.filter(v => v.id === 'color-contrast');
+  const other = r.filter(v => v.impact !== 'critical' && v.id !== 'color-contrast');
+  ok(`axe ${label}: no critical violation (${critical.length})`, critical.length === 0);
+  ok(`axe ${label}: no colour-contrast violation (${contrast.length})`, contrast.length === 0);
+  for (const v of [...critical, ...contrast]) console.log(`      ${v.id} ×${v.n}: ${v.sample.join(' | ')}`);
+  if (other.length) console.log(`      (axe ${label}: ${other.map(v => v.id + '×' + v.n).join(', ')} — informational)`);
+}
+async function axeThemes(label) {
+  for (const t of ['dark', 'aurora', 'light']) {
+    await page.locator(`.swatch[data-theme="${t}"]`).click(); await page.waitForTimeout(300);
+    await axeCheck(`${label} · ${t}`);
+  }
+}
 
 async function runFull() {
   await page.waitForSelector('#tiles .tile', { timeout: 15000 });
@@ -521,6 +548,11 @@ async function runFull() {
     holds: weekHoldsToday({ start: '2026-09-21' }, '2026-09-27'),
     tz: Intl.DateTimeFormat().resolvedOptions().timeZone }));
   await nzCtx.close();
+  await axeCheck('dashboard'); await axeThemes('dashboard');
+  await page.click('#settingsBtn'); await page.waitForTimeout(800); await axeCheck('settings modal');
+  await page.keyboard.press('Escape'); await page.waitForTimeout(200);
+  await page.goto(BASE + '/runs', { waitUntil: 'networkidle' }); await page.waitForTimeout(800); await axeCheck('run browser');
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
   ok(`a week's end survives a southern DST switch (${nz.tz}: 2026-09-21 → ${nz.end})`,
      nz.end === '2026-09-27' && nz.holds === true);
 
@@ -696,6 +728,7 @@ async function runNoplan() {
 }
 
 async function runEmpty() {
+  await page.waitForTimeout(800); await axeCheck('empty first run');
   // fresh tokenless + dataless instance: tiles stay empty, the first-run card drives setup
   await page.waitForSelector('#firstrun .firstrun', { timeout: 15000 });
   ok('first-run card shown on an unconfigured instance', await page.locator('#firstrun .firstrun').count() === 1);
@@ -790,6 +823,7 @@ async function runPublic() {
   const tc = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
   ok('theme-color follows the switch on the public box too', tc === '#191a1d');
   await page.screenshot({ path: `${SHOTS}/10-public.png`, fullPage: true });
+  await axeCheck('public'); await axeThemes('public');
 }
 
 async function runPublicFull() {
@@ -814,6 +848,7 @@ async function runPublicFull() {
   ok('the latest-activity card still renders its date (any locale order)',   // CI's Chromium says "Tue, Sep 1"; a UK locale "Tue 1 Sept"
      /\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/.test(recentText) && !/Invalid Date/.test(recentText));
   await page.screenshot({ path: `${SHOTS}/11-public-full.png`, fullPage: true });
+  await axeCheck('public-full');
 }
 
 async function runMap() {
@@ -832,6 +867,7 @@ async function runMap() {
   await page.waitForTimeout(800);
   ok(`no CSP / integrity / Leaflet console errors (${cspErrors.length})`, cspErrors.length === 0);
   await page.screenshot({ path: `${SHOTS}/12-map.png`, fullPage: false });
+  await axeCheck('demo');
 }
 
 // 0.56.0 §AUTH — the private console locks itself. A fresh instance lands on /setup; a later visit

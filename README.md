@@ -205,6 +205,7 @@ than an invented explanation.
 | `SH_TRUST_PROXY_AUTH` / `SH_CF_ACCESS_TEAM` / `SH_CF_ACCESS_AUD` / `SH_PROXY_CIDR` | skip the login for a verified proxy identity (Cloudflare Access JWT, or a forwarded user from inside the CIDR) |
 | `SH_COOKIE_SECURE` | `0` only for a plain-http LAN box; the session cookie is Secure by default |
 | `SH_AI_NARRATION` / `SH_AI_PARSING` / `SH_AI_JUDGMENT` | env fallbacks for the three AI switches (1/0; Settings overrides; judgment defaults to 0) |
+| `SH_BACKUP_DIR` / `SH_BACKUP_KEEP` / `SH_BACKUP_PUSH` | private box: where nightly snapshots go (compose: `./backups`), how many to keep (7), a command to run after each (inside the container, file in `$SH_BACKUP_FILE`) |
 | `SH_MAX_BODY_BYTES` | request-body cap, every box (default 65536; a larger body is a JSON 413) |
 | `SH_RATE_POST` / `SH_RATE_EXPENSIVE` / `SH_RATE_RESET` | per-address requests per minute for writes (120), backup/export downloads (10) and the demo reset (6); `SH_RATE_LIMIT=0` disables the limiter |
 | `SH_DEMO_ROUTE_CENTER` | `lat,lon` the demo's synthetic routes are centred on (default: Central Park) |

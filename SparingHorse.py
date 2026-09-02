@@ -5892,7 +5892,8 @@ def _private_only_path(p):
     sanitizes on the public box (HR/TE/feeling dropped, judged on pace — `effort_discipline(public=…)`),
     so the score is public while the HR-led critique stays private."""
     return (p in ("/api/health", "/api/settings", "/api/geocode", "/api/secrets",
-                  "/api/secrets/validate", "/api/runs")   # §RB — calendar carries HR-zone grades
+                  "/api/secrets/validate", "/api/runs",   # §RB — calendar carries HR-zone grades
+                  "/api/system")                          # 0.56.1 — the household's timestamps
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
             or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the user's data
             or p.startswith("/api/availability")          # §AV — away days = empty-house broadcast
@@ -8795,6 +8796,27 @@ def api_health_add():
     return jsonify(ok=True)
 
 
+@app.get("/api/system")
+def api_system():
+    """0.56.1 (review O1) — the operational telemetry, on the page: last sync, the nightly's outcome
+    and failures in a row, the watch push, the newest backup and where backups go. Everything here
+    already lived in `meta` or on disk; it was only readable in `docker logs`. Private-only."""
+    db = get_db()
+    last_sync, last_ok = get_meta(db, "last_sync"), get_meta(db, "sched:last_ok")
+    files = _backup_files()
+    latest = files[-1] if files else None
+    age_h = round((time.time() - latest.stat().st_mtime) / 3600, 1) if latest else None
+    su = suunto_status()
+    return jsonify(ok=True, engine_version=ENGINE_VERSION, tz=(PROCESS_TZ or config().sync_tz.key),
+                   last_sync=last_sync,
+                   sync_stale=(not last_sync) or _seconds_since(last_sync) > SCHED_STALE_HOURS * 3600,
+                   sched={"last_run": get_meta(db, "sched:last_run"), "last_ok": last_ok,
+                          "fail_count": int(get_meta(db, "sched:fail_count", "0") or 0)},
+                   suunto={"connected": bool(su.get("connected")), "last_push": get_meta(db, "suunto:last_push")},
+                   backup={"dir": str(_backup_dir()), "latest": latest.name if latest else None, "age_h": age_h,
+                           "kept": len(files), "keep": BACKUP_KEEP, "push": bool(BACKUP_PUSH)})
+
+
 @app.get("/api/settings")
 def api_settings():
     """The settable non-secret personalization + provenance. Private-only via `_private_only_path`
@@ -9016,6 +9038,8 @@ def api_suunto_push():
     d = body()
     res = push_guides(get_db(), days=int(d.get("days") or SUUNTO_PUSH_DAYS),
                       recreate=bool(d.get("recreate")))
+    if res.get("ok") and not res.get("skipped"):            # 0.56.1 — the System block reads this
+        set_meta(get_db(), "suunto:last_push", _now_iso()); get_db().commit()
     return jsonify(**res), (200 if res.get("ok") or res.get("skipped") else 502)
 
 
@@ -9161,12 +9185,33 @@ def _daily_replan():
         db.close()
 
 
+# 0.56.1 (review F3) — backups used to sit beside the live database, in the same bind mount: the
+# thing being backed up and its backups shared one failure domain. SH_BACKUP_DIR puts them on their
+# own volume; SH_BACKUP_PUSH runs a command after each snapshot (inside the container, with the
+# snapshot's path in SH_BACKUP_FILE) for whatever carries it off the host; `restore` puts one back.
+BACKUP_DIR = Path(os.environ["SH_BACKUP_DIR"]) if os.environ.get("SH_BACKUP_DIR") else None   # None: beside the DB
+BACKUP_KEEP = int(os.environ.get("SH_BACKUP_KEEP", "7"))
+BACKUP_PUSH = (os.environ.get("SH_BACKUP_PUSH") or "").strip()
+
+
+def _backup_dir():
+    """Where snapshots go: SH_BACKUP_DIR, else the live database's own directory (as before 0.56.1).
+    Resolved at call time so a test that moves DB_PATH moves the backups with it."""
+    return BACKUP_DIR or DB_PATH.parent
+
+
+def _backup_files():
+    return sorted(_backup_dir().glob(f"{DB_PATH.stem}-backup-*.db"))
+
+
 def _backup_rotate():
-    """After a successful nightly: a consistent snapshot beside the DB (VACUUM INTO — WAL-safe,
-    page-consistent, compacted), dated, newest 7 kept — the NAS volume then holds a week of nightlies
-    with zero cron. Best-effort: a failed snapshot must never fail the nightly (caller catches)."""
+    """After a successful nightly: a consistent snapshot in BACKUP_DIR (VACUUM INTO — WAL-safe,
+    page-consistent, compacted), dated, newest BACKUP_KEEP kept, then the push hook if one is set.
+    Best-effort: a failed snapshot must never fail the nightly (caller catches). Returns the path."""
+    bdir = _backup_dir()
+    bdir.mkdir(parents=True, exist_ok=True)
     day = datetime.now().strftime("%Y-%m-%d")
-    target = DB_PATH.parent / f"{DB_PATH.stem}-backup-{day}.db"
+    target = bdir / f"{DB_PATH.stem}-backup-{day}.db"
     if target.exists():
         target.unlink()          # VACUUM INTO wants a fresh path; a same-day re-run replaces it
     db = connect_db()
@@ -9174,8 +9219,53 @@ def _backup_rotate():
         db.execute("VACUUM INTO ?", (str(target),))
     finally:
         db.close()
-    for f in sorted(DB_PATH.parent.glob(f"{DB_PATH.stem}-backup-*.db"))[:-7]:
+    for f in _backup_files()[:-BACKUP_KEEP]:
         f.unlink()
+    if BACKUP_PUSH:
+        try:
+            res = subprocess.run(BACKUP_PUSH, shell=True, timeout=900, capture_output=True, text=True,
+                                 env={**os.environ, "SH_BACKUP_FILE": str(target)})
+            tail = (res.stdout + res.stderr).strip()[-300:]
+            print(f"[backup] push hook exit {res.returncode}" + (f": {tail}" if tail else ""))
+        except Exception as e:                  # the snapshot is on disk either way
+            print(f"[backup] push hook failed: {e}")
+    return target
+
+
+def restore_db(snapshot, db_path=None):
+    """Put a snapshot back as the live database. Refuses anything that is not a readable Sparing
+    Horse database; keeps the current file beside it as `<db>.pre-restore-<stamp>`; removes the
+    -wal/-shm sidecars so SQLite does not replay the old journal over the restored pages. The server
+    must not be running against the file (CLI use: stop the container first — see DEPLOY.md §7).
+    Returns (ok, message)."""
+    db_path = Path(db_path or DB_PATH)
+    src = Path(snapshot)
+    if not src.is_file():
+        return False, f"{src} is not a file"
+    try:
+        chk = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        try:
+            if chk.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                return False, "the snapshot fails PRAGMA integrity_check"
+            tables = {r[0] for r in chk.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            chk.close()
+    except sqlite3.DatabaseError as e:
+        return False, f"not a SQLite database: {e}"
+    if not {"activities", "plans", "meta"} <= tables:
+        return False, "not a Sparing Horse database (activities/plans/meta missing)"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    keep = None
+    if db_path.exists():
+        keep = db_path.with_name(f"{db_path.name}.pre-restore-{stamp}")
+        shutil.copy2(db_path, keep)
+    for side in (db_path.with_name(db_path.name + "-wal"), db_path.with_name(db_path.name + "-shm")):
+        if side.exists():
+            side.unlink()
+    tmp = db_path.with_name(db_path.name + ".restoring")
+    shutil.copy2(src, tmp)
+    os.replace(tmp, db_path)
+    return True, (f"restored {src.name} → {db_path}" + (f"; the previous file is {keep.name}" if keep else ""))
 
 
 def _nightly_job(kind="nightly"):
@@ -9244,6 +9334,8 @@ def _nightly_job_once(kind="nightly"):
         db = connect_db()
         try:
             res = push_guides(db)
+            if res.get("ok") and not res.get("skipped"):     # 0.56.1 — the System block reads this
+                set_meta(db, "suunto:last_push", _now_iso()); db.commit()
         finally:
             db.close()
         if not res.get("skipped"):
@@ -9483,7 +9575,7 @@ SELFTEST_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>
   body{background:#141210;color:#ece7df;font:14px/1.5 system-ui,sans-serif;margin:0;padding:24px;max-width:1000px}
   h1{font-size:20px;margin:0 0 4px} .sub{color:#9a8f80;margin:0 0 18px;font-size:13px}
-  button{background:#d4744e;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;margin-right:8px}
+  button{background:#b9542c;color:#fff;border:0;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;margin-right:8px}   /* 0.56.1: white on the lighter terracotta was 3.3:1 */
   button.ghost{background:#2a251f;color:#ece7df}
   table{border-collapse:collapse;width:100%;margin-top:14px;font-size:13px}
   th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #2a251f;vertical-align:top}
@@ -9494,8 +9586,8 @@ SELFTEST_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
   .flag{color:#e3b34e} pre{margin:4px 0 0;white-space:pre-wrap;word-break:break-word;color:#b9ad9d;font-size:12px}
   .sumline{font:600 14px/1.6 ui-monospace,monospace;margin:12px 0}
   code{background:#2a251f;padding:2px 6px;border-radius:5px;font-size:12px}
-  a{color:#d4744e}
-</style></head><body>
+  a{color:#f2a27e}   /* 0.56.1: the dark page needs a lighter link than the button's fill */
+</style></head><body><main>
 <h1>Sparing Horse — self-test</h1>
 <p class="sub">Private diagnostics. The <b>browser self-check</b> drives the live §6c endpoints here (real key on the NAS) and stores results; the <b>server battery</b> runs the in-process scenarios. Both land in <code>/api/selftest</code>.</p>
 <div>
@@ -9616,7 +9708,7 @@ $("#run").addEventListener("click",runClient);
 $("#server").addEventListener("click",runServer);
 $("#json").addEventListener("click",()=>location.href="/api/selftest");
 runClient();
-</script></body></html>"""
+</script></main></body></html>"""
 
 
 # ── Synthetic seed (local test instance / demo mode) ─────────────────────────
@@ -10144,6 +10236,16 @@ if DEMO:
           f"reset every {DEMO_RESET_EVERY_S}s")
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "restore":     # CLI: python SparingHorse.py restore <snapshot.db>
+        # 0.56.1 — stop the server first (the file is replaced underneath it otherwise); inside the
+        # stack: `docker compose stop sparinghorse && docker compose run --rm sparinghorse python
+        # SparingHorse.py restore /backups/<file> && docker compose start sparinghorse`.
+        if len(sys.argv) < 3:
+            print("Usage: python SparingHorse.py restore <snapshot.db>")
+            sys.exit(2)
+        ok, msg = restore_db(sys.argv[2])
+        print(msg)
+        sys.exit(0 if ok else 1)
     if len(sys.argv) > 1 and sys.argv[1] == "passphrase":  # CLI: python SparingHorse.py passphrase --set | --reset
         # 0.56.0 — runs against the same store the server reads on every request, so it takes effect
         # at once: no restart. Inside the container: `docker compose exec sparinghorse python

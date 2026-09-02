@@ -159,13 +159,19 @@ a major upgrade (§7).
 
 ## 7. Backups, restore, rollback
 
-- The private box writes a consistent snapshot beside the database after every successful nightly
-  (`./data/sparinghorse-backup-YYYY-MM-DD.db`, seven kept). **Settings → Backup & export** downloads a
-  snapshot or a portable JSON export on demand. Copy `./data` and `./secrets` off the host on a
+- The private box writes a consistent snapshot to `./backups` after every successful nightly
+  (`sparinghorse-backup-YYYY-MM-DD.db`, `SH_BACKUP_KEEP` = 7 kept) — its own volume since 0.56.1, so
+  a loss of `./data` does not take the backups with it. `SH_BACKUP_PUSH` runs a command inside the
+  container after each snapshot with the file in `$SH_BACKUP_FILE` (the image has python and sh;
+  for rclone, run it on the host against `./backups`). **Settings → Backup & export** downloads a
+  snapshot or a portable JSON export on demand; **Settings → System** shows the newest backup's age. Copy `./data` and `./secrets` off the host on a
   schedule; the secrets store is encrypted at rest since 0.56.0 (keep `SH_SECRET_KEY` or
   `secrets.key` with the copy, or the tokens must be re-entered).
-- **Restore:** stop the stack, drop the snapshot into `./data` as `sparinghorse.db` (remove any
-  `-wal`/`-shm` files beside it), start the stack. The entrypoint re-owns the file.
+- **Restore:** `docker compose stop sparinghorse && docker compose run --rm sparinghorse python
+  SparingHorse.py restore /backups/<file> && docker compose start sparinghorse`. The command refuses
+  a file that is not a Sparing Horse database, keeps the previous file as
+  `sparinghorse.db.pre-restore-<stamp>`, and removes the WAL sidecars; the entrypoint re-owns the
+  result. (Dropping the file into `./data` by hand still works.)
 - **Rollback:** `git checkout <previous tag>` and `docker compose up -d --build`. The database from a
   newer release may carry columns the older code ignores; it will not carry data the older code
   cannot read.

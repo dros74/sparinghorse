@@ -403,6 +403,24 @@ def _stc_readiness_contrast():
                 fail.append(f"{theme}/{state}: verdict {verdict:.2f} < 3.0 (top stop)")
             if footer < 4.5:
                 fail.append(f"{theme}/{state}: footer {footer:.2f} < 4.5 (bottom stop)")
+    # 0.56.1 (review U3) — the theme TOKENS themselves, per theme: muted text on every surface, the
+    # ink on the accent buttons, and the text-safe accent/warn inks, all ≥ 4.5:1. The 2026-09-02
+    # review measured white on the Charcoal accent at 2.6:1 and Daylight's muted at 4.49:1.
+    for theme, sel in (("light", ":root"), ("dark", '[data-theme="dark"]'), ("aurora", '[data-theme="aurora"]')):
+        tok = {**root, **_stcss_decls(_stcss_rule(S.APP_CSS, sel))}
+        def col(name):
+            c, _ = _stcss_color(tok.get(name, ""), tok)
+            return c
+        pairs = [("--muted", "--bg"), ("--muted", "--surface"), ("--muted", "--surface2"),
+                 ("--onacc", "--accent"), ("--accent-ink", "--surface2"), ("--warn-ink", "--surface"),
+                 ("--text", "--surface2")]
+        for fg, bg in pairs:
+            try:
+                ratio = _stcss_contrast(col(fg), col(bg))
+            except Exception as e:
+                fails.append(f"{theme}: {fg}/{bg} unreadable ({e})"); continue
+            if ratio < 4.5:
+                fails.append(f"{theme}: {fg} on {bg} is {ratio:.2f}:1, under 4.5")
     return _st("det", "readiness-contrast",
                "readiness status card: verdict text ≥3:1 on the gradient top, footer ≥4.5:1 on the bottom stop, all 3 themes × states (WCAG relative luminance)",
                passed=not fail, expect="every theme×state ≥3.0 verdict / ≥4.5 footer",
@@ -2823,6 +2841,21 @@ def _stc_scheduler_health():
                     "meta": m2, "passed": p}); ok = ok and p
     finally:
         S.DB_PATH, S.run_sync, S.push_guides = saved
+    # 0.56.1 (review O1) — the same telemetry on the page: /api/system carries the sync/nightly/
+    # backup/watch fields on the private box and is private-only
+    saved_ro = S.READONLY
+    try:
+        c = S.app.test_client()
+        S.READONLY = False
+        sysj = c.get("/api/system").get_json() or {}
+        missing = [k for k in ("last_sync", "sched", "suunto", "backup", "engine_version") if k not in sysj]
+        S.READONLY = True
+        pub = c.get("/api/system").status_code
+        p = not missing and pub == 403
+        out.append({"case": "/api/system carries the telemetry on the private box and is 403 on the public one",
+                    "missing": missing, "public_status": pub, "passed": p}); ok = ok and p
+    finally:
+        S.READONLY = saved_ro
     return _st("det", "scheduler-health",
                "nightly telemetry + boot catch-up + rotated backups: healthz carries it (public: booleans "
                "only); stale last_ok ⇒ catch-up owed; success records/rotates, failure counts and skips the snapshot",
@@ -5778,6 +5811,50 @@ def _stc_backup_export():
         if not S._private_only_path(p):
             fails.append(f"{p} not private-only")
     src.close(); dst.close()
+    # 0.56.1 (review F3) — snapshots go to BACKUP_DIR (its own volume), BACKUP_KEEP are kept, and
+    # `restore_db` puts one back (keeping the previous file, dropping the WAL sidecars) while refusing
+    # a file that is not a Sparing Horse database
+    import tempfile as _tf, shutil as _sh
+    tdir = S.Path(_tf.mkdtemp(prefix="sh-bak-"))
+    saved_bd, saved_db, saved_keep = S.BACKUP_DIR, S.DB_PATH, S.BACKUP_KEEP
+    try:
+        live = tdir / "live.db"
+        c = _sq.connect(str(live)); c.executescript(S.SCHEMA)
+        c.execute("INSERT INTO meta VALUES('marker','one')"); c.commit(); c.close()
+        S.DB_PATH, S.BACKUP_DIR, S.BACKUP_KEEP = live, tdir / "backups", 2
+        for i in range(3):
+            t = S._backup_rotate()
+            t.rename(t.with_name(f"live-backup-2000-01-0{i + 1}.db"))   # three "days" of snapshots
+        names = sorted(p.name for p in S._backup_files())
+        if not (tdir / "backups").is_dir() or len(names) not in (2, 3):
+            fails.append(f"rotation into BACKUP_DIR wrote {names}")
+        S._backup_rotate()
+        if len(S._backup_files()) != 2:
+            fails.append(f"BACKUP_KEEP=2 left {len(S._backup_files())} snapshots")
+        snap = S._backup_files()[-1]
+        c = _sq.connect(str(live)); c.execute("UPDATE meta SET value='two' WHERE key='marker'"); c.commit(); c.close()
+        (tdir / "live.db-wal").write_bytes(b"")
+        ok, msg = S.restore_db(snap)
+        if not ok:
+            fails.append(f"restore refused a good snapshot: {msg}")
+        c = _sq.connect(str(live)); v = c.execute("SELECT value FROM meta WHERE key='marker'").fetchone()[0]; c.close()
+        if v != "one":
+            fails.append(f"restore did not put the snapshot's pages back (marker={v})")
+        if not list(tdir.glob("live.db.pre-restore-*")):
+            fails.append("restore kept no copy of the previous file")
+        if (tdir / "live.db-wal").exists():
+            fails.append("restore left the old WAL beside the restored file")
+        junk = tdir / "junk.db"; junk.write_text("not a database")
+        ok, msg = S.restore_db(junk)
+        if ok:
+            fails.append("restore accepted a file that is not a database")
+        other = tdir / "other.db"; oc = _sq.connect(str(other)); oc.execute("CREATE TABLE t(x)"); oc.commit(); oc.close()
+        ok, msg = S.restore_db(other)
+        if ok:
+            fails.append("restore accepted a SQLite file that is not a Sparing Horse database")
+    finally:
+        S.BACKUP_DIR, S.DB_PATH, S.BACKUP_KEEP = saved_bd, saved_db, saved_keep
+        _sh.rmtree(tdir, ignore_errors=True)
     return _st("det", "backup-export",
                "JSON export round-trips all non-rebuildable tables; import refuses non-empty/foreign/newer; VACUUM snapshot complete + secret-free; endpoints private-only",
                passed=not fails, expect="round-trip faithful + guards hold",
@@ -6945,7 +7022,7 @@ def _stc_calibration_inventory():
                 # lifetimes; none of them is a magnitude the plan is computed from
                 "PASSPHRASE_MIN", "LOGIN_MAX_FAILS", "LOGIN_LOCK_BASE_S", "LOGIN_LOCK_MAX_S",
                 "LOGIN_GLOBAL_FAILS", "LOGIN_GLOBAL_WINDOW_S", "SESSION_DAYS", "JWKS_TTL_S",
-                "_SCRYPT_LOG_N", "_SCRYPT_R", "_SCRYPT_P"}   # (_SCRYPT_MAXMEM is 2**27 — an expression, uncounted)
+                "_SCRYPT_LOG_N", "_SCRYPT_R", "_SCRYPT_P"}   # (_SCRYPT_MAXMEM is 2**27 and BACKUP_KEEP an env read — expressions, uncounted)
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -15410,6 +15487,16 @@ def _stc_touch_targets():
     for sel in (".swatch", ".qhint", ".prseg", ".hrange button"):
         if "relative" not in _stcss_decls(_stcss_rule(css, sel)).get("position", ""):
             fails.append(f"(c) {sel}: not position:relative — its ::before would anchor elsewhere")
+    # 0.56.1 (review U4) — the stop-symptom row is a ≥32px full row and the ignore/delete controls are
+    # buttons with a ≥24px box, not 15px anchors
+    stop = _stcss_decls(_stcss_rule(css, ".checkin .stop"))
+    if "32px" not in stop.get("min-height", ""):
+        fails.append("the stop-symptom row has no 32px minimum height")
+    lb = _stcss_decls(_stcss_rule(css, ".linkbtn"))
+    if "24px" not in lb.get("min-height", ""):
+        fails.append(".linkbtn has no 24px minimum height")
+    if 'class="linkbtn' not in S.APP_JS or 'id="igntog"' not in S.APP_JS or '<a href="#" id="igntog"' in S.APP_JS:
+        fails.append("ignore/delete are not rendered as .linkbtn buttons")
     return _st("det", "touch-targets",
                "the four sub-floor controls (theme swatches, ? hints, priority segments, health "
                "range buttons) project a transparent ::before hit area of ≥24px with no visual "

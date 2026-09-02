@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.56.1] - 2026-09-02
+
+### Fixed
+
+- **The page reads (review U2, U3, U4).** The 2026-09-02 review ran axe-core on every surface and
+  measured the type: unlabelled check-in selects and date inputs, no main landmark and 134 nodes
+  outside any landmark, about 200 text nodes under 11 px on the desktop dashboard (29 at 8.5 px),
+  white on the Charcoal accent at 2.6:1, the motto at 3.7:1, the "not set" badges at 3.7:1 at 9 px,
+  a 13 px stop-symptom checkbox as the smallest target on the readiness card, and 15 px ignore/delete
+  anchors. Now:
+  - **Landmarks and names.** The page has a `main`, a `banner` and a named region per section; the
+    check-in selects, the race-date and away-day inputs and the theme swatches carry accessible
+    names; the self-test page has a `main` too.
+  - **A type floor.** Nothing renders under 11 px; 85 stylesheet rules that sat between 8 and
+    10.5 px moved to 11, and 39 rules that carry information — session lines, the week's sessions,
+    help and error text, zones, chips with numbers, tooltips, the ACWR explainer — moved to 12.
+  - **Contrast in all three themes.** Daylight's muted text darkened to clear 4.5:1 on every surface;
+    dark ink on the Charcoal and Aurora accent buttons (white was 2.6:1 and 4.2:1); text-safe
+    `--accent-ink` / `--warn-ink` tokens for the motto, the objective date, the "not set" badge and
+    the demo button, so the paint hues stay for fills and gradients; the map's empty state and the
+    self-test page's button and links re-inked. `det/readiness-contrast` now checks the tokens per
+    theme.
+  - **Targets.** The stop-symptom control is a full 32 px row with an 18 px box; ignore and delete
+    are buttons with a 24 px box (they were `href="#"` anchors); the calendar arrows and the swatches
+    are taller. `det/touch-targets` pins the first two.
+  - **Enforced in the browser.** axe-core 4.10 is vendored into `test/` and the driver runs it on
+    the dashboard in all three themes, the Settings modal, the run browser, the first-run card, the
+    public box in all three themes, the public-full fixture and the demo: no critical violation and
+    no colour-contrast violation, or the flow fails.
+- **The one hard-coded `en-US` date** (review U5) — the weekly-chart label — follows the browser's
+  locale like every other date on the page.
+
+### Added
+
+- **Backups on their own volume, a push hook, and a restore command (review F3).** Snapshots used to
+  sit beside the live database in the same bind mount. `SH_BACKUP_DIR` (compose: `./backups`) puts
+  them on their own volume, `SH_BACKUP_KEEP` (7) bounds them, `SH_BACKUP_PUSH` runs a command inside
+  the container after each snapshot with the file in `$SH_BACKUP_FILE`, and
+  `python SparingHorse.py restore <snapshot>` puts one back: it refuses anything that is not a
+  Sparing Horse database, keeps the previous file beside the restored one, and removes the WAL
+  sidecars. The restore drill is recorded in PROJECT_LOG §125. `det/backup-export` drives all of it
+  on a temp directory.
+- **A System block in Settings (review O1).** Last sync, the nightly's outcome and failures in a
+  row, the watch push, the newest backup and its age, where backups go — the telemetry that lived
+  only in `docker logs`. `GET /api/system`, private-only; `det/scheduler-health` pins it.
+
 ## [0.56.0] - 2026-09-02
 
 ### Added
