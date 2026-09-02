@@ -582,10 +582,34 @@ def _stc_image_completeness():
     ghosts = sorted(c for c in copied if c.endswith(".py") and not (root / c).exists())
     fails = ([f"imported but never COPYed: {missing}"] if missing else []) + \
             ([f"COPYed but not in the tree: {ghosts}"] if ghosts else [])
+    # 0.55.2 (review S4) — the shape of the image, not just its contents: a digest-pinned base, the
+    # hash-pinned lock installed with --require-hashes, an entrypoint that drops privileges (and is
+    # COPYed, and executable, and really calls setpriv), a HEALTHCHECK, and the vendored Leaflet
+    # under static/ so the CSP's "no third-party script" claim is true inside the container.
+    text = df.read_text(encoding="utf-8")
+    if not S.re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}", text, S.re.M):
+        fails.append("FROM is not pinned to a digest")
+    if "requirements.lock" not in copied or "--require-hashes -r requirements.lock" not in text:
+        fails.append("the image does not install the hash-pinned requirements.lock")
+    if not (root / "requirements.lock").exists() or "--hash=sha256" not in (root / "requirements.lock").read_text(encoding="utf-8"):
+        fails.append("requirements.lock is missing or carries no hashes")
+    if "entrypoint.sh" not in copied or 'ENTRYPOINT ["/entrypoint.sh"]' not in text:
+        fails.append("no privilege-dropping ENTRYPOINT")
+    ep = root / "entrypoint.sh"
+    if not ep.exists() or "setpriv --reuid" not in ep.read_text(encoding="utf-8"):
+        fails.append("entrypoint.sh is missing or no longer drops to the app user with setpriv")
+    if "HEALTHCHECK" not in text:
+        fails.append("no HEALTHCHECK")
+    if "/healthz" not in text:
+        fails.append("the HEALTHCHECK does not probe /healthz")
+    if not (root / "static" / "vendor" / "leaflet-1.9.4" / "leaflet.js").exists():
+        fails.append("static/vendor/leaflet-1.9.4/leaflet.js is not in the tree the image COPYs")
     return _st("det", "image-completeness",
                "every local module the app imports — and the static/ tree it reads at import — is "
-               "COPYed into the image, and every COPYed module still exists",
-               passed=not fails, expect="no imported module missing from the Dockerfile",
+               "COPYed into the image, every COPYed module still exists, and the image is the "
+               "0.55.2 shape: digest-pinned base, hash-pinned lock, privilege-dropping entrypoint, "
+               "HEALTHCHECK on /healthz, vendored Leaflet",
+               passed=not fails, expect="no imported module missing from the Dockerfile; hardened image shape",
                got={"required": sorted(needed), "copied": sorted(copied), "failures": fails or "none"})
 
 
@@ -1366,14 +1390,38 @@ def _stc_csp_worker():
             fail.append(f"the CSP lost `{must}` — this fix must not be the one that opened it up")
     if "script-src 'nonce-" not in csp:
         fail.append("script-src is no longer nonce-based")
+    # (d) 0.55.2 (review S8) — no third-party script host, ever again. Leaflet is served from
+    # /static/vendor, `'strict-dynamic'` makes an injected `<script src=…>` dead whatever host it
+    # names, and the vendored file must actually be there or the map is the thing that broke.
+    if "unpkg" in csp:
+        fail.append("the CSP still names unpkg.com — Leaflet is vendored; no third-party script host")
+    if "'strict-dynamic'" not in csp:
+        fail.append("script-src has no 'strict-dynamic' — an injected script tag naming an allowed host would run")
+    lf = c.get("/static/vendor/leaflet-1.9.4/leaflet.js")
+    if lf.status_code != 200 or len(lf.data) < 100_000:
+        fail.append(f"/static/vendor/leaflet-1.9.4/leaflet.js is not served ({lf.status_code}, {len(lf.data)} bytes)")
+    html_js = c.get("/static/app.js").get_data(as_text=True)
+    if "unpkg.com" in html_js:
+        fail.append("app.js still loads Leaflet from unpkg.com")
+    # (e) the other two headers of the same release: Permissions-Policy always; HSTS only when the
+    # request came over TLS (plain http must NOT carry it — a LAN box would lock itself out)
+    if "geolocation=()" not in r.headers.get("Permissions-Policy", ""):
+        fail.append("no Permissions-Policy header")
+    if "Strict-Transport-Security" in r.headers:
+        fail.append("HSTS was sent on a plain-http request")
+    rs = c.get("/", headers={"X-Forwarded-Proto": "https"})
+    if "max-age=" not in rs.headers.get("Strict-Transport-Security", ""):
+        fail.append("no HSTS behind a proxy that says https")
     return _st("det", "csp-worker",
-               "§CSP the policy admits the app's own service worker (`worker-src 'self'`) so the PWA "
-               "layer it ships can actually register, the shell still asks for one and /sw.js is "
-               "served, and the rest of the policy — nonce'd scripts, no objects, no framing — is "
-               "unchanged",
+               "§CSP the policy admits the app's own service worker (`worker-src 'self'`), the shell "
+               "still registers /sw.js, no third-party script host is named and 'strict-dynamic' is "
+               "on with Leaflet served from /static/vendor, Permissions-Policy is set, HSTS rides only "
+               "on TLS requests, and the rest of the policy — nonce'd scripts, no objects, no "
+               "framing — is unchanged",
                passed=not fail,
-               expect="worker-src 'self' present · shell registers /sw.js · policy otherwise intact",
-               got={"csp": csp[:200], "sw_served": c.get("/sw.js").status_code,
+               expect="worker-src 'self' · /sw.js served · no unpkg · strict-dynamic · vendored Leaflet "
+                      "· Permissions-Policy · HSTS only over https · policy otherwise intact",
+               got={"csp": csp[:260], "sw_served": c.get("/sw.js").status_code,
                     "failures": fail or "none"})
 
 

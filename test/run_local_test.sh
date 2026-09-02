@@ -3,7 +3,7 @@
 # with Playwright, then tear down. No Runalyze token or network needed. Two phases:
 #   1. full  — a synthetic-seeded instance (dashboard, #67 dialog cycle, first-run hidden + step ③)
 #   2. empty — a fresh dataless instance (first-run card step ①)
-#   (+ noplan / settled / cold / blocked / public / publicfull — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
+#   (+ noplan / settled / cold / blocked / public / publicfull / map — see launch_and_drive calls below; "blocked" cuts /api/* + /healthz
 #    and asserts every tile reaches a failure terminus with a working retry, UX-3; "public" runs the
 #    READONLY shell over the no-plan fixture, UX-11)
 #
@@ -35,12 +35,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# launch_and_drive <db> <port> <mode> <label> [readonly=1]
+# launch_and_drive <db> <port> <mode> <label> [readonly=1] [demo=1]
 launch_and_drive() {
-  local db="$1" port="$2" mode="$3" label="$4" ro="${5:-0}"
-  local kind="PRIVATE"; [ "$ro" = "1" ] && kind="PUBLIC"
+  local db="$1" port="$2" mode="$3" label="$4" ro="${5:-0}" demo="${6:-0}"
+  local kind="PRIVATE"; [ "$ro" = "1" ] && kind="PUBLIC"; [ "$demo" = "1" ] && kind="DEMO"
   echo "▸ [$label] launching tokenless $kind instance on :$port"
-  SH_DB="$db" RUNALYZE_TOKEN= SH_PORT="$port" SH_READONLY="$ro" "$PY" SparingHorse.py >"$WORK/server-$mode.log" 2>&1 &
+  SH_DB="$db" RUNALYZE_TOKEN= SH_PORT="$port" SH_READONLY="$ro" SH_DEMO="$demo" SH_DEMO_RESET_EVERY_S=100000 \
+    "$PY" SparingHorse.py >"$WORK/server-$mode.log" 2>&1 &
   PIDS+=("$!")
   local up=0
   for _ in $(seq 1 40); do
@@ -101,6 +102,13 @@ PUBFULL_DB="$WORK/publicfull.db"
 echo "▸ seeding $PUBFULL_DB"
 SH_DB="$PUBFULL_DB" "$PY" SparingHorse.py seed >/dev/null
 launch_and_drive "$PUBFULL_DB" "$((PORT + 7))" publicfull "public-full" 1 || RC=$?
+
+# Phase 9 — map (0.55.2): the DEMO box on an EMPTY database — it seeds the synthetic athlete AND the
+# routes at boot (the CLI `seed --demo` writes runs but no routes; only demo_reset draws them), so this
+# is also the one place the demo's own first boot is exercised. Leaflet must render from /static/vendor
+# under the tightened CSP with a clean console.
+MAP_DB="$WORK/map.db"
+launch_and_drive "$MAP_DB" "$((PORT + 8))" map "map" 0 1 || RC=$?
 
 echo "▸ artifacts: $WORK (server logs + screenshots)"
 exit $RC

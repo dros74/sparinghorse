@@ -10,6 +10,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.55.2] - 2026-09-02
+
+### Security
+
+- **The container runs unprivileged, on a read-only root, with no capabilities and a memory ceiling
+  (§S4, review S4).** The image used to run as root with the live database bind-mounted read-write
+  — a compromise of the *public* box was a root shell over the real data and the nightly backups
+  beside it. Now `entrypoint.sh` starts as root only long enough to give `/data` and `/secrets` to
+  the app user (uid 10001; `SH_UID`/`SH_GID` to choose) and drops to it with `setpriv` for the life
+  of the process; a `USER` line alone would have booted the next deploy into "attempt to write a
+  readonly database" on any host whose mounts are root-owned. Compose merges one `x-hardening`
+  block into all three services: `read_only` (the app writes only to the mounts and a tmpfs
+  `/tmp`), `cap_drop: ALL` plus the four the entrypoint's first second needs, `no-new-privileges`,
+  `mem_limit: 512m` (the app sits at ~80 MB, the self-test child peaks at ~180 MB on a real-size
+  database — measured), and a `healthcheck` on `/healthz` that the Dockerfile also declares, so
+  `docker ps` finally shows healthy/unhealthy. The demo's secrets-store path moves to the tmpfs
+  (it holds nothing, but the status read opens the file).
+- **Pinned supply chain.** `FROM python:3.12-slim` is pinned by digest, and the wheels are installed
+  from a new `requirements.lock` with `--require-hashes` — 28 packages, every hash listed, generated
+  with `uv` for Python 3.12 on Linux. `anthropic` is constrained to the 0.x line the LLM layer was
+  written and exercised against; the unconstrained resolution would have pulled 1.3.0, a major the
+  code has never run on, on the next rebuild. CI installs the same lock, and a new CI job builds the
+  image, runs it exactly as compose does, waits for healthy, and asserts the server's uid, the
+  read-only root, the database's owner, the CSP and the vendored Leaflet from inside the container.
+- **No third-party script host in the Content-Security-Policy (review S8).** `script-src` allowed
+  any script from `unpkg.com` as a host source, so an HTML injection anywhere could have loaded an
+  arbitrary npm package despite the nonce. Leaflet 1.9.4 is now served from `static/vendor/` (the
+  exact unpkg bytes — the SRI pins in `app.js` still verify them, same-origin or not), `unpkg.com`
+  is gone from `script-src`, `style-src` and `img-src`, and `script-src` carries `'strict-dynamic'`:
+  only the nonce'd tags and the scripts they create may run, whatever host an injected tag names.
+  The map also works with the outside world cut off. Two more headers: `Permissions-Policy`
+  (geolocation, camera, microphone, payment all denied) on every response, and
+  `Strict-Transport-Security` only when the request came over TLS — behind the tunnel or a proxy
+  that says `X-Forwarded-Proto: https` — never on plain http, where a browser that cached it for a
+  LAN hostname could not reach the box again.
+
+### Documentation
+
+- **`DEPLOY.md`** — the operator's page: the three-box trust model as a diagram, the sentence
+  "never publish 8770", a Cloudflare Tunnel + Access and a Caddy `basic_auth` example, what the image
+  does to the host, upgrade, supply-chain bumps, backup, restore and rollback. Linked from the README
+  and the manual.
+
+### Tests
+
+- `det/csp-worker` now asserts the whole policy shape (no unpkg, `'strict-dynamic'`, the vendored
+  file served, `Permissions-Policy`, HSTS only over TLS); `det/image-completeness` asserts the image
+  shape (digest-pinned base, hash-pinned lock, privilege-dropping entrypoint, HEALTHCHECK, vendored
+  Leaflet); a new browser phase, `map`, drives the private console over the `--demo` fixture and
+  requires Leaflet to render from this origin with a clean console.
+
 ## [0.55.1] - 2026-09-02
 
 ### Security

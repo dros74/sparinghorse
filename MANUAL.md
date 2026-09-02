@@ -103,6 +103,9 @@ file editing is required for day-to-day use.
 
 ### Run with Docker (the public/private split)
 
+> The operator's page — the trust model, what must never be reachable, proxy examples, upgrade,
+> backup, restore and rollback — is [`DEPLOY.md`](DEPLOY.md).
+
 `docker compose` runs the **same image twice off one shared `./data` DB**:
 
     mkdir -p data && cp .env.example .env

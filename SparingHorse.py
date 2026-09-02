@@ -6035,14 +6035,27 @@ def _security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    # 0.55.2 (review S8) — the page asks for none of these; say so, so a script that somehow ran here
+    # could not ask either.
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), camera=(), microphone=(), payment=()")
+    # HSTS only when the request actually came over TLS — behind the tunnel or a proxy that says so
+    # (`X-Forwarded-Proto: https`), or a TLS listener of our own. Never on plain http: a browser that
+    # cached HSTS for a LAN hostname could not reach the box again until it expired.
+    if request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https":
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     nonce = getattr(g, "csp_nonce", None)
     if nonce:
         resp.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
-            f"script-src 'nonce-{nonce}' https://unpkg.com; "  # inline SPA (nonce) + Leaflet (unpkg)
-            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; "
+            # 0.55.2 — Leaflet is served from /static/vendor now, so no third-party host may run a
+            # script here at all. `'strict-dynamic'`: only the nonce'd tags and the scripts THEY
+            # create (app.js appends the Leaflet <script>) may execute; a host allowlist is ignored
+            # by browsers that understand it, which is the point — an injected `<script src=…>`
+            # from any host is dead whether or not it names one we once trusted.
+            f"script-src 'nonce-{nonce}' 'strict-dynamic'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src https://fonts.gstatic.com; "
-            "img-src 'self' data: https://*.tile.openstreetmap.org https://unpkg.com; "
+            "img-src 'self' data: https://*.tile.openstreetmap.org; "
             # `worker-src` was never declared, so the browser fell back to `script-src` — which
             # allows a nonce and unpkg and nothing else, and a nonce cannot be attached to a worker
             # script. The result: `navigator.serviceWorker.register("/sw.js")` has been BLOCKED on

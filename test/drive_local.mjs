@@ -815,6 +815,24 @@ async function runPublicFull() {
   await page.screenshot({ path: `${SHOTS}/11-public-full.png`, fullPage: true });
 }
 
+async function runMap() {
+  // 0.55.2 — Leaflet is served from /static/vendor and the CSP names no third-party script host.
+  // Driven over the `--demo` fixture (the only seed whose runs carry a route): the map must still
+  // render, from this origin, with a clean console — the tooth that catches a CSP that broke the
+  // map, a vendor path that 404s, or an SRI pin that no longer matches the bytes on disk.
+  const cspErrors = [];
+  page.on('console', m => { if (/Content.Security.Policy|Refused to|integrity|leaflet/i.test(m.text())) cspErrors.push(m.text()); });
+  await page.waitForSelector('#actmap.leaflet-container', { timeout: 20000 });   // Leaflet classes the container itself
+  const src = await page.evaluate(() => [...document.querySelectorAll('script[src]')].map(e => e.getAttribute('src')));
+  ok('Leaflet loads from this origin, not a CDN',
+     src.some(u => u.startsWith('/static/vendor/leaflet-1.9.4/leaflet.js')) && !src.some(u => /unpkg|cdn/.test(u)));
+  ok('the map rendered tiles or a route', await page.locator('#actmap .leaflet-tile, #actmap .leaflet-overlay-pane path').count() > 0);
+  ok('window.L is Leaflet 1.9.4', await page.evaluate(() => (window.L && window.L.version) || '') === '1.9.4');
+  await page.waitForTimeout(800);
+  ok(`no CSP / integrity / Leaflet console errors (${cspErrors.length})`, cspErrors.length === 0);
+  await page.screenshot({ path: `${SHOTS}/12-map.png`, fullPage: false });
+}
+
 try {
   console.log(`\n→ driving ${BASE}  (mode=${MODE})\n`);
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
@@ -825,6 +843,7 @@ try {
   else if (MODE === 'blocked') await runBlocked();
   else if (MODE === 'public') await runPublic();
   else if (MODE === 'publicfull') await runPublicFull();
+  else if (MODE === 'map') await runMap();
   else await runFull();
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));

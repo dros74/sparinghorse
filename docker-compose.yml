@@ -1,6 +1,42 @@
+# ── Hardening shared by all three services (0.55.2, review S4) ───────────────────────────────
+# One block, merged into each service below. What each line buys:
+#   read_only      the image's filesystem cannot be written at runtime — the app writes only to the
+#                  mounted /data, /secrets and the tmpfs /tmp (self-test snapshots, backup staging)
+#   cap_drop ALL   no Linux capability at all, except the four entrypoint.sh needs for its first
+#   cap_add …      second: CHOWN (give the mounts to the app user), SETUID/SETGID (drop to it),
+#                  DAC_OVERRIDE (traverse a mount whose files a previous run left owned by that user).
+#                  After the drop the process holds none of them — see entrypoint.sh.
+#   no-new-privileges  nothing exec'd from here can regain privileges via setuid binaries
+#   mem_limit      the app sits at ~80 MB and the self-test child peaks at ~180 MB on a real-size
+#                  database (measured 2026-09-02); 512 MB is 2× headroom, and a runaway is killed
+#                  rather than taking the host with it
+#   healthcheck    what `docker ps` shows as healthy/unhealthy — /healthz, which also carries the
+#                  scheduler's failure count (the Dockerfile declares the same probe)
+x-hardening: &hardening
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
+    - DAC_OVERRIDE
+  security_opt:
+    - no-new-privileges:true
+  mem_limit: 512m
+  healthcheck:
+    test: ["CMD", "python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8770/healthz', timeout=4).status == 200 else 1)"]
+    interval: 30s
+    timeout: 5s
+    start_period: 20s
+    retries: 3
+
 services:
   # ── Private — full read/write, behind Cloudflare Access (only the owner) ──────
   sparinghorse:
+    <<: *hardening
     build: .
     image: sparinghorse:local
     container_name: sparinghorse
@@ -47,7 +83,9 @@ services:
       - SH_GUIDE_URL=${SH_GUIDE_URL:-}
     volumes:
       # Locally-owned data copy lives on the NAS — back it up by copying this folder.
-      # This is the single writer of the DB.
+      # This is the single writer of the DB. Since 0.55.2 the files in it are owned by the app
+      # user (uid 10001 by default, SH_UID/SH_GID to change) — entrypoint.sh chowns the mount on
+      # every start, so a root-created folder keeps working.
       - ./data:/data
       # Private-only key store (Runalyze token / Claude key set in the Settings window). Deliberately
       # NOT under ./data and NOT mounted on the public container — keeps secrets off the open box.
@@ -65,6 +103,7 @@ services:
   # the connection is query_only, and there are NO tokens — so it cannot sync, call the
   # LLM, or write, even if something tried. It just renders the latest shape + plan.
   sparinghorse-public:
+    <<: *hardening
     image: sparinghorse:local
     container_name: sparinghorse-public
     restart: unless-stopped
@@ -102,6 +141,7 @@ services:
   # `POST /api/secrets` so a visitor cannot paste one in. The plan explainer serves a narration
   # baked beforehand with `SparingHorse.py demo-bake` (stored in the demo DB), flagged as a sample.
   sparinghorse-demo:
+    <<: *hardening
     image: sparinghorse:local
     container_name: sparinghorse-demo
     restart: unless-stopped
@@ -110,6 +150,10 @@ services:
     environment:
       - SH_DEMO=1
       - SH_DB=/data/sparinghorse.db
+      # The demo holds no secret and refuses to accept one, but the Settings panel's status read
+      # opens the store file to answer "not configured" — on a read-only root filesystem that open
+      # must land on the tmpfs, not in /app (0.55.2).
+      - SH_SECRETS_DB=/tmp/secrets.db
       # How often the synthetic athlete is restored. Lower it if the demo gets busy.
       - SH_DEMO_RESET_EVERY_S=3600
       # Give the demo the same clock as the rest of the stack, or its "today" is UTC and the

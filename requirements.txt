@@ -1,7 +1,9 @@
 Flask~=3.0
 waitress~=3.0
 requests~=2.31
-anthropic>=0.69    # LLM adjustment layer (§6c) — optional at runtime, app degrades gracefully without a key
+anthropic>=0.69,<1 # LLM adjustment layer (§6c) — optional at runtime, app degrades gracefully without a key.
+                   # <1: the 0.x SDK surface the layer was written and exercised against; 1.x is untested here.
+                   # The image installs requirements.lock (hash-pinned, generated from this file — see DEPLOY.md).
 tzdata             # IANA tz database (python:slim ships NO /usr/share/zoneinfo). §TZ depends on this
                    # TWICE: zoneinfo reads it directly, and _glibc_tzdir() points TZDIR at it so
                    # time.tzset() can move the PROCESS clock onto SH_TZ — the engine's 'today'.

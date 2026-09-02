@@ -698,14 +698,16 @@ function ensureLeaflet(){
   if(window.L) return Promise.resolve();
   if(LEAFLET_READY) return LEAFLET_READY;
   LEAFLET_READY=new Promise((res,rej)=>{
-    // Subresource Integrity: this runs in the PRIVATE instance (token + blood markers), so pin the
-    // exact 1.9.4 bytes — a compromised/MITM'd CDN can't substitute code. Hashes are version-locked.
+    // 0.55.2 — Leaflet 1.9.4 is served from THIS box (static/vendor/, the exact unpkg bytes), so the
+    // CSP names no third-party script host at all and the map works with the outside world cut off.
+    // The Subresource Integrity pins stay: same-origin or not, the browser refuses bytes that are
+    // not the ones this file was written against. Hashes are version-locked.
     const css=document.createElement("link");
-    css.rel="stylesheet"; css.href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+    css.rel="stylesheet"; css.href="/static/vendor/leaflet-1.9.4/leaflet.css";
     css.integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H";
     css.crossOrigin="anonymous"; document.head.appendChild(css);
     const js=document.createElement("script");
-    js.src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    js.src="/static/vendor/leaflet-1.9.4/leaflet.js";
     js.integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH";
     js.crossOrigin="anonymous";
     js.onload=()=>res(); js.onerror=()=>rej(new Error("leaflet failed to load"));

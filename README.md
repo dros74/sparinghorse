@@ -114,7 +114,10 @@ Screen* for a standalone window with an offline app shell. No store, no build st
 caches only the shell and never the API.
 
 ## Run with Docker — optional public + private split
-`docker compose` runs the **same image twice off one shared `./data` DB**:
+`docker compose` runs the **same image twice off one shared `./data` DB**. The operator's page —
+the trust model, what must never be reachable, the proxy examples, upgrade, backup and rollback — is
+[`DEPLOY.md`](DEPLOY.md); the quick version follows. Since 0.55.2 the image runs unprivileged on a
+read-only root with a healthcheck, and installs a hash-pinned `requirements.lock`.
 
     mkdir -p data && cp .env.example .env   # fill RUNALYZE_TOKEN (+ optional keys)
     docker compose up -d --build

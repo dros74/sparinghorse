@@ -30,7 +30,9 @@ jobs:
       # retrieved for pip but doesn't exist on disk"). Disabling the cache while declaring it
       # failed every run from the day CI landed, with every test step green — the worst shape a
       # broken gate can take, because it teaches you to read the red X as noise.
-      - run: pip install -r requirements.txt
+      # The same hash-pinned set the image installs (0.55.2): CI must not pass on a dependency
+      # the container would then refuse.
+      - run: pip install --require-hashes -r requirements.lock
 
       - name: Every module compiles
         run: |
@@ -83,6 +85,49 @@ jobs:
             echo "publish_mirror.sh absent (public mirror) — leak scan is a private-repo step"
           fi
 
+  image:
+    name: Container image (non-root, read-only, healthy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the image (digest-pinned base, hash-pinned wheels)
+        run: docker build -t sparinghorse:ci .
+      - name: Run it exactly as compose does and wait for healthy
+        run: |
+          mkdir -p "$RUNNER_TEMP/data" "$RUNNER_TEMP/secrets"
+          docker run -d --name sh \
+            --read-only --tmpfs /tmp \
+            --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE \
+            --security-opt no-new-privileges:true --memory 512m \
+            -e SH_DB=/data/sparinghorse.db -e SH_SECRETS_DB=/secrets/secrets.db \
+            -v "$RUNNER_TEMP/data:/data" -v "$RUNNER_TEMP/secrets:/secrets" \
+            sparinghorse:ci
+          status=starting
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' sh)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          docker logs sh 2>&1 | tail -20
+          [ "$status" = healthy ] || { echo "::error::the container never became healthy ($status)"; exit 1; }
+      - name: The app runs unprivileged, on a read-only root, and owns its data
+        run: |
+          # PID 1 is the server after entrypoint.sh dropped privileges; `docker exec` itself is root.
+          uid=$(docker exec sh sh -c "awk '/^Uid:/{print \$2}' /proc/1/status")
+          echo "server uid: $uid"
+          [ "$uid" = "10001" ] || { echo "::error::the server runs as uid $uid, not the app user"; exit 1; }
+          docker exec sh sh -c 'touch /app/x' && { echo "::error::the root filesystem is writable"; exit 1; }
+          owner=$(stat -c %u "$RUNNER_TEMP/data/sparinghorse.db")
+          echo "database owner uid: $owner"
+          [ "$owner" = "10001" ] || { echo "::error::the database is owned by uid $owner"; exit 1; }
+          docker exec sh python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8770/healthz').read().decode())"
+          h=$(docker exec sh python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8770/'); print(r.headers.get('Content-Security-Policy',''))")
+          echo "$h" | grep -q "strict-dynamic" && ! echo "$h" | grep -q "unpkg" || { echo "::error::CSP is not the 0.55.2 policy: $h"; exit 1; }
+          docker exec sh python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8770/static/vendor/leaflet-1.9.4/leaflet.js'); assert r.status==200 and len(r.read())>100000"
+      - if: always()
+        run: docker rm -f sh >/dev/null 2>&1 || true
+
   browser:
     name: Browser flows (Playwright)
     runs-on: ubuntu-latest
@@ -93,7 +138,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-      - run: pip install -r requirements.txt
+      # The same hash-pinned set the image installs (0.55.2): CI must not pass on a dependency
+      # the container would then refuse.
+      - run: pip install --require-hashes -r requirements.lock
       - uses: actions/setup-node@v7
         with:
           # The Node the BROWSER TESTS run on — a different axis from the `node24` runtime the
@@ -107,7 +154,7 @@ jobs:
         run: |
           npm install --no-save playwright
           npx playwright install --with-deps chromium
-      - name: Drive the real UI in 6 modes
+      - name: Drive the real UI in 9 modes
         env:
           PY: python
           NODE_PATH: ${{ github.workspace }}/node_modules
