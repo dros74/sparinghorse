@@ -11,7 +11,7 @@ the quick start; MANUAL.md covers using the app.
                          │
           ┌──────────────┴──────────────┐
           │  your reverse proxy / tunnel │   TLS ends here. The PRIVATE box has its own
-          │  (Cloudflare Tunnel + Access,│   passphrase login since 0.56.0 (§2a); a proxy
+          │  (Cloudflare Tunnel + Access,│   passphrase login of its own (§2); a proxy
           │   Caddy, nginx, Traefik …)   │   in front of it stays the first wall.
           └───┬──────────┬──────────┬───┘
    owner only │   anyone │   anyone │
@@ -26,8 +26,8 @@ the quick start; MANUAL.md covers using the app.
           ./secrets (private only)
 ```
 
-- **The private box locks itself (0.56.0)** — a passphrase, a login page, a 30-day session cookie,
-  and a first-boot page that serves nothing else until a passphrase exists (§2a). That is a second
+- **The private box locks itself**: a passphrase, a login page, a 30-day session cookie, and a
+  first-boot page that serves nothing else until a passphrase exists (§2). That is a second
   wall, not a reason to expose it: everything it holds — the Runalyze token, the Claude key, Suunto
   tokens, blood markers, readiness notes, a one-click full-database download — still deserves a
   proxy in front. **Never publish port 8770 to a network you do not fully trust.** The compose file
@@ -39,7 +39,7 @@ the quick start; MANUAL.md covers using the app.
 - **The demo box** is the full console over a synthetic athlete on its own named volume. It is safe
   to expose; visitors can drive the engine but not the box (see the README's refused list).
 
-## 2a. Access to the private console (0.56.0)
+## 2. Access to the private console
 
 - **Upgrading an existing box to 0.56.0+:** `sh prepare_env.sh --check` in the compose directory
   previews, `sh prepare_env.sh` writes — it backs up `.env`, generates `SH_SECRET_KEY` from
@@ -49,13 +49,12 @@ the quick start; MANUAL.md covers using the app.
   already set. Keep a copy of the new `.env` somewhere safe: the key is what decrypts the token store.
   `--check` exits 3 when something is pending (a directory to create, a variable to add) so a deploy
   script can stop before the build; its `.env.bak-<stamp>` backups are git-ignored.
-- **Where the two values are (0.60.0 — no dashboard needed).** Deploy once without the bypass, open
-  the private site through Access once, then `sh prepare_env.sh --from-container` reads the team and
-  the audience tag the console saw and asks you to confirm the team name; `docker compose up -d`
-  recreates the container with them. They also show in Settings → System. In the Zero Trust
-  dashboard (as of 2026-09) they are under Access controls → Applications → the application →
-  **Details** ("Application Audience (AUD) Tag"); the team is the part before `.cloudflareaccess.com`
-  in the login URL.
+- **Where the two values are.** No dashboard needed: deploy once without the bypass, open the private
+  site through Access once, then `sh prepare_env.sh --from-container` reads the team and the audience
+  tag the console saw and asks you to confirm the team name; `docker compose up -d` recreates the
+  container with them. They also show in Settings → System. The Zero Trust dashboard no longer shows
+  the audience tag on the application's page (checked 2026-09), which is why the console reads it for
+  you; the team is the part before `.cloudflareaccess.com` in the login URL.
 - **First boot.** With no passphrase in the secrets store the console serves only `/setup`. Either
   open it and set one (12+ characters), or put `SH_PASSPHRASE=…` in `.env` before the first start and
   the page never appears. `/healthz`, the static assets and the icons are the only other things
@@ -71,8 +70,8 @@ the quick start; MANUAL.md covers using the app.
 - **Skipping the login behind a proxy that already authenticates.** Set `SH_TRUST_PROXY_AUTH=1` and
   one of:
   - **Cloudflare Access:** `SH_CF_ACCESS_TEAM=yourteam` (the team name, or
-    `yourteam.cloudflareaccess.com`) and `SH_CF_ACCESS_AUD=` the application's audience tag from the
-    Access application's overview. The `Cf-Access-Jwt-Assertion` header on every tunnelled request is
+    `yourteam.cloudflareaccess.com`) and `SH_CF_ACCESS_AUD=` the application's audience tag (the one
+    `--from-container` reads). The `Cf-Access-Jwt-Assertion` header on every tunnelled request is
     verified against the team's published keys (RS256, issuer, audience, expiry); a request without a
     valid one falls back to the passphrase.
   - **A proxy on a dedicated network:** `SH_PROXY_CIDR=` the network the proxy speaks from; a request
@@ -83,7 +82,7 @@ the quick start; MANUAL.md covers using the app.
   store on first start. Losing the key means re-entering the tokens in Settings — the passphrase is
   unaffected. The box refuses to start if the store is readable by other users.
 
-## 2. What the image does to protect the host (0.55.2)
+## 3. What the image does to protect the host
 
 - **Runs unprivileged.** The container starts as root only long enough for `entrypoint.sh` to give
   the mounted `/data` and `/secrets` to the app user (uid/gid **10001** by default), then drops to
@@ -95,14 +94,14 @@ the quick start; MANUAL.md covers using the app.
   services. The app writes only to `/data`, `/secrets` and a tmpfs `/tmp`.
 - **Pinned supply chain.** The base image is pinned by digest, and the Python dependencies are
   installed from `requirements.lock` with `--require-hashes`: a rebuild installs exactly the wheels
-  that were reviewed, or fails. Bump either deliberately (see §6).
+  that were reviewed, or fails. Bump either on purpose (see §7).
 - **No third-party script host.** Leaflet is served from the image (`static/vendor/`); the
   Content-Security-Policy admits only the page's own nonce'd scripts. Map tiles still come from
   OpenStreetMap on the private box, and web fonts from Google Fonts on every box.
 - **Abuse dampers.** A 64 KB request-body cap and per-address rate limits on writes, downloads and
   the demo reset (see the README's configuration table). They are limits, not authentication.
 
-## 3. Putting a proxy in front
+## 4. Putting a proxy in front
 
 Whatever you use, the rule is the same: the private service is reachable only by authenticated
 you; the public and demo services may be open.
@@ -113,7 +112,7 @@ Docker network (`sparinghorse-edge`) and point three public hostnames at `http:/
 on the private hostname (an email allowlist is enough). The tunnel sets `CF-Connecting-IP` and
 `X-Forwarded-Proto`, which the rate limiter and the HSTS header read.
 
-**Caddy on the host (any VPS or home server).** The console has its own login since 0.56.0; Caddy's
+**Caddy on the host (any VPS or home server).** The console has its own login; Caddy's
 `basic_auth` (or `forward_auth` to an identity provider) stays a good second wall on the private
 hostname, and with `forward_auth` + `SH_PROXY_CIDR` the console can trust the identity Caddy sets:
 
@@ -136,7 +135,7 @@ Run Caddy on the `sparinghorse-edge` network (or add `ports: ["127.0.0.1:8770:87
 service and proxy to loopback — never to `0.0.0.0`). Caddy sets `X-Forwarded-For` and
 `X-Forwarded-Proto` by default.
 
-## 4. Running it
+## 5. Running it
 
 ```
 mkdir -p data secrets backups && cp .env.example .env   # fill RUNALYZE_TOKEN, SH_TZ, the optional keys
@@ -152,19 +151,19 @@ On a host where Docker needs root (a Synology, for instance), prefix the compose
 `sudo`. Compose reads `.env` for the whole file whatever service you name, so a root-owned `.env`
 makes a non-root `docker compose` fail before it looks at any service.
 
-## 5. Upgrading
+## 6. Upgrading
 
 **Every code release needs `docker compose up -d --build`.** A plain `up -d` restarts the same image
 and deploys nothing. **Upgrading past 0.56.1:** the private service bind-mounts `./backups`, and a
 Synology's Docker refuses to start a container whose bind source does not exist — `mkdir -p backups`
-first (`prepare_env.sh` creates `data`, `secrets` and `backups` for you). After the build, open the footer of the private page and check the version it
-prints matches the release; `/healthz` on any box reports `ok`. An `.env` change needs a container
-recreate (`up -d`), not a rebuild.
+first (`prepare_env.sh` creates `data`, `secrets` and `backups` for you). After the build, open the
+footer of the private page and check the version it prints matches the release; `/healthz` on any box
+reports `ok`. An `.env` change needs a container recreate (`up -d`), not a rebuild.
 
 Database migrations are additive and run at start; a downgrade is not tested. Take a snapshot before
-a major upgrade (§7).
+a major upgrade (§8).
 
-## 6. Bumping the pinned supply chain
+## 7. Bumping the pinned supply chain
 
 - **Base image:** look up the current digest (`docker manifest inspect python:3.12-slim` or the
   registry's manifest headers), replace the `FROM … @sha256:…` line, rebuild, run the suite, quote
@@ -174,16 +173,16 @@ a major upgrade (§7).
   rebuild, run the suite and the browser flows, and quote the version diff in the commit. CI
   installs the same lock, so a mismatch between the lock and the source fails there first.
 
-## 7. Backups, restore, rollback
+## 8. Backups, restore, rollback
 
 - The private box writes a consistent snapshot to `./backups` after every successful nightly
-  (`sparinghorse-backup-YYYY-MM-DD.db`, `SH_BACKUP_KEEP` = 7 kept) — its own volume since 0.56.1, so
-  a loss of `./data` does not take the backups with it. `SH_BACKUP_PUSH` runs a command inside the
+  (`sparinghorse-backup-YYYY-MM-DD.db`, `SH_BACKUP_KEEP` = 7 kept) on its own volume, so a loss of
+  `./data` does not take the backups with it. `SH_BACKUP_PUSH` runs a command inside the
   container after each snapshot with the file in `$SH_BACKUP_FILE` (the image has python and sh;
   for rclone, run it on the host against `./backups`). **Settings → Backup & export** downloads a
-  snapshot or a portable JSON export on demand; **Settings → System** shows the newest backup's age. Copy `./data` and `./secrets` off the host on a
-  schedule; the secrets store is encrypted at rest since 0.56.0 (keep `SH_SECRET_KEY` or
-  `secrets.key` with the copy, or the tokens must be re-entered).
+  snapshot or a portable JSON export on demand; **Settings → System** shows the newest backup's age.
+  Copy `./data` and `./secrets` off the host on a schedule; the secrets store is encrypted at rest
+  (keep `SH_SECRET_KEY` or `secrets.key` with the copy, or the tokens must be re-entered).
 - **Restore:** `docker compose stop sparinghorse && docker compose run --rm sparinghorse python
   SparingHorse.py restore /backups/<file> && docker compose start sparinghorse`. The command refuses
   a file that is not a Sparing Horse database, keeps the previous file as
@@ -193,7 +192,7 @@ a major upgrade (§7).
   newer release may carry columns the older code ignores; it will not carry data the older code
   cannot read.
 
-## 8. Reading the box
+## 9. Reading the box
 
 - `docker compose logs -f sparinghorse` — the app prints its own diagnostics (sync, scheduler, tz,
   secrets) to stdout; waitress logs to stderr.

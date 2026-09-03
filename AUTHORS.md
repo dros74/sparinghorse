@@ -1,6 +1,6 @@
 # Authors & provenance
 
-For complete transparency about who authored this project and how it was built.
+Who authored this project, and how it was built.
 
 ## Copyright holder
 
@@ -17,15 +17,15 @@ attaches to those human creative choices.
 ## How it was built
 
 The implementation code and documentation were written with substantial assistance from
-**Claude, Anthropic's AI assistant**, working under the author's direction — proposing
-implementations, drafting code and docs, and reviewing changes — with the author setting the goals,
+**Claude, Anthropic's AI assistant**, working under the author's direction: proposing
+implementations, drafting code and docs, and reviewing changes, with the author setting the goals,
 making the decisions at each fork, and approving every change.
 
-For honesty about the record: an AI is **not** a legal author and holds **no** copyright in its
-output. Anthropic's terms assign whatever ownership exists in the generated output to the user.
-Accordingly, the assistant is **not** a copyright holder. Many commits in the project history carry
-a `Co-Authored-By: Claude <noreply@anthropic.com>` trailer — that is an honest attribution of how
-the code was produced (a record of effort and method), **not** a claim of copyright.
+An AI is **not** a legal author and holds **no** copyright in its output. Anthropic's terms assign
+whatever ownership exists in the generated output to the user, so the assistant is **not** a
+copyright holder. Many commits in the project history carry a
+`Co-Authored-By: Claude <noreply@anthropic.com>` trailer. That records how the code was produced,
+the effort and the method; it is **not** a claim of copyright.
 
 ## Contributors
 

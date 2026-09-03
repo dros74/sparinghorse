@@ -146,7 +146,7 @@ if [ "$SET_KEY" = 0 ] && [ "$SET_CF" = 0 ] && [ -z "$PP" ]; then echo "Nothing t
 # ── write ──────────────────────────────────────────────────────────────────────────────────────────
 STAMP=$(date +%Y%m%d-%H%M%S)
 cp -p "$ENV_FILE" "$ENV_FILE.bak-$STAMP" && chmod 600 "$ENV_FILE.bak-$STAMP"
-printf '\n# — added by prepare_env.sh on %s (Sparing Horse console access, DEPLOY.md §2a) —\n' "$STAMP" >> "$ENV_FILE"
+printf '\n# — added by prepare_env.sh on %s (Sparing Horse console access, DEPLOY.md §2) —\n' "$STAMP" >> "$ENV_FILE"
 [ "$SET_KEY" = 1 ] && replace_or_append SH_SECRET_KEY "$(gen_key)"
 if [ "$SET_CF" = 1 ]; then
   replace_or_append SH_TRUST_PROXY_AUTH 1

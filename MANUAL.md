@@ -1,8 +1,7 @@
 # Sparing Horse — Self-Hoster's Manual
 
-A hands-on guide to **running** Sparing Horse (the app) and to **reading what it tells you**. For the
-one-paragraph pitch, the feature list and the public-vs-private capability matrix, see the
-[README](README.md); this document is the longer how-to that sits behind it.
+How to run Sparing Horse and how to read what it tells you. The feature list and the public-vs-private
+capability matrix are in the [README](README.md); this is the longer how-to behind it.
 
 > **Not medical advice.** Sparing Horse is a training tool, not a medical device. Its readiness gate flags
 > stop-the-run / cardiac-type symptoms and tells you to see a doctor — always do. Train at your own risk.
@@ -38,10 +37,11 @@ Sparing Horse does **not** generate a static plan from a template. It is a *func
 night (and on demand) it re-reads your current shape and your objectives and re-derives the **entire road
 ahead** — past weeks frozen exactly as you lived them, future weeks re-periodized. Three ideas to hold:
 
-- **It starts from where you actually are.** Pace zones come from your VO₂max, load from your TRIMP history,
-  the re-base block from your recent training. Nothing is assumed.
-- **The road moves in both directions.** Run well and earn fitness → the plan expands to use it. Run poorly
-  or miss sessions → it eases toward an honest goal. Every regeneration is diff-able against the last.
+- **It starts from where you are.** Pace zones come from your VO₂max, load from your TRIMP history, the
+  re-base block from your recent training. Nothing is assumed.
+- **The road moves in both directions.** Run well and earn fitness, and the plan expands to use it. Run
+  poorly or miss sessions, and it eases toward a goal you can still reach. Every regeneration can be
+  compared with the last.
 - **A plan is the road *ahead*.** Weeks you have already lived are carried verbatim and shown locked
   (🔒) for as long as they are part of the current block — but when a block ends and the road
   re-anchors, the plan starts from the new block and those older weeks are no longer in it. Nothing
@@ -49,24 +49,23 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
   was prescribed (the effort monitor) read from that whole history, not
   from the road currently on screen. The plan document answers "where am I going", not "where have
   I been" — the drift scorecard and the prediction ledger answer that.
-- **Safety is a governed ceiling — and the governed number is not the one on the card.** Every
-  planned week is sized against a **1.25** ceiling, and that bound is never broken. But the ratio the
-  governor decides on is a *shape-neutral* one — the week's mean acute load over its mean chronic
-  load, with the chronic denominator floored at low CTL — because the last-day sample lands on the
-  long run and carries a structural offset that is placement, not stress. The **ACWR shown on a week
-  card is that last-day sample**, so it reads higher, and on a hard building week it can print above
-  1.30 while the governed number sits at 1.25. Both numbers are published: the card shows the
-  reading, and each week also carries the governor's own decision variable beside it.
-  The in-week *peak* is bounded at **1.30** — except on the assertive build once the biomechanical
-  governors have a baseline to work from, where the damage-axis bounds (no session's equivalent-km
-  may jump past its step, no week's past the weekly ceiling) deliberately replace the per-day ratio
+- **Safety is a governed ceiling, and the governed number is not the one on the card.** Every planned
+  week is sized against a **1.25** ceiling, and that bound is never broken. The ratio the governor
+  decides on is shape-neutral: the week's mean acute load over its mean chronic load, with the chronic
+  denominator floored at low CTL. The last-day sample lands on the long run and carries an offset that
+  is placement, not stress. The **ACWR shown on a week card is that last-day sample**, so it reads
+  higher, and on a hard building week it can print above 1.30 while the governed number sits at 1.25.
+  Both numbers are published: the card shows the reading, and each week also carries the governor's
+  own decision variable beside it. The in-week *peak* is bounded at **1.30**, except on the assertive
+  build once the biomechanical governors have a baseline, where the damage-axis bounds (no session's
+  equivalent km may jump past its step, no week's past the weekly ceiling) replace the per-day ratio
   as the acute brake: injuries are biomechanical rather than physiological, and the per-day ratio was
-  measuring *where in the week we sampled* as much as what was run. Further brakes engage regardless
-  (long-run-jump cap, tissue limiter, chronic-growth cap). The plan follows your *measured* form —
+  measuring where in the week we sampled as much as what was run. Further brakes engage regardless
+  (long-run-jump cap, tissue limiter, chronic-growth cap). The plan follows your *measured* form;
   nothing is unlocked by adherence bookkeeping.
 
-You operate it by keeping your data synced and your objectives current. The engine does the rest; the AI
-layer (optional) only narrates and parses — it never overrides the deterministic safety logic.
+You operate it by keeping your data synced and your objectives current. The engine does the rest. The
+optional AI layer only narrates and parses; it never overrides the deterministic safety logic.
 
 > **What you inherit if you are not the author.** Most of the numbers in the engine are the sport's
 > published consensus (Daniels' pace zones, the acute:chronic band, the 10 % long-run rule, the 80/20
@@ -75,10 +74,10 @@ layer (optional) only narrates and parses — it never overrides the determinist
 > years of data and four marathons — and they are, in rough order of how much they matter to you, the
 > biomechanical damage weights, the low-load ACWR floor, the easy-day ladder, the phase ramps, and the
 > whole finish-time model. The governors among them **fail safe**: each is a ceiling that only ever
-> *reduces* load, so being wrong for you makes your plan too cautious, visibly, on the page. The
-> finish-time projection does not fail safe in that sense — it is a claim about *your* race day fitted
-> to someone else's races, which is why it always ships with an uncertainty band that widens honestly
-> when it has little to go on. Treat the band, not the time, as the output.
+> *reduces* load, so being wrong for you makes your plan too cautious, and you can see that on the page.
+> The finish-time projection does not fail safe in that sense. It is a claim about *your* race day fitted
+> to someone else's races, which is why it always ships with an uncertainty band that widens when it has
+> little to go on. Treat the band, not the time, as the output.
 
 ---
 
@@ -106,28 +105,30 @@ file editing is required for day-to-day use.
 > The operator's page — the trust model, what must never be reachable, proxy examples, upgrade,
 > backup, restore and rollback — is [`DEPLOY.md`](DEPLOY.md).
 
-`docker compose` runs the **same image twice off one shared `./data` DB**:
+`docker compose` runs the **same image three times**:
 
     mkdir -p data secrets backups && cp .env.example .env
     docker compose up -d --build
 
 | Service | Port | Role |
 |---|---|---|
-| `sparinghorse` | 8770 | Full read/write, holds the tokens, runs the nightly sync. **Keep it private** — behind a reverse proxy, Cloudflare Access, or a VPN. |
-| `sparinghorse-public` | 8771 | `SH_READONLY=1`, **no tokens**, an always-open read-only showcase. |
+| `sparinghorse` | 8770 | Full read/write, holds the tokens, runs the nightly sync. **Keep it private**: behind a reverse proxy, Cloudflare Access, or a VPN. |
+| `sparinghorse-public` | 8771 | `SH_READONLY=1`, **no tokens**, an always-open read-only showcase over the same `./data` database. |
+| `sparinghorse-demo` | 8770 | `SH_DEMO=1`, the full console over a synthetic athlete on its own volume, restored hourly. Optional. |
 
-**Why two containers and not one with a toggle?** The public container literally has no token and a
-query-only DB connection, so it *cannot* sync, write, or call the AI even if it wanted to. The split is the
-security boundary; see [§11](#11-the-privacy-model).
+**Why separate containers and not one with a toggle?** The public container has no token and a
+query-only DB connection, so it cannot sync, write, or call the AI. The split is the security boundary;
+see [§11](#11-the-privacy-model).
 
 ### Install it as an app (PWA)
 
 Sparing Horse is a Progressive Web App. In any modern browser, open your instance and choose **Install**
 (desktop Chrome/Edge: the install icon in the address bar) or **Add to Home Screen** (mobile) — you get a
-standalone window/icon with no browser chrome, and an offline app shell so the UI still loads with no
-connection (it'll show empty tiles until you're back online; the service worker caches only the shell, never
-your data or the API). Nothing to build or sideload; it works on both the private and public instances. On
-iOS the home-screen icon is lower-fidelity (Safari doesn't render the SVG app icon) — cosmetic only.
+standalone window with an icon and no browser chrome, and an offline app shell so the UI still loads
+with no connection (empty tiles until you are back online; the service worker caches only the shell, never
+your data or the API). Nothing to build or sideload; it works on the private, public and demo instances,
+and the installed app opens on `/today`. On iOS the home-screen icon is lower-fidelity (Safari does not
+render the SVG app icon); cosmetic only.
 
 ---
 
@@ -152,7 +153,7 @@ The card removes itself once all three are done.
 ## 4. Getting your data in
 
 - **Sync now** pulls recent activities plus today's shape snapshot. **Backfill all** walks your whole
-  history (run it once at setup; after that, nightly sync keeps you current).
+  history (run it once at setup; after that, the nightly sync keeps you current).
 - **Nightly auto-sync** runs at `SH_SYNC_AT` (default `22:00` in `SH_TZ`). Disable with `SH_SCHEDULE=0`.
 - **Watch-recorded health metrics.** Each sync also pulls your daily **HRV (sleeping RMSSD)**, **body weight**
   and **resting HR** from Runalyze into the health-markers charts (a routine sync grabs the last ~60 days; a
@@ -160,7 +161,7 @@ The card removes itself once all three are done.
   your own long-horizon baseline — useful precisely when a watch's short rolling baseline has re-anchored to
   a depressed period. Lab values (triglycerides, cholesterol, etc.) are entered manually and kept local.
 - **Duplicates.** If the same activity lands twice (e.g. a re-upload), a banner appears with a link to the
-  duplicate. Duplicates are excluded from the de-duplicated model that drives CTL/ATL, so they never quietly
+  duplicate. Duplicates are excluded from the de-duplicated model that drives CTL/ATL, so they never
   inflate your fitness.
 - **Delete / ignore an activity.** Each activity row has a 🗑 action. Deleting removes the *local* copy only
   (it does not touch Runalyze). A re-sync will **not** silently re-import a row you deleted unless it is
@@ -169,7 +170,7 @@ The card removes itself once all three are done.
 
 > **Reconstruction vs. snapshot.** CTL/ATL are reconstructed locally from your *running* TRIMP, and also
 > arrive as a daily *snapshot* from Runalyze (which includes all sports). The two can differ by a point or
-> two at the seam — that is expected (different scopes, different t0), not a bug. Non-running load (a tennis
+> two at the seam; that is expected (different scopes, different t0). Non-running load (a tennis
 > match, a bike ride) reaches the plan via the Runalyze snapshot, not via the local running reconstruction.
 
 ---
@@ -220,9 +221,8 @@ scorecard keeps reckoning the race for ~12 weeks. The plan itself never trains t
 ### Target times
 
 Enter a target like `3:30` (marathon/half, `H:MM`) or `21:00` (5k/10k, `MM:SS`), or just `finish`. The
-feasibility verdict reads your target honestly: it separates **finish healthy** (realistic off a rebuild)
-from a **time target** that the runway's chronic load won't support, and it re-reads this every block as
-real fitness returns.
+feasibility verdict separates **finish healthy** (realistic off a rebuild) from a **time target** that the
+runway's chronic load will not support, and it re-reads this every block as real fitness returns.
 
 ### The finish projection
 
@@ -238,9 +238,9 @@ Projected marathon finish 3:35:10–4:33:05
 ```
 
 - **off today's shape** — the same model run at your *current* measured state: today's speed, today's
-  chronic load, the longest long actually behind you.
+  chronic load, the longest long run behind you.
 - **by race day** — the same model at the state the laid plan projects you into.
-- **the build buys** — the difference, named honestly in both directions. A taper-only runway reads
+- **the build buys** — the difference, named in both directions. A taper-only runway reads
   *"this runway costs 6 min"*; a flat one reads *"holds today's shape"*.
 - Hovering shows the **what-if** the strip used to lead with: if the race were later, on the same
   training, +4 and +8 weeks. That prices a *later race date*, not your timeline — which is why it is a
@@ -248,33 +248,34 @@ Projected marathon finish 3:35:10–4:33:05
 
 Both axes move. Projected fitness comes from the plan's own chronic load and the long-run ladder it
 builds; projected speed is your measured aerobic profile carried forward through the laid weeks. Both
-are re-anchored on what you have actually run at every regeneration, so the projection cannot drift
+are re-anchored on what you have run at every regeneration, so the projection cannot drift
 away from reality — a fast or slow responder bends the curve, but neither can wander off it.
 
 **How wide the band is, and why.** Three things widen it: how variably you have raced before, how few
 races the engine has to calibrate on, and how far away the race is. The horizon part is *measured* from
-your own history — how far the projection has actually strayed over 2, 4, 8, 19 weeks — not assumed, and
+your own history — how far the projection has strayed over 2, 4, 8, 19 weeks — not assumed, and
 it grows slowly, because fitness is mean-reverting: week 20 adds far less uncertainty than week 2 did.
 The band narrows as races land and as race day approaches.
 
 **When it will not answer.** A prediction saved by an older version of the engine is labelled
-*"saved by an earlier engine — regenerate to re-read"* rather than presented as current — plans are
-versioned artifacts, and updating the app deliberately does not rewrite them. And if your most recent
+*"saved by an earlier engine — regenerate to re-read"* rather than presented as current: plans are
+versioned artifacts, and updating the app does not rewrite them. And if your most recent
 measured running is older than about eight weeks, the *"off today's shape"* line is withheld entirely,
 because a value from before a layoff is not a description of today. Run, and it re-anchors on its own.
 
 **It keeps score.** Every prediction is recorded, and once you race, settled against the result: whether
 the outcome fell inside the band, and a proper log score for how well-placed it was. The drift page
-plots the whole ledger, so the projection's own track record is visible rather than quietly forgotten.
+plots the whole ledger, so the projection's own track record stays visible.
 
 ---
 
 ## 6. Reading the dashboard, panel by panel
 
-> **Since 0.57.0** the dashboard is plan-first — objective, plan, readiness, latest run — and every analytics
-> panel below is collapsed until you open it (remembered per device). `/today` is the one-screen daily
-> surface: the readiness verdict, today's session, the check-in and one line saying why this session; the
-> installed app opens there. On wide screens a rail at the left lists the sections.
+> The dashboard is plan-first (objective, plan, readiness, latest run), and every analytics panel below is
+> collapsed until you open it (remembered per device). `/today` is the one-screen daily surface: the
+> readiness verdict, today's session, the check-in and one line saying why this session; the installed app
+> opens there. On wide screens a rail at the left lists the sections. The theme button in the header
+> switches between Daylight and Charcoal; without a saved choice the system setting decides.
 
 ### Current shape
 VO₂max, **CTL** (chronic load ≈ your fitness, a slow ~42-day average), **ATL** (acute load ≈ recent fatigue,
@@ -305,17 +306,16 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   four fitness components it chiefly builds (**VO₂max**, **SSmax/LT2**, **economy**, **resilience** — hover
   a chip for the science), and each phase header sums what the phase is *for*, derived from the sessions
   themselves. On the **assertive** regime the quality mix is periodized by component: a short VO₂ touch
-  appears already in Base (develop it early — it's cheap to hold later; the touch is deliberately small so
-  it fits the biomechanical budget of a volume rebuild), the mid-week interval session then keeps its full
-  size in a *maintenance role* through Build and Peak (it never grows — but shrinking it turned out to
-  lower the whole week's safe load, so it stays), while the marathon-pace long-run segment **grows week
-  over week at constant speed** (longer, not faster) and Peak pivots to resilience — the long-fast run is
-  the workout. The conservative regime keeps its gentler classic mix; you'll just see the tags. An eased
-  or fatigue-capped session loses its chip — a session that no longer happens builds nothing, and the app
-  won't claim otherwise.
+  appears already in Base (develop it early, it is cheap to hold later; the touch is small so it fits the
+  biomechanical budget of a volume rebuild), the mid-week interval session then keeps its full
+  size in a *maintenance role* through Build and Peak (it never grows, but shrinking it lowers the whole
+  week's safe load, so it stays), while the marathon-pace long-run segment **grows week over week at
+  constant speed** (longer, not faster) and Peak pivots to resilience: the long fast run is the workout.
+  The conservative regime keeps its gentler classic mix; only the tags show. An eased or fatigue-capped
+  session loses its chip: a session that no longer happens builds nothing.
 
 **A deload that is not owed.** The plan lays a down week every fourth week to absorb the
-block before it. If the block was not actually run — a work trip, a cold — that deload is not owed,
+block before it. If the block was not run (a work trip, a cold) that deload is not owed,
 and the week card says so: the block's km against its bar, the load ratio, fatigue against fitness,
 and whether you checked in fresh. All four must hold, and the last is the one that matters: the
 engine cannot tell a busy week from an ill one, only you can, so a check-in saying legs good and
@@ -340,12 +340,12 @@ axis the regime runs is listed — the load ratio (ACWR), the long-run step, the
 for the week and for the single session, the near-ceiling streak, the fitness gain per week — each as
 *laid / ceiling* with the headroom and a letter for the ceiling's basis: **L** from the literature,
 **A** fitted to your own history, **S** a structural choice. A held axis is marked; the binding one is
-the axis that actually decided the week's size. Below the axes, the injury-risk read: whether the
+the axis that decided the week's size. Below the axes, the injury-risk read: whether the
 long run sits within the +10 % step, against the one cohort behind that rule (Nielsen et al., Aarhus).
 It is a read, not a probability — the app never prints an injury percentage, because one runner's
 history cannot calibrate one. In a race week the axis reads the longest *training* bout; the race
-distance is the goal, not a step. The caution regime lists only the load ratio: its biomechanical
-governors are dormant by design. Today carries the same binding limit under the why-line.
+distance is the goal, not a step. The conservative regime lists only the load ratio: its biomechanical
+governors are dormant there. Today carries the same binding limit under the why-line.
 
 ### Race chain strip (multi-A only)
 When you chain ≥ 2 A-races, a strip shows each race with its **role**, date, **projected race-day CTL**, and
@@ -360,18 +360,18 @@ projection**.
 
 - The **prediction ledger** plots every finish prediction the engine has ever made for this goal —
   median plus the 80 % envelope — against the day it was made. Steps in the line are model upgrades or
-  your shape moving; both are honest, and both are on the record. Once the race is run, the outcome is
+  your shape moving; both are on the record. Once the race is run, the outcome is
   scored against the prediction standing before it (in the band or not, plus a proper log score) and
   the reckoning names the engine's call.
 - The **fitness chart** carries a line about the engine rather than about you: *how far the CTL
-  projection has run from what actually happened*, as a median over every week that has been scored,
+  projection has run from what happened*, as a median over every week that has been scored,
   at the horizon it was scored at, with the number of weeks it rests on. Positive means you came out
   **fitter** than projected — the model under-predicted you. It is a reading, not a lever: nothing in
   the plan acts on it, and a test enforces that.
 - For a **multi-A** build the scorecard breaks out **each peak's** founding→now projection and trend, and
   the headline names the **next peak** still ahead.
-- Once a race **passes**, the scorecard stops projecting and **reckons**: the fitness you actually arrived
-  with vs. what the founding road promised, and your finish vs. your goal (DNF detected). This reckoning is
+- Once a race **passes**, the scorecard stops projecting and **reckons**: the fitness you arrived with
+  vs. what the founding road promised, and your finish vs. your goal (DNF detected). This reckoning is
   **private-only** (your finish time is more than the public "shape + plan" line shows).
 
 ### Track record
@@ -381,14 +381,14 @@ by its successor before anyone could check it. This panel keeps them: every pred
 first time its outcome is knowable, written down, and **never rewritten**.
 
 - **Weekly fitness checkpoints.** For each completed week, the CTL the plan projected for it against
-  the CTL you actually carried, with the *bias* called out separately from the *scatter* — a
+  the CTL you carried, with the *bias* called out separately from the *scatter* — a
   persistent sign (always fitter, always short) is a model error; noise around zero is just weather.
   Only forecasts made at least **28 days** before the week ended are scored: grading the plan that
   was regenerated the night before would be grading hindsight.
 - **Race bands.** Each finished race is scored twice — the **final** pre-race prediction, and the one
   standing **eight weeks out**, which is the horizon at which a marathon forecast is still useful and
   still hard. In the band or not, and by how much.
-- It appears on the **public** box too, with one deliberate difference: the public view publishes
+- It appears on the **public** box too, with one difference: the public view publishes
   whether a band contained the race, never what you ran. (Publishing the prediction beside its error
   would hand the finish time back, and your results are private.)
 
@@ -401,7 +401,7 @@ their intent or more with no race in them, with the week's check-in mix. Every r
 never rewritten. The public box publishes the calibration and the override count, never a week's km.
 
 ### Effort discipline
-*Are your easy days actually easy?* Graded against a *moving*, fitness-tracking easy bar — HR-led on a
+*Are your easy days easy?* Graded against a *moving*, fitness-tracking easy bar — HR-led on a
 derived lactate-threshold HR where that's trustworthy, otherwise your grade-adjusted pace vs an
 aerobic-threshold (LT1) bar (with an HR-redline backstop either way). A 0–100 easy-discipline score plus per-run verdicts (on / hot / too
 hard); each run's `anchor` names the basis it used. Prescribed quality sessions are matched to your runs
@@ -415,24 +415,24 @@ available: the verdict is graded on the **work reps only** — warm-up, floats a
 against the prescribed zone's HR band, tagged **·reps read**. Reps shorter than ~3 minutes are judged
 on **pace** vs the zone target instead: a short rep starts rested and HR peaks *into* the recovery
 (the pace and HR peaks are out of phase), so a within-rep HR average would under-read every short rep
-as sandbagged. Pace also stands in whenever the reps carry no HR. Without a detected structure the whole-run average has to stand in, tagged **·rough read**
-(reps blend with recovery, so that verdict is low-confidence by construction).
+as sandbagged. Pace also stands in whenever the reps carry no HR. Without a detected structure the
+whole-run average has to stand in, tagged **·rough read** (reps blend with recovery, so that verdict is
+low-confidence).
 
-**How "effort" is actually computed.** The app keeps the *prescription* and the *judgment* on different
-anchors, on purpose:
+**How "effort" is computed.** The app keeps the *prescription* and the *judgment* on different anchors:
 
 - The **plan prescribes pace** (Daniels VDOT zones from your VO₂max). That is what feeds the engine — volume,
   TRIMP load, taper, the ACWR ceiling. None of the HR machinery below touches the plan numbers.
 - The **monitor judges the completed run against a moving easy bar**, on whichever basis your data supports
   (the run's `anchor` field names it):
   - **Heart rate vs a derived LTHR** (`lthr`) — the primary read where a confident, *moving* lactate-threshold
-    HR exists, because HR is the honest signal of how easy a run really was. Two runners with the same HRmax
+    HR exists, because HR is the direct signal of how easy a run was. Two runners with the same HRmax
     can have thresholds 15+ bpm apart, and %HRmax is loosest exactly at the easy↔threshold line this score is
     about. Run zones use Friel's %LTHR grid (Z1 < 0.85 · Z2 0.85–0.89 · Z3 0.90–0.94 · Z4 0.95–0.99 · Z5 ≥
     1.00 · LTHR): an easy run averaging above the Z1/Z2 boundary reads *hot*, at/above Z4 (threshold) *too hard*.
   - **Grade-adjusted pace vs a moving LT1 bar** (`lt1_pace`) — when there's no trustworthy LTHR. LT1 (≈80 %
-    of 5 k pace) is your aerobic-threshold easy ceiling and *moves* as fitness changes. A merely-elevated HR
-    on an easy-*paced* run is deliberately **not** policed (normal decoupling in a rebuild), but an
+    of 5 k pace) is your aerobic-threshold easy ceiling and *moves* as fitness changes. An elevated HR on
+    an easy-*paced* run is **not** policed (normal decoupling in a rebuild), but an
     **HR-redline backstop** keeps an easy-paced run whose HR sat at threshold+ from ever reading easy.
   - **%HRmax grid** (`hrmax`) — a last-resort read only when there's neither a confident LTHR nor a pace.
 
@@ -443,20 +443,20 @@ hard effort (a race, or a tempo with little warm-up/cool-down) the whole-run ave
 your sustained hard efforts (20–70 min at ≥ 85 % robust HRmax) and takes a spike-resistant high percentile,
 with a **confidence** flag that decays as the data ages (LTHR drifts up as fitness returns). With too little
 data it falls back to a %HRmax estimate, flagged *provisional*. Known limitation: for *structured* tempos the
-warm-up/cool-down dilute the whole-run average, so this method **understates** LTHR — which is why the easy
-ceiling is pinned to the conservative (lower) Friel boundary, never a looser one. (A manual LTHR override and
-the classic 30-min time-trial protocol are on the roadmap, gated behind readiness so the app never prompts a
-maximal test during a restart.)
+warm-up/cool-down dilute the whole-run average, so this method **understates** LTHR, which is why the easy
+ceiling is pinned to the conservative (lower) Friel boundary, never a looser one. A field-tested LTHR can be
+entered under **Settings → Manual LTHR** ([§12](#12-settings-and-secrets)); the 30-minute protocol is there
+too, and the app only suggests the test when every readiness clearance holds.
 
 **Pace vs HR coherence.** Because prescription and judgment are independent estimates, the app cross-checks
 them: if your runs done *at* the prescribed easy pace keep landing *above* the easy HR ceiling, your easy pace
-is ahead of your current aerobic fitness (classic cardiac decoupling in a rebuild) — the check says so and
-tells you to trust HR on easy days. It is a **diagnostic only**; it never silently rewrites the plan.
+is ahead of your current aerobic fitness (classic cardiac decoupling in a rebuild); the check says so and
+tells you to trust HR on easy days. It is a **diagnostic only**; it never rewrites the plan.
 
 ### Current zones
 One table of your training-intent zones — easy / marathon / threshold / interval — with a **pace** window
 and an **HR** band per row, both tracking your *current* fitness (private view only; it carries HR). The
-two columns are deliberately independent estimators:
+two columns are independent estimators:
 
 - **Pace** comes from your effective VO₂max via the Daniels–Gilbert oxygen-cost curve: zone paces are fixed
   fractions of vVO₂max (marathon 0.81 · threshold 0.88 · interval 0.97), and the easy bar is **LT1** ≈ 80%
@@ -466,9 +466,9 @@ two columns are deliberately independent estimators:
   the table can never disagree with the effort verdicts: the easy row's top *is* the monitor's easy ceiling,
   and LTHR sits at the top of the threshold band.
 
-Because pace derives from VDOT and HR from LTHR, the columns can visibly disagree while you rebuild
-(cardiac decoupling) — the Pace↔HR coherence line above tracks exactly that; on easy days HR is the honest
-read. On short intervals the opposite caveat applies: HR lags the effort, so pace leads.
+Because pace derives from VDOT and HR from LTHR, the columns can disagree while you rebuild (cardiac
+decoupling); the Pace↔HR coherence line above tracks exactly that, and on easy days trust HR. On short
+intervals the opposite caveat applies: HR lags the effort, so pace leads.
 
 ### Readiness
 A daily **green / amber / red** verdict. It flags stop-the-run / cardiac-type symptoms deterministically (no
@@ -490,16 +490,14 @@ bpm — one point per run over the last 180 days, with a trend line. It is the l
 read the app holds: the same pace at a lower heart rate *is* the adaptation, and unlike CTL nothing
 has to be inferred — it comes straight off the watch.
 
-Only **aerobic** runs are plotted (average HR at or below the top of Z2). That filter is the whole
-trick: mixing an all-out 5k with an easy hour makes the line read your training *mix* rather than
-your fitness.
+Only **aerobic** runs are plotted (average HR at or below the top of Z2). The filter matters: mixing an
+all-out 5k with an easy hour makes the line read your training *mix* rather than your fitness.
 
 **Temperature sits in its own panel below**, never subtracted from the efficiency figure and never
-plotted against the same axis. Heat genuinely depresses efficiency, but cool-weather runs also tend
-to be the most recent ones — so in any rebuild the two are confounded exactly where the trend looks
-most flattering. The card publishes both series and the correlation between them **as a number**,
-and corrects for nothing, because the size of that correction is not settled on one runner's data.
-A chart that quietly applied it would be asserting a finding the evidence has not made.
+plotted against the same axis. Heat depresses efficiency, but cool-weather runs also tend to be the
+most recent ones, so in any rebuild the two are confounded exactly where the trend looks most
+flattering. The card publishes both series and the correlation between them **as a number**, and
+corrects for nothing, because the size of that correction is not settled on one runner's data.
 
 Efficiency is **measure-first**: shown and trended, governing no part of the plan. HR-derived, so
 the card is **private-only**.
@@ -512,15 +510,15 @@ a non-run, a private note tells you so.
 **Read back** — under the metrics, the app narrates what the recorded pace profile *says you did*, in the
 plan's own vocabulary: `Intervals — 12min wu @5:50 · 3× 3–4min @5:05–5:15 w/ 60–90s floats · 15min cd @6:30`,
 or simply `Easy run — 45min @6:25/km · 2× strides`. Structure is detected from **contrast** (sustained pace
-shifts, grade-adjusted so hills don't fake intervals), then each block is named against **your zones as of
-that day**. It's a description of what happened, never a judgment — and if the signal is too noisy it says
+shifts, grade-adjusted so hills do not fake intervals), then each block is named against **your zones as of
+that day**. It is a description of what happened, never a judgment, and if the signal is too noisy it says
 nothing rather than guess. New runs are read at sync; older runs the first time you open them (in the
 `/runs` browser too). The label is pace-based and public-safe; per-segment HR stays private.
 
 A thin **HR-zone band** runs along the top of the chart: each section of the run is coloured by the HR zone
 you were in (the same Z1–Z5 model used everywhere else — LTHR-anchored when confident, %HRmax otherwise; hover
-the HR metric to see the legend and the anchor). Because the zones are Friel-LTHR, a *properly* easy run reads
-mostly Z1 (wide by design) with any creep into Z2+ clearly visible — that band *is* your easy-discipline read,
+the HR metric to see the legend and the anchor). Because the zones are Friel-LTHR, a properly easy run reads
+mostly Z1 (a wide zone) with any creep into Z2+ clearly visible; that band *is* your easy-discipline read,
 section by section. The per-point HR trace and the band are **private**: on the public box both the HR stream
 and the zone model are stripped server-side, so the band simply doesn't render there.
 
@@ -565,7 +563,7 @@ an updated record — so if you deleted a guide off the wrist, updating it never
 **Rebuild** re-creates the window under fresh ids, which is the only thing that does. Use it when
 guides are missing from the watch but the app says they were pushed.
 
-⚠ **Where the instructions actually appear.** A guide's countdown, pace and HR targets live on the
+⚠ **Where the instructions appear.** A guide's countdown, pace and HR targets live on the
 SuuntoPlus display, which is *a screen of its own* — on a Race S you reach it by pressing the crown
 mid-exercise, and the watch never switches to it for you. The only part that arrives on whatever
 screen you happen to be looking at is the short **popup at each step boundary**, so that is where
@@ -602,8 +600,8 @@ a different screen, not looking at a broken guide.
   doesn't exist for training (a flight, a family day), not for when you're struggling. Declare the
   date or range and the plan **re-lays the week around it**: the displaced run slides to the nearest
   sensible day, hard sessions keep their spacing, and the long run takes the last available day. A
-  heavily blocked week gets honestly **lighter** — runs that have no legal day are shed *with their
-  load*, never crammed into the days around them. Affected weeks carry an `✈ away` tag. Away days
+  heavily blocked week gets **lighter**: runs that have no legal day are shed *with their load*, never
+  crammed into the days around them. Affected weeks carry an `✈ away` tag. Away days
   are **private**: they never appear on the public page in any form (an away date on a public site
   tells the world your house is empty).
 
@@ -611,12 +609,12 @@ a different screen, not looking at a broken guide.
 
 ## 11. The privacy model
 
-The two containers **share one `./data` DB**, so the hard rule is: **anything written to the shared DB is
-readable by the public container.** Sparing Horse is built around that constraint:
+The private and public containers **share one `./data` DB**, so the hard rule is: **anything written to the
+shared DB is readable by the public container.** Sparing Horse is built around that constraint:
 
 - **Secrets never touch the shared DB.** Tokens and the Claude key live in a **private-only** secrets store
   (`SH_SECRETS_DB`, default `./secrets`) mounted *only* to the private container. The public box has no
-  tokens, full stop.
+  tokens.
 - **Sensitive endpoints are withheld server-side**, not merely hidden in the UI. On the read-only container
   the route map (GPS), blood/health markers, the per-run HR effort detail, the readiness inputs, and the
   post-race reckoning all return 403 / are sanitized — the public mirror physically cannot serve them.
@@ -624,7 +622,7 @@ readable by the public container.** Sparing Horse is built around that constrain
   every mutation; it cannot sync, write, delete, or call the AI.
 
 - **The public payloads are allowlists, not subtractions.** Each public resource has a named list of
-  the fields it serves, plus a register of the ones deliberately withheld — so a new field is absent
+  the fields it serves, plus a register of the ones withheld — so a new field is absent
   from the public box until someone classifies it, rather than present until someone notices. The
   track record is the sharpest case: the public box publishes whether a finish landed inside the band
   it was given, but never the finish time, because the prediction beside its error would hand the
@@ -646,14 +644,16 @@ The decision line: *training shape + plan* can be public; *medical / location / 
 
 The **Settings** window (private container only) is where you configure the app without editing files:
 
-- **Console access** (0.56.0) — how this session is signed in (the passphrase, or a proxy identity when
+- **Console access** — how this session is signed in (the passphrase, or a proxy identity when
   `SH_TRUST_PROXY_AUTH` is on), **Change passphrase** (signs every other device out, keeps this one) and
   **Log out**. Sessions last 30 days per device. Forgotten passphrase: `python SparingHorse.py passphrase
   --reset` inside the container clears it and the first-boot page comes back; `--set` sets one from the
   terminal. Five wrong attempts lock the address for a minute, doubling up to fifteen.
-- **System** (0.56.1) — last sync, the nightly's outcome and failures in a row, the watch push, the
-  newest backup and its age. What `docker logs` used to be for.
-- **AI features** (0.56.0) — three switches, each saying what it sends to Anthropic when a Claude key is
+- **System** — last sync, the nightly's outcome and failures in a row, the watch push, the newest backup
+  and its age, and the Cloudflare Access team and audience tag the console has seen on incoming tokens
+  (with whether the login bypass is on). To skip the passphrase behind Access, run
+  `sh prepare_env.sh --from-container` on the host and recreate the container (DEPLOY.md §2).
+- **AI features** — three switches, each saying what it sends to Anthropic when a Claude key is
   set: *plan narration* (the computed plan summary and the athlete context), *goal parsing and race
   advice* (the typed goal and the objectives list), and *check-in judgment and free-text adjustments* (the
   check-in note, energy and sleep answers, HRV state, today's session, and anything typed into "Tell the
@@ -663,28 +663,25 @@ The **Settings** window (private container only) is where you configure the app 
 - **Connections & keys** — set your **Runalyze token**, (optional) **Claude API key**, and — if you
   want the plan on your wrist ([§8](#8-sending-the-plan-to-a-suunto-watch-optional)) — the three
   **Suunto** values (client id, client secret, subscription key) plus the **Connect** button. They are
-  written to the private-only secrets store — **encrypted at rest** since 0.56.0 (`SH_SECRET_KEY`, or a
-  key file beside the store) — applied live (no restart), and **write-only**: the UI shows
+  written to the private-only secrets store, **encrypted at rest** (`SH_SECRET_KEY`, or a key file
+  beside the store), applied live (no restart), and **write-only**: the UI shows
   whether a key is configured and whether it currently **validates** ("✓ in use · valid" / "✗ key rejected"),
   but never echoes the secret back. The Claude key check uses a zero-token metadata call. Each stored
   key also shows a short **fingerprint** (`fp a1b2c3d4`) — the first eight hex characters of its
   SHA-256. It is one-way, so it says *which* value is in the box without describing it, which is how
-  you confirm a rotation actually landed ("configured" looks identical before and after). Check it
+  you confirm a rotation landed ("configured" looks identical before and after). Check it
   against your own copy with `printf %s "$KEY" | sha256sum | cut -c1-8`. Typing into several key
   fields and saving one leaves the others' text alone.
 - **Personalization** — athlete context (one line injected into AI prompts), a house link for the header
-  widget, an optional house back-link, and the timezone. These are non-secret and stored in the DB.
+  widget, an optional house back-link, the timezone, and your age (a cold-start prior the engine uses
+  before your runs supply the numbers). These are non-secret and stored in the DB.
 - **Manual LTHR (bpm)** — your lactate-threshold heart rate from a field test. When set, it overrides the
   data-derived estimate everywhere the app anchors on LTHR (the effort monitor's ceilings, the HR-zone
   band, the LT1 cross-check). It **ages out**: a fresh entry (≤6 weeks) outranks the derived read, then
   decays — LTHR moves with fitness, so an old number from a fitter or less-fit you would mis-anchor your
-  easy ceiling. Re-test rather than re-typing the same value (re-saving the same number deliberately does
-  not re-freshen it). Empty = derive from your runs (the default).
-
-- - **System → Cloudflare Access** (0.60.0) — the team and audience tag the console has seen on
-  incoming Access tokens, and whether the login bypass is on. To skip the passphrase behind Access,
-  run `sh prepare_env.sh --from-container` on the host and recreate the container (DEPLOY.md §2a).
-- **Distance units** (0.58.0) — `km` or `mi`. The engine plans in kilometres whatever you choose and the
+  easy ceiling. Re-test rather than re-typing the same value (re-saving the same number does not refresh
+  it). Empty = derive from your runs (the default).
+- **Distance units** — `km` or `mi`. The engine plans in kilometres whatever you choose and the
   API stays metric; this changes how every distance and pace is *shown*, on every page and every box
   (the public box follows it too). Reload after saving.
 - **Long run day** and **Rest days, most wanted first** — the shape of your training week. By default
@@ -715,16 +712,12 @@ The canonical no-lab way to measure LTHR (Friel):
 ⚠️ **This is a near-maximal effort.** The app only *suggests* the test (a line on the effort panel) when
 every clearance holds: your plan is on the assertive regime (never during a post-illness
 conservative rebuild), your latest check-in is green (no stop-symptom, not heavy-legged), there is no
-medical hold, and the current threshold estimate is actually improvable. If you have any cardiovascular
+medical hold, and the current threshold estimate is improvable. If you have any cardiovascular
 history, clear max-effort testing with your doctor first — the derived estimate needs no test at all and
 self-corrects as you train. Re-test roughly every 6–8 weeks in a building block if you want to keep the
 manual anchor fresh; otherwise clear the field and let the data lead.
 
-> **Deploy note for the Docker split:** the secrets store adds a `./secrets` volume on the **private**
-> service. If you adopt it on an existing deployment, recreate the container (`docker compose up -d`, not just
-> `restart`) so the new volume mounts.
-
-Anything you'd rather set via environment still works — see the env table in the [README](README.md).
+Anything you would rather set via environment still works; see the env table in the [README](README.md).
 
 ---
 
@@ -762,8 +755,8 @@ API keys and tokens are **never** included in either file — they live in a sep
 | Fitness looks inflated, a banner mentions a duplicate | A duplicate upload. Open the banner link and resolve it; the de-duplicated model already excludes it from CTL. |
 | CTL from the chart ≠ the shape snapshot by a point or two | Expected seam — local running reconstruction vs. Runalyze's all-sport snapshot. Not a bug. |
 | AI buttons are disabled / "add a Claude API key" | No Anthropic key. Add one in **Settings → Connections & keys** (optional — the engine runs without it). |
-| A trail run didn't reach the plan | Running-family activities (trail/treadmill) are included; check the activity's sport actually matches. Pure non-runs are excluded by design. |
-| Public site won't sync | By design — the public container has no token and a query-only connection. Sync from the private instance. |
+| A trail run didn't reach the plan | Running-family activities (trail/treadmill) are included; check the activity's sport matches. Non-runs are excluded. |
+| Public site won't sync | The public container has no token and a query-only connection. Sync from the private instance. |
 | Want to verify the engine | Run `python SparingHorse.py selftest` (or `/selftest`, private only) — the deterministic battery. It runs as its own process against a database snapshot, so the rest of the site keeps working while it does. The language-model checks are opt-in (`SH_SELFTEST_LLM=1`). |
 
 ---
@@ -800,5 +793,5 @@ API keys and tokens are **never** included in either file — they live in a sep
   scored once the race was run.
 ---
 
-*For the change history see [CHANGELOG.md](CHANGELOG.md). For licensing and the honest AI-assisted provenance
-see [AUTHORS.md](AUTHORS.md) and the AGPL-3.0 `LICENSE`.*
+*For the change history see [CHANGELOG.md](CHANGELOG.md). For licensing and how the code was written see
+[AUTHORS.md](AUTHORS.md) and the AGPL-3.0 `LICENSE`.*
