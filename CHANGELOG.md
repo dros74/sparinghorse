@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.3] - 2026-09-03
+
+### Fixed
+
+- **Product copy in plain voice.** Thirteen strings the app shows or sends carried words that added
+  nothing: the away-days help in Settings ("a heavily blocked week gets honestly lighter"), the
+  split-recording chips, the finish-time and ledger notes, the zones hint, the feasibility message, the
+  re-base note and two lines of the AI prompts. The words are gone; the meaning is unchanged. The re-base
+  note travels in the plan payload, so the golden snapshots moved by that one line each.
+
+### Changed
+
+- **The public docs read as the author, and match the code.** README rewritten in plain prose with the
+  same facts; it now links the demo, lists all three compose services, gives the public box its effort
+  and track-record rows, and names ten environment variables the table never listed. The manual no
+  longer calls the manual LTHR entry a roadmap item, lists the demo service, and drops the version
+  stamps from feature prose. DEPLOY.md's sections run 1 to 9 (they ran 1, 2a, 2, 3), and it no longer
+  says the Cloudflare dashboard shows the audience tag, which it stopped doing. `.env.example` said the
+  nightly sync defaults to 22:30; the code says 22:00.
+- **The mirror's leak gate and the CI scan exempt one hostname**, the demo site linked from the README,
+  and nothing else under the domain; a line that also names a private host is still caught.
+
 ## [0.60.2] - 2026-09-03
 
 ### Fixed
