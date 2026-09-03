@@ -1587,6 +1587,15 @@ def init_db():
                 db.execute("UPDATE adjustments SET active=0 WHERE id=?", (row["id"],))
         except (ValueError, TypeError):
             continue
+    # 0.60.4 — the override ledger's denominator moved to the sheet (track_record_override_rescore):
+    # rows scored against the old basis go once, and the scan re-writes the weeks that still qualify
+    # now rather than at the next nightly pass. The scan is the nightly's own code; a failure here
+    # must not keep the app from starting — the nightly will run it again.
+    if track_record_override_rescore(db):
+        try:
+            track_record_scan(db)
+        except Exception as e:                                   # noqa: BLE001 — start-up must survive
+            print(f"[init_db] override re-score deferred to the nightly scan: {e}", file=sys.stderr)
     db.commit()
     db.close()
 
@@ -4240,7 +4249,9 @@ TR_T8_DAYS = 56          # the second horizon a race band is scored at: eight we
 TR_T8_TOL_DAYS = 14      # …and how near that horizon the scored plan must actually sit
 TR_SCAN_WEEKS = 52       # how far back a scan reaches for unscored weekly checkpoints
 TR_CTL_CLOSE = 2.0       # CTL points: within this, the weekly forecast "landed" (≈ 4% at CTL 50)
-TR_OVERRIDE_RATIO = 1.5  # 0.58.0 — a week run at ≥ this × its intent (no race) is banked as an override (symmetry (e))
+TR_OVERRIDE_RATIO = 1.5  # 0.58.0 — a week run at ≥ this × its SHEET (no race) is banked as an override (symmetry (e))
+TR_OVERRIDE_BASIS = "sheet_km"   # 0.60.4 — the override denominator, stamped in every row's payload; rows scored
+                                 # against anything else are dropped ONCE and re-scored (track_record_override_rescore)
 
 
 def score_ctl_week(predicted, actual):
@@ -4340,6 +4351,28 @@ def _tr_write(db, kind, key, lead_days, predicted, actual, err, in_band, payload
     return db.total_changes
 
 
+def track_record_override_rescore(db):
+    """0.60.4 — drop the override rows scored against anything but the sheet, ONCE, so the next scan
+    re-writes the weeks that qualify under the sheet rule. Write-once protects a score from revision
+    after the outcome is known; it does not protect a row whose denominator meant something else (the
+    skeleton km an older engine left in `intent_km`, proposal §11a). A meta marker keeps a restart
+    from repeating it; a row that already names the sheet basis is kept as it is. Returns the number
+    of rows dropped."""
+    if get_meta(db, "tr:override_basis") == TR_OVERRIDE_BASIS:
+        return 0
+    dropped = 0
+    for r in db.execute("SELECT key, payload FROM track_record WHERE kind='override'").fetchall():
+        try:
+            basis = json.loads(r["payload"] or "{}").get("basis")
+        except (ValueError, TypeError):
+            basis = None
+        if basis != TR_OVERRIDE_BASIS:
+            db.execute("DELETE FROM track_record WHERE kind='override' AND key=?", (r["key"],))
+            dropped += 1
+    set_meta(db, "tr:override_basis", TR_OVERRIDE_BASIS)
+    return dropped
+
+
 def track_record_scan(db, today=None):
     """Score everything that has become scorable and is not scored yet. Idempotent, cheap, and safe
     to call from the nightly on every pass; returns what it added.
@@ -4398,7 +4431,14 @@ def track_record_scan(db, today=None):
     # One row per COMPLETED week: what the plan standing at the week's start asked (the session sheet,
     # `km`, which is the adherence denominator by decision (a); the intent bar rides in the payload),
     # and what was run. An override row is written when the week was run at ≥ TR_OVERRIDE_RATIO ×
-    # the intent on a week that held no race — the corpus decision (e) asked for.
+    # the SHEET on a week that held no race — the corpus decision (e) asked for.
+    # 0.60.4 — the sheet, not `intent_km`: an override is an adherence question (was the week run far
+    # past what it was told?), and `intent_km` on a plan written by an older engine is not a bar at
+    # all — engines up to ~0.39 stamped the base skeleton's km there (16–24) under a 42–54 km sheet
+    # (proposal §11a). Scored against it, 2026-08-24 read as a 2.7× override on a week run at 1.09× its
+    # sheet, and the corpus C's thresholds are meant to be calibrated on carried three such rows beside
+    # the one real one (08-17, 4.1×). Every row names its `basis`; rows without one are re-scored once
+    # at start-up (track_record_override_rescore).
     race_weeks = set()
     for o in db.execute("SELECT date FROM objectives WHERE date IS NOT NULL").fetchall():
         try:
@@ -4441,14 +4481,14 @@ def track_record_scan(db, today=None):
             _tr_write(db, "prescription", mk, (m + timedelta(days=6) - m).days, laid, ran,
                       (None if ratio is None else round(ratio - 1.0, 3)), None, payload, now)
             added["prescription"] += (db.total_changes > before)
-        if ("override", mk) not in have and intent and ran >= TR_OVERRIDE_RATIO * intent and mk not in race_weeks:
+        if ("override", mk) not in have and laid and ran >= TR_OVERRIDE_RATIO * laid and mk not in race_weeks:
             ci = db.execute("SELECT energy, sleep, stop_symptom FROM readiness WHERE date >= ? AND date < date(?, '+7 day')",
                             (mk, mk)).fetchall()
-            payload_o = {**payload, "checkins": len(ci),
+            payload_o = {**payload, "basis": TR_OVERRIDE_BASIS, "checkins": len(ci),
                          "any_heavy_or_poor": any((r["energy"] == "heavy" or r["sleep"] == "poor") for r in ci),
                          "any_stop": any(bool(r["stop_symptom"]) for r in ci)}
             before = db.total_changes
-            _tr_write(db, "override", mk, 0, intent, ran, round(ran / intent - 1.0, 3), None, payload_o, now)
+            _tr_write(db, "override", mk, 0, laid, ran, round(ran / laid - 1.0, 3), None, payload_o, now)
             added["override"] += (db.total_changes > before)
 
     # ── readiness calls (0.58.0) — did the check-in's own signal precede what happened that day? ──

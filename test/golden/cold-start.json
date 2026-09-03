@@ -17,9 +17,9 @@
           "governor_basis": "intent_km",
           "intent_km": 14.6,
           "note": "the sheet and the bar diverge beyond 10 %",
-          "ratio": 0.349,
-          "sheet_km": 5.1,
-          "training_km": 5.1
+          "ratio": 0.692,
+          "sheet_km": 10.1,
+          "training_km": 10.1
         },
         "clipped": false,
         "elapsed": false,

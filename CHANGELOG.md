@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.4] - 2026-09-04
+
+### Fixed
+
+- **The current week's bar line.** The "bar · sheet" figure on the week underway summed the lived days
+  at what had been laid for them, not at what was run, so a week run over its lay under-read its own
+  sheet by every kilometre of over-run and was labelled as diverging from a bar it was meeting. On the
+  live week of 31 August it read sheet 35.4 against bar 59.4 while the header said 54.6 km. The sheet
+  now keeps the header's identity: lived days at what was run, remaining days at their lay. Frozen
+  weeks are unchanged.
+- **The override ledger scored against the wrong number.** An override row was banked when a week was
+  run at 1.5× its `intent_km`, but plans written by engines before about 0.39 carry the base
+  skeleton's km in that field (16 to 24) under a 42 to 54 km sheet, so three of the six rows
+  described weeks run at 0.95 to 1.11× what they were told. Overrides now score against the session
+  sheet, the adherence denominator by decision (a); each row names its basis; rows without one are
+  dropped once at start-up and the weeks that still qualify are re-scored at once.
+
 ## [0.60.3] - 2026-09-03
 
 ### Fixed

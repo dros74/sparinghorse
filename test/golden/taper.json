@@ -102,13 +102,13 @@
         "adjusted": false,
         "bar": {
           "adherence_basis": "sheet_km",
-          "diverge": false,
+          "diverge": true,
           "governor_basis": "intent_km",
           "intent_km": 52.7,
-          "note": null,
-          "ratio": 0.943,
-          "sheet_km": 49.7,
-          "training_km": 49.7
+          "note": "the sheet and the bar diverge beyond 10 %",
+          "ratio": 0.602,
+          "sheet_km": 31.7,
+          "training_km": 31.7
         },
         "clipped": false,
         "elapsed": false,

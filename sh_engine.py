@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.60.3"
+ENGINE_VERSION = "0.60.4"
 
 
 def _zones_asof(db, date_iso=None):
@@ -3656,17 +3656,25 @@ def _deload_read(db, sh, idx, cur_start, today, prior_plan, ctl, atl, cap, permi
             "why": why, "readiness_why": tok.get("why")}
 
 
-def _week_bar(*, intent_km, sessions, frozen=False, ran_km=None):
+def _week_bar(*, intent_km, sessions, frozen=False, ran_km=None, lived_km=None):
     """§P2 (0.59.0, symmetry decision (a)) — BOTH denominators, named and published on every laid week.
     `intent_km` is the as-laid ramp bar: the governor basis (the C-test and every governor read).
     `sheet_km` is the session sheet the athlete reads day to day: the adherence basis. Where the two
     diverge the week says why, in a field, not a footnote: a race week's sheet includes the race; a
     frozen week's bar is what was asked when the week was first laid while its sheet is what was run;
     anything else beyond BAR_DIVERGE_TOL on a live week is labelled as such (proposal §11 measured
-    0.92–1.00× where both are live). No behaviour change: nothing reads this yet — C will."""
+    0.92–1.00× where both are live). No behaviour change: nothing reads this yet — C will.
+
+    §P2b (0.60.4) — a STRADDLING week passes `lived_km` with only its REMAINING sessions: the sheet is
+    what was run so far plus what is still laid, the identity the header already keeps (§CARD2,
+    km_done + km_ahead). Summing the lived days' as-laid km instead read 35.4 against a 59.4 bar on
+    the live week of 2026-08-31 — every lived day had been run over its lay — and labelled the week
+    "diverge" while its header said 54.6 km, 92 % of the bar. A prescription for a day already run
+    is superseded by its actual (§PRO20b); the sheet says so too now."""
     sessions = sessions or []
-    sheet = round(sum((s.get("km") or 0.0) for s in sessions), 1)
-    training = round(sum((s.get("km") or 0.0) for s in sessions if not s.get("race")), 1)
+    lived = float(lived_km) if lived_km is not None else 0     # int 0 keeps an untouched week byte-identical
+    sheet = round(lived + sum((s.get("km") or 0.0) for s in sessions), 1)
+    training = round(lived + sum((s.get("km") or 0.0) for s in sessions if not s.get("race")), 1)
     ratio = round(sheet / intent_km, 3) if intent_km else None
     if frozen:
         note = "frozen: the bar is what was asked when the week was first laid; the sheet is what was run"
@@ -4143,6 +4151,13 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     runs_ahead=len(_ahead), km_ahead=_ahead_km,
                     runs=week_actuals[0] + len(_ahead),
                     km=round(week_actuals[1] + _ahead_km, 1))
+                # §P2b (0.60.4) — the bar's sheet keeps the same identity: lived days at what was run,
+                # the remaining days at their lay. The lay above summed the as-laid sessions, so a week
+                # run over its lay under-read its own sheet by every km of over-run and was labelled
+                # "diverge" against a bar it was meeting (live week 2026-08-31: sheet 35.4, bar 59.4,
+                # header 54.6).
+                pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=_ahead,
+                                         lived_km=week_actuals[1])
             # §PRO9 — surface the ceiling at week level too, exactly as the full-week path does; the
             # straddle branch built `pweek` by hand and never carried it, so a capped straddle week
             # showed the note on the session but nothing on the card.

@@ -2064,8 +2064,15 @@ def _stc_denominators():
       (c) `diverge` is true exactly when a note is present, and a live non-race week within
           BAR_DIVERGE_TOL carries none;
       (d) the ledger's prescription rows read the SHEET (decision (a)): a prescription row's laid km
-          equals the standing plan's `km`, never its `intent_km` when the two differ;
-      (e) the frozen carry path stamps `bar` with the frozen note and `ran_km` (an in-memory week)."""
+          equals the standing plan's `km`, never its `intent_km` when the two differ — and so do the
+          OVERRIDE rows (0.60.4): a week run at 1.59× its sheet is banked with the sheet as its
+          denominator and `basis` named, a week run at 1.30× its sheet under a stale 22-km bar is NOT;
+      (e) the frozen carry path stamps `bar` with the frozen note and `ran_km` (an in-memory week);
+      (f) §P2b (0.60.4) — the STRADDLING week's sheet counts lived days at what was RUN: on a Thursday
+          with 45 km already logged (an over-run no lay matches), `sheet_km` equals the header's
+          done + ahead and differs from the as-laid session sum;
+      (g) the one-shot re-score drops an override row that names no basis, keeps one that does, marks
+          the DB, and is a no-op on the second call."""
     import sqlite3 as _sq
     fails, detail = [], {}
     fx, fx_today = _race_fixture_db("marathon")
@@ -2083,9 +2090,12 @@ def _stc_denominators():
             fails.append(f"(a) week {w.get('start')} has no bar"); continue
         if b.get("governor_basis") != "intent_km" or b.get("adherence_basis") != "sheet_km":
             fails.append(f"(a) week {w.get('start')} bases {b.get('governor_basis')}/{b.get('adherence_basis')}")
-        sheet = round(sum((s.get("km") or 0.0) for s in w.get("sessions") or []), 1)
+        if w.get("partial") and w.get("km_done") is not None:      # §P2b — the header's identity
+            sheet = round((w.get("km_done") or 0.0) + (w.get("km_ahead") or 0.0), 1)
+        else:
+            sheet = round(sum((s.get("km") or 0.0) for s in w.get("sessions") or []), 1)
         if abs((b.get("sheet_km") or 0) - sheet) > 0.06:
-            fails.append(f"(a) week {w.get('start')} sheet_km {b.get('sheet_km')} ≠ Σ sessions {sheet}")
+            fails.append(f"(a) week {w.get('start')} sheet_km {b.get('sheet_km')} ≠ {sheet} (Σ sessions; done + ahead on the straddle)")
         is_race = any(s.get("race") for s in w.get("sessions") or [])
         if is_race:
             race_seen += 1
@@ -2116,8 +2126,11 @@ def _stc_denominators():
         mem.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw) "
                     "VALUES(?,?,?,?,?,?,?,'{}')", (i + 1, day, day + "T18:00", S.RUNNING_SPORT, 10.0, 3600, 60.0))
     w1 = S._monday(today) - _td(weeks=2)
+    w2 = S._monday(today) - _td(weeks=1)          # (d2) the 2026-08-24 shape: a 54-km sheet under a stale 22-km bar
     plan3 = {"objective": {}, "base": {"weeks": [{"wk": 1, "start": w1.isoformat(), "km": 44.0, "intent_km": 40.0,
-                                                  "proj_ctl": 50.0, "sessions": []}]}}
+                                                  "proj_ctl": 50.0, "sessions": []},
+                                                 {"wk": 2, "start": w2.isoformat(), "km": 54.0, "intent_km": 22.0,
+                                                  "proj_ctl": 52.0, "sessions": []}]}}
     mem.execute("INSERT INTO plans(id,created_at,for_date,inputs,plan) VALUES(1,'now',?,'{}',?)",
                 ((w1 - _td(days=2)).isoformat(), S.json.dumps(plan3)))
     mem.commit()
@@ -2129,16 +2142,59 @@ def _stc_denominators():
         pl = S.json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"]
         if abs((r["predicted"] or 0) - 44.0) > 0.05 or pl.get("intent_km") != 40.0:
             fails.append(f"(d) the prescription row read laid={r['predicted']} intent={pl.get('intent_km')} — the sheet (44) must be the denominator, the bar (40) the payload")
+    # (d2) the override rows read the sheet too (0.60.4): 70 km run — 1.59× the 44-km sheet banks, 1.30× the
+    # 54-km sheet does not, whatever the stale bar (22) would have said
+    o1 = mem.execute("SELECT predicted, payload FROM track_record WHERE kind='override' AND key=?", (w1.isoformat(),)).fetchone()
+    pl1 = (S.json.loads(o1["payload"]) if o1 else {})
+    if not o1 or abs((o1["predicted"] or 0) - 44.0) > 0.05 or pl1.get("basis") != S.TR_OVERRIDE_BASIS:
+        fails.append(f"(d2) the override row must score against the sheet (44) and name its basis: {dict(o1) if o1 else None}")
+    if mem.execute("SELECT 1 FROM track_record WHERE kind='override' AND key=?", (w2.isoformat(),)).fetchone():
+        fails.append("(d2) a week run at 1.30× its sheet was banked as an override — the stale bar (22) governed")
+    # (g) the one-shot re-score: a legacy row (no basis) goes, the sheet-basis row stays, the marker holds
+    mem.execute("INSERT INTO track_record(kind,key,scored_at,lead_days,predicted,actual,err,payload) "
+                "VALUES('override','2026-01-05','x',0,22.0,58.7,1.668,?)",
+                (S.json.dumps({"week": "2026-01-05", "intent_km": 22, "laid_km": 54.0, "ran_km": 58.7}),))
+    n1 = S.track_record_override_rescore(mem)
+    left = {r["key"] for r in mem.execute("SELECT key FROM track_record WHERE kind='override'").fetchall()}
+    n2 = S.track_record_override_rescore(mem)
+    if n1 != 1 or "2026-01-05" in left or w1.isoformat() not in left or n2 != 0 \
+            or S.get_meta(mem, "tr:override_basis") != S.TR_OVERRIDE_BASIS:
+        fails.append(f"(g) re-score: dropped {n1} then {n2}, left {sorted(left)}, marker {S.get_meta(mem, 'tr:override_basis')!r}")
+    detail["overrides"] = {"w1_predicted": o1["predicted"] if o1 else None, "rescore_dropped": n1}
     mem.close()
+    # (f) §P2b — the STRADDLING week's sheet counts lived days at what was RUN
+    fx2, t2 = _race_fixture_db("marathon", today=_d(2026, 6, 4))     # a Thursday: Mon + Wed lived (10 km each)
+    fx2.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?)",
+                ("2026-06-02", "2026-06-02T18:00", S.RUNNING_SPORT, 25.0, 9000, 150.0))   # an over-run no lay matches
+    fx2.commit()
+    try:
+        plan2 = S.generate_plan(fx2, today=t2)
+    finally:
+        fx2.close()
+    st = [w for k, v in plan2.items() if isinstance(v, dict) and "weeks" in v
+          for w in v["weeks"] if w.get("start") == "2026-06-01"]
+    if not st:
+        fails.append("(f) the fixture laid no straddling week for 2026-06-01")
+    else:
+        w, b = st[0], (st[0].get("bar") or {})
+        laid_sum = round(sum((s.get("km") or 0.0) for s in w.get("sessions") or []), 1)
+        if not w.get("partial") or (w.get("km_done") or 0) < 45.0:
+            fails.append(f"(f) the fixture did not straddle with 45 km lived: partial={w.get('partial')} done={w.get('km_done')}")
+        if abs((b.get("sheet_km") or 0) - (w.get("km") if w.get("km") is not None else -1)) > 0.06:
+            fails.append(f"(f) straddle sheet_km {b.get('sheet_km')} ≠ header km {w.get('km')} (done {w.get('km_done')} + ahead {w.get('km_ahead')})")
+        if abs((b.get("sheet_km") or 0) - laid_sum) <= 0.06:
+            fails.append(f"(f) straddle sheet_km {b.get('sheet_km')} still equals the as-laid sum {laid_sum} — the tooth is not biting")
+        detail["straddle"] = {"done": w.get("km_done"), "ahead": w.get("km_ahead"), "sheet": b.get("sheet_km"),
+                              "laid_sum": laid_sum, "ratio": b.get("ratio"), "note": b.get("note")}
     # (e) the frozen carry path
     b = E._week_bar(intent_km=40.0, sessions=[{"km": 10.0}, {"km": 12.0}], frozen=True, ran_km=30.0)
     if not (b.get("diverge") and "frozen" in str(b.get("note")) and b.get("ran_km") == 30.0 and b.get("sheet_km") == 22.0):
         fails.append(f"(e) frozen bar wrong: {b}")
     return _st("det", "denominators",
                "§P2 — both denominators published on every laid week (intent_km = governor basis, sheet_km = "
-               "adherence basis), the sheet equals the sessions, race and frozen weeks are labelled, the "
-               "ledger's prescription rows read the sheet",
-               passed=not fails, expect="both bases named; labelled where they diverge; ledger reads the sheet",
+               "adherence basis), the sheet equals the sessions (lived days at what was run on the straddle), "
+               "race and frozen weeks are labelled, the ledger's prescription AND override rows read the sheet",
+               passed=not fails, expect="both bases named; labelled where they diverge; straddle sheet = done + ahead; ledger reads the sheet",
                got={**detail, "failures": fails or "none"})
 
 
