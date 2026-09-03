@@ -72,12 +72,20 @@ jobs:
           # mirror the file is absent and this step is a no-op by design.
           if [ -f publish_mirror.sh ]; then
             LEAK_RE="$(sed -n "s/^LEAK_RE='\(.*\)'$/\1/p" publish_mirror.sh)"
+            ALLOW_RE="$(sed -n "s/^ALLOW_RE='\(.*\)'$/\1/p" publish_mirror.sh)"
             if [ -z "$LEAK_RE" ]; then echo "::error::could not read LEAK_RE"; exit 1; fi
             # Scan the tree that would actually be PUBLISHED. publish_mirror.sh strips these four
             # before it scans, and PROJECT_LOG.md is full of the owner's real context by design — a
             # scan that includes them fails every time and teaches everyone to ignore it.
-            if git grep -nIiE "$LEAK_RE" -- . \
-                 ':!PROJECT_LOG.md' ':!ENGINE_SCIENCE.md' ':!publish_mirror.sh' ':!.githooks'; then
+            # ALLOW_RE (also read from the script) is the one public hostname the docs may carry; it
+            # is removed from each matched line and the line re-tested, exactly as the script does.
+            hits="$(git grep -nIiE "$LEAK_RE" -- . \
+                 ':!PROJECT_LOG.md' ':!ENGINE_SCIENCE.md' ':!publish_mirror.sh' ':!.githooks' || true)"
+            if [ -n "$hits" ] && [ -n "$ALLOW_RE" ]; then
+              hits="$(printf '%s\n' "$hits" | sed -E "s#$ALLOW_RE##g" | grep -iE "$LEAK_RE" || true)"
+            fi
+            if [ -n "$hits" ]; then
+              printf '%s\n' "$hits"
               echo "::error::personal-data pattern found in the tree that would be published"; exit 1
             fi
             echo "clean"
