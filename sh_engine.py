@@ -4819,7 +4819,7 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
                f"re-reads this each block as fitness returns.")
         if finish_time:
             b = finish_time["band"]
-            msg += (f" At this fitness the honest read is **{b['lo_hms']}–{b['hi_hms']}** — and it "
+            msg += (f" At this fitness the range is **{b['lo_hms']}–{b['hi_hms']}** — and it "
                     f"gets faster the more runway you give it (see the curve).")
         return {"verdict": "too soon", "projected_ctl": proj, "estimate_ctl": est,
                 "finish_time": finish_time, "note": msg}
@@ -6025,7 +6025,7 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         "tune_ups": [{"label": o["label"], "date": o["date"], "type": o["type"],
                       "priority": o["priority"]} for o in tune_ups],
         "note": ("Easy pace ~%s/km — if your easy runs are habitually faster than this they're "
-                 "really threshold effort; the re-base deliberately runs slower to build the aerobic "
+                 "really threshold effort; the re-base runs slower to build the aerobic "
                  "base. (See the Effort-discipline panel for how your actual easy runs measure up.)"
                  % fmt_pace(zones["easy_top"])),
         "adjustment": ({"note": adj["note"], **adj["directive"], "clamp": adj.get("clamp"),

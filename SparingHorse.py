@@ -5055,7 +5055,7 @@ ADJUSTMENT_SCHEMA = {
                   "description": "A warm, specific one-or-two-sentence reply spoken to the runner. For "
                   "a pure reflection (no load change) this is the whole response — acknowledge what they "
                   "felt and, where it fits, affirm it with the plan's own logic. For a real "
-                  "adjustment, say plainly what you're proposing and why."},
+                  "adjustment, say clearly what you're proposing and why."},
     },
     "required": ["situation", "volume_multiplier", "scope_days", "easy_only", "medical_flag",
                  "summary", "reply"],
@@ -5370,7 +5370,7 @@ def explain_plan(db, diff=None, fresh=False):
         "sports-science engine: never change, recompute, or invent any; your only job is the 'why'. "
         "Cover where their current shape sits, why the re-base is easy-dominant (an easy day run faster "
         "than the easy target is really threshold effort — running slower IS the work), how weekly load "
-        "ramps while projected ACWR stays in the safe band, and an honest read on the goal "
+        "ramps while projected ACWR stays in the safe band, and where the goal stands "
         "(finishing healthy vs a time near their PB). Walk the WHOLE phase path in phase_blocks: Base "
         "grows easy aerobic volume with a light cruise-tempo on-ramp; Build adds the specific work — "
         "VO₂ intervals plus a marathon-pace finish on the long run; Peak sharpens at race pace; Taper "

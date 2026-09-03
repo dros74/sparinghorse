@@ -541,7 +541,7 @@ async function loadActivity(aid){
           `<button type="button" id="delact" data-id="${a.id}" class="linkbtn delact" title="Hard-remove this activity from your local copy — for one you ALREADY deleted on Runalyze (insert-only sync leaves the row behind). Still on Runalyze? It returns next sync — use ⊘ ignore instead.">🗑 delete</button></div>`}
       </div>
       <div class="mrow">
-        <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}${a.sj?` <span class="sjchip" title="This recording is part ${a.sj.index} of ${a.sj.parts} of a deliberately split session (${a.sj.km} km · ${a.sj.min} min total) — the read-back line below joins the parts. Numbers on this card are THIS part's own.">1+1 · part ${a.sj.index}/${a.sj.parts}</span>`:""}</span>
+        <span class="ttl">${esc(a.sport||"Activity")}${a.title?` — ${esc(a.title)}`:""}${a.sj?` <span class="sjchip" title="This recording is part ${a.sj.index} of ${a.sj.parts} of a session recorded in ${a.sj.parts} parts (${a.sj.km} km · ${a.sj.min} min total) — the read-back line below joins the parts. Numbers on this card are THIS part's own.">1+1 · part ${a.sj.index}/${a.sj.parts}</span>`:""}</span>
         ${m("When", when, "")}
         ${m("Distance", fmt(U.d(a.distance,2),2), U.unit)}
         ${m("Duration", durStr(a.duration), "")}
@@ -567,7 +567,7 @@ async function loadActivity(aid){
       const el=$("#structline");
       if(!el || !st || !st.ok) return;
       el.innerHTML=`<span class="sdet" title="Detected from the recorded pace profile — grade-adjusted, segmented by sustained pace shifts, and named against your zones as of that day. What the app read back, not what was prescribed.">Read back:</span> `+
-        (st.composite?`<span class="sjchip" title="A deliberately split recording (${st.n_parts} parts, saved minutes apart) read back as ONE session — each part analysed on its own clean streams, then joined.">1+1</span> `:"")+
+        (st.composite?`<span class="sjchip" title="A recording saved in ${st.n_parts} parts minutes apart, read back as ONE session — each part analysed on its own clean streams, then joined.">1+1</span> `:"")+
         `<b>${esc(st.kind_label)}</b> — ${esc(st.summary)}`+
         (st.confidence==="rough"?` <span class="muted" title="The pace signal was noisy (GPS gaps or drift) — segment paces are approximate.">·rough signal</span>`:"")+
         (st.sq&&st.sq.line?`<div class="sqline"><span class="sdet" title="Strides execution — count vs the prescribed set band; HR shown as RESPONSE (a 15–20s stride's HR peak lags into the recovery), never as the effort verdict — pace is the trick.">Strides read:</span> ${esc(st.sq.line)}</div>`:"");
@@ -1963,7 +1963,7 @@ function renderPlan(p){
   const fcHint = !FT ? "" : (FT.note||"")
     + (runway?` If the race were later (same training): ${runway}.`:"")
     + (ftStale?" This prediction was saved by an earlier version of the engine — regenerate the plan to re-read it on the current model.":"")
-    + (ftAnchor?` Your last measured speed is ${ftAnchor.age_days} days old (${esc(ftAnchor.as_of)}), so there is no honest read of today's shape to compare against — run, and it re-anchors on its own.`:"");
+    + (ftAnchor?` Your last measured speed is ${ftAnchor.age_days} days old (${esc(ftAnchor.as_of)}), so there is no current read of today's shape to compare against — run, and it re-anchors on its own.`:"");
   const finishCurve = FT ? `<div class="finishcurve">
       <span class="fclabel">Projected ${esc(FT.distance)} finish
         ${FTB?`<b>${esc(FTB.lo_hms)}–${esc(FTB.hi_hms)}</b>`:`<b>${esc(FT.hms)}</b>`}</span>
@@ -2244,7 +2244,7 @@ function driftLegend(lines){
 }
 function mkChart(host, lines, {fmt=v=>v.toFixed(0), zeroBase=false, nowT=null, dots=false}={}){
   const all=lines.flatMap(l=>l.pts||[]);
-  if(all.length<2){ host.innerHTML=`<div class="empty">Not enough history yet — the road will visibly move as results come in.</div>`; return; }
+  if(all.length<2){ host.innerHTML=`<div class="empty">Not enough history yet — the road will move as results come in.</div>`; return; }
   const W=1000, H=170, padL=34, padR=14, padT=10, padB=18;
   const xs=all.map(p=>ISO2T(p.date)), x0=Math.min(...xs), x1=Math.max(...xs);
   let lo=Math.min(...all.map(p=>p.val)), hi=Math.max(...all.map(p=>p.val));
@@ -2582,7 +2582,7 @@ async function loadDrift(){
       <p class="note" id="note-out">The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?</p>
       <span id="lg-out">${driftLegend(outLines)}</span><div id="drift-out"></div></div>
     ${fd.length?`<div class="driftblock"><h3>Predicted finish · the ledger</h3>
-      <p class="note">The finish the engine predicted at each re-plan — the product watching itself. Lower is faster; the dashed envelope is the 80% band (it starts where plans began carrying one) and should narrow as the race nears. Steps in the line are model upgrades or your shape moving, both honest.</p>
+      <p class="note">The finish the engine predicted at each re-plan — the product watching itself. Lower is faster; the dashed envelope is the 80% band (it starts where plans began carrying one) and should narrow as the race nears. Steps in the line are model upgrades or your shape moving, both on the record.</p>
       <span id="lg-fin">${driftLegend(finLegend)}</span><div id="drift-fin"></div></div>`:""}`;
   const setLg=(id,lines)=>{const e=$(id); if(e) e.innerHTML=driftLegend(lines);};
   const FOUND_OUT_NOTE="The race-day CTL the engine projected at each re-plan. Is your goal race getting more or less reachable as your results come in?";
@@ -2870,8 +2870,8 @@ async function loadSettings(){
       <button type="button" class="ghost" id="avadd">Add</button>
     </div>
     <div class="help">Days you can't run (travel, life). The plan lays around them: runs slide to the
-      nearest sensible day, spacing rules hold, and a heavily blocked week gets honestly lighter —
-      never crammed. Single day: leave the second date empty. Private — away days never appear on
+      nearest sensible day, spacing rules hold, and a heavily blocked week gets lighter, never
+      crammed. Single day: leave the second date empty. Private — away days never appear on
       the public page.</div>
     <div class="err" id="averr"></div>
   </div>`;
@@ -3143,7 +3143,7 @@ async function loadZones(){
   ZONESD=d;   // §W1 — same payload shape as the readiness rider; workout cards read it
   const paceHint=qhint("Pace targets are fixed fractions of vVO₂max — the velocity at VO₂max, solved from the Daniels–Gilbert oxygen-cost curve VO₂(v) = −4.60 + 0.182258·v + 0.000104·v² — using your CURRENT effective VO₂max: marathon 0.81, threshold 0.88, interval 0.97 of vVO₂max. The easy bar is LT1 (aerobic threshold), operationalized as 80% of 5k pace with v5k ≈ 0.95·vVO₂max (a pace-first anchor informed by John Davis). Every value moves as your VO₂max moves — zones are never stale.");
   const hrHint=qhint("HR bands are the Friel run grid as fractions of LTHR: Z1 <0.85, Z2 0.85–0.90, Z3 0.90–0.95, Z4 0.95–1.00, Z5 ≥ LTHR. LTHR is estimated streamlessly — the whole-run average HR of your sustained hard efforts (20–70 min at ≥85% of robust HRmax), robust-high percentile, recency-weighted confidence — or taken from your manual field-test entry while fresh (Settings → Manual LTHR). Without a trustworthy LTHR the grid falls back to %HRmax (60/70/80/90). These are the SAME cutoffs the effort monitor and the activity chart band read — one grid, so the card can't disagree with the verdicts.");
-  const noteHint=qhint("Pace and HR are two INDEPENDENT estimators of the same fitness (VDOT from VO₂max vs the LTHR grid), deliberately not averaged into one number. On a rebuild they can visibly disagree — cardiac decoupling: a given easy pace costs more HR than VDOT predicts. The Pace↔HR line under Effort discipline tracks that divergence; when they disagree on an easy day, heart rate is the honest read of how easy it really was. On short intervals the opposite caveat applies: HR lags the effort, so pace leads there.");
+  const noteHint=qhint("Pace and HR are two INDEPENDENT estimators of the same fitness (VDOT from VO₂max vs the LTHR grid), not averaged into one number. On a rebuild they can disagree — cardiac decoupling: a given easy pace costs more HR than VDOT predicts. The Pace↔HR line under Effort discipline tracks that divergence; when they disagree on an easy day, heart rate is the direct read of how easy it was. On short intervals the opposite caveat applies: HR lags the effort, so pace leads there.");
   const paceCell=r=>{
     const st=r.pace_slower_than, tg=r.pace_target;
     if(st && st.fmt) return `slower than <b>${esc(U.p(st.fmt))}</b>/${U.unit}`;
