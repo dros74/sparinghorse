@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.60.6"
+ENGINE_VERSION = "0.60.7"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1244,7 +1244,14 @@ WEEK_TRIMP_SEARCH_MAX = 1000.0   # `hi` for the weekly-load binary search — a 
 # 3:1 shape it never fires (the down week resets the streak first), so it disturbs nothing — it only
 # catches the pathological long-grind a thinner moderate-ramp margin (CTL_RAMP_MAX=5) can't otherwise see.
 NEAR_CEILING_ACWR = ACWR_SOFT - 0.05   # 1.20 — "near the ceiling" for the consecutive-week count
-MESO_MAX_HARD = 3                      # max consecutive near-ceiling building weeks before a forced deload
+MESO_MAX_HARD = 4                      # max consecutive near-ceiling building weeks before a forced deload.
+#   §MESO4 (0.60.7) — 3 → 4, my call of 2026-09-06 under the "don't limit the athlete's potential where no
+#   ceiling breaks" guideline. At 3 the net fired on my live road the moment the §SHARE long runs lifted
+#   the week of 08-31 over 1.20 (measured 08-24 1.39, then 1.24 and 1.33 projected): two down weeks in
+#   the build (09-14, 10-12), −35 km on the road, race-day CTL 113. At 4 the shape's own 3:1 trough
+#   arrives first (09-21) and the net stays what it was written to be — the catch for a grind the
+#   cadence misses — not the cadence itself. Every ceiling (ACWR, eq, ladder, chronic ramp) still binds
+#   week by week; this only lets a fourth near-ceiling week stand before a recovery is forced.
 
 # §PRO9 — long-run progression cap (the Davis/Aarhus injury lever, ENGINE_SCIENCE.md §3.2). Aarhus
 # (n≈5000): a sharp jump in the SINGLE longest run vs the longest of the trailing ~4 weeks predicts
@@ -3727,7 +3734,7 @@ def _week_bar(*, intent_km, sessions, frozen=False, ran_km=None, lived_km=None):
 
 def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid, long_bound,
                  eq_week_cap, eq_week_laid, eq_week_bound, eq_sess_cap, eq_sess_laid,
-                 streak, streak_bound, ramp_cap, ctl_gain, race_week=False):
+                 streak, streak_bound, ramp_cap, ctl_gain, race_week=False, streak_exempt=None):
     def axis(name, ceiling, laid, bound, unit):
         if ceiling is None or laid is None:
             return None
@@ -3748,6 +3755,13 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
         if streak is not None:
             out["tissue"] = {"streak": int(streak), "limit": MESO_MAX_HARD, "headroom": MESO_MAX_HARD - int(streak),
                              "binds": bool(streak_bound), "basis": LIMITS_BASIS["tissue"], "unit": "weeks"}
+            if streak_exempt:
+                # §MESO4 — a streak past its limit with `binds: false` needs its reason on the axis: the
+                # peak phase is exempt from the forced deload (the taper is its recovery), so the count
+                # keeps rising there and nothing fires. Said where the number is read.
+                out["tissue"]["exempt"] = streak_exempt
+                out["tissue"]["note"] = ("the peak phase is exempt from the forced deload: the taper is its "
+                                         "recovery; the per-week ceilings still bind")
         if ramp_cap is not None and ctl_gain is not None:
             out["chronic"] = {"ceiling": round(ramp_cap, 2), "laid": round(ctl_gain, 2),
                               "headroom": round(ramp_cap - ctl_gain, 2),
@@ -4595,6 +4609,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             eq_week_cap=bio_cap, eq_week_laid=week["eq_km"], eq_week_bound=bool(bio_over),
             eq_sess_cap=session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
             streak=consec_hard, streak_bound=bool(forced_deload),
+            streak_exempt=("peak" if is_peak else None),     # §MESO4 — say why a streak past its limit stands
             ramp_cap=ramp, ctl_gain=(ctl - _ctl_start))
         if av_dates:                                 # §AV — laid around away days (PRIVATE-only field;
             week["av_dates"] = av_dates              # the public plan view strips it)

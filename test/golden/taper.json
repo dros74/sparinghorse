@@ -508,8 +508,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }
@@ -712,8 +712,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }

@@ -186,8 +186,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 1,
-            "limit": 3,
+            "headroom": 2,
+            "limit": 4,
             "streak": 2,
             "unit": "weeks"
           }
@@ -319,8 +319,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 0,
-            "limit": 3,
+            "headroom": 1,
+            "limit": 4,
             "streak": 3,
             "unit": "weeks"
           }
@@ -487,8 +487,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }
@@ -628,8 +628,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 2,
-            "limit": 3,
+            "headroom": 3,
+            "limit": 4,
             "streak": 1,
             "unit": "weeks"
           }
@@ -787,8 +787,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 1,
-            "limit": 3,
+            "headroom": 2,
+            "limit": 4,
             "streak": 2,
             "unit": "weeks"
           }
@@ -950,8 +950,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 0,
-            "limit": 3,
+            "headroom": 1,
+            "limit": 4,
             "streak": 3,
             "unit": "weeks"
           }
@@ -1114,8 +1114,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }
@@ -1269,8 +1269,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 2,
-            "limit": 3,
+            "headroom": 3,
+            "limit": 4,
             "streak": 1,
             "unit": "weeks"
           }
@@ -1537,8 +1537,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 1,
-            "limit": 3,
+            "headroom": 2,
+            "limit": 4,
             "streak": 2,
             "unit": "weeks"
           }
@@ -1699,8 +1699,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 0,
-            "limit": 3,
+            "headroom": 1,
+            "limit": 4,
             "streak": 3,
             "unit": "weeks"
           }
@@ -1866,8 +1866,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }
@@ -2008,8 +2008,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 2,
-            "limit": 3,
+            "headroom": 3,
+            "limit": 4,
             "streak": 1,
             "unit": "weeks"
           }
@@ -2313,8 +2313,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 1,
-            "limit": 3,
+            "headroom": 2,
+            "limit": 4,
             "streak": 2,
             "unit": "weeks"
           }
@@ -2618,8 +2618,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 0,
-            "limit": 3,
+            "headroom": 1,
+            "limit": 4,
             "streak": 3,
             "unit": "weeks"
           }
@@ -3052,8 +3052,10 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": -1,
-            "limit": 3,
+            "exempt": "peak",
+            "headroom": 0,
+            "limit": 4,
+            "note": "the peak phase is exempt from the forced deload: the taper is its recovery; the per-week ceilings still bind",
             "streak": 4,
             "unit": "weeks"
           }
@@ -3374,8 +3376,10 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": -2,
-            "limit": 3,
+            "exempt": "peak",
+            "headroom": -1,
+            "limit": 4,
+            "note": "the peak phase is exempt from the forced deload: the taper is its recovery; the per-week ceilings still bind",
             "streak": 5,
             "unit": "weeks"
           }
@@ -3696,8 +3700,10 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": -3,
-            "limit": 3,
+            "exempt": "peak",
+            "headroom": -2,
+            "limit": 4,
+            "note": "the peak phase is exempt from the forced deload: the taper is its recovery; the per-week ceilings still bind",
             "streak": 6,
             "unit": "weeks"
           }
@@ -4112,8 +4118,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }
@@ -4387,8 +4393,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }
@@ -4627,8 +4633,8 @@
           "tissue": {
             "basis": "L",
             "binds": false,
-            "headroom": 3,
-            "limit": 3,
+            "headroom": 4,
+            "limit": 4,
             "streak": 0,
             "unit": "weeks"
           }

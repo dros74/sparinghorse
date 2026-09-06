@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.7] - 2026-09-06
+
+### Changed
+
+- **The forced-deload net allows four near-ceiling weeks, not three.** The net exists to catch a grind
+  the 3:1 cadence misses. At three it fired the moment the bigger long runs lifted the week underway
+  over ACWR 1.20, placing two down weeks in the build and taking 35 km off the road. At four the
+  cadence's own down week arrives first. Every per-week ceiling still binds; this only lets a fourth
+  near-ceiling week stand before a recovery week is forced. On the live road: one down week on 21
+  September, remaining volume 864 km, projected race CTL 121.
+
 ## [0.60.6] - 2026-09-06
 
 ### Fixed

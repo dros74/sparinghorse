@@ -1666,8 +1666,8 @@ function limitsHtml(L){
       <span class="lk">${esc(LIMIT_NAMES[k])}</span><span class="lv mono">${limV(ax.laid,ax.unit)} <span class="muted">/ ${limV(ax.ceiling,ax.unit)}</span></span>
       <span class="lh mono ${ax.headroom<0?'over':''}">${ax.headroom>=0?"+":""}${limV(ax.headroom,ax.unit)}</span><span class="lb">${esc(ax.basis)}</span></div>`);
   }
-  if(L.tissue) rows.push(`<div class="lim${L.tissue.binds?' held':''}${L.binding==='tissue'?' binding':''}" title="consecutive near-ceiling weeks before a forced deload; basis: literature">
-      <span class="lk">${esc(LIMIT_NAMES.tissue)}</span><span class="lv mono">${L.tissue.streak} <span class="muted">/ ${L.tissue.limit}</span></span><span class="lh mono">+${L.tissue.headroom}</span><span class="lb">${esc(L.tissue.basis)}</span></div>`);
+  if(L.tissue) rows.push(`<div class="lim${L.tissue.binds?' held':''}${L.binding==='tissue'?' binding':''}" title="${esc(L.tissue.note||"consecutive near-ceiling weeks before a forced deload")}; basis: literature">
+      <span class="lk">${esc(LIMIT_NAMES.tissue)}</span><span class="lv mono">${L.tissue.streak} <span class="muted">/ ${L.tissue.limit}</span></span><span class="lh mono">${L.tissue.exempt?"exempt":"+"+L.tissue.headroom}</span><span class="lb">${esc(L.tissue.basis)}</span></div>`);
   if(!rows.length) return "";
   const head = L.binding ? `This week is held by <b>${esc(LIMIT_NAMES[L.binding]||L.binding)}</b>` : "No limit binds this week";
   const risk = L.risk ? `<div class="limrisk">Injury-risk read: the long run sits <b>${esc(L.risk.read)}</b> — in the ${esc(L.risk.cohort)} cohort (n≈${L.risk.n}) sharp longest-run jumps predicted injury where weekly-mileage jumps did not. A read against published evidence, not a probability for you.</div>` : "";

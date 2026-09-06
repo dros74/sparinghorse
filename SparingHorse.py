@@ -7092,7 +7092,8 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             "limits": {"regime": True, "binding": True,
                        "acwr": _PV_LIMIT_AXIS, "long_step": _PV_LIMIT_AXIS, "eq_week": _PV_LIMIT_AXIS,
                        "eq_session": _PV_LIMIT_AXIS, "chronic": _PV_LIMIT_AXIS,
-                       "tissue": {"streak": True, "limit": True, "headroom": True, "binds": True, "basis": True, "unit": True},
+                       "tissue": {"streak": True, "limit": True, "headroom": True, "binds": True, "basis": True, "unit": True,
+                                  "exempt": True, "note": True},   # §MESO4 — the peak exemption, named
                        "risk": {"axis": True, "cohort": True, "note": True, "n": True, "basis": True, "read": True}},
             "runs_ahead": True, "runs_done": True, "sessions": _PV_SESSION, "start": True,
             "strides": True, "trimp_total": True, "volume_met": True, "wk": True}
