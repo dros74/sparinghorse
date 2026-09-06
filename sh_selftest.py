@@ -5164,6 +5164,150 @@ def _stc_straddle_long():
                     "cap": cap, "capped_long": lb, "caution_full": c_full, "caution_straddle": c_strd})
 
 
+def _stc_long_run_held():
+    """§LRH (0.60.5) — THE LONG RUN HOLDS ITS RUNG ON THE STRADDLING WEEK, WHATEVER DAY THE WEEK IS
+    REGENERATED ON. The remainder budget was a UNIFORM per-run share of the intent (`len(rem)/runs`),
+    so a Sunday regeneration handed the long run a sixth of the week where the full lay gives it a
+    quarter or more; and §6o-B's week-level charge let an over-run on the easy days come out of the
+    long run. Live (2026-09-05, week 08-31, plans 176 → 177): the same 42.5 km run, every published
+    limit slack, and the Sunday long went 14.6 → 11.5 km because the seed date moved a day. The
+    ruling of 2026-09-06: protect the long run when the easy days over-run — it holds the rung the full
+    week lays, the sheet may run over the bar, and only the load ceilings may shorten it (out loud).
+    §LRH-2: a day already run is LIVED, not laid — the nightly regeneration runs after the evening
+    run, and laying a session on that day then shedding it folded its budget into the long run.
+    Pure/in-memory."""
+    from datetime import date, timedelta
+    easy = 414
+    mon = date(2026, 8, 31)
+    ctl0, atl0 = 70.0, 65.0
+    longs = [12.0, 12.5, 13.0, 13.6]            # §PRO9 cap = 1.10 × 13.6 = 15.0
+    shape = {"wk": 1, "km": 40, "runs": 6, "long": 11, "strides": 0, "intent": "Base — aerobic"}
+    fails = []
+
+    def _gen(**kw):
+        return S.generate_block([dict(shape)], mon, ctl0, atl0, easy,
+                              recent_longs=list(longs), **kw)[0][0]
+
+    def _long(week):
+        v = [s for s in week["sessions"] if (s.get("kind") or "").startswith("long") and (s.get("km") or 0) > 0]
+        return max(v, key=lambda s: s["km"]) if v else None
+
+    A = dict(regime="assertive", last_nondown=600.0)
+    full = _gen(**A)
+    fl = _long(full)
+    if not fl:
+        return _st("det", "long-run-held", "§LRH fixture", passed=False, expect="a long run",
+                   got="the full week laid no long run")
+    rung, full_km = fl["km"], full["km"]
+    if not (0.15 * full_km < rung < 0.5 * full_km):
+        fails.append(f"fixture too weak — rung {rung} km is not a normal share of a {full_km} km week")
+    if not (rung > full_km / shape["runs"] + 1.0):
+        fails.append(f"fixture too weak — the uniform share {full_km / shape['runs']:.1f} km is not clearly "
+                     f"under the rung {rung} km, so the regression could not show")
+    sun, sat = mon + timedelta(days=6), mon + timedelta(days=5)
+
+    # (a) THE REGRESSION — Sunday regeneration, week on track: 5 runs done at the full lay's short-day
+    #     total. Pre-fix the uniform share laid intent/6 (about half the rung).
+    on_track = (5, round(full_km - rung, 1))
+    a = _gen(today=sun, week_actuals=on_track, **A)
+    la = _long(a)
+    if not la or abs(la["km"] - rung) > 0.35:
+        fails.append(f"(a) Sunday regen laid long {la and la['km']} vs rung {rung} — the uniform share cut it")
+    if abs(a["km"] - full_km) > 0.5:
+        fails.append(f"(a) Sunday regen week {a['km']} km ≠ full week {full_km} km — not day-invariant")
+    if not (a.get("long_held") and la and la.get("long_held")):
+        fails.append("(a) the hold is not published on the week and the session (`long_held`)")
+    if a["limits"].get("acwr", {}).get("binds"):
+        fails.append("(a) the ACWR axis claims to bind on a week it did not cut")
+
+    # (b) DAY-INVARIANCE — the SAME week regenerated on Thu (rest day), Sat (run today, already
+    #     logged) and Sun lays the SAME long run. Thu: 3 of 6 runs done; Sat: 5 done incl. today.
+    thu = mon + timedelta(days=3)
+    b_thu = _gen(today=thu, week_actuals=(3, round(0.45 * full_km, 1)), **A)
+    b_sat = _gen(today=sat, week_actuals=on_track, today_trimp=90.0, today_run=True, **A)
+    for tag, w in (("Thu", b_thu), ("Sat+run", b_sat)):
+        lw = _long(w)
+        if not lw or abs(lw["km"] - rung) > 0.35:
+            fails.append(f"(b) {tag} regen laid long {lw and lw['km']} vs rung {rung} — moves with the day")
+    # §LRH-2 — Saturday's logged run is LIVED: its row stays (superseded by the actual on the card),
+    # it is not counted ahead, and only Sunday remains to lay.
+    sat_rows = [s for s in b_sat["sessions"] if s["date"] == sat.isoformat()]
+    if not sat_rows:
+        fails.append("(b) the run-today's row vanished from the week (it is lived, and must show)")
+    if b_sat.get("runs_ahead") != 1 or abs((b_sat.get("km_ahead") or 0) - rung) > 0.35:
+        fails.append(f"(b) Sat regen ahead = {b_sat.get('runs_ahead')} runs / {b_sat.get('km_ahead')} km — "
+                     f"expected only the Sunday long ({rung})")
+
+    # (c) OVER-RUN, SHEET SPENT — the km intent is already run by Saturday night. Pre-fix Sunday fell
+    #     to optional rest and the long run vanished; now it holds, the flag stays true (it is), the
+    #     sheet runs over the bar, and the bar note says why.
+    c = _gen(today=sun, week_actuals=(5, round(full_km + 4.0, 1)), **A)
+    lc = _long(c)
+    if not lc or abs(lc["km"] - rung) > 0.35:
+        fails.append(f"(c) spent week laid long {lc and lc['km']} vs rung {rung} — the covered test dropped it")
+    if not c.get("volume_met"):
+        fails.append("(c) volume_met went false on a week whose km intent is run — the fact must stay")
+    if any(s.get("kind") == "rest" for s in c["sessions"] if s["date"] == sun.isoformat()):
+        fails.append("(c) an optional-rest entry sits on the long-run day")
+    bar = c.get("bar") or {}
+    if not (bar.get("sheet_km", 0) > bar.get("intent_km", 0) + 1.0):
+        fails.append(f"(c) the sheet {bar.get('sheet_km')} does not run over the bar {bar.get('intent_km')}")
+    if bar.get("diverge") and "keeps its rung" not in (bar.get("note") or ""):
+        fails.append(f"(c) the bar note does not name the hold: {bar.get('note')!r}")
+
+    # (d) THE CEILING IS THE ONLY CUTTER — a hot seed (ATL over CTL) makes the remainder search answer
+    #     less than the rung: the long run is cut BUT PRESENT, the hold is NOT claimed, and the ACWR
+    #     axis binds. The seed is walked up from warm to hot and the first cut-but-present week is
+    #     judged; a fixture that only ever governs the day to nothing proves nothing about the cut.
+    ld, d = None, None
+    for _atl in (70.0, 72.0, 74.0, 76.0, 78.0, 82.0):
+        _d = S.generate_block([dict(shape)], mon, 70.0, _atl, easy, recent_longs=list(longs),
+                              today=sun, week_actuals=on_track, **A)[0][0]
+        _l = _long(_d)
+        if _l and _l["km"] < rung - 0.5:
+            ld, d = _l, _d
+            break
+    if ld is None:
+        fails.append("(d) fixture too weak — no seed cut the long run while leaving it laid")
+    else:
+        if d.get("long_held") or ld.get("long_held"):
+            fails.append("(d) a ceiling-cut long run still claims `long_held`")
+        if not d["limits"].get("acwr", {}).get("binds"):
+            fails.append("(d) the ACWR ceiling cut the long run and the limits block does not say so")
+
+    # (e) NEVER CRAM — a Sunday regeneration on a barely-run week lays the rung and not one km more;
+    #     the missed days are gone, not folded into the back of the week.
+    e = _gen(today=sun, week_actuals=(2, 9.0), **A)
+    le = _long(e)
+    if le and le["km"] > rung + 0.35:
+        fails.append(f"(e) under-run week crammed the long run to {le['km']} (rung {rung})")
+    if e["km"] > full_km + 0.5:
+        fails.append(f"(e) under-run week {e['km']} exceeds its full week {full_km}")
+
+    # (f) CAUTION CONTRACT — no rung, no hold: the proportional lay stands, byte-identical. The
+    #     on-track actuals are CAUTION's own (its intent is the skeleton), or the remainder is spent
+    #     and the limb judges an optional-rest day instead of a long run.
+    cfw = _gen(regime="caution")
+    cf = _long(cfw)
+    f = _gen(today=sun, week_actuals=(5, round(cfw["km"] - (cf["km"] if cf else 0.0), 1)), regime="caution")
+    lf = _long(f)
+    if f.get("long_held") or any(s.get("long_held") for s in f["sessions"]):
+        fails.append("(f) the hold leaked into caution")
+    if not (lf and cf):
+        fails.append(f"(f) fixture too weak — caution laid no long run (full {cf and cf['km']}, Sunday {lf and lf['km']})")
+    elif not (lf["km"] < cf["km"] - 0.5):
+        fails.append(f"(f) caution Sunday long {lf['km']} did not scale with the remainder ({cf['km']} full)")
+    return _st("det", "long-run-held",
+               "§LRH the straddling week's long run holds the rung the full week lays, on whatever day the "
+               "week is regenerated (uniform-share regression, day-invariance incl. a run-today, sheet "
+               "already spent, ceiling as the only cutter and it says so, never cram, caution untouched)",
+               passed=not fails, expect="long == full-week long (±0.35) on Thu/Sat/Sun regens; held flags; "
+               "spent week keeps it; ceiling cut ⇒ acwr.binds; caution proportional",
+               got={"rung": rung, "full_km": full_km, "sun": la and la["km"], "thu": _long(b_thu) and _long(b_thu)["km"],
+                    "sat": _long(b_sat) and _long(b_sat)["km"], "spent": lc and lc["km"],
+                    "ceiling": ld and ld["km"], "caution": lf and lf["km"], "failures": fails or "none"})
+
+
 def _stc_session_step():
     """§PRO17/§AARHUS — no prescribed SUSTAINED bout may jump past `SESSION_EQ_STEP` × the largest of
     the trailing window, in eq_km (damage), not raw km.
@@ -9554,8 +9698,16 @@ def _stc_frequency_met():
     # assertive week, since on caution intent == skeleton and the two numbers coincide.
     a_shape = [{"wk": 1, "km": 15, "runs": 4, "long": 6, "strides": 0,
                 "intent": "Base — aerobic volume"}]
-    a_wks, _ = S.generate_block(a_shape, bs, 55.0, 60.0, 428.0, today=today,
-                              regime="assertive", zones=S.pace_zones(34.8), week_actuals=(4, 60.0))
+    # §LRH (0.60.5) — a long run still AHEAD now holds its rung on an over-run assertive week instead of
+    # falling to optional rest, so this limb puts the long run BEHIND today (long day = Saturday) — the
+    # covered test then empties the remainder exactly as before, and the note it writes is what is judged.
+    _prefs = E.day_preferences()
+    E.set_day_preferences("sat", None)
+    try:
+        a_wks, _ = S.generate_block(a_shape, bs, 55.0, 60.0, 428.0, today=today,
+                                  regime="assertive", zones=S.pace_zones(34.8), week_actuals=(4, 60.0))
+    finally:
+        E._DAY_PREF = _prefs          # restore the parsed pair as-is
     a_note = next((s.get("note") or "" for s in a_wks[0]["sessions"]
                    if s.get("kind") == "rest"), "")
     # ANTI-VACUITY — this assertive shape must genuinely intend MORE than its skeleton, or the note has
@@ -16514,7 +16666,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),
                  lambda: _stc_seed_stale(),

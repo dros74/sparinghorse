@@ -1715,6 +1715,7 @@ function weekHtml(w,p,today){
                  :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
                // §PRO9 — long-run progression cap (Aarhus injury lever); §3.1 — biomechanical (eq_km) load ease
                w.long_step_capped?`<span class="wfz" title="Long-run progression cap: this week's long run was held to +10% over your longest run of the last 4 weeks — the strongest single injury lever (a sharp long-run jump predicts injury more than mileage jumps). Freed volume went to easy runs; weekly load unchanged.">long-run held (+10%)</span>`:'',
+               w.long_held?`<span class="wfz" title="Long run kept at its ladder rung (${U.d(w.long_held.rung_km)} ${U.unit}): your easy days ran over this week's sheet, so the sheet runs over the bar and the long run keeps its distance. Only the load ceilings can shorten it.">long run kept</span>`:'',
                // §REST — the day-spacing gate: the week wanted another run day but every open day
                // would have chained a run streak, so the spacing held and the week is honestly lighter
                // §REST2 — …and how much it cost, when the engine can measure it. A boolean says the

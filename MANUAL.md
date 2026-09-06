@@ -298,7 +298,9 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   hold, or a stop-symptom check-in within the last 56 days; it lifts by itself once that window is
   clean. How last week compared to its prescription is *not* a body signal: a travel week, a skipped
   run, a week lived differently never demotes the plan. In the assertive regime a
-  week can be flagged **`long-run held (+10%)`** (the long-run-jump cap) or **`fast load eased`** (the
+  week can be flagged **`long-run held (+10%)`** (the long-run-jump cap), **`long run kept`** (the week
+  underway was over-run on its easy days and the long run kept the distance a whole week would give it,
+  so the sheet runs over the bar; only the load ceilings can shorten it) or **`fast load eased`** (the
   biomechanical brake trimming a fast-load spike to easy). After a long healthy *break*, the plan
   restarts from a small conservative dose and ramps from there by measurement — no gate, just a floor.
 - **`clipped to fit ACWR`** — the safety ceiling trimmed that week's volume. Expected on aggressive weeks.

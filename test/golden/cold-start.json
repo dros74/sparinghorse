@@ -35,7 +35,7 @@
         "limits": {
           "acwr": {
             "basis": "L",
-            "binds": false,
+            "binds": true,
             "ceiling": 1.25,
             "headroom": -0.98,
             "laid": 2.23,

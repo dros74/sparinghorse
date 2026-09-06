@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.60.4"
+ENGINE_VERSION = "0.60.5"
 
 
 def _zones_asof(db, date_iso=None):
@@ -2873,6 +2873,16 @@ def _is_taper(w):
     return _week_role(w) in ("taper", "race")
 
 
+def _run_logged_on(db, day):
+    """§LRH-2 (0.60.5) — whether a RUN (owned, not dropped, with distance) is logged on `day`. A fact
+    about the sheet, kept apart from `today_trimp`: that one is whole-body load and floors the
+    projection only (§PRO20b)."""
+    drop = dropped_ids(db)
+    rows = db.execute("SELECT id, distance FROM activities WHERE date=? AND " + RUN_FAMILY_SQL,
+                      (day.isoformat(),)).fetchall()
+    return any(r["id"] not in drop and r["distance"] for r in rows)
+
+
 def _current_week_actuals(db, today):
     """§6e-FREQ — actual run-days + km the athlete has logged in the CALENDAR week (Mon–Sun) holding
     `today`, from owned data only (ignored/deleted excluded). Feeds the frequency-met check: once the
@@ -3742,7 +3752,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
                    recent_eq=None, week_actual_long=None, week_actual_eq=None, blocked=None,
-                   recent_session_eq=None, today_trimp=None, pinned_past=None, prev_tail=0,
+                   recent_session_eq=None, today_trimp=None, today_run=None, pinned_past=None, prev_tail=0,
                    race=None):
     """Phase-agnostic week-by-week generator (§6f) — the engine's core build machinery, shared by
     the re-base and (next) the Base/Build/Peak/Taper phases. Grows load across `shape`'s weeks,
@@ -3832,7 +3842,19 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if today and wk_start_d < today <= wk_start_d + timedelta(days=6):
             offsets = av_days if av_days is not None else _run_days(wk["runs"])
             today_off = (today - wk_start_d).days
-            rem = [o for o in offsets if o >= today_off]
+            # §LRH-2 (0.60.5) — A DAY ALREADY RUN IS LIVED, NOT LAID. The nightly regeneration runs after
+            # the evening run, so on the daily path `today` is a day with a logged run; it stayed a
+            # remainder slot, the lay put a session on it, §JR shed that session because the long run's
+            # aim took the budget, and the shed day's budget folded into the long run — so the long run
+            # read 14.6 km on Saturday's regeneration and its own 13.3 km rung on Sunday's, for the same
+            # week and the same runs. A run-today joins the lived days (its actual is charged through
+            # `actual_floor` either way, and §CARD2 already counts it at what was run); the remainder
+            # lays only the days still ahead. `today_run` is its own argument, not `today_trimp`: the
+            # floor is whole-body load and goes into the PROJECTION only (§PRO20b, det/today-actual);
+            # "a run is logged today" is a fact about the sheet. Callers that pass none (dets,
+            # goldens) keep the old lay ⇒ byte-identical; the app passes what the activities say.
+            _today_run = bool(today_run)
+            rem = [o for o in offsets if o > today_off or (o == today_off and not _today_run)]
             # §PRO13 — the straddling week's INTENT is the one this regime actually lays, not the
             # skeleton. §6o/§6o-B were written against the caution model (`chosen = min(intent,
             # allowed)`), where `wk["km"]` IS the intent. §PRO2's assertive regime RIDES the ceiling
@@ -3925,7 +3947,20 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                        av_blocked=av_off,
                                        long_km_cap=long_km_cap, ladder=assertive,   # §PRO24
                                        prev_tail=prev_tail)   # §REST
-            elapsed = [s for s in full if s["date"] < today.isoformat()]   # for log matching / display
+            # §LRH (0.60.5) — THE LONG RUN'S RUNG IS THE DISTANCE THE FULL WEEK JUST LAID FOR IT. §PRO15
+            # defined the aim as "the distance the full-week path would lay at this intent" and then
+            # approximated it with the skeleton's share × intent, which sits under the ladder whenever
+            # §PRO23 has raised the long run above that share. `full` IS the full-week lay, so the aim
+            # is read off it: one number, the same one the card shows on a week laid whole.
+            # Assertive-only, like every lever that feeds it; caution keeps the proportional lay.
+            _full_long = None
+            if assertive:
+                _fl = [s for s in full if (s.get("kind") or "").startswith("long") and (s.get("km") or 0) > 0]
+                if _fl:
+                    _full_long = max(_fl, key=lambda s: s.get("km") or 0.0)
+                    long_km_aim = _full_long["km"]
+            elapsed = [s for s in full if s["date"] < today.isoformat()
+                       or (_today_run and s["date"] == today.isoformat())]   # §LRH-2 — a run-today is lived
             # §PAST — but a day already RUN is history, not a slice of today's arithmetic. `full` has
             # to be re-laid (the remainder is governed off `wk_intent_trimp`, and this is its basis);
             # its elapsed slice must not be shown as the prescription, because the week's intent moves
@@ -3955,6 +3990,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # is spent — an over-run week must NOT lay more sessions on the remaining days just
             # because the run count is short (more runs to hit a count = junk by definition). "Spent"
             # = less than one §JR-honest run left (taper exempt: a tiny shakeout is real).
+            # §LRH — IS THE WEEK'S LONG RUN STILL AHEAD? Its laid date is after today, or today and not
+            # yet run, and that day is one the remainder may place. Only then is there a rung to hold.
+            _long_ahead = bool(
+                assertive and _full_long is not None and rem
+                and (_full_long["date"] > today.isoformat()
+                     or (_full_long["date"] == today.isoformat() and not _today_run))
+                and ((_date(_full_long["date"]) - wk_start_d).days in rem))
+            long_held, _rem_clipped = False, False
             freq_met = vol_met = False
             if rem and week_actuals is not None:
                 a_runs, a_km = week_actuals
@@ -3966,7 +4009,14 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     RUN_MIN_KM * (easy_pace_sec / 60.0) * EASY_TRIMP_PER_MIN
                 freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= wk_intent_km
                 vol_met = wk_intent_km > 0 and left_tr <= min_left
-                if freq_met or vol_met:
+                # §LRH — THE RULING OF 2026-09-06 ("protect the long run when I over-run"): a week whose
+                # sheet is already run does not lose its long run. The easy days absorbed the over-run;
+                # the long run is the marathon stimulus and the one bout whose progression the Aarhus
+                # cohort ties to injury, so it is the last thing the sheet may trade away. The covered
+                # tests still empty the remainder when the long run is behind us (a met-week junk run
+                # does nothing for aerobic shape — that stands); with the long run ahead the remainder
+                # stays, the floor below sizes it, and §JR sheds the shorts.
+                if (freq_met or vol_met) and not _long_ahead:
                     rem = []
             if rem:
                 # §6o-QF — a MID-QUALITY session whose laid day is still AHEAD isn't "missed": it
@@ -4036,6 +4086,26 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     # is never crammed into the back of the week. (§PRO13: charged against the
                     # regime's real intent, not the skeleton.)
                     prorate = min(prorate, max(0.0, wk_intent_km - week_actuals[1]) * TRIMP_PER_KM)
+                # §LRH (0.60.5) — THE LONG RUN HOLDS ITS RUNG. `prorate` is a UNIFORM per-run share
+                # (`len(rem) / runs`), and the long run is not a uniform run: on a Sunday regeneration the
+                # one day left is the long day and the share hands it a sixth of the week where its lay
+                # is a quarter or more. Measured live (2026-09-05, week 08-31, plans 176 → 177): the
+                # same 42.5 km run, the same ceilings, and the Sunday long run went 14.6 → 11.5 km
+                # because the seed date moved from Friday to Saturday — the week laid 3 km under its
+                # own intent with every published limit slack. The same share also let an over-run on
+                # the easy days come out of the long run (§6o-B's charge is week-level, blind to which
+                # day is left). So the remainder is floored at the rung — the TRIMP of the long run the
+                # full week laid — and only the ceiling search (`allowed`) may cut below it; when it does
+                # the limits block says so (`_rem_clipped` → acwr.binds). The sheet may then run over
+                # `intent_km`; that is the ruling, and the bar note names it. Caution never reaches
+                # here (`_long_ahead` is assertive-only) ⇒ byte-identical.
+                if _long_ahead:
+                    _rung_tr = float(_full_long.get("trimp") or 0.0)
+                    if _rung_tr > prorate + 1e-9:
+                        prorate, long_held = _rung_tr, True
+                _rem_clipped = allowed + 1e-6 < prorate     # the ceiling, not the share, bound the remainder
+                if _rem_clipped:
+                    long_held = False       # the ceiling spoke: the long run is NOT at its rung, and says so
                 chosen = min(prorate, allowed)
                 rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, use_zones,
                                              days_override=rem, av_blocked=av_off, q_days=q_ahead,
@@ -4051,6 +4121,12 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                  long_km_cap=long_km_cap, long_km_aim=long_km_aim,
                                                  free_from=today_off,   # §PRO24 — no ladder (remainder)
                                                  fixed_days=elapsed_offs, prev_tail=prev_tail)   # §REST
+                if long_held:
+                    # §LRH — the session says so, in a field the card and the dets both read; the note
+                    # stays the session's own (a long_mp's structure string is the card's to trim).
+                    for _s in rem_s:
+                        if (_s.get("kind") or "").startswith("long") and (_s.get("km") or 0) > 0:
+                            _s["long_held"] = True
             elif freq_met or vol_met:                      # week already covered → optional, never forced
                 a_runs, a_km = week_actuals
                 # §6e3 — quote the intent that MADE the decision, not the shape skeleton. Both tests
@@ -4109,9 +4185,17 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
             pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=sessions)   # §P2 (0.59.0)
+            if long_held:
+                # §LRH — published, so "why is the sheet over the bar?" has an answer in the week itself
+                _held = [s for s in rem_s if s.get("long_held")]
+                pweek["long_held"] = {"km": (_held[0].get("km") if _held else None),
+                                      "rung_km": _full_long["km"], "basis": "full-week lay"}
             pweek["limits"] = _week_limits(          # §LIMITS (0.58.0) — the straddling week's read; the
                 assertive=assertive, eff_cap=eff_cap,   # streak/ramp governors are not reproduced here (§PRO13)
-                acwr_laid=(eow_flat if eow_flat is not None else eow), clipped=False,
+                # §LRH — `clipped` used to be a constant False here, so the ACWR axis could never read
+                # "binds" on the one week the remainder search actually governs. It binds when the
+                # search answered less than the remainder asked for.
+                acwr_laid=(eow_flat if eow_flat is not None else eow), clipped=_rem_clipped,
                 long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions), long_bound=bool(long_km_cap and any(s.get("long_step_capped") for s in sessions)),
                 eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=False,
                 eq_sess_cap=_session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
@@ -4143,7 +4227,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # `week_actuals is None` (direct det fixtures) keeps the prescription-sum header verbatim.
             if week_actuals is not None:
                 _ahead = [s for s in rem_s if (s.get("kind") or "") != "rest"]
-                if today_trimp:
+                if today_trimp or _today_run:
                     _ahead = [s for s in _ahead if s["date"] > today.isoformat()]
                 _ahead_km = round(sum(s.get("km") or 0.0 for s in _ahead), 1)
                 pweek.update(
@@ -4158,6 +4242,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # header 54.6).
                 pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=_ahead,
                                          lived_km=week_actuals[1])
+            if long_held and pweek["bar"].get("diverge"):
+                # §LRH — the sheet runs over the bar BECAUSE the long run kept its rung; say that,
+                # not "diverge". `diverge` stays true: it is.
+                pweek["bar"]["note"] = ("the long run keeps its rung; the sheet runs over the bar by "
+                                        "what the easy days ran over")
             # §PRO9 — surface the ceiling at week level too, exactly as the full-week path does; the
             # straddle branch built `pweek` by hand and never carried it, so a capped straddle week
             # showed the note on the session but nothing on the card.
@@ -5625,7 +5714,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                   week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                   consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
                   recent_eq=None, db=None, pace_zones=None, blocked=None, recent_session_eq=None,
-                  today_trimp=None, prev_tail=0, race=None):
+                  today_trimp=None, today_run=None, prev_tail=0, race=None):
     """§6f Step E (continuity) — generate one phase block with the past FROZEN. A week whose 7-day
     window has fully elapsed (end < today) is carried **verbatim** from `prior_by_start` (matched on
     start date), so a mid-block regeneration never rewrites weeks already lived. Today-onward weeks
@@ -5756,6 +5845,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                                         recent_session_eq=recent_session_eq,               # §PRO17
                                         week_actual_long=wal, week_actual_eq=wae,
                                         today_trimp=today_trimp,                     # §PRO20b today's actual
+                                        today_run=today_run,                         # §LRH-2 a run is logged today
                                         pinned_past=pinned_past,                     # §PAST — lived days
                                         blocked=blocked,                             # §AV — away days
                                         prev_tail=prev_tail,                         # §REST — seam into wk 1
@@ -5968,6 +6058,7 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
     # never into what is laid — so it can only tighten the governor. None on a day with no runs yet
     # ⇒ byte-identical.
     today_trimp = daily_trimp_series(db).get(today.isoformat()) or None
+    today_run = _run_logged_on(db, today)      # §LRH-2 — a run today is lived, not laid (runs only)
     # §PRO8 — the live ASSERTIVE plan floors the SOFT-cap CTL denominator at low chronic load so the
     # ceiling can build instead of pinning at ~maintenance; caution passes None (byte-identical). The
     # re-base is always caution, so it never receives it.
@@ -5986,6 +6077,7 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
                                                              db=db, pace_zones=zones,  # §PRO9/§3.1 — elapsed
                                                              # weeks anchor the caps on ACTUALS, not plan
                                                              today_trimp=today_trimp,  # §PRO20b
+                                                             today_run=today_run,      # §LRH-2
                                                              blocked=av_blocked,       # §AV — away days
                                                              prev_tail=live["prev_tail"],   # §REST
                                                              race=race_)                    # §RACE

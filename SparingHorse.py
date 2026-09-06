@@ -7028,6 +7028,7 @@ _PV_QUALITY = {"attach": True, "component": True, "frac": True, "kind": True, "l
 # NOT `reflection`: the free-text "how it felt" is the readiness-note posture — private (§H7).
 _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "component": True,
                "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
+               "long_held": True,   # §LRH — the long run kept its rung on a straddling week
                "minutes": True, "missed": True, "note": True, "optional": True,
                "pace_zone": True, "race": True,   # §RACE — race day, already public via objectives
                # §TT2 — the same reasoning one priority tier down: the plan already publishes
@@ -7057,6 +7058,8 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             # above. Strictly less revealing than the sentence they are derived from.
             "phase": True, "role": True, "km_level": True,   # §C — what a down week asks if its deload is retired
             "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
+            # §LRH — the hold, named: the same class as `long_step_capped` (a governor annotation)
+            "long_held": {"km": True, "rung_km": True, "basis": True},
             "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
             "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,
             # the governor's own annotations — the chips the week card renders. Same class as

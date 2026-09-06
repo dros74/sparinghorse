@@ -10,6 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.5] - 2026-09-06
+
+### Fixed
+
+- **The week underway cut its long run by the day it was regenerated on.** The remaining days were
+  budgeted as a uniform share of the week (days left ÷ runs), so a Sunday regeneration gave the long
+  run one sixth of the week where the full lay gives it a quarter or more. On the live week of 31
+  August two regenerations three hours apart, with no new run between them, laid the Sunday long run at
+  14.6 km and then 11.5 km, with every published limit slack. The long run now holds the distance the
+  full-week lay gives it, and the same week reads the same on a Thursday, Saturday or Sunday
+  regeneration.
+- **A day already run was still laid.** The nightly regeneration runs after the evening run, so
+  today stayed a remainder slot: the lay put a session on it, the junk floor shed it, and its budget
+  folded into the long run. A day with a logged run is now lived, not laid; its actual load still
+  reaches the projection as before. The engine reads "a run is logged today" from the activities,
+  apart from today's load, which floors the projection only.
+- **The limits block could never report the ACWR ceiling on the week underway.** The axis was passed a
+  constant; it now binds when the ceiling search answered less than the remainder asked for.
+
+### Changed
+
+- **The long run is protected when the easy days over-run.** By decision of 6 September: on the week
+  underway the long run keeps its rung even when the week's sheet is already run, the sheet may run
+  over the bar, and only the load ceilings may shorten it. The week card shows a `long run kept` chip,
+  the week and the session carry `long_held`, and the bar note names the hold instead of "diverge".
+  The caution regime is unchanged.
+
 ## [0.60.4] - 2026-09-04
 
 ### Fixed

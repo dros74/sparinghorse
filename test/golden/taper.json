@@ -23,11 +23,11 @@
           "horizon": 0.0182,
           "race": 0.08
         },
-        "hi_hms": "1:26:59",
-        "hi_seconds": 5219,
+        "hi_hms": "1:26:46",
+        "hi_seconds": 5206,
         "level": 80,
-        "lo_hms": "1:07:22",
-        "lo_seconds": 4042,
+        "lo_hms": "1:07:13",
+        "lo_seconds": 4033,
         "sigma_log": 0.0997
       },
       "correction": 1.0,
@@ -35,37 +35,37 @@
         {
           "ctl": 64,
           "evo2": 54.2,
-          "hms": "1:16:33",
+          "hms": "1:16:22",
           "plus_weeks": 0
         },
         {
           "ctl": 73,
           "evo2": 54.6,
-          "hms": "1:14:48",
+          "hms": "1:14:38",
           "plus_weeks": 4
         },
         {
           "ctl": 84,
           "evo2": 55.0,
-          "hms": "1:13:25",
+          "hms": "1:13:15",
           "plus_weeks": 8
         }
       ],
       "distance": "half",
-      "hms": "1:16:33",
-      "long_km": 16.7,
+      "hms": "1:16:22",
+      "long_km": 17.3,
       "note": "a range, not a promise: it assumes the laid build completes, and race day rides fuelling, pacing, weather and the day's legs. The median is the trend signal \u2014 more runway \u2192 higher fitness \u2192 faster \u2014 and the band narrows as runs land and raced results calibrate it.",
-      "seconds": 4593,
+      "seconds": 4582,
       "today": {
         "at_ctl": 66,
         "at_evo2": 54.0,
-        "gain_seconds": 14,
+        "gain_seconds": 25,
         "hms": "1:16:47",
         "long_km": 15.8,
         "seconds": 4607
       }
     },
-    "note": "Projected fitness by race day \u2248 CTL 64 (from 66 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 35 a healthy half finish needs. That supports **finishing Golden Half healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **1:07:22\u20131:26:59** (median 1:16:33) \u2014 the range narrows as runs land.",
+    "note": "Projected fitness by race day \u2248 CTL 64 (from 66 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 35 a healthy half finish needs. That supports **finishing Golden Half healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **1:07:13\u20131:26:46** (median 1:16:22) \u2014 the range narrows as runs land.",
     "projected_ctl": 64,
     "verdict": "finish"
   },
@@ -94,7 +94,7 @@
       "vo2max"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 65.3,
+    "end_atl": 65.8,
     "end_ctl": 64.0,
     "start": "2026-06-29",
     "weeks": [
@@ -135,8 +135,8 @@
             "basis": "S",
             "binds": false,
             "ceiling": 20.54,
-            "headroom": 3.84,
-            "laid": 16.7,
+            "headroom": 3.24,
+            "laid": 17.3,
             "unit": "eq-km"
           },
           "eq_week": {
@@ -151,8 +151,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 17.4,
-            "headroom": 0.7,
-            "laid": 16.7,
+            "headroom": 0.1,
+            "laid": 17.3,
             "unit": "km"
           },
           "regime": "assertive",
@@ -166,10 +166,10 @@
         },
         "long": 6,
         "partial": true,
-        "peak_acwr": 1.02,
+        "peak_acwr": 1.028,
         "phase": "peak",
-        "proj_acwr": 1.02,
-        "proj_acwr_flat": 0.722,
+        "proj_acwr": 1.028,
+        "proj_acwr_flat": 0.718,
         "proj_ctl": 64.0,
         "quality": [
           {
@@ -338,35 +338,35 @@
           {
             "date": "2026-07-02",
             "kind": "easy",
-            "km": 7.5,
-            "minutes": 38,
+            "km": 7.2,
+            "minutes": 36,
             "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
             "strides": 2,
-            "trimp": 62.2
+            "trimp": 59.4
           },
           {
             "date": "2026-07-04",
             "kind": "easy",
-            "km": 7.5,
-            "minutes": 38,
+            "km": 7.2,
+            "minutes": 36,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 62.2
+            "trimp": 59.4
           },
           {
             "date": "2026-07-05",
             "kind": "long",
-            "km": 16.7,
-            "minutes": 84,
+            "km": 17.3,
+            "minutes": 87,
             "note": "long easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 138.2
+            "trimp": 143.7
           }
         ],
         "start": "2026-06-29",
         "strides": 2,
-        "trimp_total": 428.1,
+        "trimp_total": 428.0,
         "volume_met": false,
         "wk": 1
       }
@@ -476,8 +476,8 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 21.71,
-            "headroom": 14.81,
+            "ceiling": 22.49,
+            "headroom": 15.59,
             "laid": 6.9,
             "unit": "eq-km"
           },
@@ -492,8 +492,8 @@
           "long_step": {
             "basis": "L",
             "binds": false,
-            "ceiling": 18.4,
-            "headroom": 12.8,
+            "ceiling": 19.0,
+            "headroom": 13.4,
             "laid": 5.6,
             "unit": "km"
           },
@@ -515,11 +515,11 @@
           }
         },
         "long": 7,
-        "peak_acwr": 0.925,
+        "peak_acwr": 0.931,
         "phase": "taper",
-        "proj_acwr": 0.64,
-        "proj_acwr_flat": 0.717,
-        "proj_acwr_soft": 0.717,
+        "proj_acwr": 0.641,
+        "proj_acwr_flat": 0.72,
+        "proj_acwr_soft": 0.72,
         "proj_ctl": 53.9,
         "quality": [
           {
@@ -679,8 +679,8 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 21.71,
-            "headroom": 0.61,
+            "ceiling": 22.49,
+            "headroom": 1.39,
             "laid": 21.1,
             "unit": "eq-km"
           },
@@ -695,8 +695,8 @@
           "long_step": {
             "basis": "L",
             "binds": false,
-            "ceiling": 18.4,
-            "headroom": 14.4,
+            "ceiling": 19.0,
+            "headroom": 15.0,
             "laid": 4.0,
             "unit": "km"
           },
@@ -719,10 +719,10 @@
           }
         },
         "long": 4,
-        "peak_acwr": 1.318,
+        "peak_acwr": 1.319,
         "phase": "taper",
         "proj_acwr": 0.578,
-        "proj_acwr_flat": 0.847,
+        "proj_acwr_flat": 0.848,
         "proj_acwr_soft": 0.46,
         "proj_ctl": 50.2,
         "quality": [],
