@@ -271,8 +271,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.72,
-            "laid": 0.53,
+            "headroom": 0.73,
+            "laid": 0.52,
             "unit": "ratio"
           },
           "binding": "chronic",
@@ -330,7 +330,7 @@
         "phase": "base",
         "proj_acwr": 2.191,
         "proj_acwr_flat": 2.016,
-        "proj_acwr_soft": 0.529,
+        "proj_acwr_soft": 0.5222,
         "proj_ctl": 13.3,
         "quality": [
           {
@@ -580,8 +580,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.57,
-            "laid": 0.68,
+            "headroom": 0.59,
+            "laid": 0.66,
             "unit": "ratio"
           },
           "binding": "chronic",
@@ -639,7 +639,7 @@
         "phase": "base",
         "proj_acwr": 1.801,
         "proj_acwr_flat": 1.56,
-        "proj_acwr_soft": 0.6814,
+        "proj_acwr_soft": 0.6578,
         "proj_ctl": 21.4,
         "quality": [
           {
@@ -739,8 +739,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.44,
-            "laid": 0.81,
+            "headroom": 0.45,
+            "laid": 0.8,
             "unit": "ratio"
           },
           "binding": "chronic",
@@ -798,7 +798,7 @@
         "phase": "base",
         "proj_acwr": 1.68,
         "proj_acwr_flat": 1.518,
-        "proj_acwr_soft": 0.8143,
+        "proj_acwr_soft": 0.8003,
         "proj_ctl": 26.4,
         "quality": [
           {
@@ -902,8 +902,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.31,
-            "laid": 0.94,
+            "headroom": 0.34,
+            "laid": 0.91,
             "unit": "ratio"
           },
           "binding": "chronic",
@@ -961,7 +961,7 @@
         "phase": "base",
         "proj_acwr": 1.588,
         "proj_acwr_flat": 1.432,
-        "proj_acwr_soft": 0.9372,
+        "proj_acwr_soft": 0.9109,
         "proj_ctl": 31.4,
         "quality": [
           {

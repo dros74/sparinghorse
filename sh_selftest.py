@@ -5308,6 +5308,92 @@ def _stc_long_run_held():
                     "ceiling": ld and ld["km"], "caution": lf and lf["km"], "failures": fails or "none"})
 
 
+def _stc_long_share_base():
+    """§SHARE (0.60.6) — THE 30 % SHARE CEILING IS OF THE WEEK'S KM, NOT OF THE EASY BUDGET. `long_w` is
+    a share of the easy budget (the week less its quality sessions), so bounding it at LONG_RUN_MAX_FRAC
+    held the long run to 30 % of the EASY km — 23 % of a 57-km base week (13.3 km under a 15.0 ladder
+    that never bound; a step down from the 13.6 run the Sunday before). Doctrine's band is of weekly km,
+    and Breeze lays 32–39 % on its long-run weeks. The ruling of 2026-09-06: pin the ladder rung and
+    lay the rest of the week around it under the ceilings. Scope: a full lay of a BUILDING week under a
+    ladder (assertive); taper and down weeks, the remainder, and caution keep the old bound. Pure."""
+    from datetime import date
+    easy = 414
+    mon = date(2026, 8, 31)
+    zones = S.pace_zones(34.8)
+    q = [{"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals", "rep_min": 3,
+          "rec_min": 2, "label": "VO₂ reps (3min)", "component": "vo2max"},
+         {"kind": "interval", "zone": "interval", "frac": 0.08, "structure": "intervals", "rep_min": 1,
+          "rec_min": 2, "label": "short VO₂ touch", "component": "vo2max"}]
+    wk = {"wk": 1, "km": 57, "runs": 6, "long": 15, "strides": 0, "intent": "Base — aerobic", "role": "base",
+          "quality": q}
+    W = _trimp_for_km(57.0, easy)
+    FRAC = E.LONG_RUN_MAX_FRAC
+    fails = []
+
+    def lay(week, cap, **kw):
+        return S._distribute_week(dict(week), mon, W, easy, zones, long_km_cap=cap, ladder=True, **kw)[0]
+
+    def long_km(ss):
+        v = [x["km"] for x in ss if (x.get("kind") or "").startswith("long") and x.get("km")]
+        return max(v) if v else 0.0
+
+    def week_km(ss):
+        return sum((x.get("km") or 0.0) for x in ss)
+
+    def easy_km(ss):
+        return sum((x.get("km") or 0.0) for x in ss if x.get("kind") in ("easy", "long"))
+
+    # (a) a ladder INSIDE the doctrine band is reached: 15.0 on a ~57-km week is 26 % of the week
+    a = lay(wk, 15.0)
+    la, wa = long_km(a), week_km(a)
+    if abs(la - 15.0) > 0.35:
+        fails.append(f"(a) ladder 15.0 not reached: long {la} on a {wa} km week")
+    if not (0.22 <= la / max(wa, 1e-9) <= FRAC + 0.02):
+        fails.append(f"(a) long share {la / max(wa, 1e-9):.2f} is outside the doctrine band")
+    # ANTI-VACUITY — the old, easy-budget bound must sit UNDER the ladder here, or nothing was fixed
+    if not (FRAC * easy_km(a) < 15.0 - 0.5):
+        fails.append(f"(a) fixture too weak — the easy-budget bound {FRAC * easy_km(a):.1f} is not under the ladder")
+    shorts = [x["km"] for x in a if x.get("kind") == "easy" and x.get("km")]
+    if shorts and la <= max(shorts):
+        fails.append(f"(a) the long run {la} is not the week's longest run (shorts {shorts})")
+
+    # (b) a ladder ABOVE the band is bounded at 30 % of the WEEK — above the old bound, not past doctrine
+    b = lay(wk, 40.0)
+    lb, wb = long_km(b), week_km(b)
+    if lb > FRAC * wb + 0.5:
+        fails.append(f"(b) long {lb} exceeds {FRAC:.0%} of the {wb} km week")
+    if lb < FRAC * easy_km(b) + 0.5:
+        fails.append(f"(b) long {lb} still bounded by the easy budget ({FRAC * easy_km(b):.1f})")
+
+    # (c) TAPER and DOWN weeks keep the easy-budget bound: this lever reaches the rung, it does not lift every week
+    for role, intent in (("taper", "Taper — drop volume, keep sharpness"), ("down", "Down week — absorb the block")):
+        c = lay(dict(wk, role=role, intent=intent), 40.0)
+        if long_km(c) > FRAC * easy_km(c) + 0.5:
+            fails.append(f"(c) {role} week's long run {long_km(c)} rose with the week base (easy bound {FRAC * easy_km(c):.1f})")
+
+    # (d) NO LADDER (caution): the bound is untouched
+    d = S._distribute_week(dict(wk), mon, W, easy, zones)[0]
+    if long_km(d) > FRAC * easy_km(d) + 0.5:
+        fails.append(f"(d) caution lay rose to {long_km(d)} (easy bound {FRAC * easy_km(d):.1f})")
+
+    # (e) END-TO-END — an assertive base week under the ladder lands its long run at min(ladder, 30 % of the week)
+    e = S.generate_block([dict(wk)], mon, 70.0, 65.0, easy, zones=zones, regime="assertive",
+                         last_nondown=600.0, recent_longs=[12.0, 12.5, 13.0, 13.6])[0][0]
+    le, we = long_km(e["sessions"]), e["km"]
+    want = min(round(E.LONG_RUN_STEP_CAP * 13.6, 1), FRAC * we)
+    if abs(le - want) > 0.5:
+        fails.append(f"(e) end-to-end long {le} on a {we} km week, expected ≈ {want:.1f} (ladder or {FRAC:.0%} of the week)")
+    return _st("det", "long-share-base",
+               "§SHARE the long-run share ceiling is measured against the week's km (doctrine) not the easy "
+               "budget: a ladder inside the band is reached, one above it is held at 30 % of the week; taper, "
+               "down, remainder and caution keep the old bound; end-to-end the assertive base week lands at "
+               "min(ladder, 30 % of the week)",
+               passed=not fails, expect="long == ladder (15.0) on the 57-km base week; ≤ 30 % of the week; "
+               "taper/down/caution unchanged; e2e == min(ladder, 30 %)",
+               got={"a_long": la, "a_week": wa, "b_long": lb, "b_week": wb, "e_long": le, "e_week": we,
+                    "failures": fails or "none"})
+
+
 def _stc_session_step():
     """§PRO17/§AARHUS — no prescribed SUSTAINED bout may jump past `SESSION_EQ_STEP` × the largest of
     the trailing window, in eq_km (damage), not raw km.
@@ -16666,7 +16752,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),
                  lambda: _stc_seed_stale(),

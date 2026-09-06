@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.60.6] - 2026-09-06
+
+### Fixed
+
+- **The long run's share ceiling was measured against the wrong base.** The 30 % doctrine cap on the
+  long run is a fraction of the week's km, as its constant says, but the lay applied it to the easy
+  budget left after the quality sessions, so a base week held its long run to about 23 % of the week:
+  13.3 km on a 57 km week under a 15.0 km ladder that never bound, and a step down from the 13.6 km
+  run the Sunday before. The ceiling now reads the week's km, so the +10 % ladder is reached in base
+  and the long run climbs every week. Applies to a full lay of a building week under the ladder;
+  taper and down weeks, the week underway's remainder, and the caution regime keep the old bound.
+  On the live road the long runs to 5 October read 16.5, 17.6, 19.4, 21.4 and 23.5 km instead of
+  12.2, 15.1, 16.6, 18.3 and 20.1; weekly volume sits about 5 % lower because the bigger long runs
+  reach the load ceilings sooner, and the near-ceiling net brings the first down week a week earlier.
+
 ## [0.60.5] - 2026-09-06
 
 ### Fixed

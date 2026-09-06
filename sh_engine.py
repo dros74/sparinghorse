@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.60.5"
+ENGINE_VERSION = "0.60.6"
 
 
 def _zones_asof(db, date_iso=None):
@@ -2112,6 +2112,30 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         _per = trimp_per_min(long_q["zone"])
         _zp = (zones or {}).get(long_q["zone"]) or easy_pace_sec
         mp_km = round(max(1, round(mp_work / _per)) * 60 / _zp, 1)
+    # §SHARE (0.60.6) — THE SHARE CEILING IS A FRACTION OF THE WEEK'S KM, AS ITS CONSTANT SAYS. `long_w`
+    # is a share of the EASY budget, which on a quality week is the week less its hard sessions, so
+    # bounding it at LONG_RUN_MAX_FRAC held the long run to 30 % of the easy km — 23 % of my 57-km base
+    # week of 2026-08-31: 13.3 km under a 15.0 ladder that never bound, a step DOWN from the 13.6 run
+    # the Sunday before, and the same on every base week of the road (12.1 on the 56.6-km week after).
+    # §PRO23 promised "raise the long run TO its ladder" and this bound was what stopped it. Doctrine's
+    # 25–30 % is of weekly km (Daniels, Hansons); Davis's Breeze plan, my tier, lays 32–39 % on its
+    # long-run weeks. Measured against the week, the ladder is the binder in base and the long run
+    # climbs +10 %/wk. Converted once into the share of the easy budget that the same km mean: the
+    # week's km = the quality km already built + the MP km + the easy budget at easy pace. Only ever
+    # RAISES the bound (week km ≥ easy km), and only where the ladder exists to be reached — a FULL
+    # lay (`free_from is None`; the remainder is not the week, §PRO15's aim carries the full lay's long
+    # there) of a BUILDING week (taper and down weeks keep the easy-budget bound: their long run is
+    # meant to be short, and this lever is about reaching the rung, not lifting every week). Used by
+    # §PRO23 alone: §PRO21's ratio floor keeps its own bound. `long_km_cap` is assertive-only ⇒ caution
+    # and the re-base byte-identical.
+    long_cap_wk = long_cap
+    if (long_km_cap and free_from is None and easy_budget > 0
+            and not _is_taper(wk) and not _is_down(wk)):
+        _km_per_tr = 60.0 / (easy_pace_sec * EASY_TRIMP_PER_MIN)         # easy km per TRIMP
+        _q_km = sum((s.get("km") or 0.0) for s in sessions)              # mid-week quality, already built
+        _week_km = _q_km + mp_km + easy_budget * _km_per_tr
+        _cap_base_tr = max(0.0, long_cap * _week_km - mp_km) / _km_per_tr
+        long_cap_wk = min(1.0, max(long_cap, _cap_base_tr / easy_budget))
     # §PRO15 — the long run is sized off the WEEK, not off what is left of it. `long_w` is a SHARE
     # of the budget, so when the §6o remainder governs a fraction of the week (mid-week regeneration,
     # over-run early days) the long run takes the same proportional haircut as the easy days — the
@@ -2165,7 +2189,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # outside the assertive regime, so caution never evaluates it ⇒ byte-identical, as for part 1.
     if long_km_cap and easy_budget > 0 and n_short > 0:
         _w_ladder = (max(0.0, long_km_cap - mp_km) * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN) / easy_budget
-        long_w = max(long_w, min(_w_ladder, long_cap))
+        long_w = max(long_w, min(_w_ladder, long_cap_wk))     # §SHARE — the bound is of the week
     # §PRO9 — long-run progression cap. Clip the long-run SHARE so its distance ≤ `long_km_cap`; the
     # freed budget flows to the short easies through the (1−long_w) split below (weekly total untouched).
     # Needs somewhere to redistribute (n_short>0) and a positive easy budget; the MP-finish km rides on
