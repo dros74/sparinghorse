@@ -135,6 +135,12 @@ services:
     environment:
       - SH_READONLY=1
       - SH_DB=/data/sparinghorse.db
+      # §TZ (0.63.4) — the SAME clock as the private box. The public page renders "today" and the
+      # week underway from the process clock like every other read; without SH_TZ this container
+      # ran on UTC and, between midnight and the zone's offset every night, showed yesterday's
+      # session as today's and last week as the week underway while the private page had moved on.
+      # det/compose-clock fails the suite if a service that opens the DB is missing this line.
+      - SH_TZ=${SH_TZ:-}
       # - SH_PRIVATE_URL=https://private.example.com   # optional "Log in" link → your private console
       # deliberately NO RUNALYZE_TOKEN / ANTHROPIC_API_KEY here
       # Header link — public-visible by design. Real values from the host .env; no personal data in this file.

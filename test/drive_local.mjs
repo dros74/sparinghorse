@@ -589,6 +589,12 @@ async function runFull() {
   await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
   await axeCheck('dashboard'); await axeThemes('dashboard');
   await page.click('#settingsBtn'); await page.waitForTimeout(800); await axeCheck('settings modal');
+  // 0.68.0 — the dialog is tabbed: one bar built from the panels present, one panel shown at a time
+  const tabs = await page.evaluate(() => [...document.querySelectorAll('#settingsTabs [role="tab"]')].map(b => b.dataset.for));
+  ok(`settings: a tab per concern (${tabs.join(' ')})`, ['athlete', 'connections', 'console'].every(t => tabs.includes(t)));
+  await page.evaluate(() => window.SHSettings.show('connections')); await page.waitForTimeout(300);
+  ok('settings: the keys block lives on the Connections tab', await page.locator('#settab-connections:not([hidden]) #secretsBox .secblock').count() === 1);
+  await page.evaluate(() => window.SHSettings.show('console')); await page.waitForTimeout(300); await axeCheck('settings modal — console tab');
   // 0.60.2 — the Console access and System blocks share the keys block's inset: they ran edge to edge
   // (inputs wider than the content column, System values clipped at the dialog's right edge)
   await page.waitForSelector('#authBox .secblock, #systemBox .secblock', { timeout: 15000 }).catch(() => {});

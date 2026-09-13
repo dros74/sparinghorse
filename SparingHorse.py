@@ -1983,6 +1983,9 @@ SECRET_SPEC = [
      "help": "API Zone → your profile → subscriptions (primary or secondary key both work)."},
 ]
 SECRET_BY_KEY = {s["key"]: s for s in SECRET_SPEC}
+# §BEAT (0.61.0) — a module that adds secrets to the spec also owns their validity probe: key → fn(value)
+# returning 'valid' | 'invalid' | 'unknown'. Consulted by validate_secret before its built-in cases.
+SECRET_VALIDATORS = {}
 
 
 def _secrets_conn():
@@ -2097,6 +2100,12 @@ def validate_secret(key):
     value = _resolve_secret(SECRET_BY_KEY[key])[0]
     if not value:
         return "unset"
+    if key in SECRET_VALIDATORS:          # §BEAT — a module-owned key probes through its own module
+        try:
+            return SECRET_VALIDATORS[key](value)
+        except Exception as e:
+            print(f"[secrets] validate {key} failed: {e}")
+            return "unknown"
     try:
         if key == "runalyze_token":
             r = requests.get(f"{RUNALYZE_BASE}/statistics/current",
@@ -6150,6 +6159,7 @@ def _private_only_path(p):
                   "/api/secrets/validate", "/api/runs",   # §RB — calendar carries HR-zone grades
                   "/api/system")                          # 0.56.1 — the household's timestamps
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
+            or p.startswith("/api/music")                 # §BEAT — listening history + Spotify OAuth
             or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the user's data
             or p.startswith("/api/availability")          # §AV — away days = empty-house broadcast
             or (p.startswith("/api/activity/") and p.endswith("/map")))
@@ -7060,6 +7070,7 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
             # §LRH — the hold, named: the same class as `long_step_capped` (a governor annotation)
             "long_held": {"km": True, "rung_km": True, "basis": True},
+            "day_share": True,   # §DAYSHARE — the days ahead kept their own lay: the same class, a flag
             "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
             "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,
             # the governor's own annotations — the chips the week card renders. Same class as
@@ -7131,10 +7142,14 @@ _PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ct
             "regime": {"mode": True, "reason": True},
             "seed_now": {"atl": True, "bridged_days": True, "ctl": True, "effective_vo2max": True,
                          "fallback": True, "from": True, "moved": True,
+                         "stale_skipped": True, "stale_unresolved": True,     # §SEED2 — counts, no history
+                         "tainted_skipped": True,                               # §SEED3 — a count
                          "was": {"atl": True, "ctl": True, "effective_vo2max": True},
                          "was_from": True},
             "shape": {"atl": True, "ctl": True, "effective_vo2max": True,
-                      "seed": {"bridged_days": True, "fallback": True, "from": True}},
+                      "seed": {"bridged_days": True, "fallback": True, "from": True,
+                               "stale_skipped": True, "stale_unresolved": True,
+                               "tainted_skipped": True}},
             # `ratio` matters more than it looks: the ease line renders `Math.round((ratio||0)*100)%`,
             # so withholding it does not blank the line — it prints "measured fitness 0% of
             # projection", which is WRONG rather than absent.
@@ -8451,6 +8466,8 @@ def _seed_now(db, plan, today=None):
     # wobble never fires a banner the athlete cannot see the cause of.
     return {"from": meta.get("from"), "bridged_days": meta.get("bridged_days"),
             "fallback": meta.get("fallback"), "was_from": saved.get("from"),
+            "stale_skipped": meta.get("stale_skipped"), "stale_unresolved": meta.get("stale_unresolved"),
+            "tainted_skipped": meta.get("tainted_skipped"),
             "moved": now != was, **now, "was": was}
 
 
@@ -9298,6 +9315,10 @@ def _render_app(page="dash"):
     # are injected into header HTML — so escape at the render site regardless of source (defence in
     # depth, not relying on the save-time char check alone).
     cfg = config()      # TECH-4 — one snapshot for the whole page render
+    # §BEAT (0.61.0) — the music module, when present, fills five placeholders in the shell: the header
+    # link, the mobile tab, and on its own page the stylesheet, the section and the script. Absent
+    # module (the public mirror strips it) or READONLY → every one of them is the empty string.
+    mb = sh_music.render_bits(page, READONLY) if sh_music is not None else {}
     hublink = (f'<a class="hublink" href="{html.escape(cfg.house_url, quote=True)}">'
                f'← {html.escape(cfg.house_name or cfg.house_url)}</a>'
                if cfg.house_url else "")
@@ -9337,6 +9358,12 @@ def _render_app(page="dash"):
                      '<circle cx="5.5" cy="18.5" r="2.3"/><circle cx="18.5" cy="5.5" r="2.3"/>'
                      '<path d="M7.5 17C14 15.5 10.5 8 16.5 6.5"/></svg><span>Runs</span></a>')
             .replace("__SH_HUBLINK__", hublink)
+            .replace("__SH_MUSIC_LINK__", mb.get("link", ""))      # §BEAT
+            .replace("__MOBNAV_MUSIC__", mb.get("mobnav", ""))
+            .replace("__SH_MUSIC_CSS__", mb.get("css", ""))
+            .replace("__SH_MUSIC_PAGE__", mb.get("page", ""))
+            .replace("__SH_MUSIC_SETTINGS__", mb.get("settings", ""))   # 0.68.0 — the module's Settings tab
+            .replace("__SH_MUSIC_JS__", mb.get("js", ""))
             # Cache-bust CSS/JS per release: the shell itself is no-cache (below), so a deploy lands
             # on an ordinary reload instead of serving yesterday's app out of the browser cache.
             .replace("__SH_VER__", ENGINE_VERSION))
@@ -9578,6 +9605,13 @@ def _nightly_job_once(kind="nightly"):
             print(f"[scheduler] track record: {added}")
     except Exception as e:
         print(f"[scheduler] track record scan failed: {e}")
+    # §BEAT2 (0.62.0) — the music module banks the day's plays (Spotify forgets past fifty) and reads
+    # the day's runs back song by song. Optional module, never raises; absent on the public mirror.
+    if sh_music is not None:
+        try:
+            sh_music.nightly()
+        except Exception as e:
+            print(f"[scheduler] music nightly failed: {e}")
     # §SG — after the re-plan, keep the watch current: push the refreshed next-days sessions
     # as SuuntoPlus Guides. No-ops (skipped=True) when Suunto isn't connected; push_guides
     # never raises, but the belt-and-braces try keeps a converter surprise from killing the loop.
@@ -10485,6 +10519,21 @@ if DEMO:
     threading.Thread(target=_demo_reset_loop, daemon=True).start()
     print(f"[demo] DEMO MODE — full private console over synthetic data, "
           f"reset every {DEMO_RESET_EVERY_S}s")
+
+# ── §BEAT (0.61.0) — the music module: optional, private, unpublished until it graduates ──────
+# `sh_music.py` is imported INSIDE a try so a tree without it (the public mirror strips the file
+# and its two static siblings) boots exactly as before: no page, no routes, no secrets in the spec,
+# empty placeholders in the shell. With it present, register() adds the /music page, the
+# /api/music/* routes (private-only via _private_only_path) and three rows to SECRET_SPEC. The
+# module reaches back into this one through the object handed to it — never by name — so it works
+# whether the app was imported as `SparingHorse` or is running as `__main__`.
+try:
+    import sh_music
+except ImportError:
+    sh_music = None
+if sh_music is not None:
+    sh_music.register(app, sys.modules[__name__])
+
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "restore":     # CLI: python SparingHorse.py restore <snapshot.db>

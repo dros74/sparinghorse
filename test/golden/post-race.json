@@ -51,7 +51,9 @@
     "seed": {
       "bridged_days": 1,
       "fallback": null,
-      "from": "2026-06-29"
+      "from": "2026-06-29",
+      "stale_skipped": 0,
+      "tainted_skipped": 0
     }
   },
   "shape_response": {

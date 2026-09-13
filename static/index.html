@@ -22,7 +22,8 @@ window.SH_THEME_BG={light:"#f4f1ea",dark:"#191a1d"};   // each theme's --bg (app
 document.querySelector('meta[name="theme-color"]').setAttribute("content",window.SH_THEME_BG[t]);
 document.querySelector('link[rel="manifest"]').setAttribute("href","/manifest.webmanifest?theme="+t);</script>
 <script>if("serviceWorker" in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/sw.js").catch(function(){})})}</script>
-<link rel="stylesheet" href="/static/app.css?v=__SH_VER__"></head>
+<link rel="stylesheet" href="/static/app.css?v=__SH_VER__">
+__SH_MUSIC_CSS__</head>
 <body data-mtab="today" data-page="__SH_PAGE__">
 __SH_DEMOBAR__
   <div class="topbar" role="banner">
@@ -44,8 +45,9 @@ __SH_DEMOBAR__
       <div class="bar">
         <a class="ghost" id="todayLink" href="/today" title="Today — the readiness verdict, the session, the check-in; the page the installed app opens on">☀ Today</a>
         <a class="ghost" id="runsLink" href="/runs" title="Run browser — a calendar of your whole training history; open any past run on the activity tile">🗓 Runs</a>
+        __SH_MUSIC_LINK__
         <button class="primary" id="syncBtn">Sync now</button>
-        <button class="primary" id="settingsBtn" title="Personalization — athlete context, links, sync timezone, the AI switches">⚙ Settings</button>
+        <button class="primary" id="settingsBtn" title="Settings — athlete, connections, music, console">⚙ Settings</button>
         <button class="ghost" id="backfillBtn" title="One-time full-history pull — walks every page back to your first activity. Use on a fresh machine or if old history is missing.">Backfill all</button>
       </div>
     </header>
@@ -155,16 +157,28 @@ __SH_DEMOBAR__
       </form>
     </details>
 
-    <dialog id="settingsDialog" class="modal">
+    <dialog id="settingsDialog" class="modal" aria-labelledby="settingsTitle">
       <div class="modal-head">
-        <h2>Settings <span class="muted mono" style="font-size:12px">— keys &amp; personalization, stored privately on your instance</span></h2>
+        <h2 id="settingsTitle">Settings <span class="muted mono" style="font-size:12px">— stored privately on your instance</span></h2>
         <button class="modal-x" id="settingsClose" aria-label="Close settings">✕</button>
       </div>
+      <!-- 0.68.0 — one tab per concern; a tab is a <section class="settab"> and the bar is built from
+           the sections present, so a module (music) adds its own tab by adding a section. -->
+      <div class="modal-tabs" id="settingsTabs" aria-label="Settings sections"></div>
       <div class="modal-body">
-        <div id="secretsBox"></div>
-        <div id="authBox"></div>
-        <div id="systemBox"></div>
-        <div id="settings"><div class="empty">Loading…</div></div>
+        <section class="settab" data-tab="athlete" data-label="Athlete" role="tabpanel" id="settab-athlete">
+          <div id="settings"><div class="empty">Loading…</div></div>
+        </section>
+        <section class="settab" data-tab="connections" data-label="Connections" role="tabpanel" id="settab-connections" hidden>
+          <div id="secretsBox"></div>
+          <div id="aiBox"></div>
+        </section>
+        __SH_MUSIC_SETTINGS__
+        <section class="settab" data-tab="console" data-label="Console" role="tabpanel" id="settab-console" hidden>
+          <div id="authBox"></div>
+          <div id="systemBox"></div>
+          <div id="consoleBox"></div>
+        </section>
       </div>
     </dialog>
 
@@ -183,6 +197,7 @@ __SH_DEMOBAR__
       </div>
     </dialog>
 
+    __SH_MUSIC_PAGE__
     <footer data-mtab="today">
       <span id="foot">Spares the horse by being the horse · not synced yet</span>
       <span id="footver" title="Engine version — the release that served this page">v__SH_VER__</span>
@@ -202,8 +217,10 @@ __SH_DEMOBAR__
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg><span>Fitness</span></button>
     __MOBNAV_BODY__
     __MOBNAV_RUNS__
+    __MOBNAV_MUSIC__
   </nav>
 
 <script>window.SH={readonly:__SH_READONLY__,demo:__SH_DEMO__,privateUrl:__SH_PRIVATE_URL__,staleHours:__SH_STALE_HOURS__,units:__SH_UNITS__};</script>
 <script nonce="__SH_NONCE__" src="/static/app.js?v=__SH_VER__"></script>
+__SH_MUSIC_JS__
 </body></html>

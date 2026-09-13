@@ -32,7 +32,9 @@ everything.
   is governed*).
 - **Replanning in both directions.** Run poorly or miss sessions and the road eases toward a goal you
   can still reach. Rebuild faster than projected and it expands to use the fitness you have. Each
-  regeneration can be compared with the last.
+  regeneration can be compared with the last. A week regenerated mid-week keeps the days still ahead
+  at their own lay: a run over its prescription is not taken back from them, and a missed day is not
+  folded into them.
 - **Several A-races in one build.** Chain them into one continuous road with intermediate peaks, tapers
   and re-build bridges. Each race's role follows from how far apart they are.
 - **Volume follows measured fitness.** The build rides the load ceiling and calibrates the ride to how

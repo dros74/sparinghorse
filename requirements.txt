@@ -10,3 +10,6 @@ cryptography>=43,<47   # 0.56.0: Fernet for the secrets store at rest + RSA veri
 tzdata             # IANA tz database (python:slim ships NO /usr/share/zoneinfo). §TZ depends on this
                    # TWICE: zoneinfo reads it directly, and _glibc_tzdir() points TZDIR at it so
                    # time.tzset() can move the PROCESS clock onto SH_TZ — the engine's 'today'.
+fitdecode~=0.11     # 0.63.0 (§BEAT3): reads the original FIT Runalyze serves per run — one-second
+                   # cadence and the watch's lap presses, which the music read-back turns into
+                   # in-run verdicts. Pure Python.

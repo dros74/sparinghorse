@@ -55,6 +55,17 @@ import sh_engine as E
 APP_MODULES = (S, E)                                  # every module the app's own code lives in
 APP_SOURCES = ("SparingHorse.py", "sh_engine.py")     # …and the files they live in
 
+# §BEAT (0.61.0) — the music module is OPTIONAL: the app imports it inside a try and the public
+# mirror ships without it. When it is in the tree it joins both registers (so the shadow check, the
+# constant inventory and the source scans cover it) and its dets run; when it is not, `M` is None
+# and every music det reports itself skipped rather than failing a build that never had it.
+try:
+    import sh_music as M
+    APP_MODULES += (M,)
+    APP_SOURCES += ("sh_music.py",)
+except ImportError:
+    M = None
+
 
 def _patch_globals(**kw):
     """Rebind module-level names EVERYWHERE the app can see them; returns the undo.
@@ -1277,6 +1288,60 @@ def _stc_quality_forward():
                got="ok" if not bad else f"fails: {bad}", output=detail)
 
 
+def _stc_quality_forward_kinds():
+    """§QF2 (0.64.1) — a still-ahead PROGRESSION run survives the straddle remainder, and every
+    pinned day keeps the session of its OWN kind. §6o-QF's `q_ahead` filter listed ("tempo",
+    "interval", "race_pace") and never learned "progression" when §PROG put progression runs into
+    QUALITY_KINDS, so on the live plan (week 09-07, pair threshold + progression) every regeneration
+    from Tuesday on turned Thursday's progression run into easy + strides; and the pins took the
+    shape's specs in LIST order, so once Tuesday's tempo was lived a Wednesday regeneration would
+    have handed Thursday the pair's first spec — a second tempo. Pure: one §MIX week laid in full,
+    then re-laid on the first quality day and on the day after it. Fails under either mutation
+    (the old filter; order-based pins)."""
+    from datetime import date, timedelta
+    detail, bad = [], []
+    easy = 430
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    mon = date(2026, 8, 3)
+    Q = ("tempo", "progression")
+    shape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 2, "phase": "base", "role": "build",
+              "intent": "General — aerobic volume + early VO₂",
+              "quality": [E._base_quality_spec("threshold"), E._base_quality_spec("progression")]}]
+
+    def _q(weeks_out, frm):
+        return {s["kind"]: s["date"] for s in weeks_out[0]["sessions"]
+                if s["date"] >= frm and s["kind"] in Q}
+
+    full, _ = E.generate_block(shape, mon, 45.0, 40.0, easy, zones=zones)
+    fq = _q(full, mon.isoformat())
+    detail.append({"full": fq})
+    if set(fq) != set(Q):
+        bad.append(f"fixture: the full week lays {fq}, not one of each")
+    else:
+        first, second = sorted(fq.items(), key=lambda kv: kv[1])
+        d_first = date.fromisoformat(first[1])
+        # A — regenerated ON the first quality day, both still ahead: both kept, on their days
+        wA, _ = E.generate_block(shape, mon, 45.0, 40.0, easy, zones=zones, today=d_first,
+                                 week_actuals=(1, 6.0))
+        qA = _q(wA, d_first.isoformat())
+        detail.append({"A_on_first_day": qA})
+        if qA != fq:
+            bad.append(f"A: remainder laid {qA}, the full week {fq}")
+        # B — regenerated the day AFTER the first session was run: the second keeps its day AND its kind
+        d_b = d_first + timedelta(days=1)
+        wB, _ = E.generate_block(shape, mon, 45.0, 40.0, easy, zones=zones, today=d_b,
+                                 week_actuals=(2, 12.0))
+        qB = _q(wB, d_b.isoformat())
+        detail.append({"B_after_first": qB})
+        if qB != {second[0]: second[1]}:
+            bad.append(f"B: remainder laid {qB}, want {{{second[0]!r}: {second[1]!r}}}")
+    return _st("det", "quality-forward-kinds",
+               "§QF2 — a still-ahead progression run survives the straddle remainder on its day, and a "
+               "remainder laid after the pair's first session keeps the second as its own kind",
+               passed=not bad, expect="both kinds on the first day · the second alone, as itself, the day after",
+               got="ok" if not bad else f"fails: {bad}", output=detail)
+
+
 def _stc_public_view_coverage(db):
     """§PV — EVERY field the engine can put on a public payload must be CLASSIFIED: named in a
     `PUBLIC_VIEWS` spec (published) or in `_PV_WITHHELD` (private on purpose). A field in neither is
@@ -2348,7 +2413,11 @@ def _stc_deload_retire():
         return S._plan_identity(pl)          # timestamps aside, as the A3 double-click test defines "same"
 
     offset = None
-    for off in (49, 21, 77, 28, 56, 35):
+    # 21 first — the fixture's stated shape (base week four contains today). §ANCHOR (0.63.1): an anchor
+    # older than six weeks no longer resets while the race is ahead, so 49 now lands today in base
+    # week EIGHT of a three-week-stripped corpus, where the ceilings pin the level week to the down
+    # lay — a state this det was never about (it used to be a no-op offset that reset to today).
+    for off in (21, 28, 35, 49, 56, 77):
         fx = build(off, True)
         try:
             plan0 = S.generate_plan(fx, today=TODAY)
@@ -3595,10 +3664,61 @@ def _stc_rebase_anchor():
     elapsed = S._monday(today) - _td(weeks=len(S.REBASE_SHAPE) + 1)
     if S._rebase_start(db(elapsed.isoformat()), today) != S._monday(today):
         fails.append("fully-elapsed anchor did not reset to this Monday")
+    # §ANCHOR (0.63.1) — the anchor lives as long as the ROAD it anchors. With an upcoming A-race
+    # ahead, an anchor past the six-week re-base horizon is KEPT (live 2026-09-07: it reset at week
+    # seven and re-split the runway as if no base had been run); with the race behind, or only a B
+    # tune-up ahead, or an anchor older than REBASE_ANCHOR_MAX_WEEKS, it resets as before.
+    def dbo(seed, race_date, prio="A", status="upcoming"):
+        m = db(seed)
+        m.execute("CREATE TABLE objectives(id INTEGER PRIMARY KEY, type TEXT, label TEXT, date TEXT, target TEXT, "
+                  "priority TEXT, status TEXT)")
+        m.execute("INSERT INTO objectives(type, label, date, priority, status) VALUES('marathon','r',?,?,?)",
+                  (race_date, prio, status))
+        m.commit()
+        return m
+    old = S._monday(today) - _td(weeks=len(S.REBASE_SHAPE) + 4)      # ten weeks back: well past the horizon
+    ahead = (today + _td(weeks=12)).isoformat()
+    if S._rebase_start(dbo(old.isoformat(), ahead), today) != old:
+        fails.append("(anchor) a road with an A-race ahead lost its anchor at week seven")
+    if S._rebase_start(dbo(old.isoformat(), (today - _td(days=1)).isoformat()), today) != S._monday(today):
+        fails.append("(anchor) the race passed and the anchor did not reset")
+    if S._rebase_start(dbo(old.isoformat(), ahead, prio="B"), today) != S._monday(today):
+        fails.append("(anchor) a B tune-up alone kept the anchor")
+    if S._rebase_start(dbo(old.isoformat(), ahead, status="removed"), today) != S._monday(today):
+        fails.append("(anchor) a removed objective kept the anchor")
+    stale = S._monday(today) - _td(weeks=E.REBASE_ANCHOR_MAX_WEEKS + 1)
+    if S._rebase_start(dbo(stale.isoformat(), ahead), today) != S._monday(today):
+        fails.append("(anchor) an anchor older than the cap was kept")
+    if S._rebase_start(dbo(old.isoformat(), today.isoformat()), today) != old:
+        fails.append("(anchor) a race TODAY is still the road ahead")
+    # the back-only HEAL: an anchor the old rule already reset to this Monday goes back to the start
+    # the newest saved plan was built on — a base/build road (no re-base weeks) anchored earlier, race
+    # ahead — and the store is corrected; a re-base plan in that slot, or a race behind, heals nothing
+    def dbp(seed, race_date, plan_start, rebase_weeks):
+        m = dbo(seed, race_date)
+        m.execute("CREATE TABLE plans(id INTEGER PRIMARY KEY, created_at TEXT, for_date TEXT, inputs TEXT, plan TEXT)")
+        m.execute("INSERT INTO plans(created_at, for_date, inputs, plan) VALUES('t','d','{}',?)",
+                  (S.json.dumps({"rebase": {"start": plan_start, "weeks": rebase_weeks}}),))
+        m.commit()
+        return m
+    this_mon = S._monday(today)
+    m = dbp(this_mon.isoformat(), ahead, old.isoformat(), [])
+    if S._rebase_start(m, today) != old or S.get_meta(m, "rebase_start") != old.isoformat():
+        fails.append("(heal) a reset road anchor was not taken back to the saved plan's start")
+    m = dbp(this_mon.isoformat(), ahead, old.isoformat(), [{"wk": 1}])
+    if S._rebase_start(m, today) != this_mon:
+        fails.append("(heal) a re-base plan's anchor must NOT be restored — its expiry is the 07-28 ruling")
+    m = dbp(this_mon.isoformat(), (today - _td(days=1)).isoformat(), old.isoformat(), [])
+    if S._rebase_start(m, today) != this_mon:
+        fails.append("(heal) healed with the race behind")
+    m = dbp(old.isoformat(), ahead, this_mon.isoformat(), [])
+    if S._rebase_start(m, today) != old:
+        fails.append("(heal) moved an anchor FORWARD to a saved plan's later start")
     return _st("det", "rebase-anchor",
                "block Monday-anchored (calendar weeks → weekend long run); legacy anchor migrates to "
-               "its containing Monday — back-only (never forward → no pre-start tile / un-bank)",
-               passed=not fails, expect="Monday-aligned · back-only migration · elapsed resets",
+               "its containing Monday — back-only (never forward → no pre-start tile / un-bank); the "
+               "anchor lives as long as the road (an A-race ahead), resets once it has passed",
+               passed=not fails, expect="Monday-aligned · back-only migration · elapsed resets · road keeps",
                got={"violations": fails or "none"})
 
 
@@ -5164,6 +5284,129 @@ def _stc_straddle_long():
                     "cap": cap, "capped_long": lb, "caution_full": c_full, "caution_straddle": c_strd})
 
 
+def _stc_day_share():
+    """§DAYSHARE (0.65.0) — ON THE ASSERTIVE ROAD THE DAYS AHEAD KEEP THEIR OWN LAY. The straddle
+    remainder's budget was a UNIFORM per-run share of the intent (`len(rem) / runs`), and the runs
+    are not uniform: a quality day is the week's smallest run. Live (2026-09-08, week 09-07, plans
+    190 → 191): a 5.7-km tempo run at 7.3 km handed the four days left 4/5 of the bar — 43.4 km for
+    days the full lay had at 50.0 — so each easy run went 11.2 → 9.3 km and the week 55.7 → 51.0,
+    after a run OVER prescription. §LRH fixed that share for the long run; this is the same rule for
+    every day: the remainder is the TRIMP the full-week lay put on the days still ahead, and only
+    the ceiling search may cut below it. (a) the regression: the quality day run over its lay,
+    regenerated the next day — every day ahead keeps its kind and its km, the week reads the full
+    week plus the over-run, the flag is published, the ceiling does not claim to bind; (b) never
+    cram: the same day run UNDER its lay leaves the days ahead at their lay, not more; (c) a large
+    over-run diverges from the bar and the note names the rule; (d) a hot seed cuts the days ahead
+    and the limits block says so; (e) caution keeps §6o-B's charge, byte-identical. Pure."""
+    from datetime import date, timedelta
+    easy = 430
+    zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    mon = date(2026, 8, 3)
+    shape = {"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 2, "phase": "base", "role": "build",
+             "intent": "General — aerobic volume + early VO₂",
+             "quality": [E._base_quality_spec("threshold"), E._base_quality_spec("progression")]}
+    A = dict(regime="assertive", last_nondown=380.0)
+    fails, got = [], {}
+
+    def _gen(ctl=60.0, atl=50.0, **kw):
+        return E.generate_block([dict(shape)], mon, ctl, atl, easy, zones=zones, **kw)[0][0]
+
+    def _by_date(week):
+        return {s["date"]: s for s in week["sessions"]
+                if (s.get("km") or 0) > 0 and (s.get("kind") or "") != "rest"}
+
+    full = _gen(**A)
+    fb = _by_date(full)
+    if len(fb) < 4:
+        return _st("det", "day-share", "§DAYSHARE fixture", passed=False, expect="a laid week",
+                   got=f"the full week laid {len(fb)} runs")
+    small = min(fb.values(), key=lambda s: s["km"])
+    if small["kind"] not in ("tempo", "progression"):
+        fails.append(f"fixture: the smallest run is {small['kind']} {small['km']} km, not a quality day")
+    d_small = date.fromisoformat(small["date"])
+    d_next = d_small + timedelta(days=1)
+    lived = [s for s in fb.values() if s["date"] <= small["date"]]
+    lived_km = round(sum(s["km"] for s in lived), 1)
+    ahead_full = {d: s for d, s in fb.items() if d > small["date"]}
+    if not ahead_full or abs(sum(s["km"] for s in ahead_full.values()) - full["km"] / len(fb) * len(ahead_full)) < 1.0:
+        fails.append("fixture too weak — the days ahead sum to about their uniform share, so the regression could not show")
+    over = 1.6
+    got["full"] = {d: (s["kind"], s["km"]) for d, s in fb.items()}
+
+    # (a) THE REGRESSION
+    a = _gen(today=d_next, week_actuals=(len(lived), round(lived_km + over, 1)), **A)
+    ab = _by_date(a)
+    got["a"] = {d: (s["kind"], s["km"]) for d, s in ab.items() if d > small["date"]}
+    for d, s in ahead_full.items():
+        if d not in ab or ab[d]["kind"] != s["kind"] or abs(ab[d]["km"] - s["km"]) > 0.35:
+            fails.append(f"(a) {d} laid {ab.get(d, {}).get('kind')} {ab.get(d, {}).get('km')} km, "
+                         f"the full week {s['kind']} {s['km']} km — the uniform share cut it")
+    if not a.get("day_share"):
+        fails.append("(a) the week does not publish `day_share`")
+    if abs(a["km"] - (full["km"] + over)) > 0.5:
+        fails.append(f"(a) week {a['km']} km ≠ full week {full['km']} + over-run {over}")
+    if a["limits"].get("acwr", {}).get("binds"):
+        fails.append("(a) the ACWR axis claims to bind on a week it did not cut")
+
+    # (b) NEVER CRAM
+    b = _gen(today=d_next, week_actuals=(len(lived), round(max(0.5, lived_km - 3.0), 1)), **A)
+    bb = _by_date(b)
+    for d, s in ahead_full.items():
+        if d in bb and bb[d]["km"] > s["km"] + 0.35:
+            fails.append(f"(b) {d} crammed to {bb[d]['km']} km over its lay {s['km']}")
+
+    # (c) THE BAR NOTE on a 20 % over-run
+    c = _gen(today=d_next, week_actuals=(len(lived), round(lived_km + 0.2 * full["km"], 1)), **A)
+    bar = c.get("bar") or {}
+    got["c_bar"] = bar
+    if not (bar.get("diverge") and "keep their lay" in (bar.get("note") or "")):
+        fails.append(f"(c) the bar note does not name the rule on a 20 % over-run: {bar}")
+
+    # (d) THE CEILING IS THE ONLY CUTTER — judged against the hot seed's OWN full lay (a hotter seed
+    #     moves the intent too, and a smaller full week is not a cut). The seed and the over-run are
+    #     walked up until the days ahead read under their own full lay; that week must say the
+    #     ceiling did it.
+    cut = None
+    for _over in (over, 0.3 * full["km"], 0.6 * full["km"]):
+        for _atl in (60.0, 68.0, 76.0, 84.0, 92.0, 100.0):
+            fh = _by_date(_gen(atl=_atl, **A))
+            w = _gen(atl=_atl, today=d_next, week_actuals=(len(lived), round(lived_km + _over, 1)), **A)
+            wb = _by_date(w)
+            own = sum(s["km"] for d, s in fh.items() if d > small["date"])
+            laid = sum(s["km"] for d, s in wb.items() if d > small["date"])
+            if own > 0 and laid < own - 1.0:
+                cut, got["d"] = w, {"atl": _atl, "over": round(_over, 1), "own": round(own, 1), "laid": round(laid, 1)}
+                break
+        if cut is not None:
+            break
+    if cut is None:
+        fails.append("(d) fixture too weak — no seed cut the days ahead under their own full lay")
+    elif not cut["limits"].get("acwr", {}).get("binds"):
+        fails.append("(d) the ceiling cut the days ahead and the limits block does not say so")
+    elif cut.get("day_share") and cut.get("long_held"):
+        fails.append("(d) a ceiling-cut remainder still claims the long run held")
+
+    # (e) CAUTION CONTRACT — §6o-B's charge stands, byte-identical
+    cf = _gen(regime="caution")
+    cfb = _by_date(cf)
+    c_small = min(cfb.values(), key=lambda s: s["km"])
+    c_lived = [s for s in cfb.values() if s["date"] <= c_small["date"]]
+    cs = _gen(regime="caution", today=date.fromisoformat(c_small["date"]) + timedelta(days=1),
+              week_actuals=(len(c_lived), round(sum(s["km"] for s in c_lived) + over, 1)))
+    if cs.get("day_share"):
+        fails.append("(e) `day_share` leaked into caution")
+    if cs["km"] > cf["km"] + 0.5:
+        fails.append(f"(e) caution week {cs['km']} km runs over its full week {cf['km']} — the charge is gone")
+    return _st("det", "day-share",
+               "§DAYSHARE the assertive straddle remainder is the days' own lay, not a uniform per-run "
+               "share: a quality day run over its lay leaves every day ahead at its kind and km "
+               "(regression), never crams an under-run, names the rule on the bar, is cut only by the "
+               "ceiling (which says so), and leaves caution byte-identical",
+               passed=not fails, expect="days ahead == full lay (±0.35) · flag · no cram · note · "
+               "ceiling cut ⇒ acwr.binds · caution ≤ full",
+               got={"violations": fails or "none", **got})
+
+
 def _stc_long_run_held():
     """§LRH (0.60.5) — THE LONG RUN HOLDS ITS RUNG ON THE STRADDLING WEEK, WHATEVER DAY THE WEEK IS
     REGENERATED ON. The remainder budget was a UNIFORM per-run share of the intent (`len(rem)/runs`),
@@ -5306,6 +5549,207 @@ def _stc_long_run_held():
                got={"rung": rung, "full_km": full_km, "sun": la and la["km"], "thu": _long(b_thu) and _long(b_thu)["km"],
                     "sat": _long(b_sat) and _long(b_sat)["km"], "spent": lc and lc["km"],
                     "ceiling": ld and ld["km"], "caution": lf and lf["km"], "failures": fails or "none"})
+
+
+def _stc_week_mean_roll_invariant():
+    """§WKMEAN (0.68.2) — THE SHAPE-NEUTRAL READING OF A WEEK DOES NOT DEPEND ON THE DAY IT IS READ ON.
+    `_project_week` rolls from `roll_from`, so on a straddling week its means used to run over the days
+    LEFT to place — the last-day sample §PRO16 replaced, back in through the side door. Live 2026-09-12
+    (seed 79.0/92.0 end of Friday, lived 0/98/54/175/68/104): Saturday night read the remainder mean at
+    1.25 with a 154-TRIMP Sunday, Sunday morning read Sunday alone at 1.25 with 125.8, and the whole week
+    read 1.145 at 154. With `lived_trimps` the lived days are read back from the seed and the mean spans
+    the week; `eow` and the peak stay on the rolled part. Pure/in-memory, the live week's loads."""
+    from datetime import date, timedelta
+    mon = date(2026, 9, 7)
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    L = dict(zip(days, [0.0, 98.0, 54.0, 175.0, 68.0, 104.0, 154.0]))
+    seed = (78.3, 100.5)                        # end of Sunday 09-06
+    fails = []
+    full = E._project_week(seed[0], seed[1], days[0], L)
+    F, eow_full, peak_full = full[4], full[2], full[3]
+    if F is None or not (1.10 < F < 1.20):
+        fails.append(f"fixture — the whole-week reading {F} is not the live 1.14x")
+    reads, olds = {}, {}
+    for i in range(1, 7):
+        c, a = seed
+        for d in days[:i]:                      # the seed a regeneration on day i would carry
+            c = E._ewma_step(c, L[d], E.TAU_CTL); a = E._ewma_step(a, L[d], E.TAU_ATL)
+        ahead = {d: L[d] for d in days[i:]}
+        r = E._project_week(c, a, days[0], ahead, roll_from=days[i],
+                            lived_trimps={d: L[d] for d in days[:i]})
+        reads[days[i]] = r[4]
+        if r[4] is None or abs(r[4] - F) > 1e-6:
+            fails.append(f"read on {days[i]}: flat {r[4]} ≠ whole-week {F}")
+        if r[2] != eow_full or r[3] != peak_full:
+            fails.append(f"read on {days[i]}: eow/peak {r[2]}/{r[3]} moved off {eow_full}/{peak_full} — "
+                         "the lived days feed the means only")
+        olds[days[i]] = E._project_week(c, a, days[0], ahead, roll_from=days[i])[4]
+    # anti-vacuity — WITHOUT the lived days the Sunday read is the days-left reading, the defect itself;
+    # it must sit well away from F, or the invariant above would hold on any fixture.
+    if olds[days[6]] is None or abs(olds[days[6]] - F) <= 0.05:
+        fails.append(f"revert limb — the days-left reading on Sunday ({olds[days[6]]}) is within 0.05 of "
+                     f"{F}; the fixture cannot show the defect")
+    return _st("det", "week-mean-roll-invariant",
+               "§WKMEAN the shape-neutral acute:chronic reading is the same whichever day of the week it is "
+               "read on (lived days read back from the seed feed the means; eow/peak untouched; the "
+               "days-left reading on Sunday is far from it)",
+               passed=not fails, expect="flat == whole-week flat (±1e-6) on Tue..Sun; eow/peak equal; "
+               "Sunday without lived days > 0.05 away",
+               got={"whole_week": F, "reads": reads, "days_left": olds, "failures": fails or "none"})
+
+
+def _stc_straddle_regen_day():
+    """§WKMEAN (0.68.2) — THE SUNDAY SESSION IS THE SAME WHETHER THE WEEK IS REGENERATED ON SATURDAY NIGHT
+    OR SUNDAY MORNING. The straddle remainder search judged the shape-neutral reading over the days LEFT,
+    so the same week and the same runs laid a 14.0 km long run on Saturday (plan 206, 2026-09-12) and an
+    11.5 km easy run on Sunday, both "at the ceiling". The fixture is that week: the live seed and lived
+    loads, an assertive base week, the long-step and session ceilings armed as the live plan has them.
+    With the lived days handed to the search, both days lay the rung and the long-step ceiling is the
+    binder, as the whole-week reading says. Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 9, 7)
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    L = dict(zip(days[:6], [0.0, 98.0, 54.0, 175.0, 68.0, 104.0]))
+    seed, easy, km_done = (78.3, 100.5), 414, 43.3
+    shape = {"wk": 1, "km": 50, "runs": 6, "long": 14, "strides": 0, "intent": "Base — aerobic"}
+    A = dict(regime="assertive", last_nondown=600.0, recent_longs=[13.0, 14.0, 14.5, 15.0],
+             recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.5, 14.0, 14.5, 15.0])
+    fails = []
+
+    def _walk(upto):
+        c, a = seed
+        for d in days[:upto]:
+            c = E._ewma_step(c, L[d], E.TAU_CTL); a = E._ewma_step(a, L[d], E.TAU_ATL)
+        return c, a
+
+    def _sunday(w):
+        rows = [s for s in w["sessions"] if s["date"] == days[6] and (s.get("kind") or "") != "rest"]
+        return (rows[0].get("kind"), rows[0].get("km")) if rows else (None, 0.0)
+
+    def _gen(today_i, series):
+        c, a = _walk(today_i)
+        kw = dict(today_trimp=L[days[5]], today_run=True) if today_i == 5 else {}
+        return E.generate_block([dict(shape)], mon, c, a, easy, today=mon + timedelta(days=today_i),
+                                week_actuals=(5, km_done), day_series=series, **kw, **A)[0][0]
+
+    sat, sun = _gen(5, L), _gen(6, L)
+    ks, ku = _sunday(sat), _sunday(sun)
+    if ks[0] != ku[0] or abs((ks[1] or 0.0) - (ku[1] or 0.0)) > 0.05:
+        fails.append(f"Sunday differs by regeneration day — Sat regen {ks}, Sun regen {ku}")
+    if ks[0] != "long":
+        fails.append(f"fixture — the Saturday regeneration laid {ks}, not the long run")
+    for tag, w in (("Sat", sat), ("Sun", sun)):
+        ax = w["limits"].get("acwr", {})
+        if ax.get("binds") or w["limits"].get("binding") == "acwr":
+            fails.append(f"{tag} regen: the ACWR axis binds ({ax}) on a week whose whole-week reading is under the ceiling")
+        if not (1.05 <= (ax.get("laid") or 0.0) <= 1.20):
+            fails.append(f"{tag} regen: published acwr.laid {ax.get('laid')} is not the whole-week reading (≈1.15)")
+    la, lu = sat["limits"].get("acwr", {}).get("laid"), sun["limits"].get("acwr", {}).get("laid")
+    if la is None or lu is None or abs(la - lu) > 0.02:
+        fails.append(f"published acwr.laid differs by day: Sat {la}, Sun {lu}")
+    # anti-vacuity — WITHOUT the lived series the search reads the days left (the pre-§WKMEAN path, kept
+    # byte-identical for callers that pass none): on this fixture that MUST split the two days, or the
+    # invariant above was never at risk here.
+    o_sat, o_sun = _sunday(_gen(5, None)), _sunday(_gen(6, None))
+    if o_sat[0] == o_sun[0] and abs((o_sat[1] or 0.0) - (o_sun[1] or 0.0)) <= 0.05:
+        fails.append(f"revert limb — the days-left reading lays the same Sunday on both days ({o_sat} / {o_sun}); "
+                     "the fixture cannot show the defect")
+    return _st("det", "straddle-regen-day",
+               "§WKMEAN the straddling week lays the same Sunday session on a Saturday-night and a "
+               "Sunday-morning regeneration (live 2026-09-12 fixture; ACWR does not bind; the published "
+               "reading is the whole-week one; the days-left reading splits them)",
+               passed=not fails, expect="Sat regen Sunday == Sun regen Sunday (kind and km); acwr.binds False; "
+               "laid ≈ 1.15 on both; without the series the days differ",
+               got={"sat": ks, "sun": ku, "laid": (la, lu), "binding": (sat["limits"].get("binding"),
+                    sun["limits"].get("binding")), "days_left": (o_sat, o_sun), "failures": fails or "none"})
+
+
+def _stc_phase_handover_windows():
+    """§HANDOVER (0.68.4) — A PHASE THAT IS ENTIRELY LIVED HANDS ITS ACTUALS TO THE NEXT PHASE'S CEILINGS.
+    `_split_freeze` refreshed the §PRO9/§3.1 windows from the elapsed weeks only when the phase still had a
+    week to lay, and never refreshed the §PRO17 session window at all; a phase with nothing left to lay
+    handed on the seed it was handed — the plan-anchor read. Live 2026-09-14 (build wk 1, base fully lived):
+    the build received July's [8.5, 5.0, 8.4, 8.2] against a trailing longest of 16.6 km and laid a 9.4 km
+    long run, the ladder restarting from there. Fixture: a two-week phase whose lived weeks ran 13.0 and
+    15.0 km long runs, regenerated on the Monday after it ended with a stale seed. Pure/in-memory: with no
+    db the frozen sessions stand in for the actuals, the same fallback the elapsed path already used."""
+    from datetime import date, timedelta
+    ps = date(2026, 7, 27)
+
+    def _wk(i, long_km, easy_km):
+        start = ps + timedelta(weeks=i - 1)
+        d = [(start + timedelta(days=k)).isoformat() for k in range(7)]
+        sess = [{"date": d[1], "kind": "easy", "km": easy_km, "minutes": 60, "trimp": 100.0},
+                {"date": d[3], "kind": "easy", "km": easy_km, "minutes": 60, "trimp": 100.0},
+                {"date": d[5], "kind": "easy", "km": easy_km - 2.0, "minutes": 45, "trimp": 75.0},
+                {"date": d[6], "kind": "long", "km": long_km, "minutes": 100, "trimp": 180.0}]
+        return {"wk": i, "start": start.isoformat(), "km": round(sum(s["km"] for s in sess), 1), "runs": 4,
+                "sessions": sess, "trimp_total": 455.0, "proj_acwr": 1.05, "intent": "Base — aerobic",
+                "phase": "base", "role": "build"}
+
+    weeks = [_wk(1, 13.0, 8.0), _wk(2, 15.0, 9.0)]
+    prior = {w["start"]: w for w in weeks}
+    shape = [{**{k: w[k] for k in ("wk", "km", "runs", "intent", "phase", "role")}, "long": 14, "strides": 0}
+             for w in weeks]
+    seed, seed_eq, seed_seq = [8.5, 5.0, 8.4, 8.2], [38.9, 27.0, 48.2, 52.0], [13.4, 10.7, 11.7, 12.6]
+    fails = []
+    today = ps + timedelta(days=14)             # the Monday after the phase: nothing left to lay
+    out = E._split_freeze(shape, ps, (60.0, 60.0), 400.0, None, None, prior, today,
+                          recent_longs=seed, recent_eq=seed_eq, recent_session_eq=seed_seq)
+    laid, gen, rl, req, rsq, pt = out[0], out[3], out[6], out[7], out[8], out[9]
+    if gen or len(laid) != 2 or not all(w.get("frozen") for w in laid):
+        fails.append(f"fixture — expected two frozen weeks and nothing laid (generated {gen}, "
+                     f"frozen {[w.get('frozen') for w in laid]})")
+    exp_l = [E._week_long_km(w["sessions"]) for w in weeks]
+    exp_e = [E._week_eq_km(w["sessions"]) for w in weeks]
+    exp_s = [round(max(E._bout_eq_km(s) for s in w["sessions"]), 2) for w in weeks]
+    if [round(x, 2) for x in (rl or [])[-2:]] != exp_l:
+        fails.append(f"long window carried {rl}, expected a tail of {exp_l}")
+    if [round(x, 2) for x in (req or [])[-2:]] != exp_e:
+        fails.append(f"week-eq window carried {req}, expected a tail of {exp_e}")
+    if [round(x, 2) for x in (rsq or [])[-2:]] != exp_s:
+        fails.append(f"session window carried {rsq}, expected a tail of {exp_s}")
+    if len(rl or []) > E.LONG_RUN_STEP_WINDOW or len(req or []) > E.BIO_EQ_WINDOW or len(rsq or []) > E.BIO_EQ_WINDOW:
+        fails.append(f"a window was not tail-trimmed: {len(rl or [])}/{len(req or [])}/{len(rsq or [])}")
+    exp_t = E._week_run_tail(weeks[-1]["sessions"], weeks[-1]["start"])
+    if pt != exp_t:
+        fails.append(f"§REST seam carried {pt}, expected the last lived week's run-day tail {exp_t}")
+    # the ceiling the athlete reads — the next phase's first week, seeded with what was carried, prices its
+    # long run off the lived 15.0; seeded with the stale windows (what an all-frozen phase used to hand on)
+    # the same week reads the July ceiling. The revert limb is that second lay.
+    nxt = {"wk": 1, "km": 55, "runs": 5, "long": 16, "strides": 0, "intent": "Build — supportive",
+           "phase": "build", "role": "build"}
+    A = dict(regime="assertive", last_nondown=455.0)
+
+    def _cap(longs, eqs, seqs):
+        w = E.generate_block([dict(nxt)], today, 60.0, 60.0, 400.0, today=today,
+                             recent_longs=longs, recent_eq=eqs, recent_session_eq=seqs, **A)[0][0]
+        return ((w.get("limits") or {}).get("long_step") or {}).get("ceiling")
+
+    cap_new, cap_old = _cap(rl, req, rsq), _cap(seed, seed_eq, seed_seq)
+    exp_cap = round(E.LONG_RUN_STEP_CAP * 15.0, 1)
+    if cap_new != exp_cap:
+        fails.append(f"next phase's long-step ceiling {cap_new}, expected {exp_cap} (the step over the lived 15.0)")
+    if cap_old is None or cap_old >= exp_cap - 3.0:
+        fails.append(f"revert limb — the stale seed reads a ceiling of {cap_old}, within 3 km of {exp_cap}; "
+                     "the fixture cannot show the defect")
+    # the straddling path — the same phase regenerated mid-week-2 must carry the lived week 1's bout into the
+    # session window, the one window the elapsed path never refreshed
+    mid = ps + timedelta(days=9)
+    out2 = E._split_freeze(shape, ps, (60.0, 60.0), 400.0, None, None, prior, mid, week_actuals=(1, 8.0),
+                           recent_longs=seed, recent_eq=seed_eq, recent_session_eq=seed_seq, **A)
+    rsq2 = [round(x, 2) for x in (out2[8] or [])]
+    if exp_s[0] not in rsq2:
+        fails.append(f"straddle path — the lived week 1 bout {exp_s[0]} is not in the carried session window {rsq2}")
+    return _st("det", "phase-handover-windows",
+               "§HANDOVER a phase with nothing left to lay hands the next phase its lived weeks' long runs, "
+               "week eq and largest bouts (tail-trimmed) plus the §REST seam; the next phase's long-step "
+               "ceiling is the step over the lived long run; the stale seed reads a ceiling ≥ 3 km lower; "
+               "the straddling path carries the lived week's bout into the session window",
+               passed=not fails, expect=f"windows end {exp_l}/{exp_e}/{exp_s}; seam {exp_t}; ceiling {exp_cap}; "
+               "stale ceiling < ceiling − 3; straddle session window holds week 1's bout",
+               got={"longs": rl, "eqs": req, "seqs": rsq, "seam": pt, "ceiling": cap_new, "stale_ceiling": cap_old,
+                    "straddle_seqs": rsq2, "failures": fails or "none"})
 
 
 def _stc_long_share_base():
@@ -7908,7 +8352,16 @@ def _stc_calibration_inventory():
                 # lifetimes; none of them is a magnitude the plan is computed from
                 "PASSPHRASE_MIN", "LOGIN_MAX_FAILS", "LOGIN_LOCK_BASE_S", "LOGIN_LOCK_MAX_S",
                 "LOGIN_GLOBAL_FAILS", "LOGIN_GLOBAL_WINDOW_S", "SESSION_DAYS", "JWKS_TTL_S",
-                "_SCRYPT_LOG_N", "_SCRYPT_R", "_SCRYPT_P"}   # (_SCRYPT_MAXMEM is 2**27 and BACKUP_KEEP an env read — expressions, uncounted)
+                "_SCRYPT_LOG_N", "_SCRYPT_R", "_SCRYPT_P",   # (_SCRYPT_MAXMEM is 2**27 and BACKUP_KEEP an env read — expressions, uncounted)
+                # 0.61.0 — §BEAT plumbing: API batch sizes, page sizes, cache lifetimes, timeouts
+                "RB_BATCH", "LFM_PAGE", "SP_PAGE", "MUSIC_LIBRARY_MAX", "MUSIC_LOOKUPS_PER_REFRESH",
+                "MUSIC_FEATURE_MISS_TTL_DAYS", "MUSIC_SEARCH_MISS_TTL_DAYS", "MUSIC_HTTP_TIMEOUT",
+                "MUSIC_OAUTH_STATE_TTL_S", "MUSIC_UPCOMING_DAYS", "MUSIC_DISCOVERY_SIZE",
+                "MUSIC_DESC_MAX", "MUSIC_PLAYLIST_CHUNK", "MUSIC_PLAYLISTS_MAX", "MUSIC_PLAYLIST_ITEMS_MAX",
+                "MUSIC_PLAYED_KEEP_DAYS", "MUSIC_READBACK_RUNS", "MUSIC_LAP_END_GRACE_S",
+                # 0.67.0 — §DISCO plumbing: how many ListenBrainz rows are read per call, per refresh
+                "MUSIC_LB_NEIGHBOURS", "MUSIC_LB_PER_USER", "MUSIC_LB_CF", "MUSIC_LB_WEEKLY_LISTS",
+                "MUSIC_LB_RADIO_SEEDS", "MUSIC_LB_LOOKUPS", "MUSIC_LB_NAMES_BATCH"}
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -9429,12 +9882,15 @@ def _stc_seed_stale():
     from datetime import date
     fail = []
 
-    def mkdb(snaps):
+    def mkdb(snaps, acts=()):
         mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
         mem.executescript(S.SCHEMA)
         for d, vo2, ctl, atl in snaps:
             mem.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,"
                         "fitness,fatigue) VALUES(?,?,?,?,?)", (d, d + "T20:00:00+00:00", vo2, ctl, atl))
+        for d, tr in acts:                        # synced before the day's capture — not §SEED2-stale
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp,synced_at) "
+                        "VALUES(?,?,?,?,?,?,?)", (d, d + "T18:00", S.RUNNING_SPORT, 8.0, 2900, tr, d + "T19:00:00+00:00"))
         mem.commit()
         return mem
 
@@ -9463,8 +9919,11 @@ def _stc_seed_stale():
         fail.append(f"fires but misreports the numbers it shows you: {r}")
 
     # (c) ⭐ CRYING WOLF — a DIFFERENT source day whose values are identical must stay SILENT.
-    db2 = mkdb([(D30, 34.79, 56.0, 64.0), (D31, 34.79, 56.0, 64.0)])
-    r = S._seed_now(db2, mkplan(D30, 34.79, 56.0, 64.0), AUG1)
+    # Since §SEED3 the rows have to be a history the engine could have rolled (a second identical
+    # row with no run between is a tainted read): a run whose TRIMP equals the load is the EWMA's
+    # fixed point, so 60 / 60 followed by a 60-TRIMP day reads 60 / 60 again — identical AND real.
+    db2 = mkdb([(D30, 34.79, 60.0, 60.0), (D31, 34.79, 60.0, 60.0)], [(D31, 60.0)])
+    r = S._seed_now(db2, mkplan(D30, 34.79, 60.0, 60.0), AUG1)
     if not r:
         fail.append("no read at all on the identical-values case")
     elif r["moved"]:
@@ -9474,8 +9933,8 @@ def _stc_seed_stale():
         fail.append("anti-vacuity: (c) is not actually testing a different source day")
 
     # (d) eVO₂max ALONE moves ⇒ fires (it is part of the seed tuple and it moves the pace zones).
-    db3 = mkdb([(D30, 34.40, 56.0, 64.0), (D31, 34.79, 56.0, 64.0)])
-    r = S._seed_now(db3, mkplan(D30, 34.40, 56.0, 64.0), AUG1)
+    db3 = mkdb([(D30, 34.40, 60.0, 60.0), (D31, 34.79, 60.0, 60.0)], [(D31, 60.0)])
+    r = S._seed_now(db3, mkplan(D30, 34.40, 60.0, 60.0), AUG1)
     if not r or not r["moved"]:
         fail.append(f"silent when the fitness read moved (34.40 → 34.79) — pace zones move with it: {r}")
 
@@ -16749,12 +17208,12 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
-                 lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(),
+                 lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),
                  lambda: _stc_bonus_affordance(),
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
@@ -16779,7 +17238,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(), lambda: _stc_plannable_peak(), lambda: _stc_building_load_integrity(),
-                 lambda: _stc_plan_seed(), lambda: _stc_today_actual(),
+                 lambda: _stc_plan_seed(), lambda: _stc_seed_late_upload(), lambda: _stc_seed_tainted(), lambda: _stc_seed_resync(),
+                 lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
                  lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
@@ -16810,7 +17270,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_plan_summary(), lambda: _stc_mcp_session(), lambda: _stc_sync_lock(),
                  lambda: _stc_scheduler_health(), lambda: _stc_selftest_subprocess(),
                  lambda: _stc_profile_readonly(),
-                 lambda: _stc_quality_forward(),
+                 lambda: _stc_quality_forward(), lambda: _stc_quality_forward_kinds(),
                  lambda: _stc_down_weeks(),
                  lambda: _stc_long_run(),
                  lambda: _stc_effort_discipline(db),
@@ -16966,6 +17426,1310 @@ def _selftest_text(report):
         elif r.get("got") is not None and not r.get("skipped"):
             lines.append(f"        got: {S.json.dumps(r['got'], ensure_ascii=False)}")
     return "\n".join(lines)
+
+
+# ── §BEAT (0.61.0) — the music module's dets. Each one SKIPS (never fails) when the module is not
+# in the tree: the public mirror ships without it, and a battery that failed there for a page it
+# never had would be a battery nobody trusts. ──────────────────────────────────────────────────
+def _music_skip(sid, desc):
+    return _st("det", sid, desc, skipped=True, note="sh_music.py is not in this tree")
+
+
+def _stc_music_curve():
+    """§BEAT — the cadence curves and the target ladder. A synthetic runner with a trained era
+    (CTL 90, cad = 152 + 2.5·km/h) and a detrained recent window (CTL 30, cad = 152 + 1.6·km/h):
+    (a) both lines are fitted and recover their slopes; (b) the target at an easy pace is the recent
+    line lifted by the step — under the trained line, so the step binds and says so; (c) a bigger
+    step still stops under the trained line, and a comfort ceiling under both wins and says so;
+    (d) a runner whose recent line is ABOVE the trained one is held at the recent line, not pushed;
+    (e) five recent runs do not get a fitted line — the median rides the trained slope; (f) no rows →
+    None; (g) `cadence_rows` doubles a one-leg count and drops the implausible."""
+    if M is None:
+        return _music_skip("music-curve", "§BEAT — cadence curves + the target ladder")
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails, got = [], {}
+    today = _d(2026, 9, 6)
+    rows = []
+    for i in range(60):
+        v = 8 + (i % 9) * 0.5
+        rows.append(((today - _td(days=200 + i * 3)).isoformat(), v, 152 + 2.5 * v + (0.4 if i % 2 else -0.4), 90.0))
+    for i in range(20):
+        v = 8 + (i % 5) * 0.5
+        rows.append(((today - _td(days=1 + i * 2)).isoformat(), v, 152 + 1.6 * v + (0.3 if i % 2 else -0.3), 30.0))
+    cv = M.cadence_curve(rows, today, {})
+    got["curve"] = cv
+    if not (cv and cv["trained"]["fitted"] and abs(cv["trained"]["b"] - 2.5) < 0.1):
+        fails.append(f"(a) trained line not recovered: {cv and cv['trained']}")
+    if not (cv and cv["recent"]["fitted"] and abs(cv["recent"]["b"] - 1.6) < 0.1):
+        fails.append(f"(a) recent line not recovered: {cv and cv['recent']}")
+    t = M.target_spm(cv, 400.0)                     # 6:40/km = 9 km/h → recent 166.4, ×1.015 = 168.9
+    got["target_easy"] = t
+    if not t or abs(t["spm"] - 168.9) > 0.6 or not t["why"].startswith("recent +"):
+        fails.append(f"(b) easy target should be the lifted recent line (~168.9, 'recent +…'): {t}")
+    t3 = M.target_spm(cv, 400.0, 3.0)
+    if not t3 or abs(t3["spm"] - 171.4) > 0.6:
+        fails.append(f"(c) a 3 % step lifts to ~171.4 (still under the trained 174.5): {t3}")
+    cv_c = M.cadence_curve(rows, today, {"max_spm": "168"})
+    tc = M.target_spm(cv_c, 400.0, 3.0)
+    if not tc or tc["spm"] != 168 or tc["why"] != "comfort ceiling" or cv_c["comfort_source"] != "setting":
+        fails.append(f"(c) comfort ceiling 168 must win and be named: {tc} / {cv_c and cv_c['comfort_source']}")
+    low = [(d, v, c - 40, ctl) if ctl == 90.0 else (d, v, c, ctl) for d, v, c, ctl in rows]   # trained BELOW recent
+    tl = M.target_spm(M.cadence_curve(low, today, {}), 400.0)
+    if not tl or abs(tl["spm"] - 166.4) > 0.6 or "recent line" not in tl["why"]:
+        fails.append(f"(d) recent above trained → held at the recent line: {tl}")
+    few = [r for r in rows if r[3] == 90.0] + [r for r in rows if r[3] == 30.0][:5]
+    cf = M.cadence_curve(few, today, {})
+    if not cf or cf["recent"]["fitted"] or cf["recent"]["n"] != 5 or cf["recent"]["b"] != cf["trained"]["b"]:
+        fails.append(f"(e) five recent runs must ride the trained slope unfitted: {cf and cf['recent']}")
+    if M.cadence_curve([], today, {}) is not None:
+        fails.append("(f) no rows invented a curve")
+    # (f2) CTL stamped on the recent rows only (the live shape before 0.61.1) must NOT define the
+    # trained set — the fittest of the last two months is not "trained"; the older rows are
+    part = [(d, v, c, None) if ctl == 90.0 else (d, v, c, ctl) for d, v, c, ctl in rows]
+    cp = M.cadence_curve(part, today, {})
+    if not cp or cp["trained"]["n"] != 60 or abs(cp["trained"]["b"] - 2.5) > 0.1:
+        fails.append(f"(f2) a partial CTL stamp must fall back to the older rows: {cp and cp['trained']}")
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.execute("CREATE TABLE run_metrics(date TEXT, km REAL, dur_s REAL, speed_kmh REAL, cadence REAL, ctl_snapshot REAL)")
+    m.executemany("INSERT INTO run_metrics VALUES(?,?,?,?,?,?)", [
+        ("2026-09-01", 10, 4000, 9.0, 84, 50), ("2026-09-02", 10, 4000, 9.0, 168, 50),
+        ("2026-09-03", 10, 4000, 9.0, 50, 50), ("2026-09-04", 2.0, 800, 9.0, 84, 50),
+        ("2026-09-05", 10, 3600, None, 85, 50)])          # no speed column → km over seconds
+    cr = M.cadence_rows(m)
+    m.close()
+    if [round(r[2]) for r in cr] != [168, 168, 170] or abs(cr[2][1] - 10.0) > 0.01:
+        fails.append(f"(g) one-leg doubling / implausible drop / short-run drop / speed fallback wrong: {cr}")
+    return _st("det", "music-curve",
+               "§BEAT — two speed–cadence lines from the runner's own runs; the target is the recent "
+               "line lifted by the step, capped by the trained line and the comfort ceiling, and says which",
+               passed=not fails, expect="slopes recovered; 168.9 / 171.4 / 168 (ceiling) / held at recent; "
+               "median under 12 runs; None on nothing; one-leg counts doubled",
+               got={"violations": fails or "none", **{k: v for k, v in got.items() if k != "curve"}})
+
+
+def _stc_music_segments():
+    """§BEAT — a session becomes the sequence the music must fit: (a) a structured session follows
+    its reps, work carrying the work floor and the warm-up its own; (b) a plain easy run is one
+    segment; (c) a long run over the split threshold is three rising thirds; (d) the race is settle /
+    cruise / grind by distance, minutes summing to the race's; (e) rest → nothing."""
+    if M is None:
+        return _music_skip("music-segments", "§BEAT — session → segments")
+    fails = []
+    tempo = {"date": "2026-09-08", "kind": "tempo", "km": 5.7, "minutes": 35, "reps": [
+        {"effort": "warmup", "zone": "easy", "minutes": 10, "km": 1.5, "detail": "easy warm-up"},
+        {"effort": "work", "zone": "threshold", "minutes": 15, "km": 2.7, "detail": "15min continuous @ threshold"},
+        {"effort": "cooldown", "zone": "easy", "minutes": 10, "km": 1.5, "detail": "easy cool-down"}]}
+    sg = M.session_segments(tempo)
+    if [s["effort"] for s in sg] != ["warmup", "work", "cooldown", "tail"] \
+            or [s["minutes"] for s in sg] != [10, 15, 10, M.MUSIC_TAIL_MIN]:
+        fails.append(f"(a) reps not followed (plus the run-home tail): {sg}")
+    elif not (abs(sg[3]["pace_sec"] - max(x["pace_sec"] for x in sg[:3])) < 0.01
+              and sg[3]["floor"] == M.MUSIC_ENERGY_FLOOR["tail"]):
+        fails.append(f"(a/f) the tail must run at the session's easiest pace and its own floor: {sg[3]}")
+    elif not (sg[1]["floor"] == M.MUSIC_ENERGY_FLOOR["work"] and sg[0]["floor"] == M.MUSIC_ENERGY_FLOOR["warmup"]
+              and abs(sg[1]["pace_sec"] - 15 * 60 / 2.7) < 0.01):
+        fails.append(f"(a) floors / pace wrong: {sg}")
+    # (a2) 5 × 2 min with 2-min jogs: the reps are shorter than a song, so they play as ONE block at
+    # the work pace and the work floor, warm-up and cool-down still their own segments
+    reps = [{"effort": "warmup", "zone": "easy", "minutes": 10, "km": 1.4, "detail": "easy warm-up"}]
+    for _ in range(5):
+        reps += [{"effort": "work", "zone": "interval", "minutes": 2, "km": 0.4, "detail": "2min @ interval"},
+                 {"effort": "recovery", "zone": "easy", "minutes": 2, "km": 0.3, "detail": "easy jog recovery"}]
+    reps.append({"effort": "cooldown", "zone": "easy", "minutes": 10, "km": 1.4, "detail": "easy cool-down"})
+    iv = M.session_segments({"date": "2026-09-15", "kind": "interval", "km": 8.1, "minutes": 40, "reps": reps})
+    if [s["effort"] for s in iv] != ["warmup", "work", "cooldown", "tail"] or iv[1]["minutes"] != 20 \
+            or abs(iv[1]["pace_sec"] - 2 * 60 / 0.4) > 0.01 or iv[1]["floor"] != M.MUSIC_ENERGY_FLOOR["work"] \
+            or "5 ×" not in iv[1]["label"]:
+        fails.append(f"(a2) short reps must coalesce into one work block: {iv}")
+    easy = M.session_segments({"date": "2026-09-07", "kind": "easy", "km": 8.2, "minutes": 58})
+    if len(easy) != 2 or easy[0]["minutes"] != 58 or abs(easy[0]["pace_sec"] - 58 * 60 / 8.2) > 0.01 \
+            or easy[1]["effort"] != "tail" or abs(easy[1]["pace_sec"] - easy[0]["pace_sec"]) > 0.01:
+        fails.append(f"(b) easy run is one segment plus the tail at its pace: {easy}")
+    lng = M.session_segments({"date": "2026-09-13", "kind": "long", "km": 14, "minutes": 96})
+    if len(lng) != 4 or [s["effort"] for s in lng] != ["long_1", "long_2", "long_3", "tail"] \
+            or not (lng[0]["floor"] < lng[1]["floor"] < lng[2]["floor"]) or abs(sum(s["minutes"] for s in lng[:3]) - 96) > 0.5:
+        fails.append(f"(c) long run thirds wrong: {lng}")
+    # (f) the tail runs at the session's EASIEST pace even when the session ends on work (an MP finish)
+    mp = M.session_segments({"date": "2026-09-20", "kind": "long_mp", "km": 17.4, "minutes": 114, "reps": [
+        {"effort": "easy_base", "zone": "easy", "minutes": 92, "km": 13.5, "detail": "easy base"},
+        {"effort": "work", "zone": "marathon", "minutes": 22, "km": 3.9, "detail": "22min @ MP finish"}]})
+    if not mp or mp[-1]["effort"] != "tail" or abs(mp[-1]["pace_sec"] - mp[0]["pace_sec"]) > 0.01 \
+            or mp[-1]["minutes"] != M.MUSIC_TAIL_MIN:
+        fails.append(f"(f) the tail after an MP finish must take the easy-base pace: {mp}")
+    race = M.session_segments({"date": "2026-12-06", "kind": "race", "km": 42.2, "minutes": 252, "race": True, "note": "Big City Marathon"})
+    if len(race) != 3 or [s["effort"] for s in race] != ["race_settle", "race_cruise", "race_grind"] \
+            or any(s["effort"] == "tail" for s in race) \
+            or abs(sum(s["minutes"] for s in race) - 252) > 0.5 \
+            or abs(race[2]["minutes"] - 252 * M.MUSIC_RACE_GRIND_FRAC) > 0.5 \
+            or not (race[0]["floor"] < race[1]["floor"] < race[2]["floor"]):
+        fails.append(f"(d) race segments wrong: {race}")
+    if M.session_segments({"date": "2026-09-09", "kind": "rest", "km": 0, "minutes": 0}) != []:
+        fails.append("(e) a rest day produced segments")
+    return _st("det", "music-segments",
+               "§BEAT — reps → segments with their floors; easy = one; long ≥ threshold = three rising "
+               "thirds; race = settle/cruise/grind summing to the race (no tail); rest = nothing; §BEAT5 "
+               "every other session ends on a run-home tail at its easiest pace",
+               passed=not fails, expect="shapes exact", got={"violations": fails or "none"})
+
+
+def _stc_music_pick():
+    """§BEAT — picking tracks into segments. On a synthetic pool: (a) every pick sits inside the
+    tempo window, no track twice, each segment filled past its minutes, a track far off every
+    target never chosen, and (§BEAT7) a low-energy track in the window IS chosen — energy no longer
+    gates; (b) the warm-up is ordered calm-first; (c) half-time OFF refuses an 86-bpm track for a
+    172 target and ON accepts it as 'half'; (d) a dry window calls discovery ONCE and uses what
+    comes back flagged; (e) with nothing to discover the window widens twice, says so, and the
+    shortfall is named rather than hidden; (g) §BEAT7 — a track on recent lists drops behind the
+    fresh ones and the notes count the new; the legs' verdict lifts a track and sinks another."""
+    if M is None:
+        return _music_skip("music-pick", "§BEAT — tracks into segments")
+    fails = []
+    mk = lambda i, tempo, energy, weight, mins=4.0, disc=0, title=None, artist=None: {
+        "id": i, "title": title or i, "artist": artist or i, "duration_ms": int(mins * 60000),
+        "tempo": tempo, "energy": energy, "weight": weight, "discovered": disc}
+    pool = ([mk(f"w{i}", 165 + i * 0.6, 0.5 + i * 0.03, 1.0 - i * 0.1) for i in range(4)]
+            + [mk(f"k{i}", 170 + i, 0.75 + i * 0.03, 0.8) for i in range(5)]
+            + [mk("klow", 172, 0.60, 2.0), mk("kmid", 172, 0.65, 2.0)]
+            + [mk(f"c{i}", 163 + i * 0.7, 0.45, 0.5) for i in range(3)]
+            + [mk("h1", 86, 0.85, 1.5), mk("h2", 82, 0.85, 1.5), mk("far", 180, 0.9, 3.0)]
+            # §BEAT7 — an ambient track in the window with the heaviest taste: under the plausibility floor
+            + [mk("amb", 172, 0.20, 3.0)]
+            # the same song twice under two ids (single + album): only one may play
+            + [mk("dup1", 171.5, 0.80, 2.5, title="Same Song", artist="Same Band"),
+               mk("dup2", 172.5, 0.82, 2.5, title="Same Song (Remastered)", artist="Same Band")])
+    segs = [{"label": "Warm-up", "effort": "warmup", "minutes": 10, "pace_sec": 420, "floor": 0.45},
+            {"label": "Work", "effort": "work", "minutes": 15, "pace_sec": 330, "floor": 0.70},
+            {"label": "Cool-down", "effort": "cooldown", "minutes": 8, "pace_sec": 430, "floor": 0.40}]
+    targets = [166.0, 172.0, 164.0]
+    out, notes = M.pick_for_segments(segs, pool, targets, half_time=False)
+    seen = set()
+    for sg in out:
+        w = M.MUSIC_TEMPO_WINDOW
+        for t in sg["tracks"]:
+            eff = t["tempo"] * 2 if t["hit"] == "half" else t["tempo"]
+            if abs(eff - sg["target_spm"]) > w * sg["target_spm"] + 1e-9:
+                fails.append(f"(a) {t['id']} outside ±{w:.0%} of {sg['target_spm']} in {sg['label']}")
+            if t["id"] in seen:
+                fails.append(f"(a) {t['id']} used twice")
+            seen.add(t["id"])
+        if sg["filled_min"] < sg["minutes"]:
+            fails.append(f"(a) {sg['label']} under-filled: {sg['filled_min']} < {sg['minutes']}")
+    if "far" in seen or "h1" in seen or "h2" in seen or "amb" in seen:
+        fails.append(f"(a/c) a track that must not qualify was picked: {seen & {'far', 'h1', 'h2', 'amb'}}")
+    work_ids = [t["id"] for t in out[1]["tracks"]]
+    if not {"klow", "kmid"} <= set(work_ids):  # §BEAT7 — energy no longer gates: the 0.60 / 0.65 tracks at 172 play
+        fails.append(f"(a) energy must not gate: the two weight-2.0 tracks at 172 must be in the work picks, got {work_ids}")
+    if len(seen & {"dup1", "dup2"}) != 1:
+        fails.append(f"(a) the same song under two ids must play once: {seen & {'dup1', 'dup2'}}")
+    if notes:
+        fails.append(f"(a) a full pool produced notes: {notes}")
+    # (g) §BEAT7 — rotation: the two weight-2.0 tracks were on three recent lists → the fresh k
+    # tracks fill the segment ahead of them, and the note counts the new; the legs' verdict: k0
+    # followed (+1.0) leads the k tracks, k4 broke and dipped (−1.5) is not picked at all
+    out_r, notes_r = M.pick_for_segments(segs[1:2], pool, [172.0], served={"klow": 3, "kmid": 3})
+    got_r = [t["id"] for t in out_r[0]["tracks"]]
+    if "klow" in got_r or "kmid" in got_r or not any("new to the last" in n and "5 of 5" in n for n in notes_r):
+        fails.append(f"(g) served tracks must yield to fresh ones and the note count them: picks={got_r} notes={notes_r}")
+    if any(t.get("served") != 0 for t in out_r[0]["tracks"]) or out_r[0].get("fresh") != len(got_r):
+        fails.append(f"(g) picks must carry served/fresh: {[(t['id'], t.get('served')) for t in out_r[0]['tracks']]} fresh={out_r[0].get('fresh')}")
+    out_l, _ = M.pick_for_segments(segs[1:2], pool, [172.0], follow={"k0": 1.0, "k4": -1.5})
+    got_l = [t["id"] for t in out_l[0]["tracks"]]
+    ks = [i for i in got_l if i.startswith("k") and i not in ("klow", "kmid")]
+    if not ks or ks[0] != "k0" or "k4" in got_l or out_l[0]["tracks"][got_l.index("k0")].get("follow") != 1.0:
+        fails.append(f"(g) the legs' verdict must order the picks: {got_l}")
+    # (g2) the song behind the editions: a verdict or a list count keyed by the song's NAME reaches a
+    # track under another id — dup1/dup2 are one song, served three times under the name
+    out_n, _ = M.pick_for_segments(segs[1:2], pool, [172.0], served={M.song_key("Same Band", "Same Song"): 3})
+    got_n = [t["id"] for t in out_n[0]["tracks"]]
+    if got_n[0] in ("dup1", "dup2") or not any(t["id"] in ("dup1", "dup2") and t.get("served") == 3 for t in out_n[0]["tracks"]) and any(i in ("dup1", "dup2") for i in got_n):
+        fails.append(f"(g2) a count keyed by the song name must reach every edition: {[(t['id'], t.get('served')) for t in out_n[0]['tracks']]}")
+    wu = [t["energy"] for t in out[0]["tracks"]]
+    if wu != sorted(wu):
+        fails.append(f"(b) warm-up not calm-first: {wu}")
+    out_h, _ = M.pick_for_segments(segs, pool, targets, half_time=True)
+    # §BEAT5 — half-time ON: the 82-bpm track lands on the COOL-DOWN (164) as 'half'; the 86-bpm one
+    # never lands on the WORK segment (172), whatever the setting — a beat per stride did not carry the
+    # tempo (2026-09-08)
+    hh = [t for sg in (out_h[0], out_h[2]) for t in sg["tracks"] if t["id"] == "h2"]   # warm-up 166 or cool-down 164: both in reach of 82 × 2
+    if not hh or hh[0]["hit"] != "half":
+        fails.append("(c) half-time ON must accept the 82-bpm track on an easy segment (164/166) as 'half'")
+    if any(t["id"] == "h1" for t in out_h[1]["tracks"]):
+        fails.append("(c) half-time ON must still refuse the 86-bpm track on the 172 WORK segment")
+    # (f) §BEAT5 — set aside: a track ruled out for work stays out of the work segment; one ruled out
+    # for both never plays; the notes say how many
+    out_s, notes_s = M.pick_for_segments(segs, pool, targets, set_aside={"k2": {"work"}, "w1": {"work", "easy"}})
+    seen_s = {t["id"] for sg in out_s for t in sg["tracks"]}
+    if "k2" in {t["id"] for t in out_s[1]["tracks"]} or "w1" in seen_s:
+        fails.append(f"(f) a set-aside track was picked: work={[t['id'] for t in out_s[1]['tracks']]} all={sorted(seen_s)}")
+    if not any("set aside" in n for n in notes_s):
+        fails.append(f"(f) the notes do not say a track was set aside: {notes_s}")
+    calls = []
+
+    def discover(target, floor, window):
+        calls.append((target, floor, window))
+        return [mk(f"d{i}", 150 + i * 0.5, 0.8, 0.0, disc=1) for i in range(5)]
+    # 150 bpm is dry even at ±4 % (144–156): the nearest pool tracks sit at 163 and, half-time off, 86
+    dry = [{"label": "Work", "effort": "work", "minutes": 12, "pace_sec": 300, "floor": 0.70}]
+    out_d, notes_d = M.pick_for_segments(dry, pool, [150.0], discover=discover)
+    if len(calls) != 1 or not out_d[0]["tracks"] or not all(t.get("discovered") for t in out_d[0]["tracks"]) or notes_d:
+        fails.append(f"(d) discovery: calls={calls} picks={[t['id'] for t in out_d[0]['tracks']]} notes={notes_d}")
+    out_e, notes_e = M.pick_for_segments(dry, pool, [150.0], discover=lambda *a: [])
+    if sum("widened" in n for n in notes_e) != 2 or any("relaxed" in n for n in notes_e) \
+            or not any("filled" in n for n in notes_e) or out_e[0]["tracks"]:
+        fails.append(f"(e) a dry segment must widen twice, name the shortfall and pick nothing: "
+                     f"{notes_e} / {[t['id'] for t in out_e[0]['tracks']]}")
+    return _st("det", "music-pick",
+               "§BEAT — picks inside the window, no repeats, filled past the minutes; energy does not gate (§BEAT7); "
+               "warm-up calm-first; half-time is a switch; discovery once, then widen and say so; "
+               "recent lists yield to fresh tracks and the legs' verdict orders",
+               passed=not fails, expect="window/uniqueness hold; rotation + legs order; notes only when the pool is short",
+               got={"violations": fails or "none", "notes_dry": notes_e})
+
+
+def _stc_music_page():
+    """§BEAT — the wiring. (a) Public: /music redirects away, /api/music/* is 403 (it is in
+    `_private_only_path`), and the public shell carries neither the link, the tab nor the section.
+    (b) Private: /music serves data-page="music" with the section, the stylesheet and a NONCED
+    script; the dashboard carries the link and the tab but not the section. (c) The three secrets
+    the module adds are in the spec, listed by /api/secrets and never echoed. (d) Names: a session's
+    playlist name carries the day, the kind, the km and the target; the race's carries its label; a
+    description never exceeds Spotify's cap. (e) `upcoming_sessions` keeps the window, drops rest and
+    zero-km days, and always includes the race. (f) Settings validate out loud and round-trip — on a
+    throwaway music.db, never the instance's."""
+    if M is None:
+        return _music_skip("music-page", "§BEAT — page, gating, secrets, names, settings")
+    import re as _re, tempfile
+    from datetime import date as _d
+    fails = []
+    c = S.app.test_client()
+    saved_ro, saved_path = S.READONLY, M.music_db_path
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    try:
+        S.READONLY = True
+        if c.get("/music").status_code not in (301, 302, 303, 307, 308):
+            fails.append("(a) public /music did not redirect away")
+        if c.get("/api/music/status").status_code != 403:
+            fails.append("(a) public /api/music/status not 403")
+        if not S._private_only_path("/api/music/anything"):
+            fails.append("(a) /api/music is not in _private_only_path")
+        pub = c.get("/").get_data(as_text=True)
+        for needle in ('id="musicLink"', 'id="mnavmusic"', 'id="sec-music"', "music.js", 'id="settab-music"'):
+            if needle in pub:
+                fails.append(f"(a) the public shell carries {needle}")
+        S.READONLY = False
+        doc = c.get("/music").get_data(as_text=True)
+        if 'data-page="music"' not in doc or 'id="sec-music"' not in doc or "/static/music.css" not in doc:
+            fails.append("(b) private /music lacks the page tag, the section or the stylesheet")
+        if not _re.search(r'<script nonce="[A-Za-z0-9_\-]{8,}" src="/static/music\.js\?v=', doc):
+            fails.append("(b) the music script is not nonced (CSP would refuse it)")
+        dash = c.get("/").get_data(as_text=True)
+        if 'id="musicLink"' not in dash or 'id="mnavmusic"' not in dash or 'id="sec-music"' in dash:
+            fails.append("(b) the private dashboard should carry the link and the tab, not the section")
+        # 0.68.0 — the Settings → Music tab and the script ride every private page (the dialog opens
+        # there); the public shell has neither (checked in (a)); the tab bar is built from the panels
+        if 'id="settab-music"' not in dash or 'id="musicKeys"' not in dash or "/static/music.js" not in dash:
+            fails.append("(b) the private dashboard should carry the module's Settings tab panel and its script")
+        for tab in ("athlete", "connections", "console"):
+            if f'id="settab-{tab}"' not in dash:
+                fails.append(f"(b) the Settings dialog lacks the {tab} tab panel")
+        rb = c.get("/api/music/readback/987654321")
+        if rb.status_code != 404 or (rb.get_json() or {}).get("ok") is not False:
+            fails.append(f"(b) a run without a stored read-back must answer 404 ok:false, got {rb.status_code}")
+        ss = c.get("/api/music/sessions").get_json() or {}
+        if not ss.get("ok") or "sessions" not in ss or any("segs" not in x for x in ss.get("sessions") or []):
+            fails.append("(b) /api/music/sessions must carry per-segment targets (`segs`) for the page's hero")
+        if c.get("/static/music.js").status_code != 200 or c.get("/static/music.css").status_code != 200:
+            fails.append("(b) the static music files are not served")
+        st = c.get("/api/music/status").get_json()
+        if not (st and st.get("ok") and "spotify" in st and "library" in st and "redirect_uri" in st):
+            fails.append(f"(b) /api/music/status shape: {st and sorted(st)}")
+        keys = {s["key"] for s in S.SECRET_SPEC}
+        for k in ("spotify_client_id", "spotify_client_secret", "lastfm_api_key"):
+            if k not in keys or k not in S.SECRET_BY_KEY or k not in S.SECRET_VALIDATORS:
+                fails.append(f"(c) {k} missing from the spec / index / validators")
+        sec = c.get("/api/secrets").get_json() or {}
+        listed = {s["key"] for s in sec.get("secrets", [])}
+        if not {"spotify_client_id", "lastfm_api_key"} <= listed:
+            fails.append(f"(c) /api/secrets does not list the module's keys: {sorted(listed)}")
+        if any("value" in s for s in sec.get("secrets", [])):
+            fails.append("(c) /api/secrets echoes a value field")
+        s1 = {"date": "2026-09-08", "kind": "tempo", "km": 5.7, "minutes": 35}
+        n1 = M.playlist_name(s1, 173.6)
+        if not ("Tue" in n1 and "8 Sep" in n1 and "Tempo" in n1 and "5.7 km" in n1 and "174 spm" in n1):
+            fails.append(f"(d) session name: {n1!r}")
+        n2 = M.playlist_name({"date": "2026-12-06", "kind": "race", "km": 42.2, "minutes": 252, "race": True, "note": "Big City Marathon"}, 171.2)
+        if not ("Big City Marathon" in n2 and "6 Dec" in n2 and "171 spm" in n2):
+            fails.append(f"(d) race name: {n2!r}")
+        segs = [{"label": f"Segment {i} — a long detail", "minutes": 10, "target_spm": 170} for i in range(40)]
+        if len(M.playlist_description(segs)) > M.MUSIC_DESC_MAX:
+            fails.append("(d) description over Spotify's cap")
+        plan = {"phases": [{"key": "base"}, {"key": "taper"}],
+                "base": {"weeks": [{"start": "2026-09-07", "sessions": [
+                    {"date": "2026-09-07", "kind": "easy", "km": 8, "minutes": 56},
+                    {"date": "2026-09-08", "kind": "rest", "km": 0, "minutes": 0},
+                    {"date": "2026-09-09", "kind": "tempo", "km": 0, "minutes": 0},
+                    {"date": "2026-09-20", "kind": "long", "km": 14, "minutes": 96}]}]},
+                "taper": {"weeks": [{"start": "2026-11-30", "sessions": [
+                    {"date": "2026-12-06", "kind": "race", "km": 42.2, "minutes": 252, "race": True, "note": "V"}]}]}}
+        up = [s["key"] for s in M.upcoming_sessions(plan, _d(2026, 9, 7))]
+        if up != ["2026-09-07-easy", "2026-12-06-race"]:
+            fails.append(f"(e) upcoming: {up}")
+        ok, err = M.validate_music_setting("step_pct", "9")
+        if ok or not err:
+            fails.append("(f) a 9 % step was accepted")
+        ok, err = M.validate_music_setting("max_spm", "300")
+        if ok:
+            fails.append("(f) a 300 spm ceiling was accepted")
+        r = c.post("/api/music/settings", json={"step_pct": "2", "half_time": "1", "lastfm_user": "dros_74"})
+        if r.status_code != 200 or M.get_settings()["step_pct"] != "2" or M.get_settings()["half_time"] != "1":
+            fails.append(f"(f) settings did not round-trip: {r.status_code} {M.get_settings()}")
+        r = c.post("/api/music/settings", json={"lastfm_user": "<script>"})
+        if r.status_code != 400:
+            fails.append("(f) a bad username was accepted")
+        if M.music_db_path() != tmp or not tmp.exists():
+            fails.append("(f) the det did not write to its own music.db")
+    finally:
+        S.READONLY = saved_ro
+        M.music_db_path = saved_path
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-page",
+               "§BEAT — public redirect/403 and a clean public shell; private page with a nonced script; "
+               "the module's secrets in the spec and never echoed; names; the upcoming window; settings",
+               passed=not fails, expect="gating exact; shell bits where they belong; secrets listed not echoed",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_readback():
+    """§BEAT2 — reading a run back song by song. (a) `align_songs` on a synthetic run: a play
+    ending before the run and one starting after it are dropped, a song with under a minute inside
+    the run is dropped, the seam seconds at the head of each song are excluded, the mean cadence
+    and the distance-based pace come out right, and the order is play order. (b) `played_at` is the
+    END of a play: a song whose stamp is the run's start + its length starts AT the run's start.
+    (c) ratings import: only the four words are accepted, upsert by id. (d) the new routes are
+    private-only and the status carries the play-history and ratings blocks. (e) a stored token
+    without the new scope reports `needs_reconnect`; one with it does not."""
+    if M is None:
+        return _music_skip("music-readback", "§BEAT2 — play history + read-back")
+    import tempfile
+    fails = []
+    run_start, run_end = 1_000_000.0, 1_000_000.0 + 1800     # a 30-minute run
+    iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
+    played = [
+        {"played_at": iso(run_start - 100), "duration_ms": 200_000, "title": "before", "artist": "x", "spotify_id": "b"},   # ended before the run
+        {"played_at": iso(run_start + 240), "duration_ms": 240_000, "title": "first", "artist": "x", "spotify_id": "f"},    # starts AT the run start
+        {"played_at": iso(run_start + 400), "duration_ms": 240_000, "title": "second", "artist": "x", "spotify_id": "s"},   # SKIPPED at 400 s: nominal start 160 < first's end 240
+        {"played_at": iso(run_end + 30), "duration_ms": 80_000, "title": "tail", "artist": "x", "spotify_id": "t"},        # 50 s inside → under the minimum
+        {"played_at": iso(run_end + 600), "duration_ms": 200_000, "title": "after", "artist": "x", "spotify_id": "a"},
+    ]
+    # 1 Hz samples: cadence 170 during the first song's body, 176 during the second's; 2.5 m/s throughout
+    samples = []
+    for t in range(0, 1801):
+        spm = 170 if t < 240 else 176 if t < 400 else 168
+        samples.append((run_start + t, spm, 2.5 * t))
+    out = M.align_songs(run_start, run_end, played, samples)
+    ids = [s["spotify_id"] for s in out]
+    if ids != ["f", "s"]:
+        fails.append(f"(a/b) expected the two songs inside the run in play order, got {ids}")
+    else:
+        f, s = out
+        if f["start_s"] != 0 or f["read_s"] != 240 - M.MUSIC_SONG_SEAM_S or abs(f["spm"] - 170) > 0.01 or f["skipped"]:
+            fails.append(f"(a/b) first song: {f}")
+        # (a2) the skipped second song starts where the first ENDED (240 s), not its length before its
+        # stamp (160 s), reads 400 − 240 − seam, and is flagged
+        if s["start_s"] != 240 or s["read_s"] != 160 - M.MUSIC_SONG_SEAM_S or not s["skipped"] \
+                or abs(s["spm"] - 176) > 0.01 or not s["pace_sec"] or abs(s["pace_sec"] - 400) > 1:
+            fails.append(f"(a2) skipped second song (2.5 m/s = 400 s/km): {s}")
+        # (a3) §BEAT3/§BEAT7 — lap presses: singles at 100 s and 150 s → 'first' broke twice, stamped
+        # at the seconds into the song; two at 300/303 s → 'second' never again; one at 1500 s lands
+        # on no song and is reported as such
+        per, events = M.press_ratings([run_start + 100, run_start + 150, run_start + 300, run_start + 303, run_start + 1500], out, run_start)
+        if per != {"f": "break", "s": "never"} or [e["presses"] for e in events] != [1, 1, 2, 1] \
+                or events[3]["spotify_id"] is not None or out[1].get("run_rating") != "never" or out[1].get("presses") != 2 \
+                or out[0].get("breaks") != 2 or out[0].get("break_at") != [100, 150] or out[0].get("run_rating") != "break":
+            fails.append(f"(a3) press ratings: {per} {events} {[(x.get('run_rating'), x.get('presses'), x.get('breaks'), x.get('break_at')) for x in out]}")
+        # (a3b) a run from before the protocol changed reads under the old words and counts no break
+        for x in out:
+            x.pop("breaks", None); x.pop("break_at", None); x.pop("run_rating", None); x.pop("presses", None)
+        per_l, ev_l = M.press_ratings([run_start + 100, run_start + 300, run_start + 303], out, run_start, legacy=True)
+        if per_l != {"f": "pushes", "s": "relaxes"} or out[0].get("breaks") or [e["rating"] for e in ev_l] != ["pushes", "relaxes"]:
+            fails.append(f"(a3b) legacy presses: {per_l} {[(x.get('run_rating'), x.get('breaks')) for x in out]}")
+        # (a7) §BEAT7 — steadiness from the samples: a constant song is fully steady with no dip;
+        # a 6-s drop of 10 spm is one dip of 5 s, a 2-s drop is not a dip
+        if f.get("steady") != 1.0 or f.get("dips") != 0 or s.get("dips") != 0:
+            fails.append(f"(a7) constant songs must read steady with no dip: {f.get('steady')} {f.get('dips')} {s.get('dips')}")
+        sel = [(run_start + t, 160.0 if 100 <= t < 106 or 200 <= t < 202 else 170.0, 2.5 * t) for t in range(300)]
+        st_, dp_, ds_ = M.cadence_steadiness(sel)
+        if not (abs(st_ - 292 / 300) < 0.002 and dp_ == 1 and ds_ == 5):
+            fails.append(f"(a7) steadiness: got {st_} {dp_} {ds_}, want 0.973 / 1 dip / 5 s")
+        # (a8) §BEAT7 — playlist membership by id OR by name: another edition's id is the same song
+        by_id, by_name = M.playlist_membership({"segments": [{"label": "Work", "effort": "work", "target_spm": 172.0, "tracks": [
+            {"id": "A1", "title": "Same Song", "artist": "Band", "tempo": 171.0, "hit": "full"},
+            {"id": "H1", "title": "Half", "artist": "Band", "tempo": 86.0, "hit": "half"}]}]})
+        m1 = M.segment_for({"spotify_id": "A2", "title": "Same Song (Remastered)", "artist": "Band"}, by_id, by_name)
+        m2 = M.segment_for({"spotify_id": "Z", "title": "Other", "artist": "Band"}, by_id, by_name)
+        if m1 != ("Work", 172.0, "work", 171.0, "full") or m2 is not None or by_id["H1"][3:] != (86.0, "half"):
+            fails.append(f"(a8) membership: {m1} {m2} {by_id.get('H1')}")
+    # (a4) which laps are presses. The re-exported file has no trigger field: ten ~1 km laps plus a
+    # closing stub are the watch's automatic laps → no presses; the same with one lap cut short at
+    # 420 m → that one; irregular laps throughout → every one but the stub; a 'manual' trigger is a
+    # press whatever its length and a named automatic trigger never is.
+    mk = lambda t, d, trig=None: (run_start + t, d, 0.0, trig)
+    auto = [mk(400 * i, 1000 + (i % 3) - 1) for i in range(1, 11)] + [mk(4008, 16)]
+    if M.press_times(auto, run_start + 4010) != []:
+        fails.append(f"(a4) automatic kilometre laps read as presses: {M.press_times(auto, run_start + 4010)}")
+    cut = [mk(400, 1000), mk(800, 1000), mk(970, 420), mk(1370, 1000), mk(1770, 1000), mk(1800, 50)]
+    if M.press_times(cut, run_start + 1802) != [run_start + 970]:
+        fails.append(f"(a4) the lap cut short by a press was not the press: {M.press_times(cut, run_start + 1802)}")
+    irregular = [mk(160, 400), mk(650, 1230), mk(930, 700), mk(1800, 30)]
+    if M.press_times(irregular, run_start + 1802) != [run_start + 160, run_start + 650, run_start + 930]:
+        fails.append(f"(a4) irregular laps must all be presses: {M.press_times(irregular, run_start + 1802)}")
+    trig = [mk(400, 1000, "distance"), mk(500, 250, "manual"), mk(800, 1000, "distance")]
+    if M.press_times(trig, run_start + 1802) != [run_start + 500]:
+        fails.append(f"(a4) triggers: {M.press_times(trig, run_start + 1802)}")
+    sp = M.press_times_from_splits([{"duration": 400, "distance": 1.0}, {"duration": 170, "distance": 0.42}, {"duration": 400, "distance": 1.0},
+                                    {"duration": 400, "distance": 1.0}], run_start)
+    if sp != [run_start + 570]:
+        fails.append(f"(a4) splits → presses: {sp}")
+    # (a6) §BEAT6 — the file's clock anchored to the run's: a FIT two hours late is shifted whole
+    # (samples and laps alike) and the shift reported; one within the tolerance is left as it is
+    late = {"start": run_start + 7200, "samples": [(run_start + 7200 + i, 170.0, 2.5 * i) for i in range(10)],
+            "laps": [(run_start + 7200 + 5, 12.5, 5.0, None)]}
+    fx, sh = M.anchor_fit(late, run_start)
+    if not (sh == -7200 and fx["start"] == run_start and fx["samples"][0][0] == run_start
+            and fx["samples"][9][0] == run_start + 9 and fx["laps"][0][0] == run_start + 5 and fx["samples"][3][1] == 170.0):
+        fails.append(f"(a6) a two-hour-late FIT must be re-anchored whole: shift {sh} start {fx['start'] - run_start:+.0f}")
+    near = {"start": run_start + 30, "samples": [(run_start + 30, 170.0, 0.0)], "laps": []}
+    fn, sn = M.anchor_fit(near, run_start)
+    if not (sn == 0.0 and fn["start"] == run_start + 30):
+        fails.append(f"(a6) a FIT within the tolerance must be left alone: {sn} {fn['start'] - run_start:+.0f}")
+    saved_path = M.music_db_path
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    saved_tok = M._sp_tokens
+    try:
+        n = M.import_ratings([{"spotify_id": "x1", "rating": "pushes"}, {"spotify_id": "x2", "rating": "relaxes", "note": "n"},
+                              {"spotify_id": "x3", "rating": "loud"}, {"spotify_id": "", "rating": "pushes"}])
+        n2 = M.import_ratings([{"spotify_id": "x1", "rating": "neutral"}], source="run")
+        conn = M._mdb()
+        try:
+            rows = {r["spotify_id"]: (r["rating"], r["source"]) for r in conn.execute("SELECT spotify_id, rating, source FROM rating")}
+        finally:
+            conn.close()
+        if n != 2 or n2 != 1 or rows != {"x1": ("neutral", "run"), "x2": ("relaxes", "couch")}:
+            fails.append(f"(c) ratings import (with source): n={n},{n2} rows={rows}")
+        # (c2) §BEAT5/§BEAT7 — the set-aside rule off run verdicts: a skip on a work segment → work; a
+        # skip with no role (no playlist that day) → both; "never" → both; a break → nothing; a row
+        # from the older protocol ('relaxes') → nothing. And a segment's role from its effort, or
+        # from its label on an older spec.
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT OR REPLACE INTO rating_run(run_id, spotify_id, rating, at_s, role) VALUES(?,?,?,?,?)",
+                             [(1, "s1", "skip", 100, "work"), (1, "s2", "skip", 200, None), (1, "s3", "never", 300, "work"),
+                              (1, "s4", "relaxes", 400, "work"), (1, "s5", "break", 500, "work"), (2, "s1", "skip", 50, "easy")])
+            conn.commit()
+            aside = M.set_aside(conn)
+        finally:
+            conn.close()
+        if aside != {"s1": {"work", "easy"}, "s2": {"work", "easy"}, "s3": {"work", "easy"}}:
+            fails.append(f"(c2) set_aside: {aside}")
+        roles = [M._seg_role({"effort": "work"}), M._seg_role({"effort": "race_grind"}), M._seg_role({"effort": "cooldown"}),
+                 M._seg_role({"label": "Reps — 5 × work with recovery"}), M._seg_role({"label": "Work — 15min continuous @ threshold"}),
+                 M._seg_role({"label": "Cool-down — easy cool-down"})]
+        if roles != ["work", "work", "easy", "work", "work", "easy"]:
+            fails.append(f"(c2) segment roles: {roles}")
+        c = S.app.test_client()
+        saved_ro = S.READONLY
+        try:
+            S.READONLY = True
+            for path in ("/api/music/runs", "/api/music/played/pull", "/api/music/readback"):
+                code = (c.get(path) if path.endswith("runs") else c.post(path, json={})).status_code
+                if code != 403:
+                    fails.append(f"(d) public {path} answered {code}, not 403")
+            S.READONLY = False
+            st = c.get("/api/music/status").get_json() or {}
+            if "played" not in st or "ratings" not in st or st["ratings"].get("count") != 2:
+                fails.append(f"(d) status lacks the play-history / ratings blocks: {sorted(st)}")
+            if c.post("/api/music/readback", json={"run_id": "x"}).status_code != 400:
+                fails.append("(d) a junk run_id was accepted")
+        finally:
+            S.READONLY = saved_ro
+        M._sp_tokens = lambda: {"access_token": "t", "scope": "playlist-modify-private user-library-read"}
+        if not M.spotify_status()["needs_reconnect"] or "user-read-recently-played" not in M.spotify_status()["scopes_missing"]:
+            fails.append("(e) an old token must report needs_reconnect")
+        M._sp_tokens = lambda: {"access_token": "t", "scope": M.SP_SCOPES}
+        if M.spotify_status()["needs_reconnect"]:
+            fails.append("(e) a token with every scope must not report needs_reconnect")
+    finally:
+        M.music_db_path = saved_path
+        M._sp_tokens = saved_tok
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-readback",
+               "§BEAT2 — songs lined up with the run from Spotify's play history (played_at = end of play), "
+               "seams excluded, pace from distance; ratings import; routes private; old token asks to reconnect",
+               passed=not fails, expect="two songs, 170/176 spm, 400 s/km; 2 ratings; 403s; reconnect flag",
+               got={"violations": fails or "none"})
+
+def _stc_music_gap_infer():
+    """§BEAT8 (0.68.3) — THE SONGS THE PLAY HISTORY DROPPED ARE READ FROM THE LIST ORDER, SO A PRESS ALWAYS
+    FINDS ITS SONG. Spotify's recently-played omits a play skipped early and, some evenings, a full one; on
+    run 207508555 (2026-09-12) thirteen songs aligned, four gaps of 45–190 s sat between songs two apart on
+    the list, and three of the four lap presses fell inside them — attributed to no song. (a) the pure
+    helper on a four-track list: tracks 1 and 3 played with a 70-s gap and a 180-s tail ⇒ track 2 inferred
+    and skipped into the gap, track 4 inferred, not skipped, to the run's end, both read from the stream;
+    a 20-s gap infers nothing; no list, nothing. (b) end to end through `readback` on a temp music.db with
+    a canned FIT: the presses land (one in the gap ⇒ track 2 'break' at 40 s in; two in the tail ⇒ track 4
+    'never'), the events carry the ids, `rating_run` and `follow` hold them, the payload counts them.
+    (c) anti-vacuity — with the helper returning nothing, the same presses land on no song."""
+    if M is None:
+        return _music_skip("music-gap-infer", "§BEAT8 — the songs the history dropped")
+    import tempfile, sqlite3, json as _json
+    fails = []
+    run_start = 1_000_000.0
+    iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
+    seam = M.MUSIC_SONG_SEAM_S
+    tracks = [("one", 300), ("two", 427), ("three", 246), ("four", 217)]
+    spec = {"target_spm": 168.0, "segments": [{"label": "Easy run", "effort": "easy", "target_spm": 168.0,
+            "tracks": [{"id": i, "title": i.title(), "artist": "Band", "tempo": 168.0, "hit": "full"} for i, _ in tracks]}]}
+    durs = {i: float(d) for i, d in tracks}
+    run_end = run_start + 796                    # one 0–300 · gap 70 · three 370–616 · tail 180
+    samples = [(run_start + t, 168.0, 2.5 * t) for t in range(0, 797)]
+    played = [{"played_at": iso(run_start + 300), "duration_ms": 300_000, "title": "One", "artist": "Band", "spotify_id": "one"},
+              {"played_at": iso(run_start + 616), "duration_ms": 246_000, "title": "Three", "artist": "Band", "spotify_id": "three"}]
+    songs = M.align_songs(run_start, run_end, played, samples)
+    inf = M.infer_gap_songs(songs, spec, durs, run_start, run_end, samples)
+    got = [(x["spotify_id"], x["start_s"], x["read_s"], x["skipped"], x.get("inferred")) for x in inf]
+    want = [("two", 300, 70 - seam, True, True), ("four", 616, 180 - seam, False, True)]
+    if got != want:
+        fails.append(f"(a) inferred {got}, want {want}")
+    if inf and (abs(inf[0]["spm"] - 168.0) > 0.01 or inf[0].get("steady") != 1.0):
+        fails.append(f"(a) the inferred song's legs were not read from the stream: {inf[0].get('spm')} {inf[0].get('steady')}")
+    tight = [dict(played[0]), {**played[1], "played_at": iso(run_start + 566)}]      # three at 320: a 20-s gap
+    ts = M.align_songs(run_start, run_start + 566, tight, samples)
+    if M.infer_gap_songs(ts, spec, durs, run_start, run_start + 566, samples):
+        fails.append("(a) a 20-s gap was read as a dropped song")
+    if M.infer_gap_songs(songs, {}, durs, run_start, run_end, samples):
+        fails.append("(a) songs were inferred without a list")
+    # (b) end to end
+    saved_path, saved_fetch, saved_parse = M.music_db_path, M.fetch_fit, M.parse_fit
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    laps = [(run_start + 340, 850.0, 340.0, "manual"), (run_start + 700, 900.0, 360.0, "manual"),
+            (run_start + 703, 8.0, 3.0, "manual"), (run_start + 796, 232.0, 93.0, "distance")]
+    M.fetch_fit = lambda rid: b".FIT"
+    M.parse_fit = lambda raw: {"start": run_start, "samples": list(samples), "laps": list(laps)}
+    db = sqlite3.connect(":memory:"); db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, distance REAL, duration REAL, raw TEXT)")
+    db.execute("INSERT INTO activities VALUES(77, '2026-09-12', ?, 2.0, 796, '{}')", (iso(run_start),))
+    db.commit()
+    res0 = {}
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO played(played_at, spotify_id, title, artist, duration_ms, pulled_at) VALUES(?,?,?,?,?,?)",
+                             [(x["played_at"], x["spotify_id"], x["title"], x["artist"], x["duration_ms"], "x") for x in played])
+            conn.executemany("INSERT INTO track(spotify_id, title, artist, duration_ms, tempo) VALUES(?,?,?,?,?)",
+                             [(i, i.title(), "Band", d * 1000, 168.0) for i, d in tracks])
+            conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES('2026-09-12-easy', 'p', 'SH · test', '', 'x', ?)",
+                         (_json.dumps(spec),))
+            conn.execute("INSERT OR REPLACE INTO setting(key, value) VALUES('press_protocol_from', '2000-01-01')")
+            conn.commit()
+        finally:
+            conn.close()
+        res = M.readback(db, 77)
+        if not res.get("ok"):
+            fails.append(f"(b) readback failed: {res.get('error')}")
+        else:
+            ids = [x["spotify_id"] for x in res["songs"]]
+            by = {x["spotify_id"]: x for x in res["songs"]}
+            ev = {e["at_s"]: (e["spotify_id"], e["presses"], e["rating"]) for e in res["presses"]}
+            if ids != ["one", "two", "three", "four"] or res.get("inferred") != 2 or res.get("stream_source") != "fit":
+                fails.append(f"(b) songs {ids}, inferred {res.get('inferred')}, source {res.get('stream_source')}")
+            if ev != {340: ("two", 1, "break"), 700: ("four", 2, "never")}:
+                fails.append(f"(b) the presses did not find their songs: {ev}")
+            two, four = by.get("two") or {}, by.get("four") or {}
+            if not (two.get("inferred") and two.get("skipped") and two.get("run_rating") == "break" and two.get("break_at") == [40]
+                    and two.get("in_playlist") and two.get("entrained") and two.get("segment") == "Easy run"):
+                fails.append("(b) track two: " + str({k: two.get(k) for k in ("inferred", "skipped", "run_rating", "break_at", "in_playlist", "entrained", "segment")}))
+            if not (four.get("inferred") and not four.get("skipped") and four.get("run_rating") == "never" and four.get("in_playlist")):
+                fails.append("(b) track four: " + str({k: four.get(k) for k in ("inferred", "skipped", "run_rating", "in_playlist")}))
+            fw = res.get("followed") or {}
+            if fw.get("breaks") != 1 or fw.get("never") != 1 or fw.get("songs") != 4:
+                fails.append(f"(b) followed block: {fw}")
+            conn = M._mdb()
+            try:
+                rr = {r["spotify_id"]: r["rating"] for r in conn.execute("SELECT spotify_id, rating FROM rating_run WHERE run_id=77")}
+                fl = sorted(r["spotify_id"] for r in conn.execute("SELECT spotify_id FROM follow WHERE run_id=77"))
+            finally:
+                conn.close()
+            if rr != {"two": "break", "four": "never"}:
+                fails.append(f"(b) rating_run rows {rr}, want two=break four=never")
+            if fl != ["four", "one", "three", "two"]:
+                fails.append(f"(b) follow rows {fl}")
+        # (c) anti-vacuity — the helper's call removed: the gap presses find no song
+        saved_inf = M.infer_gap_songs
+        M.infer_gap_songs = lambda *a, **k: []
+        try:
+            res0 = M.readback(db, 77)
+        finally:
+            M.infer_gap_songs = saved_inf
+        ev0 = {e["at_s"]: e["spotify_id"] for e in (res0.get("presses") or [])}
+        if not (res0.get("ok") and 340 in ev0 and ev0[340] is None and ev0.get(700) is None and len(res0["songs"]) == 2):
+            fails.append(f"(c) without the helper the presses still found songs: {ev0} / {len(res0.get('songs') or [])} songs")
+    finally:
+        M.music_db_path, M.fetch_fit, M.parse_fit = saved_path, saved_fetch, saved_parse
+        db.close()
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-gap-infer",
+               "§BEAT8 — a song the play history dropped is read from the list order into the gap between its "
+               "neighbours (skipped when the next song cut it short, not when the run ended), takes the same path "
+               "as an aligned song, and the lap presses that fell in the gap land on it",
+               passed=not fails, expect="two inferred (300/50 skipped, 616/160 not); 20-s gap and no list ⇒ none; "
+               "presses 340→two break, 700→four never; rating_run + follow rows; helper removed ⇒ orphans",
+               got={"inferred": got, "orphans_without": {e["at_s"]: e["spotify_id"] for e in (res0.get("presses") or [])},
+                    "failures": fails or "none"})
+
+
+def _stc_music_follow():
+    """§BEAT7 (0.66.0) — what the legs and the ledger feed the picker. (a) `follow_row_score`: a
+    followed song scores 1, a break costs 1 (capped), a dip half (capped); (b) `follow_scores` is the
+    read-seconds-weighted mean per track and a row with no seconds counts nothing; (c) `served_counts`
+    counts lists inside the rotation window once per track, leaves older lists and the list being
+    rebuilt out; (d) `app_play_counts` counts only plays inside a run since the first list, and
+    `reweigh` takes them off the scrobble count so a track the lists served does not outrank one
+    they did not."""
+    if M is None:
+        return _music_skip("music-follow", "§BEAT7 — the legs' verdict, the rotation ledger, taste without own plays")
+    import tempfile, sqlite3 as _sq
+    from datetime import date as _d
+    fails = []
+    cases = [((True, 0, 0), 1.0), ((False, 0, 0), 0.0), ((True, 2, 0), 0.0), ((False, 1, 3), -1.5), ((True, 0, 1), 0.5)]
+    for args, want in cases:
+        if abs(M.follow_row_score(*args) - want) > 1e-9:
+            fails.append(f"(a) follow_row_score{args} = {M.follow_row_score(*args)}, want {want}")
+    saved_path = M.music_db_path
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO follow(run_id, spotify_id, spm, tempo, delta_pct, entrained, steady, dips, dip_s, breaks, read_s) "
+                             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                             [(1, "x", 170, 170, 0.0, 1, 1.0, 0, 0, 0, 200), (2, "x", 166, 170, -0.02, 0, 0.9, 0, 0, 1, 100),
+                              (3, "y", 170, 170, 0.0, 1, 1.0, 0, 0, 0, 0)])
+            spec = lambda ids: S.json.dumps({"segments": [{"label": "A", "tracks": [{"id": i} for i in ids[:2]]},
+                                                          {"label": "B", "tracks": [{"id": i} for i in ids[1:]]}]})
+            conn.executemany("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES(?,?,?,?,?,?)",
+                             [("2026-09-01-easy", "p1", "n", "u", "2026-09-01T10:00:00+00:00", spec(["A", "B"])),
+                              ("2026-09-05-tempo", "p2", "n", "u", "2026-09-05T10:00:00+00:00", spec(["A", "C"])),
+                              ("2026-08-01-long", "p3", "n", "u", "2026-08-01T10:00:00+00:00", spec(["A"]))])
+            conn.executemany("INSERT INTO played(played_at, spotify_id, title, artist, duration_ms, pulled_at) VALUES(?,?,?,?,?,?)",
+                             [("2026-09-05T16:30:00.000Z", "A", "t", "a", 200000, "x"),     # inside the run
+                              ("2026-09-05T20:00:00.000Z", "A", "t", "a", 200000, "x"),     # the evening after
+                              ("2026-07-20T16:30:00.000Z", "A", "t", "a", 200000, "x")])    # before the first list
+            conn.executemany("INSERT INTO taste(spotify_id, lfm_playcount, loved, saved, top_rank, playlisted, weight) VALUES(?,?,?,?,?,?,?)",
+                             [("A", 10, 0, 0, None, 0, 0.0), ("B", 10, 0, 0, None, 0, 0.0)])
+            conn.commit()
+            fs = M.follow_scores(conn)
+            if set(fs) != {"x"} or abs(fs["x"] - (1.0 * 200 - 1.0 * 100) / 300) > 0.002:
+                fails.append(f"(b) follow_scores: {fs}")
+            today = _d(2026, 9, 10)
+            sv = M.served_counts(conn, today)
+            if sv != {"A": 2, "B": 1, "C": 1}:
+                fails.append(f"(c) served_counts: {sv}")
+            sv2 = M.served_counts(conn, today, exclude_key="2026-09-05-tempo")
+            if sv2 != {"A": 1, "B": 1}:
+                fails.append(f"(c) the list being rebuilt must not count: {sv2}")
+            # (c2) a spec that names its tracks counts the SONG as well as the id
+            conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES(?,?,?,?,?,?)",
+                         ("2026-09-08-easy", "p4", "n", "u", "2026-09-08T10:00:00+00:00",
+                          S.json.dumps({"segments": [{"label": "E", "tracks": [{"id": "D1", "artist": "Band", "title": "Song (Live)"}]}]})))
+            conn.commit()
+            sv3 = M.served_counts(conn, today)
+            if sv3.get("D1") != 1 or sv3.get(M.song_key("Band", "Song")) != 1 or M._by_song(sv3, {"id": "D2", "artist": "Band", "title": "Song"}) != 1:
+                fails.append(f"(c2) the song name must carry the count to another edition: {sv3}")
+            # (c3) the protocol stamp: a fresh music db records the day the new words apply from
+            if not M.press_protocol_from(conn):
+                fails.append("(c3) a database that never held the legs' table must record press_protocol_from")
+            mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+            mem.executescript(S.SCHEMA)
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?)",
+                        ("2026-09-05", "2026-09-05T18:00:00+02:00", S.RUNNING_SPORT, 10.0, 3600, 90.0))
+            mem.commit()
+            ap = M.app_play_counts(conn, mem)
+            if ap != {"A": 1}:
+                fails.append(f"(d) app_play_counts: {ap}")
+            M.reweigh(conn, mem)
+            w = {r["spotify_id"]: r["weight"] for r in conn.execute("SELECT spotify_id, weight FROM taste")}
+            if not (w["A"] < w["B"]):
+                fails.append(f"(d) the app's own play must come off the count: {w}")
+        finally:
+            conn.close()
+    finally:
+        M.music_db_path = saved_path
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-follow",
+               "§BEAT7 — the legs' score per song and per track, the rotation ledger over the window (the list being "
+               "rebuilt left out), and the taste weight with the app's own run plays taken off",
+               passed=not fails, expect="1/0/0/−1.5/0.5; x = 0.333; A2 B1 C1; app plays {A: 1}; A lighter than B",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_disco():
+    """§DISCO (0.67.0) — songs never run to, from ListenBrainz. (a) `lb_merge` keeps one row per
+    recording with its sources in order and the first names seen, and drops rows without an MBID;
+    (b) the picker's fresh quota: four never-run songs spread over the core segments (2 + 2, none
+    on the tail), taken first inside the window although they score under the known tracks, never
+    from outside the window, one when the window holds one (and the note says 1 of 4), none with
+    no quota and none with no fresh set; (c) `never_run` leaves out a track a run read, a track a
+    list carried (whichever edition), a track that is not ListenBrainz's, and counts the list being
+    rebuilt as not carried; (d) `source_scores` reads the legs per source, a two-source track
+    counting for both; (e) the user setting validates and the token is a Settings secret with a
+    validator; (f) `discover_lb` files a new resolved candidate as discovered=2 with its sources,
+    fills the id of one the library already holds without a search, records a miss, and searches
+    nothing on a second pass."""
+    if M is None:
+        return _music_skip("music-disco", "§DISCO — ListenBrainz sources + the fresh quota")
+    import tempfile
+    fails = []
+    # (a)
+    merged = M.lb_merge([("neighbours", [{"mbid": "m1", "artist": "A", "title": "T"}, {"mbid": None, "artist": "X", "title": "Y"}]),
+                         ("cf", [{"mbid": "m1"}, {"mbid": "m2"}]),
+                         ("weekly", [{"mbid": "m2", "artist": "B", "title": "U"}, {"mbid": "m1", "artist": "A2", "title": "T2"}])])
+    if set(merged) != {"m1", "m2"} or merged["m1"] != {"artist": "A", "title": "T", "sources": ["neighbours", "cf", "weekly"]} \
+            or merged["m2"] != {"artist": "B", "title": "U", "sources": ["cf", "weekly"]}:
+        fails.append(f"(a) lb_merge: {merged}")
+    # (b)
+    segs = lambda: [{"label": "Easy 1", "minutes": 20, "effort": "easy", "floor": 0.0, "pace_sec": 400},
+                    {"label": "Easy 2", "minutes": 20, "effort": "easy", "floor": 0.0, "pace_sec": 400},
+                    {"label": "Run home", "minutes": 12, "effort": "tail", "floor": 0.0, "pace_sec": 420}]
+    known = [{"id": f"k{i}", "title": f"Known {i}", "artist": f"Band {i}", "duration_ms": 240000, "tempo": 170.0, "energy": 0.7, "weight": 2.0, "discovered": 0} for i in range(12)]
+    fresh = [{"id": f"f{i}", "title": f"Fresh {i}", "artist": f"New {i}", "duration_ms": 240000, "tempo": 170.0, "energy": 0.7, "weight": 0.0, "discovered": 2, "source": "neighbours"} for i in range(6)]
+    fset = {t["id"] for t in fresh}
+    out, notes = M.pick_for_segments(segs(), known + fresh, [170.0, 170.0, 170.0], fresh=fset, fresh_quota=4)
+    nr = [sg["never_run"] for sg in out]
+    if nr != [2, 2, 0]:
+        fails.append(f"(b) the quota must spread 2 + 2 over the core segments and none on the tail: {nr}")
+    if any(not p.get("never_run") for sg in out[:2] for p in sg["tracks"][:2]):
+        fails.append("(b) the never-run songs must come first in each core segment")
+    if not any("4 songs never run to" in n for n in notes):
+        fails.append(f"(b) the note must say the quota was filled: {notes}")
+    out0, notes0 = M.pick_for_segments(segs(), known + fresh, [170.0, 170.0, 170.0], fresh=fset, fresh_quota=0)
+    outn, notesn = M.pick_for_segments(segs(), known + fresh, [170.0, 170.0, 170.0])
+    if sum(sg["never_run"] for sg in out0) or sum(sg["never_run"] for sg in outn) or any("never run" in n for n in notes0 + notesn):
+        fails.append("(b) no quota, or no fresh set → no never-run picks and no note")
+    far = [{**t, "tempo": 140.0} for t in fresh[1:]]
+    out1, notes1 = M.pick_for_segments(segs(), known + [fresh[0]] + far, [170.0, 170.0, 170.0], fresh=fset, fresh_quota=4)
+    if sum(sg["never_run"] for sg in out1) != 1 or any(p["id"] in {t["id"] for t in far} for sg in out1 for p in sg["tracks"]):
+        fails.append(f"(b) one fresh song in the window → exactly one taken, none from outside it: {[sg['never_run'] for sg in out1]}")
+    if not any("1 of 4 never-run" in n for n in notes1):
+        fails.append(f"(b) the note must say 1 of 4: {notes1}")
+    # (c) (d) (f) on a throwaway music.db
+    saved_path = M.music_db_path
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO track(spotify_id, title, artist, duration_ms, tempo, discovered, source) VALUES(?,?,?,?,?,?,?)",
+                             [("X", "Read", "Band", 200000, 170.0, 2, "neighbours,cf"), ("Y", "Listed", "Band", 200000, 170.0, 2, "neighbours"),
+                              ("Y2", "Listed (Live)", "Band", 200000, 170.0, 2, "weekly"), ("Z", "Clean", "Band", 200000, 170.0, 2, "cf"),
+                              ("W", "Own", "Band", 200000, 170.0, 0, None), ("H", "Held", "Someone", 200000, 170.0, 0, None)])
+            conn.execute("INSERT INTO follow(run_id, spotify_id, spm, tempo, delta_pct, entrained, steady, dips, dip_s, breaks, read_s) VALUES(1,'X',170,170,0,1,1,0,0,0,100)")
+            conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES(?,?,?,?,?,?)",
+                         ("2026-09-01-easy", "p1", "n", "u", "2026-09-01T10:00:00+00:00",
+                          S.json.dumps({"segments": [{"label": "A", "tracks": [{"id": "Y", "artist": "Band", "title": "Listed"}]}]})))
+            conn.commit()
+            got = M.never_run(conn)
+            if got != {"Z"}:
+                fails.append(f"(c) never_run: {got}, want {{'Z'}}")
+            got2 = M.never_run(conn, exclude_key="2026-09-01-easy")
+            if got2 != {"Y", "Y2", "Z"}:
+                fails.append(f"(c) the list being rebuilt does not count as carried: {got2}")
+            sc = M.source_scores(conn)
+            nb, cf = sc.get("neighbours") or {}, sc.get("cf") or {}
+            if nb.get("tracks") != 2 or nb.get("read") != 1 or nb.get("followed_share") != 1.0 or nb.get("score") != 1.0 or nb.get("served") != 1:
+                fails.append(f"(d) neighbours: {nb}")
+            if cf.get("tracks") != 2 or cf.get("read") != 1 or (sc.get("weekly") or {}).get("read") != 0:
+                fails.append(f"(d) cf / weekly: {cf} / {sc.get('weekly')}")
+            # (f)
+            calls = {"search": []}
+            saved = (M.lb_sources, M.lb_names, M.sp_search_track)
+            M.lb_sources = lambda user, token=None: ([("neighbours", [{"mbid": "h1", "artist": "Someone", "title": "Held"},
+                                                                       {"mbid": "n1", "artist": "Fresh Band", "title": "New Song"},
+                                                                       {"mbid": "n2", "artist": "Ghost", "title": "Nowhere"}]),
+                                                      ("cf", [{"mbid": "n1"}])], {"neighbours": 3, "cf": 1}, [])
+            M.lb_names = lambda mbids: {}
+            def _search(token, title, artist, strict=False):
+                calls["search"].append((title, artist, strict))
+                return {"id": "NEW1", "title": title, "artist": artist, "duration_ms": 210000} if title == "New Song" else None
+            M.sp_search_track = _search
+            try:
+                sm = M.discover_lb(conn, "tok", "someone", None)
+                sm2 = M.discover_lb(conn, "tok", "someone", None)
+            finally:
+                M.lb_sources, M.lb_names, M.sp_search_track = saved
+            if (sm["lb_candidates"], sm["lb_new"], sm["lb_resolved"], sm["lb_unresolved"]) != (3, 2, 1, 1):
+                fails.append(f"(f) first pass: {sm}")
+            row = conn.execute("SELECT discovered, source FROM track WHERE spotify_id='NEW1'").fetchone()
+            if not row or row["discovered"] != 2 or row["source"] != "neighbours,cf":
+                fails.append(f"(f) the resolved candidate must be discovered=2 with both sources: {dict(row) if row else None}")
+            held = conn.execute("SELECT spotify_id, searched_at FROM disco WHERE mbid='h1'").fetchone()
+            if held["spotify_id"] != "H" or held["searched_at"]:
+                fails.append(f"(f) a song the library holds gets its id without a search: {dict(held)}")
+            miss = conn.execute("SELECT spotify_id, searched_at FROM disco WHERE mbid='n2'").fetchone()
+            if miss["spotify_id"] or not miss["searched_at"]:
+                fails.append(f"(f) a miss is stamped: {dict(miss)}")
+            if len(calls["search"]) != 2 or not all(c[2] for c in calls["search"]):
+                fails.append(f"(f) two strict searches on the first pass, none on the second: {calls['search']}")
+            if sm2["lb_resolved"] != 0 or sm2["lb_unresolved"] != 1:
+                fails.append(f"(f) second pass: {sm2}")
+        finally:
+            conn.close()
+    finally:
+        M.music_db_path = saved_path
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    # (e)
+    if M.validate_music_setting("listenbrainz_user", "dros_74")[0] is not True or M.validate_music_setting("listenbrainz_user", "no way!")[0] is not False:
+        fails.append("(e) the ListenBrainz user setting must validate like the last.fm one")
+    if "listenbrainz_token" not in S.SECRET_BY_KEY or "listenbrainz_token" not in S.SECRET_VALIDATORS:
+        fails.append("(e) the token must be a Settings secret with a validator")
+    return _st("det", "music-disco",
+               "§DISCO — one row per recording across the sources; four never-run songs per list, spread over the core "
+               "segments and never outside the window; never_run leaves out what a run read or a list carried; the legs "
+               "per source; the ListenBrainz pull files a resolved candidate once and searches nothing twice",
+               passed=not fails, expect="merge m1/m2; quota 2+2+0, 1 of 4; never_run {Z}; neighbours read 1 followed 100 %; (3,2,1,1) then 0/1",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_ramp():
+    """§BEAT4 — the target climbs to the trained line on the race's calendar, one rung at a time.
+    Same synthetic runner as `music-curve` (recent 152 + 1.6·v, trained 152 + 2.5·v; at 9 km/h
+    166.4 / 174.5, gap 8.1, plain step 168.9). (a) the clock: no objective, a race behind → None;
+    120 days out → before it starts (fraction 0); 63 out → halfway, week 7 of 12; 21 out → landed;
+    (b) without a ramp, or before it starts, the target is the plain ladder to the decimal; (c) at
+    the halfway mark the ramp binds and says so (170.45); (d) landed with no read-back the rung binds
+    one step over the recent line (171.4) and says a read-back is awaited; (e) a HELD read-back at
+    +2.6 % lifts the rung past the trained line, which then binds as the landed ramp (174.5); (f) a
+    read-back run UNDER its target holds the ramp at that target (170.0) and names the run; (g) the
+    target is monotone in the fraction and never over the rung; (h) a read-back with no playlist
+    proves nothing and the older one counts; (i) a small fraction never asks under the step; (j) the
+    comfort ceiling still wins; (k) `ramp_state` reads the rung from a stored read-back row and is
+    None on a plan without an objective; (l) a read-back without minutes is skipped."""
+    if M is None:
+        return _music_skip("music-ramp", "§BEAT4 — the race-anchored cadence ramp")
+    import json as _json
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails, got = [], {}
+    today = _d(2026, 9, 6)
+    rows = []
+    for i in range(60):
+        v = 8 + (i % 9) * 0.5
+        rows.append(((today - _td(days=200 + i * 3)).isoformat(), v, 152 + 2.5 * v + (0.4 if i % 2 else -0.4), 90.0))
+    for i in range(20):
+        v = 8 + (i % 5) * 0.5
+        rows.append(((today - _td(days=1 + i * 2)).isoformat(), v, 152 + 1.6 * v + (0.3 if i % 2 else -0.3), 30.0))
+    cv = M.cadence_curve(rows, today, {})
+    obj = lambda days: {"label": "Race", "date": (today + _td(days=days)).isoformat(), "priority": "A"}
+    # (a) the clock
+    if M.ramp_clock(None, today) is not None or M.ramp_clock({"label": "x"}, today) is not None \
+            or M.ramp_clock(obj(-1), today) is not None:
+        fails.append("(a) no objective / no date / a race behind must give no ramp")
+    c120, c63, c21, c5 = (M.ramp_clock(obj(n), today) for n in (120, 63, 21, 5))
+    got["clock_63"] = c63
+    if not (c120 and c120["phase"] == "before" and c120["fraction"] == 0 and c120["week"] == 0):
+        fails.append(f"(a) 120 days out is before the ramp: {c120}")
+    if not (c63 and c63["phase"] == "ramp" and abs(c63["fraction"] - 0.5) < 1e-9 and c63["week"] == 7 and c63["weeks"] == 12
+            and c63["end"] == (today + _td(days=42)).isoformat() and c63["days_to_race"] == 63):
+        fails.append(f"(a) 63 days out is halfway, week 7 of 12: {c63}")
+    if not (c21 and c21["phase"] == "landed" and c21["fraction"] == 1.0 and c21["week"] == 12):
+        fails.append(f"(a) 21 days out has landed: {c21}")
+    if not (c5 and c5["phase"] == "landed" and c5["fraction"] == 1.0):
+        fails.append(f"(a) inside the lead the ramp stays landed: {c5}")
+    # (b) plain ladder without a ramp, and before it starts
+    t0, tb = M.target_spm(cv, 400.0), M.target_spm(cv, 400.0, None, c120)
+    if not (t0 and tb and t0["spm"] == tb["spm"] and abs(t0["spm"] - 168.9) < 0.6 and tb["why"] == t0["why"]
+            and t0["why"].startswith("recent +") and tb["ramp"] is None):
+        fails.append(f"(b) no ramp / before the ramp must be the plain ladder: {t0} / {tb}")
+    # (c) halfway: the ramp binds
+    tc = M.target_spm(cv, 400.0, None, c63)
+    got["halfway"] = tc
+    if not (tc and abs(tc["spm"] - 170.45) < 0.6 and tc["why"].startswith("ramp — week 7 of 12")):
+        fails.append(f"(c) halfway the ramp binds at ~170.45 and says so: {tc}")
+    # (d) landed, no read-back: the rung binds one step over the recent line
+    td_ = M.target_spm(cv, 400.0, None, c21)
+    got["landed_no_rung"] = td_
+    if not (td_ and abs(td_["spm"] - 171.4) < 0.6 and td_["why"].startswith("rung — one step over the recent line")):
+        fails.append(f"(d) landed without a read-back → one step over the recent line, said: {td_}")
+    # (e) a held read-back lifts the rung; the trained line then binds as the landed ramp
+    rb_held = [{"date": "2026-09-05", "run_id": 1, "km": 10.0, "minutes": 66.67, "target_spm": 170.0,
+                "songs": [{"spm": 172.0, "read_s": 200}, {"spm": 168.0, "read_s": 100}]}]
+    rung = M.held_rung(rb_held, cv)
+    got["rung_held"] = rung
+    if not (rung and rung["held"] and abs(rung["ran"] - 170.7) < 0.1 and abs(rung["lift_ran"] - 0.0256) < 0.002
+            and rung["songs"] == 2):
+        fails.append(f"(e) the held rung reads 170.7 weighted, +2.6 % over the recent line: {rung}")
+    te = M.target_spm(cv, 400.0, None, dict(c21, rung=rung))
+    if not (te and abs(te["spm"] - 174.5) < 0.6 and te["why"] == "trained curve — the ramp has landed"):
+        fails.append(f"(e) with the rung lifted the landed ramp reaches the trained line: {te}")
+    # (f) a read-back run under its target holds the ramp at that target
+    rb_miss = [dict(rb_held[0], songs=[{"spm": 165.0, "read_s": 300}])]
+    rung_m = M.held_rung(rb_miss, cv)
+    tf = M.target_spm(cv, 400.0, None, dict(c21, rung=rung_m))
+    got["rung_missed"] = tf
+    if not (rung_m and not rung_m["held"] and tf and abs(tf["spm"] - 170.0) < 0.3
+            and tf["why"].startswith("rung waits — the 2026-09-05 read-back ran 165 against 170")):
+        fails.append(f"(f) a rung run under holds the target there and names the run: {rung_m} / {tf}")
+    # (g) monotone in the fraction, never over the rung
+    seq = [M.target_spm(cv, 400.0, None, dict(c63, fraction=f, week=1))["spm"] for f in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    got["by_fraction"] = seq
+    if any(b < a - 1e-9 for a, b in zip(seq, seq[1:])) or max(seq) > 171.4 + 0.6:
+        fails.append(f"(g) the target must rise with the fraction and stop at the rung: {seq}")
+    # (h) a read-back with no playlist proves nothing — the older one counts
+    rb_mixed = [{"date": "2026-09-06", "run_id": 2, "km": 8.0, "minutes": 50, "target_spm": None,
+                 "songs": [{"spm": 150.0, "read_s": 300}]}] + rb_held
+    rh = M.held_rung(rb_mixed, cv)
+    if not (rh and rh["date"] == "2026-09-05" and rh["held"]):
+        fails.append(f"(h) a target-less read-back must be skipped for the older one: {rh}")
+    # (i) a small fraction never asks under the step
+    ti = M.target_spm(cv, 400.0, None, dict(c63, fraction=0.05))
+    if not (ti and abs(ti["spm"] - 168.9) < 0.6 and ti["why"].startswith("recent +")):
+        fails.append(f"(i) a 5 % ramp sits under the step, so the step is what is asked: {ti}")
+    # (j) the comfort ceiling still wins
+    tj = M.target_spm(M.cadence_curve(rows, today, {"max_spm": "169"}), 400.0, None, dict(c21, rung=rung))
+    if not (tj and tj["spm"] == 169 and tj["why"] == "comfort ceiling"):
+        fails.append(f"(j) comfort ceiling 169 must win over a landed ramp: {tj}")
+    # (k) ramp_state reads the rung from a stored read-back
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.execute("CREATE TABLE readback(run_id INTEGER PRIMARY KEY, date TEXT, computed_at TEXT, payload TEXT)")
+    m.execute("INSERT INTO readback VALUES(1, '2026-09-05', 'x', ?)", (_json.dumps(rb_held[0]),))
+    st = M.ramp_state({"objective": obj(63)}, cv, today, m)
+    if not (st and st["fraction"] == 0.5 and st["rung"] and st["rung"]["held"] and st["rung"]["run_id"] == 1):
+        fails.append(f"(k) ramp_state must carry the clock and the stored rung: {st}")
+    if M.ramp_state({"objective": None}, cv, today, m) is not None or M.ramp_state(None, cv, today, m) is not None \
+            or M.ramp_state({"objective": obj(63)}, None, today, m) is not None:
+        fails.append("(k) no objective / no plan / no curve must give no ramp")
+    m.close()
+    # (l) a read-back without minutes is skipped
+    if M.held_rung([dict(rb_held[0], minutes=0)], cv) is not None:
+        fails.append("(l) a read-back without minutes has no speed and must be skipped")
+    # (m) §BEAT5 — the PLAYLIST's songs, each against its segment's target, lifts at each song's own
+    # speed; a song the phone played after the list ended is counted off the playlist and not read
+    rb_seg = [{"date": "2026-09-08", "run_id": 3, "km": 10.0, "minutes": 66.67, "target_spm": 170.0,
+               "songs": [{"spm": 173.0, "read_s": 200, "in_playlist": True, "seg_target": 172.0, "pace_sec": 330},
+                         {"spm": 167.0, "read_s": 100, "in_playlist": True, "seg_target": 168.0, "pace_sec": 420},
+                         {"spm": 150.0, "read_s": 400, "in_playlist": False}]}]
+    rs = M.held_rung(rb_seg, cv)
+    got["rung_segments"] = rs
+    if not (rs and rs["songs"] == 2 and rs["off_playlist"] == 1 and abs(rs["ran"] - 171.0) < 0.05
+            and abs(rs["target"] - 170.67) < 0.05 and rs["held"] and abs(rs["lift_ran"] - 0.0166) < 0.002):
+        fails.append(f"(m) the rung must read the two playlist songs against their own targets and speeds: {rs}")
+    # (n) a read-back whose plays were all off the playlist proves nothing — the older one counts
+    rb_off = [{"date": "2026-09-08", "run_id": 4, "km": 8.0, "minutes": 50, "target_spm": 170.0,
+               "songs": [{"spm": 150.0, "read_s": 300, "in_playlist": False}]}] + rb_held
+    ro = M.held_rung(rb_off, cv)
+    if not (ro and ro["date"] == "2026-09-05"):
+        fails.append(f"(n) an all-off-playlist read-back must be skipped for the older one: {ro}")
+    return _st("det", "music-ramp",
+               "§BEAT4 — with a race on the road the target climbs from the recent line to the trained "
+               "line on a twelve-week ramp landing three weeks out, never under the step, never more than "
+               "one entrainment step over the last read-back's cadence, held where a rung was run under, "
+               "and every target names what set it",
+               passed=not fails, expect="before/half/landed clock; 168.9 plain / 170.45 ramp / 171.4 rung / "
+               "174.5 trained after a held rung / 170.0 after a missed one; monotone; ceiling wins",
+               got={"violations": fails or "none", **got})
+
+
+
+def _stc_compose_clock():
+    """§TZ (0.63.4) — every container that opens the database renders "today" from its process clock,
+    so every one of them must be handed SH_TZ by the compose file. The public service was not: it ran
+    on UTC, and between midnight and the zone's offset the public page showed yesterday's session as
+    today's and last week as the week underway while the private page had moved on (seen live
+    2026-09-07 01:50 CEST). Static, on the recipe: for each service whose environment sets SH_DB, an
+    `SH_TZ=` line must sit in the same environment block. Skipped where the compose file is not
+    shipped (inside the image). ANTI-VACUITY: the file must define at least two such services, so a
+    truncated recipe reports uncompared rather than passing."""
+    import re as _re
+    from pathlib import Path
+    path = Path(__file__).with_name("docker-compose.yml")
+    if not path.exists():
+        return _st("det", "compose-clock", "§TZ — every DB-opening service carries SH_TZ (skipped: no compose file here)",
+                   passed=None, skipped=True, expect="run on a checkout", got={"compose": "absent"})
+    text = path.read_text(encoding="utf-8")
+    fails, services = [], {}
+    cur, in_env = None, False
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip()
+        m = _re.match(r"^  ([a-z][a-z0-9-]*):\s*$", line)
+        if m:
+            cur, in_env = m.group(1), False
+            services.setdefault(cur, {"db": False, "tz": False})
+            continue
+        if cur and _re.match(r"^    environment:\s*$", line):
+            in_env = True
+            continue
+        if cur and in_env and _re.match(r"^    \S", line):
+            in_env = False
+        if cur and in_env:
+            if _re.search(r"-\s*SH_DB=", line):
+                services[cur]["db"] = True
+            if _re.search(r"-\s*SH_TZ=", line):
+                services[cur]["tz"] = True
+    db_services = {k: v for k, v in services.items() if v["db"]}
+    if len(db_services) < 2:
+        fails.append(f"fewer than two DB-opening services found ({sorted(db_services)}) — the recipe did not parse")
+    for name, v in db_services.items():
+        if not v["tz"]:
+            fails.append(f"service `{name}` opens the DB without SH_TZ — its 'today' runs on the host clock")
+    return _st("det", "compose-clock",
+               "§TZ — every compose service that opens the database is handed SH_TZ, so the public and "
+               "private pages agree on what day it is",
+               passed=not fails, expect="SH_TZ beside SH_DB in every environment block",
+               got={"services": {k: v for k, v in db_services.items()}, "failures": fails or "none"})
+
+
+def _stc_seed_late_upload():
+    """§SEED2 (0.63.2) — a snapshot captured before a run of its own day reached the box is STALE and
+    the seed must not read it. Fixture: snapshots for D-2 and D-1 (yesterday), a run dated D-1 whose
+    `synced_at` is AFTER D-1's capture (the late upload) and a run dated D-2 synced before D-2's
+    capture. (a) the seed skips D-1, takes D-2 and bridges D-1 by measurement — CTL/ATL equal the
+    EWMA of D-2's row over D-1's TRIMP, meta says from D-2, 1 bridged, 1 skipped; (b) with D-1's
+    capture AFTER the upload nothing is stale and the seed is D-1 verbatim; (c) with every row in
+    the window stale `stale_unresolved` is set and the §SEED3 walk judges the rows anyway (§SEED4,
+    0.68.1: the pre-upload D-1 row fails it by the run's load and D-2 is bridged — until 0.68.1 the
+    newest row was adopted unchecked); (d) a run whose sync stamp is unknown proves nothing."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    today = _d(2026, 9, 7)
+    d1, d2 = (today - _td(days=1)).isoformat(), (today - _td(days=2)).isoformat()
+
+    # the D-2 row rolled over D-1's run: what a D-1 row captured AFTER the upload holds (§SEED3 reads a
+    # fresh row that carries the pre-upload 70 / 54 as tainted, which is what it is)
+    want_ctl, want_atl = E._ewma_step(73.0, 186.0, E.TAU_CTL), E._ewma_step(72.0, 186.0, E.TAU_ATL)
+    landed = (round(want_ctl, 1), round(want_atl, 1))
+
+    def mk(capture_d1, sync_d1_run, d1_row=(70.0, 54.0)):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)                       # the real schema: the stamps, ignored_activities, the lot
+        for d, cap, ctl, atl, acwr in ((d2, d2 + "T20:30:00+00:00", 73.0, 72.0, 0.99), (d1, capture_d1, d1_row[0], d1_row[1], 0.77)):
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,fitness,fatigue,acwr) "
+                      "VALUES(?,?,?,?,?,?)", (d, cap, 40.0, ctl, atl, acwr))
+        m.executemany("INSERT INTO activities(date,date_time,sport,distance,duration,trimp,synced_at) VALUES(?,?,?,?,?,?,?)", [
+            (d2, d2 + "T18:30:00+02:00", S.RUNNING_SPORT, 9.0, 3569, 88.0, d2 + "T20:29:00+00:00"),   # synced BEFORE D-2's capture
+            (d1, d1 + "T19:47:54+02:00", S.RUNNING_SPORT, 15.0, 5929, 186.0, sync_d1_run)])
+        m.commit()
+        return m
+    # (a) the live shape: D-1 captured 20:30, its run synced 23:00
+    vo2, ctl, atl, meta = S.plan_seed(mk(d1 + "T20:30:02+00:00", d1 + "T23:00:12+00:00"), today)
+    if meta.get("from") != d2 or meta.get("bridged_days") != 1 or meta.get("stale_skipped") != 1 or meta.get("stale_unresolved"):
+        fails.append(f"(a) meta: {meta}")
+    if abs(ctl - want_ctl) > 0.01 or abs(atl - want_atl) > 0.01:
+        fails.append(f"(a) seed {ctl:.2f}/{atl:.2f}, want the D-2 row rolled over D-1's TRIMP {want_ctl:.2f}/{want_atl:.2f}")
+    # (b) D-1 captured after the upload → trustworthy → verbatim
+    vo2, ctl, atl, meta = S.plan_seed(mk(d1 + "T23:30:00+00:00", d1 + "T23:00:12+00:00", landed), today)
+    if meta.get("from") != d1 or meta.get("stale_skipped") != 0 or meta.get("tainted_skipped") != 0 or (ctl, atl) != landed:
+        fails.append(f"(b) a fresh row must seed verbatim: {ctl}/{atl} {meta}")
+    # (c) every row stale (both runs synced after both captures) → flagged, and the walk still judges
+    # them: D-1's pre-upload 70 / 54 sits a run's load away from D-2 rolled forward, so D-2 is bridged
+    m = mk(d1 + "T20:30:02+00:00", d1 + "T23:00:12+00:00")
+    m.execute("UPDATE activities SET synced_at=?", (d1 + "T23:00:12+00:00",)); m.commit()
+    vo2, ctl, atl, meta = S.plan_seed(m, today)
+    if (meta.get("from") != d2 or not meta.get("stale_unresolved") or meta.get("stale_skipped") != 2
+            or meta.get("tainted_skipped") != 1 or meta.get("bridged_days") != 1):
+        fails.append(f"(c) all-stale must say so and still walk the rows: {ctl}/{atl} {meta}")
+    if abs(ctl - want_ctl) > 0.01 or abs(atl - want_atl) > 0.01:
+        fails.append(f"(c) seed {ctl:.2f}/{atl:.2f}, want the D-2 row rolled over D-1's TRIMP {want_ctl:.2f}/{want_atl:.2f}")
+    # (d) a run whose sync stamp is unknown (NULL) cannot prove a snapshot stale → the row seeds verbatim
+    vo2, ctl, atl, meta = S.plan_seed(mk(d1 + "T20:30:02+00:00", None, landed), today)
+    if meta.get("from") != d1 or meta.get("stale_skipped") != 0:
+        fails.append(f"(d) an unstamped run must not mark the snapshot stale: {meta}")
+    return _st("det", "seed-late-upload",
+               "§SEED2 — a snapshot captured before a late upload of its own day is skipped; the seed takes the last "
+               "trustworthy row and bridges by measurement; all-stale says so and the walk still judges the rows (§SEED4); "
+               "an unstamped run proves nothing",
+               passed=not fails, expect="skip D-1, bridge from D-2; verbatim when fresh; flagged and walked when unresolved",
+               got={"violations": fails or "none"})
+
+
+def _stc_seed_tainted():
+    """§SEED3 (0.65.2) — a snapshot that does not match the athlete's own runs is skipped. Fixture: the
+    live 2026-09-11 shape. D-2 reads CTL 75 / ATL 74; one run of 175 TRIMP on D-1; the D-1 row reads
+    the run TWICE (Runalyze held the upload twice that night: 74 + (350 − 74) / 4 = 143) where one
+    run gives 79.7 / 99.3. (a) the seed skips D-1, takes D-2 and bridges D-1 by measurement — the seed
+    IS the roll, meta says from D-2, 1 bridged, 1 tainted, 0 stale; (b) the same rows with a D-1 that
+    matches the roll seed verbatim, 0 tainted; (c) the doubled row still there a day later (its own
+    rest-day decay on the next row, today one day on) — both rows tainted, D-2 rolled two days; (d) a
+    row without a load reading is adopted as it stands; (e) ANTI-VACUITY — with the tolerance widened
+    past the residual, (a) seeds the doubled row: the det depends on the rule, not on the fixture."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    today = _d(2026, 9, 11)
+    d1, d2 = (today - _td(days=1)).isoformat(), (today - _td(days=2)).isoformat()
+    RUN = 175.0
+    one = (E._ewma_step(75.0, RUN, E.TAU_CTL), E._ewma_step(74.0, RUN, E.TAU_ATL))
+    two = (E._ewma_step(75.0, 2 * RUN, E.TAU_CTL), E._ewma_step(74.0, 2 * RUN, E.TAU_ATL))
+    if two[1] - one[1] < 4 * E.SEED_TAINT_TOL:
+        fails.append(f"fixture invalid: the doubled row sits {two[1] - one[1]:.1f} ATL from the roll, inside four tolerances")
+
+    def mk(rows, runs):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)
+        for d, ctl, atl in rows:                        # captured 20:30:04, the run synced 20:30:02 — not stale
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,fitness,fatigue) "
+                      "VALUES(?,?,?,?,?)", (d, d + "T20:30:04+00:00", 38.0, ctl, atl))
+        for d, tr in runs:
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp,synced_at) VALUES(?,?,?,?,?,?,?)",
+                      (d, d + "T19:41:46+02:00", S.RUNNING_SPORT, 13.0, 4553, tr, d + "T20:30:02+00:00"))
+        m.commit()
+        return m
+
+    def near(a, b):
+        return abs(a[0] - b[0]) < 0.01 and abs(a[1] - b[1]) < 0.01
+    # (a) the live shape
+    vo2, ctl, atl, meta = E.plan_seed(mk([(d2, 75.0, 74.0), (d1, two[0], two[1])], [(d1, RUN)]), today)
+    if meta.get("from") != d2 or meta.get("bridged_days") != 1 or meta.get("tainted_skipped") != 1 or meta.get("stale_skipped") != 0:
+        fails.append(f"(a) meta: {meta}")
+    if not near((ctl, atl), one):
+        fails.append(f"(a) seed {ctl:.2f}/{atl:.2f}, want the D-2 row rolled over one run {one[0]:.2f}/{one[1]:.2f}")
+    # (b) a row that matches the roll seeds verbatim
+    vo2, ctl, atl, meta = E.plan_seed(mk([(d2, 75.0, 74.0), (d1, round(one[0]), round(one[1]))], [(d1, RUN)]), today)
+    if meta.get("from") != d1 or meta.get("tainted_skipped") != 0 or (ctl, atl) != (round(one[0]), round(one[1])):
+        fails.append(f"(b) a matching row must seed verbatim (Runalyze rounds to integers): {ctl}/{atl} {meta}")
+    # (c) the doubled row persists: the next row is its rest-day decay, today is a day later
+    nxt = (E._ewma_step(two[0], 0.0, E.TAU_CTL), E._ewma_step(two[1], 0.0, E.TAU_ATL))
+    later = today + _td(days=1)
+    vo2, ctl, atl, meta = E.plan_seed(mk([(d2, 75.0, 74.0), (d1, two[0], two[1]), (today.isoformat(), nxt[0], nxt[1])], [(d1, RUN)]), later)
+    want = (E._ewma_step(one[0], 0.0, E.TAU_CTL), E._ewma_step(one[1], 0.0, E.TAU_ATL))
+    if meta.get("from") != d2 or meta.get("bridged_days") != 2 or meta.get("tainted_skipped") != 2 or not near((ctl, atl), want):
+        fails.append(f"(c) a persisting doubled row must stay skipped: {ctl:.2f}/{atl:.2f} {meta}, want {want[0]:.2f}/{want[1]:.2f} from {d2}")
+    # (d) a row without a load reading is adopted as it stands (nothing to compare)
+    vo2, ctl, atl, meta = E.plan_seed(mk([(d2, 75.0, 74.0), (d1, None, None)], [(d1, RUN)]), today)
+    if meta.get("from") != d1 or meta.get("tainted_skipped") != 0:
+        fails.append(f"(d) a row without a reading must be adopted, not judged: {meta}")
+    # (e) anti-vacuity — widen the tolerance past the residual and the doubled row seeds
+    keep = E.SEED_TAINT_TOL
+    try:
+        E.SEED_TAINT_TOL = 1e9
+        vo2, ctl, atl, meta = E.plan_seed(mk([(d2, 75.0, 74.0), (d1, two[0], two[1])], [(d1, RUN)]), today)
+    finally:
+        E.SEED_TAINT_TOL = keep
+    if meta.get("tainted_skipped") != 0 or not near((ctl, atl), two):
+        fails.append(f"(e) with the rule disarmed the doubled row must seed: {ctl:.2f}/{atl:.2f} {meta}")
+    return _st("det", "seed-tainted-snapshot",
+               "§SEED3 — a snapshot that does not match the engine's own roll of the athlete's runs is skipped and "
+               "bridged by measurement; a matching row seeds verbatim; a persisting doubled row stays skipped; "
+               "a row without a reading is adopted; the rule disarmed seeds the doubled row",
+               passed=not fails, expect="skip the doubled row, seed the roll; verbatim when matching; disarmed → doubled",
+               got={"violations": fails or "none"})
+
+def _stc_seed_resync():
+    """§SEED4 (0.68.1) — a re-sync is not an upload. The stale test (§SEED2) reads Runalyze's own
+    `created_at` on the activity payload, not our `synced_at`, and when every row in the window is
+    stale the §SEED3 walk runs over the rows instead of the newest being adopted unchecked. Fixture:
+    the live 2026-09-11 evening. D-2 reads 75 / 74; one run of 175 TRIMP on D-1 uploaded at 18:00,
+    synced 20:30:02; the D-1 row (captured 20:30:04) holds the run twice; and a run from 2025-10 whose
+    metadata Runalyze rewrote when a new run joined its route — uploaded a year ago, re-synced tonight
+    after every capture. (a) nothing is stale, the walk skips the doubled row: from D-2, 1 bridged,
+    0 stale, 1 tainted, the seed is D-2 rolled over one run; (b) the same with the old run's payload
+    carrying no upload stamp — the fallback to `synced_at` marks both rows stale, and the walk still
+    lands the same seed with `stale_unresolved` set; (c) a run that reached Runalyze AFTER its day's
+    capture is stale on Runalyze's clock even with the re-synced old run beside it: 1 stale, not 2;
+    (d) a run Runalyze held BEFORE the capture that our box only pulled after it is not stale — the
+    D-1 row seeds verbatim where the old rule skipped it; (e) ANTI-VACUITY — with the tolerance
+    disarmed (b) seeds the doubled row: the all-stale seed depends on the walk, not on the fixture."""
+    import sqlite3 as _sq, json as _json
+    from datetime import date as _d, datetime as _dt, timedelta as _td
+    fails = []
+    today = _d(2026, 9, 11)
+    d1, d2 = (today - _td(days=1)).isoformat(), (today - _td(days=2)).isoformat()
+    RUN = 175.0
+    one = (E._ewma_step(75.0, RUN, E.TAU_CTL), E._ewma_step(74.0, RUN, E.TAU_ATL))
+    two = (E._ewma_step(75.0, 2 * RUN, E.TAU_CTL), E._ewma_step(74.0, 2 * RUN, E.TAU_ATL))
+    rest = (E._ewma_step(75.0, 0.0, E.TAU_CTL), E._ewma_step(74.0, 0.0, E.TAU_ATL))   # D-1 captured before the run landed
+
+    def epoch(iso):
+        return int(_dt.fromisoformat(iso).timestamp())
+
+    def mk(d1_row, run_created, run_synced, old_created=epoch("2025-10-15T18:57:07+00:00")):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)
+        for d, ctl, atl in ((d2, 75.0, 74.0), (d1, d1_row[0], d1_row[1])):
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,fitness,fatigue) "
+                      "VALUES(?,?,?,?,?)", (d, d + "T20:30:04+00:00", 38.0, ctl, atl))
+        m.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw,synced_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                  (2, d1, d1 + "T19:41:46+02:00", S.RUNNING_SPORT, 13.0, 4553, RUN,
+                   _json.dumps({"id": 2, "created_at": run_created}), run_synced))
+        m.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp,raw,synced_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                  (1, "2025-10-15", "2025-10-15T20:16:03+02:00", S.RUNNING_SPORT, 5.0, 1677, 47.0,
+                   _json.dumps({"id": 1, "created_at": old_created}) if old_created is not None else "{}",
+                   today.isoformat() + "T20:23:16+00:00"))          # re-synced tonight, after every capture
+        m.commit()
+        return m
+
+    def near(a, b):
+        return abs(a[0] - b[0]) < 0.01 and abs(a[1] - b[1]) < 0.01
+    # (a) the live shape: the old run's upload stamp is a year old, so nothing is stale; the doubled row is walked
+    vo2, ctl, atl, meta = E.plan_seed(mk(two, epoch(d1 + "T18:00:00+00:00"), d1 + "T20:30:02+00:00"), today)
+    if (meta.get("from") != d2 or meta.get("bridged_days") != 1 or meta.get("stale_skipped") != 0
+            or meta.get("tainted_skipped") != 1 or meta.get("stale_unresolved")):
+        fails.append(f"(a) meta: {meta}")
+    if not near((ctl, atl), one):
+        fails.append(f"(a) seed {ctl:.2f}/{atl:.2f}, want the D-2 row rolled over one run {one[0]:.2f}/{one[1]:.2f}")
+    # (b) the old run's payload carries no upload stamp → synced_at stands in → every row stale → walked anyway
+    vo2, ctl, atl, meta = E.plan_seed(mk(two, epoch(d1 + "T18:00:00+00:00"), d1 + "T20:30:02+00:00", old_created=None), today)
+    if (meta.get("from") != d2 or meta.get("bridged_days") != 1 or meta.get("stale_skipped") != 2
+            or not meta.get("stale_unresolved") or meta.get("tainted_skipped") != 1):
+        fails.append(f"(b) an all-stale window must be walked, not adopted: {meta}")
+    if not near((ctl, atl), one):
+        fails.append(f"(b) seed {ctl:.2f}/{atl:.2f}, want {one[0]:.2f}/{one[1]:.2f}")
+    # (c) a run that reached Runalyze after its day's capture: stale on Runalyze's clock, the old run adds nothing
+    vo2, ctl, atl, meta = E.plan_seed(mk(rest, epoch(d1 + "T23:00:00+00:00"), d1 + "T23:05:00+00:00"), today)
+    if (meta.get("from") != d2 or meta.get("stale_skipped") != 1 or meta.get("stale_unresolved")
+            or meta.get("tainted_skipped") != 0 or meta.get("bridged_days") != 1):
+        fails.append(f"(c) a late upload is one stale row, not a stale window: {meta}")
+    if not near((ctl, atl), one):
+        fails.append(f"(c) seed {ctl:.2f}/{atl:.2f}, want {one[0]:.2f}/{one[1]:.2f}")
+    # (d) Runalyze held the run before the capture; our box pulled it after → not stale, the row seeds verbatim
+    row = (round(one[0]), round(one[1]))
+    vo2, ctl, atl, meta = E.plan_seed(mk(row, epoch(d1 + "T18:00:00+00:00"), d1 + "T23:05:00+00:00"), today)
+    if meta.get("from") != d1 or meta.get("stale_skipped") != 0 or meta.get("tainted_skipped") != 0 or (ctl, atl) != row:
+        fails.append(f"(d) a late PULL of a run Runalyze already held must not stale the row: {ctl}/{atl} {meta}")
+    # (e) anti-vacuity — (b) with the walk disarmed adopts the doubled row
+    keep = E.SEED_TAINT_TOL
+    try:
+        E.SEED_TAINT_TOL = 1e9
+        vo2, ctl, atl, meta = E.plan_seed(mk(two, epoch(d1 + "T18:00:00+00:00"), d1 + "T20:30:02+00:00", old_created=None), today)
+    finally:
+        E.SEED_TAINT_TOL = keep
+    if meta.get("from") != d1 or meta.get("tainted_skipped") != 0 or not near((ctl, atl), two):
+        fails.append(f"(e) with the walk disarmed the all-stale window must adopt the doubled row: {ctl:.2f}/{atl:.2f} {meta}")
+    return _st("det", "seed-resync-not-upload",
+               "§SEED4 — a re-sync is not an upload: the stale test reads Runalyze's created_at, so a metadata refresh "
+               "of old runs stales nothing; a late upload is still one stale row; an all-stale window is walked by "
+               "§SEED3 rather than adopted; with the walk disarmed the doubled row seeds",
+               passed=not fails, expect="no stale rows on a re-sync; 1 stale on a late upload; all-stale walked; disarmed → doubled",
+               got={"violations": fails or "none"})
+
 
 
 def main(argv):

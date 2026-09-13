@@ -22,6 +22,7 @@
           "training_km": 10.1
         },
         "clipped": false,
+        "day_share": true,
         "elapsed": false,
         "freq_actual": null,
         "frequency_met": false,
@@ -37,8 +38,8 @@
             "basis": "L",
             "binds": true,
             "ceiling": 1.25,
-            "headroom": -0.98,
-            "laid": 2.23,
+            "headroom": -1.81,
+            "laid": 3.06,
             "unit": "ratio"
           },
           "binding": "acwr",
@@ -80,7 +81,7 @@
         "peak_acwr": 3.334,
         "phase": "base",
         "proj_acwr": 1.276,
-        "proj_acwr_flat": 2.232,
+        "proj_acwr_flat": 3.064,
         "proj_ctl": 3.3,
         "quality": [],
         "role": "build",
@@ -154,8 +155,8 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 6.5,
-            "headroom": 1.5,
+            "ceiling": 35.93,
+            "headroom": 30.93,
             "laid": 5.0,
             "unit": "eq-km"
           },
@@ -287,8 +288,8 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 6.5,
-            "headroom": 0.4,
+            "ceiling": 35.93,
+            "headroom": 29.83,
             "laid": 6.1,
             "unit": "eq-km"
           },
@@ -443,7 +444,7 @@
             "laid": 0.53,
             "unit": "ratio"
           },
-          "binding": "eq_session",
+          "binding": "chronic",
           "chronic": {
             "basis": "L",
             "binds": false,
@@ -455,8 +456,8 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 7.93,
-            "headroom": 2.33,
+            "ceiling": 35.93,
+            "headroom": 30.33,
             "laid": 5.6,
             "unit": "eq-km"
           },
@@ -596,8 +597,8 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 7.93,
-            "headroom": 0.13,
+            "ceiling": 35.93,
+            "headroom": 28.13,
             "laid": 7.8,
             "unit": "eq-km"
           },

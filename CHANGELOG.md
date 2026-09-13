@@ -10,6 +10,341 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.68.4] - 2026-09-13
+
+### Fixed
+
+- **A plan regenerated on the first day of a new phase priced its ceilings off the plan's July
+  seed.** The long-run step, the weekly eq-km ceiling and the per-session ceiling each read a
+  trailing window of the athlete's recent weeks. The windows were refreshed from the weeks already
+  lived only while the phase still had a week to lay, and the per-session window was never refreshed
+  from lived runs at all. So a regeneration dated the Monday the build block started, with the base
+  block fully lived, handed the build the windows read at the plan's anchor: a longest run of 8.5 km
+  from July against a trailing longest of 16.6 km. The build's first week laid a 9.4 km long run
+  under a 9.4 km cap, shed 12.6 km to the rest gate, and every later long run stepped up from 9.4.
+  The same plan regenerated the evening before read an 18.3 km cap, and even that regeneration
+  priced the next long run against a July bout, cutting the week to 40.4 km. Now every lived week's
+  actual long run, eq-km and largest single-day bout extend all three windows, the weeks ahead
+  receive them, and a phase with nothing left to lay hands them to the next phase along with the
+  rest-day seam. On the 2026-09-13 database a Sunday-evening and a Monday regeneration now both lay
+  the build's first week at 62.6 km with an 18.3 km long run.
+
+## [0.68.3] - 2026-09-12
+
+### Fixed
+
+- **A lap press during a song Spotify's history had dropped landed on no song.** The read-back
+  lines up the plays Spotify reports, and Spotify's recently-played omits a play skipped early and,
+  some evenings, a full one. On the 12 Sep run thirteen songs lined up with four gaps between them,
+  each between two songs that sit two apart on the list, and three of the four presses fell in those
+  gaps: the page said "3 presses outside any song" and the verdicts were lost. A gap between two
+  neighbours on the list can only have held what the list holds between them, so the read-back now
+  reads those songs from the list order into the gap, marks them "from the list", reads the legs
+  through them like any other song, and the presses find them: on that run the two-press lands on
+  Love & Hate, the single presses on Superstar and You Know You're Right, and All My Life is read to
+  the run's end. Nothing is read into a gap under thirty seconds, into a run with no playlist, or
+  where the list was played out of order.
+
+## [0.68.2] - 2026-09-12
+
+### Fixed
+
+- **The current week's ceiling read only the days left, so the Sunday long run depended on which
+  day the plan was regenerated.** The weekly ceiling judges the shape-neutral acute:chronic reading,
+  a mean over the week's days. On the week in progress the projection starts today, so that mean ran
+  over today-onward days only: Saturday and Sunday on a Saturday-night regeneration, Sunday alone on
+  a Sunday-morning one. The same week and the same runs gave a 14.0 km long run on Saturday night and
+  an 11.5 km easy run on Sunday morning, both reported at the ceiling, while the whole week read 1.15
+  against a ceiling of 1.25 and did not bind. The reading now spans the whole week: the days already
+  run are read back from the plan's seed and join the mean. On that week the long-step ceiling is
+  what holds the Sunday long run, at 16.4 km on either day, and the week's limits block names it.
+  Weeks that start today are unchanged, and the caution regime lays the same sessions as before; only
+  the published reading of the week in progress moves.
+
+## [0.68.1] - 2026-09-11
+
+### Fixed
+
+- **A re-sync of old runs left the plan's seed with no snapshot to trust.** The plan skips a shape
+  snapshot captured before a run of its day had landed, and it judged "landed" by our own sync
+  stamp. Runalyze rewrites every run on a recurring route when a new run joins it, so the evening
+  sync after a run on the usual 5 km loop refreshed eleven runs from as far back as last October,
+  each with a sync stamp newer than every snapshot of the last two weeks. With nothing left to
+  trust, the seed adopted the newest snapshot unchecked: the 09-10 row that still held the doubled
+  progression run (fitness 88 and fatigue 143 for a true 80 and 99), and the plan lost Saturday, the
+  Sunday long run and a third of the next week. The stale test now reads Runalyze's own upload time
+  on the activity, so a metadata refresh changes nothing, and when every snapshot in the window is
+  stale the seed walks them against your own runs instead of adopting the newest. The plan card
+  says which happened.
+
+## [0.68.0] - 2026-09-11
+
+### Changed
+
+- **The Settings window is tabbed.** Athlete, Connections, Music (when the music module is
+  installed) and Console, one Save per tab that writes only what changed on that tab and any key
+  pasted into it; the per-key Save buttons are gone. The AI switches sit beside the Claude key
+  they gate, the away days beside the week's shape, backup and export on Console. Arrow keys move
+  between tabs; the last tab used is remembered per device.
+- **The Music page is about the next run.** It opens on the next session with its target cadence,
+  the per-segment targets and one Build button, then the rest of the ten days and the ramp to the
+  race, and closes on the last run read back, with the legs' headline (followed, breaks, set
+  aside, cadence against the target) above the song table; the nightly's read-back shows without
+  a click, and any recent run can be picked from a list. The connections, the matching knobs and
+  the library moved to Settings → Music, reachable from the page's Music settings button; the
+  trained and recent cadence columns sit behind "How the targets are set".
+
+## [0.67.0] - 2026-09-11
+
+### Added
+
+- **Songs never run to, from ListenBrainz.** With a ListenBrainz user set on the Music page, each
+  library refresh reads what the most similar listeners there play, ListenBrainz's own
+  collaborative picks and its weekly exploration lists, and, with a user token in Settings, LB
+  radio around the top artists. Each recording is matched to Spotify by artist and title (the
+  artist must match) and gets its tempo like any other track, with its sources kept as provenance.
+  Every list then carries up to four songs no list has carried and no run has read, spread over
+  its core segments, taken first inside the cadence window and never from outside it; the notes
+  say how many the windows held. Once those songs have been run, the Music page shows how the
+  legs took each source: songs listed, read, the share followed, and the legs' score. The
+  nightly job starts a library refresh every Monday, the day ListenBrainz publishes its lists,
+  so the fresh pool refills without a click.
+
+## [0.66.0] - 2026-09-11
+
+### Added
+
+- **The legs rate the songs.** Every run read back now scores each song by what the cadence did
+  under it: **followed** when it sat within 1 % of the song's tempo, **dips** where it fell 4 spm
+  under the song's median for 4 s or more, and the lap presses. The scores are kept per track
+  across runs and feed the next lists: a track the legs followed rises, one they broke on sinks,
+  and the read-back shows the verdict per song. Songs Spotify reports under another edition's id
+  than the one on the list now count as the list's (they read as off the playlist before), and
+  a verdict on one edition reaches the others.
+- **Lists rotate.** A song on a list built inside the last 28 days drops behind the fresh ones,
+  whichever edition of it, the list being rebuilt not counting against its own tracks, and each
+  segment's note says how many of its picks are new to the window. The taste weight takes the app's own run plays off
+  the scrobble count first, so a song the lists kept serving no longer climbed on its own serving.
+
+### Changed
+
+- **The lap presses mean two things now.** One press during a song: the beat lost me here, a
+  break stamped at that second. Two presses within six seconds: never again, set aside for every
+  kind of segment. The push / relax reading is retired: the same songs served again biased the
+  ratings, and the feel is nuanced at best. Runs from before the day this version first ran are
+  read under the old words, shown as such, and rule nothing.
+- **Energy no longer picks a track.** The tempo window is the gate, with one flat plausibility
+  floor under which a track is ambient rather than a running track; inside it the order is taste,
+  the legs' verdict, closeness and the rotation. Energy still orders the calm-first and climbing
+  segments. The couch ratings stay on file and are not used.
+
+## [0.65.2] - 2026-09-11
+
+### Fixed
+
+- **A run held twice by Runalyze doubled the plan's seed.** The plan seeds its load state from
+  Runalyze's fitness and fatigue for the day before, and those are Runalyze's own sums. When a
+  watch upload lands twice, the day's run is in them twice: the 09-10 progression run read as
+  fitness 88 and fatigue 143 for a true 80 and 99, and the next plan cut Saturday from 11.6 km to
+  5.1 km. A snapshot that does not match the engine's own roll of the athlete's runs from the last
+  trusted one is now skipped and bridged by measurement, the same way a snapshot captured before a
+  late upload already is, and the plan card says how many it skipped. The rule reads the same
+  de-duplicated daily load the rest of the engine reads, so it holds whether or not the duplicate
+  is ever deleted upstream.
+
+## [0.65.1] - 2026-09-09
+
+### Fixed
+
+- **A run's read-back lined the songs up with the wrong hour.** The activity file Runalyze serves
+  is its own re-export, and it writes the local wall time into the file's timestamps, so the
+  read-back placed the run two hours late: a tempo's read-back found no song at all, and a long
+  run's matched the evening's listening after it. The file's timeline is now anchored to the run's
+  own start, samples and lap presses alike, and the read-back says when it had to re-clock the file.
+  Press "Read again" on any run read before this release.
+
+## [0.65.0] - 2026-09-08
+
+### Changed
+
+- **A week regenerated mid-week keeps the days ahead at their own lay.** The remainder of a week
+  underway was a uniform per-run share of the week's bar, and the runs are not uniform: a quality
+  day is the week's smallest. Running the tempo past its distance handed the four days left four
+  fifths of the bar, so each easy run lost two kilometres and the week shrank after a run over
+  prescription. On the assertive road the days still ahead now keep the sessions the full week laid
+  for them, kind and distance. Only the load ceiling may cut below that, and the week says so when
+  it does. A run over its lay is not taken back from the days that follow, and a missed day is
+  never folded into them. The conservative road is unchanged.
+
+### Added
+
+- **Work segments of a cadence playlist take the whole entrainment step.** The playlist's step
+  over the recent cadence curve applied to every segment alike, so a threshold block was asked for
+  three steps per minute over the legs' recent line where the runner's own trained line sat ten
+  higher, and the legs overstrode to hold the pace. Work segments now take the full three per cent
+  the entrainment basin allows; easy segments keep the setting's step. The cadence table shows the
+  work step on its marathon, threshold and interval rows, and every target still names what set it.
+- **A run-home tail on every session's playlist.** The list used to end with the session's last
+  segment, and a road longer than the card left the phone playing whatever it chose next. Fifteen
+  minutes at the session's easiest pace now follow the last segment. They are not counted in the
+  session's minutes or its overall target, and the race gets none.
+- **The rung reads the playlist's own songs, each against its segment's target.** The read-back
+  used to weigh every song the phone played during the run against one target for the whole run.
+  Songs that belong to the playlist are now read against the target of the segment they were built
+  for, at the speed they were run at; songs the phone played after the list ended are shown but not
+  read for the rung, and a run whose plays were all off the playlist proves nothing about it.
+- **A skipped song, or two presses on a work song, is set aside.** A track skipped from the headset
+  is set aside for that kind of segment (work or easy); two presses on a work song set it aside for
+  work. The next playlist leaves them out and says how many it left. A half-time hit, one beat per
+  stride, no longer lands on a work segment whatever the setting.
+
+## [0.64.1] - 2026-09-08
+
+### Fixed
+
+- **A progression run no longer disappears when the plan is regenerated mid-week.** The remainder
+  of a week underway keeps its quality sessions on their days, but the list of kinds it looked for
+  predated progression runs, so a Tuesday regeneration turned Thursday's progression run into an
+  easy run with strides and said nothing. The remainder now recognises every quality kind, and each
+  kept day takes the session of its own kind rather than the next one in the shape's list, so a
+  regeneration after the week's first quality session has been run keeps the second as itself.
+
+## [0.64.0] - 2026-09-07
+
+### Added
+
+- **The cadence target climbs to the trained curve on the race's calendar (§BEAT4).** With a race
+  on the road, a playlist's target is no longer only the recent curve plus a fixed step. A
+  twelve-week ramp runs from the recent curve to the trained one and lands three weeks before the
+  race, so the taper is run at the race's cadence. The ramp asks for the fraction of the gap the
+  calendar has reached, never less than the step, and never more than one entrainment step over the
+  cadence the legs showed on the last read-back with a playlist: a rung run under its target holds
+  the ramp there until it is held, and before any read-back the rung is one step over the recent
+  curve. The cadence card shows the ramp's week, its landing date and the last rung, and every
+  target names which of these set it. Without a race the ladder works as before.
+
+## [0.63.4] - 2026-09-07
+
+### Fixed
+
+- **The public page ran on a different clock from the private one.** The compose file hands the
+  timezone to the private and demo services and never gave it to the public one, so the read-only
+  container ran on UTC. Between midnight and the zone's offset every night the public page showed
+  yesterday's session as today's and last week as the week underway while the private page had
+  moved on. The public service now carries the same `SH_TZ`, and a self-test reads the compose file
+  so no service that opens the database can lose it again. The plan itself was always identical on
+  both boxes.
+
+## [0.63.3] - 2026-09-07
+
+### Fixed
+
+- **A progression run's card read "3 × 20′ @ easy".** The session card built one row for every
+  work rep from the first rep's length and zone, the shape of an interval session. A progression
+  run carries three work reps at three zones, settling in easy, cruising at marathon pace and
+  closing at threshold, and the card told the athlete to run all of it easy. Reps that differ now
+  get a row each, in order, with the engine's own wording, and the cue line reads the progression.
+  The watch guide was never affected; it always took the reps one by one.
+
+## [0.63.2] - 2026-09-07
+
+### Fixed
+
+- **A plan no longer seeds from a snapshot taken before a late upload.** The seed is the fitness
+  snapshot dated yesterday. When yesterday's run reaches Runalyze after that snapshot was captured,
+  the row describes a day that had not finished landing, and the plan was built on it: on the live
+  road, fitness 70 and fatigue 54 for a true 79 and 101, a week 5 km short and a long run 1.1 km
+  short. The engine has both stamps, so such a row is now skipped, the last trustworthy row is taken
+  and the gap is rolled forward over the measured training load, the same bridge a missing day
+  already gets. When every row in the fortnight is stale the newest is used and the plan card says
+  so.
+
+## [0.63.1] - 2026-09-07
+
+### Fixed
+
+- **The road's anchor lives as long as the road.** The block's start date was kept for six weeks,
+  the length of the re-base block, and reset to the current Monday on the first regeneration after
+  that, on any road. A base-build-peak-taper road is longer, and at week seven the remaining runway
+  was split again as if no base had been run: on the live plan, five more base weeks, the build
+  pushed out five weeks and the peak cut to two. The anchor is now kept while an A-race lies ahead
+  and resets once the race has passed, when nothing is ahead, or when it is older than sixty
+  weeks. An anchor the old rule already reset is taken back, never forward, to the start the newest
+  saved plan was built on, when that plan was a base-build road and its race is still ahead; so the
+  next regeneration lays the road from its original start again. Weeks already lived are regenerated
+  from the actual runs rather than carried frozen, the trade the anchor's own documentation already
+  accepts.
+
+## [0.63.0] - 2026-09-07
+
+### Added
+
+- **In-run verdicts from the watch's lap button (§BEAT3).** One press during a song says it pushes,
+  two presses within six seconds say it relaxes, and a track skipped from the headset is recorded as
+  cut short. The read-back now fetches the run's original FIT file from Runalyze, so it reads the
+  cadence at one second and every lap press, maps each press to the song playing at that moment,
+  and keeps the verdict per run beside any rating given at rest. The cadence-by-verdict row prefers
+  the run's own verdicts. A guided long run with a fast finish is the one place a press may advance
+  the guide's step; the page says so.
+- **Ratings carry their source**, couch or run, so the two never mix.
+- New dependency `fitdecode`, pure Python, in the hash-pinned lock.
+
+## [0.62.0] - 2026-09-07
+
+### Added
+
+- **A run read back song by song (§BEAT2).** The Music page now keeps Spotify's play history,
+  pulled every time the page opens and every night, because Spotify itself only serves the last
+  fifty plays. With it, any recent run can be read back: which song was playing when, and the
+  cadence the legs held through it with the first twenty seconds of each song excluded as the seam,
+  plus the pace from the distance covered and the song's own rating when it has one. A playlist
+  built for that day shows each song against its target.
+- **Ratings.** Songs carry a verdict in the athlete's own words, pushes, relaxes, neutral or mixed,
+  imported from a file beside the music database or set one at a time. They are the ground truth
+  any groove measure will have to beat.
+- **One more Spotify permission.** Reading the play history needs `user-read-recently-played`; a
+  connection made before this version says so and offers a reconnect.
+
+## [0.61.1] - 2026-09-06
+
+### Fixed
+
+- **The trained cadence line read the wrong runs.** Fitness per run was only stamped on the last
+  three months of the metrics table, so the "fittest third" was twenty runs of the current rebuild
+  and the target sat exactly on the recent line: no step at all. Fitness now comes from the engine's
+  reconstructed curve for every run without a stamp, and a partial stamp can no longer define the
+  trained set. On the live corpus the easy target moves from 166 to 169 spm.
+- **A dry segment relaxes its energy floor before it widens the tempo window.** Energy is a
+  preference, tempo is the gate. The race's last 12 km at a floor of 0.78 had filled 42 of 73
+  minutes after widening to ±4 % while tracks at 0.66 to 0.77 inside ±2 % sat unused.
+- **The same song under two Spotify ids plays once.** Single and album versions were both picked.
+
+## [0.61.0] - 2026-09-06
+
+### Added
+
+- **Music: cadence-matched playlists for the plan's sessions (§BEAT).** A private `/music` page
+  builds one Spotify playlist per upcoming session and one for the race. Each session is cut into
+  segments (warm-up, work, recovery, cool-down; the race into settle, cruise and grind), each segment
+  gets a target cadence from the runner's own speed–cadence curves — the recent one lifted by a small
+  step, never past the trained one at that speed, never past a comfort ceiling — and tracks from the
+  listening history (last.fm scrobbles; Spotify saved tracks, top tracks and the runner's own
+  playlists) are picked into it: tempo inside ±2 % of the target, energy above the segment's floor,
+  taste breaking ties. Tempo and energy come from ReccoBeats, which reproduces the audio features
+  Spotify withdrew from new apps in 2024. A discovery switch, off by default, asks ReccoBeats for
+  tracks seeded by the runner's favourites when a window runs dry and keeps those whose measured
+  tempo lands in it — its recommendations ignore tempo, so the measured yield is about one track in
+  two hundred and the page says so. The page shows the two curves,
+  the targets per pace zone, the library's tempo coverage and the last runs' cadence — the
+  read-back the ladder climbs from.
+- **Three keys in Settings** — Spotify app client ID and secret (Development Mode, Premium required by
+  Spotify since February 2026) and a last.fm API key — plus a one-time "Connect Spotify" on the page.
+  Playlists are written private. Nothing leaves the box except the track lookups themselves.
+- **Shipped as a module.** `sh_music.py` and `static/music.*` are imported inside a try and stripped
+  from the public mirror; a tree without them boots exactly as before. The self-test battery covers
+  the curves, the ladder, the segmenting, the picking and the page's gating, and skips the four when
+  the module is absent.
+
 ## [0.60.7] - 2026-09-06
 
 ### Changed

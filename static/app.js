@@ -1590,7 +1590,16 @@ function workoutCard(s, open){
     `<td>${esc(segPace(zone,rep))}</td><td>${esc(segHR(zone))||"—"}</td></tr>`);
   if(wu.length){ row("Warm-up · easy","easy",sum(wu,"minutes"),sum(wu,"km"),wu[0]); cue.push(`${sum(wu,"minutes")}′ easy`); }
   if(base.length){ row("Easy aerobic base","easy",sum(base,"minutes"),sum(base,"km"),base[0]); cue.push(`${sum(base,"minutes")}′ easy base`); }
-  if(work.length>1){
+  // 0.63.3 — "N × M′ @ zone" is the shape of an INTERVAL session: every work rep the same length at
+  // the same zone. A progression run (§PROG) carries three work reps at three zones — settle in
+  // easy, cruise at marathon pace, close at threshold — and the same row built from work[0] read
+  // "3 × 20′ @ easy": a session the athlete would have run entirely easy. Reps that differ get a
+  // row each, in order, with the engine's own detail as the label.
+  const homogeneous=work.length>1&&work.every(r=>r.zone===work[0].zone&&r.minutes===work[0].minutes);
+  if(work.length>1&&!homogeneous){
+    work.forEach(r=>{ row(`${r.minutes}′ ${r.detail||`@ ${r.zone}`}`,r.zone,r.minutes,r.km,r); });   // row() escapes
+    cue.push(work.map(r=>`${r.minutes}′ @ ${r.zone}`).join("  →  "));
+  }else if(work.length>1){
     const rm=work[0].minutes, rz=work[0].zone, rcm=rec.length?rec[0].minutes:0;
     row(`${work.length} × ${rm}′ @ ${rz}`,rz,sum(work,"minutes"),sum(work,"km"),work[0]);
     if(rec.length) row(`${rec.length} × ${rcm}′ jog between reps`,"easy",sum(rec,"minutes"),sum(rec,"km"),rec[0]);
@@ -1618,6 +1627,7 @@ function sessSummary(s){
   if(s.reps&&s.reps.length){
     const work=s.reps.filter(r=>r.effort==='work');
     if(s.kind==='interval'&&work.length) return `${work.length}×${work[0].minutes}′ ${work[0].zone}`;
+    if(s.kind==='progression'&&work.length) return `${U.d(s.km)}${U.k} · progression to ${work[work.length-1].zone}`;   // 0.63.3
     if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${U.d(s.km)}${U.k} +${mp?mp.minutes:0}′ MP`; }
     if((s.kind==='tempo'||s.kind==='race_pace')&&work.length) return `${U.d(s.km)}${U.k} · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
   }
@@ -2015,7 +2025,7 @@ function renderPlan(p){
       Generated ${p.generated_at?esc(new Date(p.generated_at).toLocaleString()):'earlier'}, seeded from
       your ${esc(SN.was_from||'earlier')} state (CTL ${esc(SN.was.ctl)} · ATL ${esc(SN.was.atl)}). Your
       settled ${esc(SN.from)} state${SN.bridged_days?`, rolled forward ${SN.bridged_days}
-      day${SN.bridged_days>1?'s':''} by measurement,`:''} now reads CTL ${esc(SN.ctl)} · ATL
+      day${SN.bridged_days>1?'s':''} by measurement,`:''}${SN.stale_unresolved?` (every snapshot in the window was taken before a later upload, so each was checked against your own runs instead),`:SN.stale_skipped?` (${SN.stale_skipped} snapshot${SN.stale_skipped>1?'s':''} taken before a later upload skipped),`:''}${SN.tainted_skipped?` (${SN.tainted_skipped} snapshot${SN.tainted_skipped>1?'s':''} that did not match your own runs skipped),`:''} now reads CTL ${esc(SN.ctl)} · ATL
       ${esc(SN.atl)}. ${SH_READONLY?"":`Hit <b>Generate plan</b> to re-read today off it.`}</div>`:''}
     ${diffBanner(LASTDIFF)}
     ${objManager(p)}
@@ -2818,48 +2828,50 @@ if(_hform) _hform.addEventListener("submit", async e=>{
 
 // ── Settings (private-only, in a modal) — edit the non-secret personalization that otherwise comes
 // from SH_* env. Values are stored in the DB (meta) and override env; secrets are never shown/settable.
+// 0.68.0 — the Settings window is tabbed. Fields are dealt to tabs by key; each tab has ONE Save that
+// posts only the changed fields inside it and any key pasted into it, so a Save on Athlete never
+// touches Connections. The AI switches sit next to the Claude key they gate; a key the app adds later
+// lands on Athlete until this table names its tab.
+const SETTINGS_TABS = {
+  athlete: ["athlete_context","athlete_age","manual_lthr","units","long_run_day","rest_day_rank"],
+  connections: ["ai_narration","ai_parsing","ai_judgment"],
+  console: ["house_url","house_name","private_url"]
+};
+function settingField(s){
+  const id="set_"+s.key;
+  if(s.kind==="flag"){   // 0.56.0 §S5 — an on/off switch; the value is "1"/"0"
+    const on = String(s.value||"").trim()==="1";
+    return `<div class="setrow flagrow">
+      <label for="${id}" class="flaglbl"><input id="${id}" type="checkbox" data-key="${s.key}" data-flag="1" data-orig="${on?"1":"0"}" ${on?"checked":""}> ${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
+      <div class="help">${esc(s.help)}</div>
+      <div class="err" id="err_${s.key}"></div>
+    </div>`;
+  }
+  // data-orig = the value as loaded, so a Save posts ONLY the fields the user changed — posting an
+  // untouched env/default-sourced value would persist it to meta and shadow the env.
+  const ctl = s.kind==="text"
+    ? `<textarea id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}">${esc(s.value||"")}</textarea>`
+    : `<input id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}" type="text" value="${esc(s.value||"")}">`;
+  return `<div class="setrow">
+    <label for="${id}">${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
+    ${ctl}
+    <div class="help">${esc(s.help)}</div>
+    <div class="err" id="err_${s.key}"></div>
+  </div>`;
+}
+const SAVEBAR = (scope)=>`<div class="setbar"><button class="primary" type="submit">Save</button><span class="ok" id="setok-${scope}"></span></div>`;
 async function loadSettings(){
   const host=$("#settings"); if(!host) return;
   let d; try{ d=await getJSON("/api/settings"); }catch(e){ host.innerHTML=`<div class="empty">Could not load settings.</div>`; return; }
   if(!d.ok){ host.innerHTML=`<div class="empty">${esc(d.error||"unavailable")}</div>`; return; }
-  // data-orig = the value as loaded, so saveSettings posts ONLY the fields the user changed —
-  // posting an untouched env/default-sourced value would persist it to meta and shadow the env.
-  const field=s=>{
-    const id="set_"+s.key;
-    if(s.kind==="flag"){   // 0.56.0 §S5 — an on/off switch; the value is "1"/"0"
-      const on = String(s.value||"").trim()==="1";
-      return `<div class="setrow flagrow">
-        <label for="${id}" class="flaglbl"><input id="${id}" type="checkbox" data-key="${s.key}" data-flag="1" data-orig="${on?"1":"0"}" ${on?"checked":""}> ${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
-        <div class="help">${esc(s.help)}</div>
-        <div class="err" id="err_${s.key}"></div>
-      </div>`;
-    }
-    const ctl = s.kind==="text"
-      ? `<textarea id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}">${esc(s.value||"")}</textarea>`
-      : `<input id="${id}" data-key="${s.key}" data-orig="${esc(s.value||"")}" type="text" value="${esc(s.value||"")}">`;
-    return `<div class="setrow">
-      <label for="${id}">${esc(s.label)}<span class="src">${esc(s.source)}</span></label>
-      ${ctl}
-      <div class="help">${esc(s.help)}</div>
-      <div class="err" id="err_${s.key}"></div>
-    </div>`;
-  };
-  host.innerHTML=`<form class="setform" id="setform">
-    ${d.settings.map(field).join("")}
-    <div class="setbar"><button class="primary" type="submit">Save settings</button>
-      <span class="ok" id="setok"></span></div>
+  const byKey={}; d.settings.forEach(s=>{ byKey[s.key]=s; });
+  const named=new Set(Object.values(SETTINGS_TABS).flat());
+  const rows = keys => keys.map(k=>byKey[k]).filter(Boolean).map(settingField).join("");
+  const stray = d.settings.filter(s=>!named.has(s.key)).map(settingField).join("");
+  host.innerHTML=`<form class="setform" id="setform" data-scope="athlete">
+    ${rows(SETTINGS_TABS.athlete)}${stray}
+    ${SAVEBAR("athlete")}
   </form>
-  <div class="setrow" style="margin-top:14px">
-    <label>Backup &amp; export</label>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <a class="ghost" href="/api/backup/db" download style="text-decoration:none;padding:6px 11px;font-size:12px">⬇ Database snapshot (.db)</a>
-      <a class="ghost" href="/api/export/json" download style="text-decoration:none;padding:6px 11px;font-size:12px">⬇ Data export (.json)</a>
-    </div>
-    <div class="help">The snapshot is a complete, consistent copy of the database — restore by stopping the app
-      and dropping it into ./data as sparinghorse.db. The JSON export carries only what can't be rebuilt
-      (objectives, check-ins, reflections, adjustments, lab markers, plans, settings) — restore into a fresh
-      instance with: python SparingHorse.py import &lt;file&gt;. API keys are never included in either.</div>
-  </div>
   <div class="setrow" style="margin-top:14px">
     <label>Away / can't run</label>
     <ul class="avlist" id="avlist" style="list-style:none;margin:0 0 8px;padding:0"></ul>
@@ -2873,11 +2885,39 @@ async function loadSettings(){
     <div class="help">Days you can't run (travel, life). The plan lays around them: runs slide to the
       nearest sensible day, spacing rules hold, and a heavily blocked week gets lighter, never
       crammed. Single day: leave the second date empty. Private — away days never appear on
-      the public page.</div>
+      the public page. Saved as you add them.</div>
     <div class="err" id="averr"></div>
   </div>`;
   $("#setform").addEventListener("submit", saveSettings);
-
+  const ai=$("#aiBox");
+  if(ai){
+    ai.innerHTML=`<form class="setform" id="setform-connections" data-scope="connections">
+      <div class="sectitle" style="margin-top:4px">AI features</div>
+      ${rows(SETTINGS_TABS.connections)}
+      ${SAVEBAR("connections")}
+    </form>`;
+    $("#setform-connections").addEventListener("submit", saveSettings);
+  }
+  const con=$("#consoleBox");
+  if(con){
+    con.innerHTML=`<form class="setform" id="setform-console" data-scope="console">
+      <div class="sectitle" style="margin-top:4px">Links</div>
+      ${rows(SETTINGS_TABS.console)}
+      ${SAVEBAR("console")}
+    </form>
+    <div class="setrow" style="margin-top:14px">
+      <label>Backup &amp; export</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a class="ghost" href="/api/backup/db" download style="text-decoration:none;padding:6px 11px;font-size:12px">⬇ Database snapshot (.db)</a>
+        <a class="ghost" href="/api/export/json" download style="text-decoration:none;padding:6px 11px;font-size:12px">⬇ Data export (.json)</a>
+      </div>
+      <div class="help">The snapshot is a complete, consistent copy of the database — restore by stopping the app
+        and dropping it into ./data as sparinghorse.db. The JSON export carries only what can't be rebuilt
+        (objectives, check-ins, reflections, adjustments, lab markers, plans, settings) — restore into a fresh
+        instance with: python SparingHorse.py import &lt;file&gt;. API keys are never included in either.</div>
+    </div>`;
+    $("#setform-console").addEventListener("submit", saveSettings);
+  }
   wireAway();
 }
 
@@ -2916,14 +2956,21 @@ async function wireAway(){
 }
 async function saveSettings(e){
   e.preventDefault();
-  document.querySelectorAll("#setform .err").forEach(n=>n.textContent="");
-  $("#setok").textContent="";
+  const form=e.target, section=form.closest(".settab")||form, scope=form.dataset.scope||"athlete";
+  section.querySelectorAll(".err").forEach(n=>n.textContent="");
+  const ok=$("#setok-"+scope); if(ok) ok.textContent="";
   const payload={};
-  document.querySelectorAll("#setform [data-key]").forEach(n=>{
+  form.querySelectorAll("[data-key]").forEach(n=>{
     const val = n.dataset.flag ? (n.checked ? "1" : "0") : n.value;   // a switch saves "1"/"0"
     if(val !== n.dataset.orig) payload[n.dataset.key]=val;             // changed fields only
   });
-  if(Object.keys(payload).length===0){ $("#setok").textContent="No changes"; return; }
+  // 0.68.0 — the tab's one Save also lands every key pasted into it (write-only rows, no Save of their own)
+  const pasted=[...section.querySelectorAll("input[id^='sec_']")].filter(i=>i.value);
+  let keysSaved=0;
+  for(const i of pasted){ if(await saveSecret(i.id.slice(4), false, true)) keysSaved++; }
+  if(keysSaved) loadSecrets(true);
+  const keyNote = keysSaved ? ` · ${keysSaved} key${keysSaved>1?"s":""} saved` : "";
+  if(Object.keys(payload).length===0){ if(ok) ok.textContent = keysSaved ? `${keysSaved} key${keysSaved>1?"s":""} saved ✓` : (pasted.length ? "" : "No changes"); return; }
   const r=await fetch("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
   const d=await r.json();
   if(!d.ok){
@@ -2931,8 +2978,10 @@ async function saveSettings(e){
     Object.keys(errs).forEach(k=>{ const n=$("#err_"+k); if(n) n.textContent="⚠ "+errs[k]; });
     return;
   }
-  $("#setok").textContent="Saved ✓";
-  loadSettings();          // refresh provenance badges (env → saved)
+  if(ok) ok.textContent="Saved ✓"+keyNote;
+  const keep=ok?ok.textContent:"";
+  await loadSettings();          // refresh provenance badges (env → saved)
+  const ok2=$("#setok-"+scope); if(ok2) ok2.textContent=keep;
   fetch("/healthz").then(r=>r.json()).then(h=>{ if(h.ai) AI=h.ai; }).catch(()=>{});   // the AI switches gate the buttons on the next render
 }
 // Keys block — the two secrets (Runalyze token / Claude key). WRITE-ONLY: the value is never sent back,
@@ -3017,23 +3066,27 @@ async function loadSecrets(probe, justSaved){
       <div class="secinput">
         <input id="sec_${s.key}" type="password" autocomplete="new-password"
                placeholder="${s.configured?"•••• — paste a new value to replace":"Paste your key to enable"}">
-        <button type="button" class="primary" data-sec="${s.key}">Save</button>
         ${s.source==="saved"?`<button type="button" class="ghost" data-clr="${s.key}">Clear</button>`:""}
       </div>
       <div class="help">${esc(s.help)}</div>
       <div class="err" id="secerr_${s.key}"></div>
     </div>`;
+  // 0.68.0 — the music module's keys render on the Music tab (its own host) when the module is there
+  const musicHost=$("#musicKeys");
+  const isMusic=s=>/^(spotify_|lastfm_|listenbrainz_)/.test(s.key);
+  const main=d.secrets.filter(s=>!(musicHost && isMusic(s)));
+  if(musicHost) musicHost.innerHTML=d.secrets.filter(isMusic).map(row).join("");
   host.innerHTML=`<div class="secblock"><div class="sectitle">Connections &amp; keys</div>
-    ${d.secrets.map(row).join("")}<div id="suuntoBox"></div>
+    ${main.map(row).join("")}<div id="suuntoBox"></div>
     <div class="help aidisc" style="margin-top:6px"><b>What a Claude key sends to Anthropic</b> — plan narration: the computed plan summary and your athlete context; goal parsing: the goal text you type, and your objectives list for race advice; check-in judgment: your check-in note, energy and sleep answers, HRV state, today's session, and anything typed into “Tell the horse”. Each is a switch under <i>AI features</i> below; judgment is off until you turn it on.</div>
     <div class="help" style="margin-top:2px">Keys are write-only — the value never comes back to this
-      page. <code>fp</code> is the first 8 hex of its sha256, so you can confirm which value is stored:
+      page; paste a value and press the tab's Save. <code>fp</code> is the first 8 hex of its sha256, so you can confirm which value is stored:
       <code>printf %s "$KEY" | sha256sum | cut -c1-8</code>.</div></div>`;
   // put back what was being typed (minus the field just saved) BEFORE anything can steal focus
   Object.entries(drafts).forEach(([id,v])=>{ if(id==="sec_"+justSaved) return;
     const el=document.getElementById(id); if(el) el.value=v; });
-  host.querySelectorAll("button[data-sec]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.sec,false)));
-  host.querySelectorAll("button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
+  document.querySelectorAll("#settingsDialog button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
+  if(musicHost) Object.entries(drafts).forEach(([id,v])=>{ if(id==="sec_"+justSaved) return; const el=document.getElementById(id); if(el) el.value=v; });
   loadSuunto();
   if(probe) validateSecrets(d.secrets);
 }
@@ -3106,26 +3159,27 @@ async function validateSecrets(secrets){
       el.title="A key is set; couldn't reach the provider to verify it right now."; }
   });
 }
-async function saveSecret(key, clear){
+async function saveSecret(key, clear, quiet){
   const inp=$("#sec_"+key), errEl=$("#secerr_"+key); if(errEl) errEl.textContent="";
   const value = clear ? "" : (inp ? inp.value : "");
-  if(!clear && !value){ if(errEl) errEl.textContent="⚠ paste a value first"; return; }
+  if(!clear && !value){ if(errEl) errEl.textContent="⚠ paste a value first"; return false; }
   let d; try{
     const r=await fetch("/api/secrets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({key,value})});
     d=await r.json();
-  }catch(e){ if(errEl) errEl.textContent="⚠ could not save"; return; }
-  if(!d.ok){ if(errEl) errEl.textContent="⚠ "+(d.error||"could not save"); return; }
+  }catch(e){ if(errEl) errEl.textContent="⚠ could not save"; return false; }
+  if(!d.ok){ if(errEl) errEl.textContent="⚠ "+(d.error||"could not save"); return false; }
   if(inp) inp.value="";
-  loadSecrets(true, key);   // refresh badges + re-validate; siblings keep their unsaved drafts
+  if(!quiet) loadSecrets(true, key);   // refresh badges + re-validate; siblings keep their unsaved drafts
   // a freshly-set token/key changes what the app can do — refresh the affected surfaces live
   fetch("/healthz").then(r=>r.json()).then(h=>{ LLM_OK=!!h.llm; if(h.ai) AI=h.ai; TOKEN_OK=!!h.token_configured; SYNC_LAST=h.last_sync||null; paintFreshness(); refreshFirstRun(); }).catch(()=>{});
+  return true;
 }
 
 // learn whether the LLM layer is configured (§6c) before the plan/objectives render.
 // §RB — the /runs explorer boots only what it shows: the calendar + the activity tile; the
 // dashboard's status loaders (plan, drift, shape, health…) stay dashboard-only.
-if(SH_PAGE==="runs"){
-  loadRunsCal(); loadRecent();
+if(SH_PAGE==="runs"||SH_PAGE==="music"){   // §BEAT — the /music page boots its own loaders (music.js)
+  if(SH_PAGE==="runs"){ loadRunsCal(); loadRecent(); }
   // the explorer shows the same footer as the dashboard, so it needs the same sync time; /healthz
   // is the one read it already has a reason to make (private-only page, so `last_sync` is served).
   fetch("/healthz").then(r=>r.json()).then(d=>{ SYNC_LAST=d.last_sync||null; noteSync(d.last_sync);
@@ -3176,15 +3230,45 @@ async function loadZones(){
 
 // Settings modal open/close (private only — the button is removed on the public view below).
 const _setBtn=$("#settingsBtn"), _setDlg=$("#settingsDialog");
-if(_setBtn && _setDlg){
-  _setBtn.addEventListener("click", ()=>{ if(!$("#setform")) loadSettings(); loadSecrets(true); _setDlg.showModal(); });  // (re)load settings if the initial fetch failed; refresh + live-validate keys each open
+// 0.68.0 — the tab bar is built from the <section class="settab"> panels the shell carries (a module
+// adds a tab by adding a panel); the last tab used is remembered per device.
+function settingsTabs(){
+  const bar=$("#settingsTabs"); if(!bar||!_setDlg) return;
+  const secs=[..._setDlg.querySelectorAll("section.settab")];
+  bar.setAttribute("role","tablist");   // the role arrives WITH the tabs — the static shell carries no tablist over nothing
+  bar.innerHTML=secs.map(s=>`<button type="button" role="tab" class="settab-btn" data-for="${esc(s.dataset.tab)}" aria-selected="false" aria-controls="${esc(s.id)}">${esc(s.dataset.label||s.dataset.tab)}</button>`).join("");
+  bar.querySelectorAll("[data-for]").forEach(b=>b.addEventListener("click",()=>showSettingsTab(b.dataset.for)));
+  bar.addEventListener("keydown",e=>{ if(e.key!=="ArrowRight"&&e.key!=="ArrowLeft") return;
+    const btns=[...bar.querySelectorAll("[data-for]")], i=btns.indexOf(document.activeElement); if(i<0) return;
+    const n=btns[(i+(e.key==="ArrowRight"?1:btns.length-1))%btns.length]; n.focus(); showSettingsTab(n.dataset.for); e.preventDefault(); });
+}
+function showSettingsTab(name){
+  if(!_setDlg) return;
+  const secs=[..._setDlg.querySelectorAll("section.settab")];
+  if(!secs.some(s=>s.dataset.tab===name)) name=(secs[0]||{dataset:{}}).dataset.tab;
+  secs.forEach(s=>{ s.hidden = s.dataset.tab!==name; });
+  _setDlg.querySelectorAll("#settingsTabs [data-for]").forEach(b=>b.setAttribute("aria-selected", b.dataset.for===name?"true":"false"));
+  try{ localStorage.setItem("sh.settings.tab", name); }catch(e){}
+  document.dispatchEvent(new CustomEvent("sh:settings-tab",{detail:{tab:name}}));
+}
+function openSettings(tab){
+  if(!_setDlg) return;
+  if(!$("#setform")) loadSettings();   // (re)load settings if the initial fetch failed
+  loadSecrets(true);                    // refresh + live-validate keys on each open
+  let last=null; try{ last=localStorage.getItem("sh.settings.tab"); }catch(e){}
+  showSettingsTab(tab||last||"athlete");
+  if(!_setDlg.open) _setDlg.showModal();
+}
+window.SHSettings={open:openSettings, show:showSettingsTab, saveSecret, reloadSecrets:()=>loadSecrets(true)};
+if(_setDlg){
+  settingsTabs();
+  if(_setBtn) _setBtn.addEventListener("click", ()=>openSettings());
   const _x=$("#settingsClose"); if(_x) _x.addEventListener("click", ()=>_setDlg.close());
   _setDlg.addEventListener("click", e=>{ if(e.target===_setDlg) _setDlg.close(); });  // backdrop click
   // §SG — landing back from the Suunto OAuth bounce (/?suunto=connected|denied|…): reopen Settings
-  // so the fresh connection status (or the failure) is right there; scrub the flag from the URL.
+  // on Connections so the fresh status (or the failure) is right there; scrub the flag from the URL.
   const _su=new URLSearchParams(location.search).get("suunto");
-  if(_su){ history.replaceState(null,"",location.pathname);
-    if(!$("#setform")) loadSettings(); loadSecrets(true); _setDlg.showModal(); }
+  if(_su){ history.replaceState(null,"",location.pathname); openSettings("connections"); }
 }
 // 0.57.0 (§5.2) — the analytics sections are <details>, closed on a fresh device and remembered per
 // device; the plan, the readiness card and the latest run stay open. The showcase (public and demo)
@@ -3261,6 +3345,8 @@ if(SH_PAGE==="today"){
   document.title="Sparing Horse — run browser";
   const l=$("#runsLink"); if(l){ l.textContent="← Dashboard"; l.href="/"; l.title="Back to the status dashboard"; }
   const mr=$("#mnavruns"); if(mr) mr.setAttribute("aria-current","page");
+}else if(SH_PAGE==="music"){
+  // §BEAT — the music page's chrome and loaders live in music.js; nothing of the dashboard boots here
 }else if(SH_READONLY){
   loadReadiness();   // the public dashboard: the verdict card only (the server redacts its inputs)
 }else{

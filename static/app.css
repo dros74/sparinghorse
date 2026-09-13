@@ -980,7 +980,16 @@
      rows the secrets box alone can exceed 86vh, which collapsed the old #settings-only scroller
      to zero height — nothing scrolled and everything below the keys was unreachable. */
   .modal-body{overflow:auto;flex:1 1 auto;min-height:0}
-  #settings{padding:20px 22px}
+  /* 0.68.0 — the Settings tabs: one bar built from the panels present, one panel shown at a time */
+  .modal-tabs{flex:none;display:flex;gap:2px;padding:0 14px;border-bottom:1px solid var(--line);
+    background:var(--surface);overflow-x:auto}
+  .settab-btn{background:none;border:none;border-bottom:2px solid transparent;border-radius:0;
+    padding:10px 12px;min-height:44px;font-size:13px;font-weight:500;color:var(--muted);white-space:nowrap}
+  .settab-btn:hover{color:var(--text);border-bottom-color:var(--line)}
+  .settab-btn[aria-selected="true"]{color:var(--accent-ink);border-bottom-color:var(--accent);font-weight:600}   /* the ink hue — the paint accent is 4.48:1 on the surface */
+  .settab{padding:20px 22px}
+  .settab .secblock{margin-top:0;padding-bottom:0;border-bottom:none}
+  #settings{padding:0}
   /* 0.60.2 — the weather chip's orphaned tail sat between these two since 0.57.0 (e514ff3b) and took
      `.muted{color:…}` with it: every muted label rendered at full text contrast for a day. */
   .muted{color:var(--muted)} .mono{font-family:var(--mono)}

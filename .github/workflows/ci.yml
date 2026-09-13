@@ -36,14 +36,17 @@ jobs:
 
       - name: Every module compiles
         run: |
-          python -m py_compile SparingHorse.py sh_engine.py sh_selftest.py
+          # sh_*.py rather than a fixed list: the public mirror carries fewer modules than the
+          # private tree (§BEAT's sh_music.py stays private until it graduates), and one recipe
+          # must compile both.
+          python -m py_compile SparingHorse.py sh_*.py
 
       - name: The front end parses
         run: |
           # Only possible since TECH-11 moved the SPA out of a Python string literal: until then a
           # syntax error in 2,600 lines of application JavaScript could only be found by loading the
           # page in a browser and noticing that nothing worked.
-          node --check static/app.js
+          for f in static/*.js; do node --check "$f"; done
 
       - name: Seed a synthetic database
         run: SH_DB="$RUNNER_TEMP/ci.db" python SparingHorse.py seed

@@ -1,9 +1,3 @@
-# requirements.lock — the hash-pinned dependency set the container image installs (0.55.2).
-# Generated from requirements.txt for Python 3.12 on Linux; every wheel and sdist hash is listed, and
-# `pip install --require-hashes` refuses anything that does not match. Regenerate deliberately:
-#   uv pip compile --python-version 3.12 --python-platform linux --generate-hashes --no-header -o requirements.lock requirements.txt
-# then rebuild, run the suite, and quote the version diff in the commit (see DEPLOY.md).
-
 annotated-types==0.8.0 \
     --hash=sha256:13b2beaad985e05e2d6407ee4c4f35590b11f8d693a258a561055cac8f64cab7 \
     --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0
@@ -368,6 +362,10 @@ docstring-parser==0.18.0 \
     --hash=sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015 \
     --hash=sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b
     # via anthropic
+fitdecode==0.11.0 \
+    --hash=sha256:52d920e50eaa76eb065b20bfd4e42f72195e894a079098dacc1cafa908cd4b83 \
+    --hash=sha256:a1bdb9b4d1e9ebac0001fc58c22fe07a3f9967ca4e13258c6ef99cdb8d697a78
+    # via -r requirements.txt
 flask==3.1.3 \
     --hash=sha256:0ef0e52b8a9cd932855379197dd8f94047b359ca0a78695144304cb45f87c9eb \
     --hash=sha256:f4bcbefc124291925f1a26446da31a5178f9483862233b23c0c96a20701f670c

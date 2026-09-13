@@ -1302,8 +1302,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.72,
-            "laid": 0.53,
+            "headroom": 0.6,
+            "laid": 0.65,
             "unit": "ratio"
           },
           "binding": "acwr",
@@ -1315,7 +1315,7 @@
         "peak_acwr": 0.661,
         "phase": "rebase",
         "proj_acwr": 0.429,
-        "proj_acwr_flat": 0.534,
+        "proj_acwr_flat": 0.65,
         "proj_ctl": 55.4,
         "role": "build",
         "runs": 2,
@@ -1792,7 +1792,9 @@
     "seed": {
       "bridged_days": 1,
       "fallback": null,
-      "from": "2026-06-29"
+      "from": "2026-06-29",
+      "stale_skipped": 0,
+      "tainted_skipped": 0
     }
   },
   "shape_response": {

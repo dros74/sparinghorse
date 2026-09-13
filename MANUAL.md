@@ -583,6 +583,9 @@ a different screen, not looking at a broken guide.
   flagged as a missed session + a rogue extra one.
 - **Weekly:** check the plan drift scorecard. "Ahead on fitness, behind on volume" tells you which lever to
   pull.
+- **Regenerating mid-week:** the days still ahead keep the sessions the week laid for them, kind and
+  distance. A run over its prescription is not taken back from the days that follow, and a missed day is
+  not folded into them. Only the load ceiling can shorten the remainder, and the week says so when it does.
 - **When you change a goal:** add/remove/re-prioritize in the Objectives panel and regenerate. The drift
   baseline re-anchors to the new goal and self-heals as plans for it accrue. **Moving** a race is not a goal
   change — edit its date in place and the whole history follows it (§5, *Moving a race*).
@@ -644,7 +647,12 @@ The decision line: *training shape + plan* can be public; *medical / location / 
 
 ## 12. Settings and secrets
 
-The **Settings** window (private container only) is where you configure the app without editing files:
+The **Settings** window (private container only) is where you configure the app without editing files.
+It has one tab per concern, each with its own **Save** that writes only the fields changed on that tab
+(and any key pasted into it): **Athlete** (context, age, LTHR, units, the week's shape, away days),
+**Connections** (the Runalyze, Claude and Suunto keys, the watch link, the AI switches), **Music** (only
+when the music module is installed: Spotify, last.fm and ListenBrainz, the matching knobs, the library)
+and **Console** (access, system, links, backup and export). The blocks:
 
 - **Console access** — how this session is signed in (the passphrase, or a proxy identity when
   `SH_TRUST_PROXY_AUTH` is on), **Change passphrase** (signs every other device out, keeps this one) and
