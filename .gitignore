@@ -31,11 +31,17 @@ venv/
 # ── os ──────────────────────────────────────────────────────────────
 .DS_Store
 
+# ── ide ─────────────────────────────────────────────────────────────
+.kdev4/
+*.kdev4
+.vscode/
+
 # local-only medical seed (never commit)
 seed_health_local.py
 
 # early design mockups — not part of the distributed app
 _appMockups/
+_mockups/
 
 # scratch space — throwaway probe scripts, screenshots, render harness output
 tmp/

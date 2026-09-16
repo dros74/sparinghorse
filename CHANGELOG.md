@@ -10,6 +10,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.68.7] - 2026-09-16
+
+### Fixed
+
+- **A song picked at the basin's edge could never read as followed.** `pick_for_segments` filled a
+  segment from any song within `MUSIC_TEMPO_WINDOW` (±2 %, the Van Dyck entrainment basin) in score
+  order, but the read-back only calls a song followed within `MUSIC_ENTRAIN_PCT` (±1 %, calibrated on
+  the 10 Sep progression run) — so a pick near the basin's outer edge was scored down on the next list no matter
+  how the legs ran. On 15 Sep five of eleven block songs sat at 179.9–180.0 on a 176.6 target. The
+  gate now opens in rungs: the ±1 % lock band fills first, the ±2 % basin and the ±3 %/±4 % widening
+  steps follow only when it runs dry. Widening into the basin is silent; the wider steps still note.
+
+## [0.68.6] - 2026-09-16
+
+### Fixed
+
+- **A long run's finish third climbed to the line on the leftovers, not the fastest songs.**
+  `pick_for_segments` filled each segment in running order from what the pool still held, so the
+  climbing segments — `long_3` and `race_grind` — picked last and got whatever the earlier thirds
+  had not already taken; on the 13 Sep long-run list (target 169.3 spm, window 165.9–172.7) the
+  finish third held 166–168 spm tracks against the middle third's 171–172, and the old energy-only
+  sort put the calmest of those leftovers first. The climbing segments now pick first, before the
+  segments that run earlier, and take candidates at or above the target before the rest of the
+  window; the returned list stays in running order. They then play in rising tempo, ties by energy.
+  Non-climbing segments are picked exactly as before.
+
+## [0.68.5] - 2026-09-16
+
+### Fixed
+
+- **A reps-day song was graded against its whole window, not the reps.** `_coalesce_short` rightly
+  folds a session of short work bouts and recoveries (9 × 3 min VO₂) into one playlist block under
+  one target — a 3½-minute song cannot alternate with 3-minute reps and 2-minute recoveries — but the
+  read-back scored every song's cadence as the mean over its whole aligned window, so a song
+  straddling a rep and a recovery read the average of both, and a song sitting entirely on a
+  recovery read the recovery's own cadence. On the 15 Sep 9×3 run (176–178 spm reps against a 176.6
+  spm ask, the first work block ever run on target) every one of 16 songs came back "not entrained",
+  and `held_rung`, which weighs each song by its read seconds, mixed 27 minutes of reps at ~177 spm
+  with 16 minutes of recoveries at ~164 into one number: the rung read 169.7 against a 174.8 target
+  and called it not held — freezing the ramp's next step on the one session type where the legs had
+  just reached it. A new `work_spans` reads the reps' own seconds from the run's structure decode,
+  and a reps-block song is now read over its rep seconds only, weighted the same way in `held_rung`;
+  a song with under 30 seconds inside the reps is left ungraded rather than scored off a handful of
+  samples. On the 15 Sep run the block songs now read 172.0–178.0 spm over the reps, 5 of 16
+  entrained, and the rung reads 171.7 against 173.8 → held. The stored 15 Sep read-back is not
+  recomputed by the nightly; press "Read again" on that run on the Music page to pick up the new
+  read.
+
 ## [0.68.4] - 2026-09-13
 
 ### Fixed

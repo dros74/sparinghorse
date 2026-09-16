@@ -77,13 +77,20 @@ jobs:
             LEAK_RE="$(sed -n "s/^LEAK_RE='\(.*\)'$/\1/p" publish_mirror.sh)"
             ALLOW_RE="$(sed -n "s/^ALLOW_RE='\(.*\)'$/\1/p" publish_mirror.sh)"
             if [ -z "$LEAK_RE" ]; then echo "::error::could not read LEAK_RE"; exit 1; fi
-            # Scan the tree that would actually be PUBLISHED. publish_mirror.sh strips these four
+            # Scan the tree that would actually be PUBLISHED. publish_mirror.sh strips its EXCLUDES
             # before it scans, and PROJECT_LOG.md is full of the owner's real context by design — a
             # scan that includes them fails every time and teaches everyone to ignore it.
+            # The list is READ from the script, not copied: a hand copy here fell behind the day the
+            # script's list grew (DESIGN.md, tools/gemini_review.py, 2026-09-14) and failed three
+            # runs on files the mirror never publishes.
+            # (the array literal spans several commented lines; it closes on the line whose code part
+            # ends in ")" — a ")" inside a comment must not end the range)
+            eval "$(sed -n '/^EXCLUDES=(/,/^[^#]*)[[:space:]]*\(#.*\)\{0,1\}$/p' publish_mirror.sh)"
+            if [ "${#EXCLUDES[@]}" -eq 0 ]; then echo "::error::could not read EXCLUDES"; exit 1; fi
+            spec=(); for e in "${EXCLUDES[@]}"; do spec+=(":!$e"); done
             # ALLOW_RE (also read from the script) is the one public hostname the docs may carry; it
             # is removed from each matched line and the line re-tested, exactly as the script does.
-            hits="$(git grep -nIiE "$LEAK_RE" -- . \
-                 ':!PROJECT_LOG.md' ':!ENGINE_SCIENCE.md' ':!publish_mirror.sh' ':!.githooks' || true)"
+            hits="$(git grep -nIiE "$LEAK_RE" -- . "${spec[@]}" || true)"
             if [ -n "$hits" ] && [ -n "$ALLOW_RE" ]; then
               hits="$(printf '%s\n' "$hits" | sed -E "s#$ALLOW_RE##g" | grep -iE "$LEAK_RE" || true)"
             fi

@@ -7331,6 +7331,56 @@ _PV_WITHHELD = {
     "drift.counterfactual.reason",           # the regime rationale names the athlete's history
     "healthz.last_sync", "healthz.last_ok",
     "profile.hr", "profile.hr_avg", "profile.hrmax", "profile.hrzones", "profile.path",
+
+    # SH-10 (2026-09-14) — classified as withheld: the allowlist already dropped these; listed so a
+    # field in neither list fails det/public-view-coverage-all. Review before publishing any of them.
+    "healthz.ai", "healthz.ai.narration", "healthz.ai.parsing", "healthz.ai.judgment",
+    #                                          — the authenticated private box only; the public/anon
+    #                                          reply returns before this key is ever set.
+    "readiness.checkin",                      # the raw check-in row: energy/sleep/note/stop_symptom
+    "readiness.assessment.source", "readiness.assessment.reasons", "readiness.assessment.evidence",
+    "readiness.assessment.signals", "readiness.assessment.signals.energy",
+    "readiness.assessment.signals.sleep", "readiness.assessment.signals.hrv",
+    "readiness.assessment.hrv", "readiness.assessment.hrv.state",
+    "readiness.assessment.halt", "readiness.assessment.unconfirmed",
+    "readiness.assessment.bonus", "readiness.assessment.acwr",
+    #                                          — SH-15 (2026-09-16): the §6o bonus-run affordance on a
+    #                                          green rest day, a flag and the load ratio; they exist only
+    #                                          on such a day, so the coverage det first met them on the
+    #                                          seeded athlete's first rest day. Dropped publicly as before.
+    #                                          — the real assess_readiness() read: the private box
+    #                                          never rebuilds api_readiness's generic verdict-only
+    #                                          copy, so none of this rides through _PV_READINESS.
+    "readiness.permission.declared", "readiness.permission.grant", "readiness.permission.consumers",
+    "readiness.permission.checkin_date", "readiness.permission.fresh",
+    "readiness.permission.fresh_hours", "readiness.permission.age_h", "readiness.permission.expires",
+    "readiness.permission.sleep", "readiness.permission.telemetry",
+    "readiness.permission.telemetry.hrv", "readiness.permission.red_evidence",
+    "readiness.permission.why",
+    #                                          — leaf fields of the already-withheld
+    #                                          `readiness.permission` token (§B): exact-match only
+    #                                          covers a path as spelled, so each leaf needs its own line.
+    "readiness.zones", "readiness.zones.ok", "readiness.zones.hr_anchor",
+    "readiness.zones.hr_anchor.anchor", "readiness.zones.hr_anchor.ref",
+    "readiness.zones.hr_anchor.hrmax", "readiness.zones.hr_anchor.confidence",
+    "readiness.zones.hr_anchor.age_days", "readiness.zones.hr_anchor.source",
+    "readiness.zones.pace_anchor", "readiness.zones.pace_anchor.vo2max",
+    "readiness.zones.pace_anchor.p5k", "readiness.zones.pace_anchor.p5k_fmt",
+    "readiness.zones.pace_anchor.lt1_5k_frac",
+    "readiness.zones.rows", "readiness.zones.rows[].key", "readiness.zones.rows[].label",
+    "readiness.zones.rows[].zone_idx", "readiness.zones.rows[].pace_target",
+    "readiness.zones.rows[].pace_target.sec_km", "readiness.zones.rows[].pace_target.fmt",
+    "readiness.zones.rows[].pace_slower_than", "readiness.zones.rows[].pace_slower_than.sec_km",
+    "readiness.zones.rows[].pace_slower_than.fmt", "readiness.zones.rows[].hr",
+    "readiness.zones.rows[].hr.lo", "readiness.zones.rows[].hr.hi",
+    #                                          — §W1's current-zones card (training_zones()): HR bpm
+    #                                          bands, private (H7) like /api/hr-zones/derive.
+    "profile.hrzones.anchor", "profile.hrzones.ref", "profile.hrzones.cutoffs",
+    "profile.hrzones.zones", "profile.hrzones.lthr_confidence",
+    #                                          — leaf fields of the already-withheld `profile.hrzones`
+    #                                          (bpm-derived).
+    "profile.streams_final",                  # the empty-stream branch's own marker; not on the
+                                               # public box
 }
 
 PUBLIC_VIEWS = {"activity": _PV_ACTIVITY, "drift": _PV_DRIFT, "healthz": _PV_HEALTHZ,

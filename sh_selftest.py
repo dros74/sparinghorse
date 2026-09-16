@@ -1342,6 +1342,41 @@ def _stc_quality_forward_kinds():
                got="ok" if not bad else f"fails: {bad}", output=detail)
 
 
+def _pv_paths(o, where, out):
+    """Key paths, with list indices collapsed and phase blocks normalised to <phase> (base,
+    build, bridge1 … are all the same shape). Module-level (hoisted out of `_stc_public_view_coverage`
+    so `_stc_public_view_coverage_all` can walk the OTHER public resources with the same walk)."""
+    if isinstance(o, list):
+        for v in o[:6]:
+            _pv_paths(v, where + "[]", out)
+        return out
+    if not isinstance(o, dict):
+        return out
+    for k, v in o.items():
+        seg = "<phase>" if (isinstance(v, dict) and "weeks" in v) else k
+        p = f"{where}.{seg}"
+        out.add(p)
+        _pv_paths(v, p, out)
+    return out
+
+
+def _pv_classified(path, spec):
+    """Is this path reachable through the spec? Walks the spec in step with the path. Module-level
+    (hoisted out of `_stc_public_view_coverage`, see `_pv_paths`)."""
+    cur = spec
+    for seg in path.split(".")[1:]:
+        seg = seg[:-2] if seg.endswith("[]") else seg
+        if cur is True:
+            return True                      # published verbatim from here down
+        if seg == "<phase>":
+            cur = S._PV_PHASE
+            continue
+        if not isinstance(cur, dict) or seg not in cur:
+            return False
+        cur = cur[seg]
+    return True
+
+
 def _stc_public_view_coverage(db):
     """§PV — EVERY field the engine can put on a public payload must be CLASSIFIED: named in a
     `PUBLIC_VIEWS` spec (published) or in `_PV_WITHHELD` (private on purpose). A field in neither is
@@ -1358,41 +1393,11 @@ def _stc_public_view_coverage(db):
 
     Walks plans from several roads AND a payload carrying every governor annotation the engine can
     emit — those fire only under conditions no single fixture reaches, so they are pinned explicitly
-    rather than hoped for."""
+    rather than hoped for. This det covers the PLAN payload only — see `_stc_public_view_coverage_all`
+    for the same proof on the other public resources (shape, drift, track_record, objectives, log,
+    readiness, activity, profile, weekly, healthz)."""
     from datetime import date as _d
     fails, unclassified, seen = [], [], set()
-
-    def _paths(o, where, out):
-        """Key paths, with list indices collapsed and phase blocks normalised to <phase> (base,
-        build, bridge1 … are all the same shape)."""
-        if isinstance(o, list):
-            for v in o[:6]:
-                _paths(v, where + "[]", out)
-            return out
-        if not isinstance(o, dict):
-            return out
-        for k, v in o.items():
-            seg = "<phase>" if (isinstance(v, dict) and "weeks" in v) else k
-            p = f"{where}.{seg}"
-            out.add(p)
-            _paths(v, p, out)
-        return out
-
-    def _classified(path, spec):
-        """Is this path reachable through the spec? Walks the spec in step with the path."""
-        cur = spec
-        for seg in path.split(".")[1:]:
-            seg = seg[:-2] if seg.endswith("[]") else seg
-            if cur is True:
-                return True                      # published verbatim from here down
-            if seg == "<phase>":
-                cur = S._PV_PHASE
-                continue
-            if not isinstance(cur, dict) or seg not in cur:
-                return False
-            cur = cur[seg]
-        return True
-
     # (a) real roads: the ambient DB in both regimes, and a constructed race road
     plans = []
     for regime in ("caution", "assertive"):
@@ -1413,9 +1418,9 @@ def _stc_public_view_coverage(db):
                   "shape_response": {"basis": "b", "factor": 1.0, "projected": 1.0, "ratio": 0.994,
                                      "realized": 1.0, "ride_cap": 1.25}})
     for plan in plans:
-        seen |= _paths(plan, "plan", set())
+        seen |= _pv_paths(plan, "plan", set())
     for path in sorted(seen):
-        if _classified(path, S._PV_PLAN) or path in S._PV_WITHHELD:
+        if _pv_classified(path, S._PV_PLAN) or path in S._PV_WITHHELD:
             continue
         # a phase block itself is matched structurally by plan_public_view
         if path == "plan.<phase>":
@@ -1425,7 +1430,7 @@ def _stc_public_view_coverage(db):
         fails.append(f"{len(unclassified)} plan field(s) in NEITHER the spec nor _PV_WITHHELD: "
                      f"{unclassified[:8]}")
     # the withheld register must stay HONEST: a path listed there must not also be published
-    both = [p for p in S._PV_WITHHELD if p.startswith("plan.") and _classified(p, S._PV_PLAN)]
+    both = [p for p in S._PV_WITHHELD if p.startswith("plan.") and _pv_classified(p, S._PV_PLAN)]
     if both:
         fails.append(f"listed as withheld but the spec publishes it: {both}")
     return _st("det", "public-view-coverage",
@@ -1437,6 +1442,131 @@ def _stc_public_view_coverage(db):
                expect="every emitted plan field classified; nothing both published and withheld",
                got={"fields_seen": len(seen), "unclassified": unclassified or "none",
                     "failures": fails or "none"})
+
+
+# SH-10 — the resource → path-prefix map for the OTHER nine public views. `track_record`'s register
+# entries spell its root `track` (not `track_record`, the PUBLIC_VIEWS/spec key) — see `_PV_WITHHELD`;
+# `objectives` is a LIST payload, so its own paths come out of `_pv_paths` as `objectives[].field`.
+_PV_ALL_ROOTS = {"healthz": "healthz", "shape": "shape", "drift": "drift",
+                 "track_record": "track", "objectives": "objectives", "log": "log",
+                 "readiness": "readiness", "activity": "activity", "profile": "profile",
+                 "weekly": "weekly"}
+
+
+def _stc_public_view_coverage_all(db):
+    """§PV — the same proof as det/public-view-coverage, for the other nine public resources: every
+    field the engine puts on {healthz, shape, drift, track_record, objectives, log, readiness,
+    activity, profile, weekly} must be CLASSIFIED, either published by that resource's own
+    `PUBLIC_VIEWS` spec or named in `_PV_WITHHELD`.
+
+    det/public-view-coverage only ever walked the PLAN. The withheld register already carried paths
+    on these nine resources too (`track.races[].p50_hms`, `shape.latest.raw`, `activity.hr_avg`,
+    `profile.hr`, `healthz.last_sync` …) — each one added by hand the day a specific leak was found
+    and fixed — but nothing ever checked the register was COMPLETE for them: a new field on any of
+    these nine payloads could ship unclassified the exact way the plan's governor chips did on
+    0.31.0, and nothing would say so until someone found it in the field. This is that check.
+
+    Drives the REAL endpoints (test client, READONLY=False, so the private payload is the one
+    audited — the public box would trim before this det ever saw the field). A resource whose
+    payload can't be produced on the ambient (`seed`) DB — a non-200, or an empty body — FAILS
+    naming the resource and the status, rather than being silently skipped: a resource this det
+    never manages to reach is a resource this det never actually audited. The `/profile` fetch is
+    the one resource that needs help getting there — it wants a cached track, and the battery
+    carries no Runalyze token — so a throwaway trackcache row is seeded for the real activity and
+    torn down again after, the same way det/map-privacy primes it.
+
+    SAFE DIRECTION ONLY: every unclassified path this det finds belongs in `_PV_WITHHELD`, never in
+    an allowlist — deciding a field is safe to PUBLISH is a judgement call about what it reveals, not
+    something a coverage det gets to make for itself. It also re-runs the plan det's register-honesty
+    check for these nine roots: a path listed withheld that the resource's own spec would still
+    publish is a register that is lying about what it protects."""
+    fails, seen_by = [], {}
+    saved_ro = S.READONLY
+    c = S.app.test_client()
+    aid_row = db.execute("SELECT id FROM activities ORDER BY date DESC LIMIT 1").fetchone()
+    aid = aid_row["id"] if aid_row else None
+    seeded_cache, prior_cache = False, None     # the newest activity's real cached profile, if any, restored after
+
+    def _audit(resource, r, hint):
+        """Walk one resource's payload if it fetched cleanly; a bad fetch FAILS naming the hint,
+        never a silent skip."""
+        if r.status_code != 200:
+            fails.append(f"{resource}: HTTP {r.status_code} fetching {hint} — cannot audit")
+            return
+        if not r.get_data():
+            fails.append(f"{resource}: empty body fetching {hint} — cannot audit")
+            return
+        paths = _pv_paths(r.get_json(), _PV_ALL_ROOTS[resource], set())
+        spec = S.PUBLIC_VIEWS[resource]
+        unclassified = [p for p in sorted(paths)
+                        if not (_pv_classified(p, spec) or p in S._PV_WITHHELD)]
+        seen_by[resource] = {"fields_seen": len(paths), "unclassified": unclassified or "none"}
+        if unclassified:
+            fails.append(f"{resource}: {len(unclassified)} field(s) in NEITHER the spec nor "
+                         f"_PV_WITHHELD: {unclassified[:8]}")
+
+    try:
+        S.READONLY = False
+        _audit("healthz", c.get("/healthz"), "GET /healthz")
+        _audit("shape", c.get("/api/shape"), "GET /api/shape")
+        _audit("drift", c.get("/api/plandrift"), "GET /api/plandrift")
+        _audit("track_record", c.get("/api/track-record"), "GET /api/track-record")
+        _audit("objectives", c.get("/api/objectives"), "GET /api/objectives")
+        _audit("log", c.get("/api/log"), "GET /api/log")
+        _audit("readiness", c.get("/api/readiness"), "GET /api/readiness")
+        if aid is None:
+            fails.append("activity: no activity row on the ambient DB — cannot audit by id")
+        else:
+            _audit("activity", c.get(f"/api/activity/{aid}"), f"GET /api/activity/{aid}")
+            # a representative cached profile — every field _profile_cached's two return shapes can
+            # carry, so the profile audit doesn't depend on which branch a real sync happened to hit
+            prior_cache = db.execute("SELECT profile, cached_at FROM trackcache WHERE activity_id=?",
+                                     (aid,)).fetchone()
+            db.execute(
+                "INSERT OR REPLACE INTO trackcache (activity_id, profile, cached_at) VALUES (?,?,?)",
+                (aid, S.json.dumps({"v": S.PROFILE_VERSION, "dist": [0.0, 1.0], "pace": [300, 305],
+                                    "hr": [140, 142], "cadence": [170, 172],
+                                    "elevation": [10.0, 12.0], "path": [[49.5, 6.0]], "hr_avg": 145,
+                                    "has_pace": True, "has_hr": True, "has_cadence": True,
+                                    "has_elevation": True, "has_gps": True, "streams_final": True}),
+                 S._now_iso()))
+            db.commit()
+            seeded_cache = True
+            _audit("profile", c.get(f"/api/activity/{aid}/profile"),
+                   f"GET /api/activity/{aid}/profile")
+        _audit("weekly", c.get("/api/weekly"), "GET /api/weekly")
+    finally:
+        S.READONLY = saved_ro
+        if seeded_cache:                         # put back what the ambient DB had (a dev DB's real cache)
+            db.execute("DELETE FROM trackcache WHERE activity_id=?", (aid,))
+            if prior_cache is not None:
+                db.execute("INSERT INTO trackcache (activity_id, profile, cached_at) VALUES (?,?,?)",
+                           (aid, prior_cache["profile"], prior_cache["cached_at"]))
+            db.commit()
+
+    # the withheld register must stay HONEST for these roots too: a path listed there must not also
+    # be published by that resource's own spec (same limb det/public-view-coverage runs for `plan.`)
+    both = []
+    for p in sorted(S._PV_WITHHELD):
+        for resource, root in _PV_ALL_ROOTS.items():
+            prefix = root + ("[]." if root == "objectives" else ".")
+            if not p.startswith(prefix):
+                continue
+            if _pv_classified(p, S.PUBLIC_VIEWS[resource]):
+                both.append(p)
+            break
+    if both:
+        fails.append(f"listed as withheld but the spec publishes it: {both}")
+
+    return _st("det", "public-view-coverage-all",
+               "§PV the other nine public resources get the same proof det/public-view-coverage "
+               "gives the plan — every field CLASSIFIED, published by that resource's spec or named "
+               "in _PV_WITHHELD; the register carried paths for these resources already but nothing "
+               "had ever checked it was complete",
+               passed=not fails,
+               expect="every field on healthz/shape/drift/track_record/objectives/log/readiness/"
+                      "activity/profile/weekly classified; nothing both published and withheld",
+               got={"by_resource": seen_by, "failures": fails or "none"})
 
 
 def _stc_csp_worker():
@@ -5662,6 +5792,98 @@ def _stc_straddle_regen_day():
                "laid ≈ 1.15 on both; without the series the days differ",
                got={"sat": ks, "sun": ku, "laid": (la, lu), "binding": (sat["limits"].get("binding"),
                     sun["limits"].get("binding")), "days_left": (o_sat, o_sun), "failures": fails or "none"})
+
+
+def _stc_straddle_deload_invariant():
+    """SH-02 / §WKMEAN (0.68.2) — THE DELOAD ROAD DOES NOT RE-PHASE WITH THE REGENERATION DAY. SH-02 held
+    that regenerating the straddling week on different days moved the §PRO6 decision variable (proj_acwr,
+    the end-of-week ACWR the near-ceiling streak counts) and shifted which week carried the down week.
+    §WKMEAN's remainder search now reads the whole week's mean with the lived days handed in through
+    day_series, so both the decision variable and the deload road are the same on every regeneration day,
+    provided the plan is followed. The fixture is a six-week assertive block ending on a down week (live
+    shape), regenerated on each of the six days after the Monday lay. The anti-vacuity limb repeats the
+    Sunday regeneration with day_series=None — the pre-§WKMEAN days-left path, kept for callers that pass
+    none — and requires that reading to diverge from the Monday lay, or the fixture would show nothing.
+    Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 9, 7)
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    seed, easy = (78.3, 100.5), 414
+    shape = [{"wk": k, "km": 50 + 4 * k, "runs": 6, "long": 14 + k, "strides": 0, "intent": "Base — aerobic"}
+             for k in range(1, 6)] + [{"wk": 6, "km": 42, "runs": 5, "long": 12, "strides": 0,
+                                        "intent": "Down week — absorb"}]
+    A = dict(regime="assertive", last_nondown=600.0, recent_longs=[13.0, 14.0, 14.5, 15.0],
+             recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.5, 14.0, 14.5, 15.0], consec_hard=2)
+    fails = []
+
+    def _road(ws):
+        return [(w["wk"], round(w["km"], 1), "DOWN" if E._is_down(w) else ("FORCED" if w.get("forced_deload") else ""))
+                for w in ws]
+
+    full, fb = E.generate_block([dict(w) for w in shape], mon, *seed, easy, **A)
+    w0 = full[0]
+    L = {d: 0.0 for d in days}
+    for s in w0["sessions"]:
+        if (s.get("kind") or "") != "rest":
+            L[s["date"]] = float(s.get("trimp") or 0.0)
+    road0 = _road(full)
+
+    def _regen(i, series=True):
+        c, a = seed
+        for d in days[:i]:
+            c = E._ewma_step(c, L[d], E.TAU_CTL); a = E._ewma_step(a, L[d], E.TAU_ATL)
+        done = [s for s in w0["sessions"] if s["date"] < days[i] and (s.get("kind") or "") != "rest"]
+        wa = (len(done), round(sum(s["km"] for s in done), 1))
+        pin = ({s["date"]: s for s in w0["sessions"] if s["date"] < days[i]}, set(days[:i]))
+        long_done = [s["km"] for s in done if s.get("kind") == "long"]
+        return E.generate_block([dict(w) for w in shape], mon, c, a, easy, today=mon + timedelta(days=i),
+                                 week_actuals=wa, day_series=(L if series else None),
+                                 week_actual_long=(max(long_done) if long_done else None),
+                                 pinned_past=pin, **A)
+
+    proj_acwrs, consec_hards = [], []
+    for i in range(1, 7):
+        ws, b = _regen(i)
+        w = ws[0]
+        proj_acwrs.append(w["proj_acwr"]); consec_hards.append(b["consec_hard"])
+        if abs(w["proj_acwr"] - w0["proj_acwr"]) > 0.02:
+            fails.append(f"regen day {days[i]}: proj_acwr {w['proj_acwr']} vs Monday lay {w0['proj_acwr']}")
+        if b["consec_hard"] != fb["consec_hard"]:
+            fails.append(f"regen day {days[i]}: consec_hard {b['consec_hard']} vs Monday lay {fb['consec_hard']}")
+        road = _road(ws)
+        if [r[2] for r in road] != [r[2] for r in road0]:
+            fails.append(f"regen day {days[i]}: road roles {road} vs Monday lay {road0}")
+        if abs(road[0][1] - road0[0][1]) > 1.0:
+            fails.append(f"regen day {days[i]}: straddle week km {road[0][1]} vs Monday lay {road0[0][1]}")
+        for (wk, km, _t), (wk0, km0, _t0) in zip(road[1:], road0[1:]):
+            if abs(km - km0) > 1.0:
+                fails.append(f"regen day {days[i]}: week {wk} km {km} vs Monday lay {km0}")
+
+    # anti-vacuity — WITHOUT the lived series the search reads the days left (the pre-§WKMEAN path, kept
+    # byte-identical for callers that pass none): on this fixture that MUST move the Sunday regeneration
+    # away from the Monday lay, or the invariant above was never at risk here.
+    ws_c, b_c = _regen(6, series=False)
+    wc = ws_c[0]
+    road_c = _road(ws_c)
+    acwr_diff = abs(wc["proj_acwr"] - w0["proj_acwr"])
+    swk_diff = abs(road_c[0][1] - road0[0][1])     # the straddling week's own km (57.0 vs 57.8 measured)
+    if not (acwr_diff > 0.02 or swk_diff > 0.5):
+        fails.append(f"control (day_series=None) Sunday regen does not differ from the Monday lay — "
+                     f"proj_acwr {wc['proj_acwr']} vs {w0['proj_acwr']}, straddle week km {road_c[0][1]} vs "
+                     f"{road0[0][1]}; the fixture cannot show the mechanism")
+
+    return _st("det", "straddle-deload-invariant",
+               "SH-02 the §PRO6 decision variable and the deload road are the same whichever day of the "
+               "straddling week the plan is regenerated on, once the lived days feed the whole-week mean "
+               "(§WKMEAN 0.68.2); without the lived series the days-left reading moves the reading",
+               passed=not fails, expect="proj_acwr within 0.02 of the Monday lay on every regen day; "
+               "consec_hard unchanged; road roles identical; every week's km within 1.0 km of the Monday "
+               "lay; the day_series=None control diverges by more than that",
+               got={"proj_acwr_by_day": proj_acwrs, "consec_hard_by_day": consec_hards,
+                    "monday": {"proj_acwr": w0["proj_acwr"], "consec_hard": fb["consec_hard"], "road": road0},
+                    "control": {"proj_acwr": wc["proj_acwr"], "consec_hard": b_c["consec_hard"],
+                                "road": road_c, "acwr_diff": round(acwr_diff, 3), "straddle_km_diff": round(swk_diff, 2)},
+                    "failures": fails or "none"})
 
 
 def _stc_phase_handover_windows():
@@ -17208,10 +17430,10 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),
@@ -17281,7 +17503,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(), lambda: _stc_limits(db),
                  lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(), lambda: _stc_access_seen(),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
-                 lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_public_view_coverage_all(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),
@@ -17581,7 +17803,10 @@ def _stc_music_pick():
     172 target and ON accepts it as 'half'; (d) a dry window calls discovery ONCE and uses what
     comes back flagged; (e) with nothing to discover the window widens twice, says so, and the
     shortfall is named rather than hidden; (g) §BEAT7 — a track on recent lists drops behind the
-    fresh ones and the notes count the new; the legs' verdict lifts a track and sinks another."""
+    fresh ones and the notes count the new; the legs' verdict lifts a track and sinks another.
+    §BEAT11 (0.68.7): the picker now fills the ±1 % lock band before the shared `pool`'s wider
+    k-track spread, so (g) and the verdict check use their own small pools clustered inside that
+    band — the point under test is score ordering, not which rung a track happens to fall in."""
     if M is None:
         return _music_skip("music-pick", "§BEAT — tracks into segments")
     fails = []
@@ -17627,13 +17852,21 @@ def _stc_music_pick():
     # (g) §BEAT7 — rotation: the two weight-2.0 tracks were on three recent lists → the fresh k
     # tracks fill the segment ahead of them, and the note counts the new; the legs' verdict: k0
     # followed (+1.0) leads the k tracks, k4 broke and dipped (−1.5) is not picked at all
-    out_r, notes_r = M.pick_for_segments(segs[1:2], pool, [172.0], served={"klow": 3, "kmid": 3})
+    # §BEAT11 (0.68.7): the picker now fills the ±1 % lock band before the shared `pool`'s ±2 %
+    # spread of k-tracks even gets looked at, so (g) and the verdict check below get their own
+    # small pools, sized so the outcome is decided by score inside one rung rather than by which
+    # rung a track happens to fall in
+    pool_r = ([mk(f"k{i}", 172 + d, 0.8, 0.8) for i, d in enumerate((-1.0, -0.5, 0.0, 0.5, 1.0))]
+              + [mk("klow", 172, 0.8, 2.0), mk("kmid", 172, 0.8, 2.0)])
+    out_r, notes_r = M.pick_for_segments(segs[1:2], pool_r, [172.0], served={"klow": 3, "kmid": 3})
     got_r = [t["id"] for t in out_r[0]["tracks"]]
     if "klow" in got_r or "kmid" in got_r or not any("new to the last" in n and "5 of 5" in n for n in notes_r):
         fails.append(f"(g) served tracks must yield to fresh ones and the note count them: picks={got_r} notes={notes_r}")
     if any(t.get("served") != 0 for t in out_r[0]["tracks"]) or out_r[0].get("fresh") != len(got_r):
         fails.append(f"(g) picks must carry served/fresh: {[(t['id'], t.get('served')) for t in out_r[0]['tracks']]} fresh={out_r[0].get('fresh')}")
-    out_l, _ = M.pick_for_segments(segs[1:2], pool, [172.0], follow={"k0": 1.0, "k4": -1.5})
+    pool_l = ([mk(f"k{i}", 171.0 + i * 0.5, 0.8, 0.8) for i in range(5)]
+              + [mk("f1", 171.5, 0.8, 0.8), mk("f2", 172.5, 0.8, 0.8)])
+    out_l, _ = M.pick_for_segments(segs[1:2], pool_l, [172.0], follow={"k0": 1.0, "k4": -1.5})
     got_l = [t["id"] for t in out_l[0]["tracks"]]
     ks = [i for i in got_l if i.startswith("k") and i not in ("klow", "kmid")]
     if not ks or ks[0] != "k0" or "k4" in got_l or out_l[0]["tracks"][got_l.index("k0")].get("follow") != 1.0:
@@ -17685,6 +17918,122 @@ def _stc_music_pick():
                "recent lists yield to fresh tracks and the legs' verdict orders",
                passed=not fails, expect="window/uniqueness hold; rotation + legs order; notes only when the pool is short",
                got={"violations": fails or "none", "notes_dry": notes_e})
+
+
+def _stc_music_climb():
+    """§BEAT10 (0.68.6) — the climbing segments pick first, take songs at or above the target first,
+    and play in rising tempo."""
+    if M is None:
+        return _music_skip("music-climb", "§BEAT10 — the climbing segments pick first")
+    fails = []
+    mk = lambda i, tempo, energy, weight, mins=4.0: {
+        "id": i, "title": i, "artist": i, "duration_ms": int(mins * 60000),
+        "tempo": tempo, "energy": energy, "weight": weight, "discovered": 0}
+    # taste weight RISES with tempo, so an unfixed picker (processing in running order, highest score
+    # first) hands the earlier thirds the most-loved = highest-tempo songs and leaves the finish the
+    # leftovers — the 13 Sep defect this det pins.
+    pool_of = lambda n, mins=4.0: [
+        mk(f"p{i}", 166.0 + i * (6.0 / (n - 1)), 0.7, 0.5 + (166.0 + i * (6.0 / (n - 1)) - 166.0) * 0.4, mins=mins)
+        for i in range(n)]
+
+    lng = M.session_segments({"date": "2026-09-13", "kind": "long", "km": 16, "minutes": 90})
+    if [s["effort"] for s in lng] != ["long_1", "long_2", "long_3", "tail"]:
+        fails.append(f"fixture: the 16 km / 90 min long run did not yield the expected thirds + tail: "
+                     f"{[s['effort'] for s in lng]}")
+    else:
+        pool = pool_of(40)
+        if sum(1 for t in pool if t["tempo"] >= 169.0) < 20:
+            fails.append("fixture: the pool must carry at least 20 tracks at or above the 169 target")
+        out, notes = M.pick_for_segments(lng, pool, [169.0] * len(lng))
+        if [s["effort"] for s in out] != ["long_1", "long_2", "long_3", "tail"]:
+            fails.append(f"(a) the returned segments are not in running order: {[s['effort'] for s in out]}")
+        l3 = next(s for s in out if s["effort"] == "long_3")
+        l3_eff = [t["tempo"] * 2 if t.get("hit") == "half" else t["tempo"] for t in l3["tracks"]]
+        if any(e < 169.0 - 1e-9 for e in l3_eff):
+            fails.append(f"(b) long_3 holds a track under the 169 target: {l3_eff}")
+        if l3_eff != sorted(l3_eff):
+            fails.append(f"(c) long_3 is not in rising tempo: {l3_eff}")
+        seen, under, dup = set(), [], []
+        for s in out:
+            if s["filled_min"] < s["minutes"]:
+                under.append(s["effort"])
+            for t in s["tracks"]:
+                if t["id"] in seen:
+                    dup.append(t["id"])
+                seen.add(t["id"])
+        if under:
+            fails.append(f"(d) under-filled segments: {under}")
+        if dup:
+            fails.append(f"(d) tracks used twice: {dup}")
+        if notes:
+            fails.append(f"(d) a full pool produced notes: {notes}")
+
+    race = M.session_segments({"date": "2026-12-06", "kind": "race", "race": True, "km": 42.2, "minutes": 240})
+    if [s["effort"] for s in race] != ["race_settle", "race_cruise", "race_grind"]:
+        fails.append(f"fixture: the 42.2 km / 240 min race did not yield settle/cruise/grind: "
+                     f"{[s['effort'] for s in race]}")
+    else:
+        out_r, notes_r = M.pick_for_segments(race, pool_of(80), [169.0] * len(race))
+        grind = next(s for s in out_r if s["effort"] == "race_grind")
+        g_eff = [t["tempo"] * 2 if t.get("hit") == "half" else t["tempo"] for t in grind["tracks"]]
+        if any(e < 169.0 - 1e-9 for e in g_eff):
+            fails.append(f"(f) race_grind holds a track under the 169 target: {g_eff}")
+        if g_eff != sorted(g_eff):
+            fails.append(f"(f) race_grind is not in rising tempo: {g_eff}")
+    return _st("det", "music-climb",
+               "§BEAT10 (0.68.6) — the climbing segments (long_3, race_grind) pick first, take songs "
+               "at or above the target before the rest of the window, and play in rising tempo",
+               passed=not fails, expect="long_3/race_grind >= target and rising; running order kept; "
+               "every segment filled once with no notes",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_lock_band():
+    """§BEAT11 (0.68.7) — the picker fills from the ±1 % lock band before the ±2 % basin."""
+    if M is None:
+        return _music_skip("music-lock-band", "§BEAT11 — the picker fills the lock band first")
+    fails = []
+    mk = lambda i, tempo, energy, weight, mins=4.0: {
+        "id": i, "title": i, "artist": i, "duration_ms": int(mins * 60000),
+        "tempo": tempo, "energy": energy, "weight": weight, "discovered": 0}
+    seg = [{"label": "Easy run", "effort": "easy", "minutes": 20, "pace_sec": 360, "floor": 0.55}]
+    target = 170.0
+    # inner: within ±1 % (168.3–171.7) of 170, low taste; outer: within ±2 % (166.6–173.4) but
+    # outside ±1 %, high taste — a picker that scored on taste alone would take the outer six first
+    inner = [mk(f"in{i}", t, 0.7, 0.3) for i, t in enumerate([168.6, 169.0, 169.4, 170.6, 171.0, 171.4])]
+    outer = [mk(f"out{i}", t, 0.7, 2.0) for i, t in enumerate([167.0, 167.2, 167.4, 172.6, 172.8, 173.0])]
+    # (a) a full inner band (6 × 4 min = 24 min ≥ the 22 min need) fills the segment on its own —
+    # no outer track is picked, and no note (the basin never comes into play)
+    out_a, notes_a = M.pick_for_segments(seg, inner + outer, [target])
+    picked_a = {t["id"] for t in out_a[0]["tracks"]}
+    if not picked_a <= {t["id"] for t in inner}:
+        fails.append(f"(a) an outer track was picked while the inner band was not dry: {sorted(picked_a)}")
+    if notes_a:
+        fails.append(f"(a) a full inner band produced notes: {notes_a}")
+    # (b) only 3 inner tracks: the picker drains them, then widens to the basin for outer tracks —
+    # silently, since the basin is the normal rung, not a widening worth naming
+    out_b, notes_b = M.pick_for_segments(seg, inner[:3] + outer, [target])
+    picked_b = {t["id"] for t in out_b[0]["tracks"]}
+    if not {t["id"] for t in inner[:3]} <= picked_b or not picked_b & {t["id"] for t in outer}:
+        fails.append(f"(b) the 3 inner tracks plus outer ones were not all picked: {sorted(picked_b)}")
+    if any("widened" in n for n in notes_b):
+        fails.append(f"(b) widening from the lock band to the basin must stay silent: {notes_b}")
+    # (c) inner and outer both short: the picker must widen past the basin to ±3 %, and say so —
+    # exactly once, for this segment
+    beyond = [mk(f"far{i}", t, 0.7, 1.0) for i, t in enumerate([174.5, 174.7, 174.9, 175.0])]
+    out_c, notes_c = M.pick_for_segments(seg, inner[:2] + outer[:2] + beyond, [target])
+    picked_c = {t["id"] for t in out_c[0]["tracks"]}
+    if not picked_c & {t["id"] for t in beyond}:
+        fails.append(f"(c) the ±3 % tracks were not reached: {sorted(picked_c)}")
+    widen_notes = [n for n in notes_c if "window widened to ±3 %" in n]
+    if len(widen_notes) != 1:
+        fails.append(f"(c) exactly one '±3 %' widening note expected: {notes_c}")
+    return _st("det", "music-lock-band",
+               "§BEAT11 (0.68.7) — fills from the ±1 % lock band before the ±2 % basin; the basin is "
+               "silent, only ±3 %/±4 % widening is named",
+               passed=not fails, expect="inner band exhausted before the basin; basin silent; "
+               "further widening still named",
+               got={"violations": fails or "none"})
 
 
 def _stc_music_page():
@@ -17872,7 +18221,7 @@ def _stc_music_readback():
             {"id": "H1", "title": "Half", "artist": "Band", "tempo": 86.0, "hit": "half"}]}]})
         m1 = M.segment_for({"spotify_id": "A2", "title": "Same Song (Remastered)", "artist": "Band"}, by_id, by_name)
         m2 = M.segment_for({"spotify_id": "Z", "title": "Other", "artist": "Band"}, by_id, by_name)
-        if m1 != ("Work", 172.0, "work", 171.0, "full") or m2 is not None or by_id["H1"][3:] != (86.0, "half"):
+        if m1 != ("Work", 172.0, "work", 171.0, "full", False) or m2 is not None or by_id["H1"][3:] != (86.0, "half", False):
             fails.append(f"(a8) membership: {m1} {m2} {by_id.get('H1')}")
     # (a4) which laps are presses. The re-exported file has no trigger field: ten ~1 km laps plus a
     # closing stub are the watch's automatic laps → no presses; the same with one lap cut short at
@@ -18098,6 +18447,207 @@ def _stc_music_gap_infer():
                "presses 340→two break, 700→four never; rating_run + follow rows; helper removed ⇒ orphans",
                got={"inferred": got, "orphans_without": {e["at_s"]: e["spotify_id"] for e in (res0.get("presses") or [])},
                     "failures": fails or "none"})
+
+
+def _stc_music_reps_read():
+    """§BEAT9 (0.68.5) — a song in a reps block is read over the reps only. `readback`'s READ side
+    used to score every song by `_read_span`'s mean over its whole window: a song straddling a rep
+    and a jog read the average, a song on a jog alone read the jog cadence, both came out "not
+    entrained", and `held_rung` mixed reps and jogs in one weight. On the 15 Sep 9×3 run (activity
+    208349615, 176–178 spm reps against a 176.6 ask) every one of 11 block songs graded that way.
+    (a) `work_spans` from a §RD structure: the running-sum rep spans, [] when the segments do not
+    sum to the run's length within MUSIC_STRUCT_SLACK_S, and [] without a structure or with a failed
+    one. (b) end to end through `readback`: a song entirely inside one rep reads the rep's own
+    cadence and pace, one straddling a rep and a float is weighted by its rep seconds only, one
+    sitting entirely on a float is left ungraded (jogs-only, no follow row), and the warm-up song
+    outside the block reads the whole window as before. (c) `held_rung` weighs each song by its rep
+    seconds and drops the float-only song from the pool. (d) REVERT TOOTH — with `work_spans`
+    stubbed to answer [], the reps-only read never fires, and the fixture is shown to discriminate
+    (the whole-window read runs cooler). (e) `_coalesce_short` tags a block with its rep count, and
+    `_seg_is_block` reads an old, flag-less spec by its label."""
+    if M is None:
+        return _music_skip("music-reps-read", "§BEAT9 — a reps-block song is read over the reps only")
+    import tempfile, sqlite3, json as _json
+    from datetime import date as _d, timedelta as _td
+    fails, got = [], {}
+    run_start = 1_000_000.0
+    iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
+
+    # ── (a) the pure helper ──────────────────────────────────────────────────
+    segs = [{"sec": 300, "role": "warmup", "pace": 417, "km": 0.72, "zone": "Z1"}]
+    for _ in range(4):
+        segs.append({"sec": 180, "role": "work", "pace": 333, "km": 0.54, "zone": "Z4"})
+        segs.append({"sec": 120, "role": "float", "pace": 417, "km": 0.288, "zone": "Z2"})
+    st = {"v": S.STRUCT_VERSION, "ok": True, "kind": "interval", "segments": segs}
+    run_end = run_start + 1500
+    want_spans = [(run_start + 300 + i * 300, run_start + 300 + i * 300 + 180) for i in range(4)]
+    got_spans = M.work_spans(st, run_start, run_end)
+    if got_spans != want_spans:
+        fails.append(f"(a) work spans: got {got_spans}, want {want_spans}")
+    short = _json.loads(_json.dumps(st))
+    short["segments"][-1]["sec"] = 20                    # the last float shortened by 100 s
+    if M.work_spans(short, run_start, run_end) != []:
+        fails.append("(a) a structure that does not sum to the run's length must read as []")
+    if M.work_spans(None, run_start, run_end) != []:
+        fails.append("(a) no structure must read as []")
+    if M.work_spans({"ok": False, "segments": segs}, run_start, run_end) != []:
+        fails.append("(a) a failed structure must read as []")
+
+    # ── fixture: 1 Hz samples, warm-up then four work/float cycles ───────────
+    samples, dist = [], 0.0
+    for t in range(0, 1501):
+        if t < 300:
+            spm, v = 166, 2.4
+        else:
+            rel = (t - 300) % 300
+            spm, v = (177, 3.0) if rel < 180 else (164, 2.4)
+        if t:
+            dist += v
+        samples.append((run_start + t, spm, dist))
+
+    tracks = [("a", 300_000, 168.0), ("b", 180_000, 177.0), ("c", 120_000, 178.0),
+              ("d", 300_000, 176.0), ("e", 480_000, 177.0)]
+    spec = {"target_spm": 176.6, "segments": [
+        {"label": "Warm-up — easy", "effort": "warmup", "minutes": 5, "target_spm": 168,
+         "tracks": [{"id": "a", "title": "A", "artist": "Band", "tempo": 168, "hit": "full"}]},
+        {"label": "Reps — 4 × work with recovery", "effort": "work", "minutes": 20, "target_spm": 177, "reps": 4,
+         "tracks": [{"id": "b", "title": "B", "artist": "Band", "tempo": 177, "hit": "full"},
+                    {"id": "c", "title": "C", "artist": "Band", "tempo": 178, "hit": "full"},
+                    {"id": "d", "title": "D", "artist": "Band", "tempo": 176, "hit": "full"},
+                    {"id": "e", "title": "E", "artist": "Band", "tempo": 177, "hit": "full"}]}]}
+    plays = [("a", run_start + 300, 300_000), ("b", run_start + 480, 180_000), ("c", run_start + 600, 120_000),
+             ("d", run_start + 900, 300_000), ("e", run_start + 1380, 480_000)]
+    played = [{"played_at": iso(t), "duration_ms": dur, "title": i.upper(), "artist": "Band", "spotify_id": i}
+              for i, t, dur in plays]
+
+    saved_path, saved_fetch, saved_parse = M.music_db_path, M.fetch_fit, M.parse_fit
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    M.fetch_fit = lambda rid: b".FIT"
+    M.parse_fit = lambda raw: {"start": run_start, "samples": list(samples), "laps": []}
+    db = sqlite3.connect(":memory:"); db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, distance REAL, duration REAL, raw TEXT)")
+    db.execute("INSERT INTO activities VALUES(77, '2026-09-15', ?, 4.0, 1500, '{}')", (iso(run_start),))
+    db.execute("CREATE TABLE structcache(activity_id INTEGER PRIMARY KEY, structure TEXT, cached_at TEXT)")
+    db.execute("INSERT INTO structcache VALUES(77, ?, ?)", (_json.dumps(st), "x"))
+    db.commit()
+    res, res0, hr, hr0 = {}, {}, None, None
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO played(played_at, spotify_id, title, artist, duration_ms, pulled_at) VALUES(?,?,?,?,?,?)",
+                             [(x["played_at"], x["spotify_id"], x["title"], x["artist"], x["duration_ms"], "x") for x in played])
+            conn.executemany("INSERT INTO track(spotify_id, title, artist, duration_ms, tempo) VALUES(?,?,?,?,?)",
+                             [(i, i.upper(), "Band", dur, tempo) for i, dur, tempo in tracks])
+            conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES('2026-09-15-interval', 'p', 'SH · test', '', 'x', ?)",
+                         (_json.dumps(spec),))
+            conn.execute("INSERT OR REPLACE INTO setting(key, value) VALUES('press_protocol_from', '2000-01-01')")
+            conn.commit()
+        finally:
+            conn.close()
+        res = M.readback(db, 77)
+        if not res.get("ok"):
+            fails.append(f"(b) readback failed: {res.get('error')}")
+        else:
+            by = {x["spotify_id"]: x for x in res["songs"]}
+            a_, b_, c_, d_, e_ = (by.get(k) or {} for k in "abcde")
+            got.update(reps_read=res.get("reps_read"), work_spans=res.get("work_spans"),
+                       a=({k: a_.get(k) for k in ("spm", "work_s")}),
+                       d=({k: d_.get(k) for k in ("spm", "spm_all", "work_s", "entrained", "pace_sec")}),
+                       c=({k: c_.get(k) for k in ("jogs_only", "entrained", "tempo", "work_s")}),
+                       e_work_s=e_.get("work_s"))
+            if res.get("reps_read") is not True or res.get("work_spans") != 4:
+                fails.append(f"(b) reps_read/work_spans: {res.get('reps_read')} {res.get('work_spans')}")
+            if "work_s" in a_ or a_.get("spm") is None or abs(a_["spm"] - 166) > 0.5:
+                fails.append(f"(b) warm-up song a must read whole-window, ~166: {a_}")
+            if b_.get("work_s") != 160:
+                fails.append(f"(b) song b (all inside rep 1): work_s {b_.get('work_s')}")
+            if d_.get("spm_all") is None or not (170 <= d_["spm_all"] <= 174):
+                fails.append(f"(b) song d's whole-window mean (spm_all) must sit 170-174: {d_.get('spm_all')}")
+            if d_.get("spm") is None or abs(d_["spm"] - 177) > 0.5 or d_.get("work_s") != 160:
+                fails.append(f"(b) song d rep-only read: spm {d_.get('spm')} work_s {d_.get('work_s')}")
+            if d_.get("entrained") is not True:
+                fails.append(f"(b) song d must read entrained against its own 176 tempo: {d_.get('entrained')}")
+            if d_.get("pace_sec") is None or abs(d_["pace_sec"] - 333) > 3:
+                fails.append(f"(b) song d pace must read ~333 s/km over the rep only: {d_.get('pace_sec')}")
+            if c_.get("jogs_only") is not True or c_.get("entrained") is not None or c_.get("tempo") != 178.0 or c_.get("work_s") != 0:
+                fails.append(f"(b) song c (all on a float) must be jogs-only, ungraded: {c_}")
+            if e_.get("work_s") != 340 or e_.get("entrained") is not True:
+                fails.append(f"(b) song e: work_s {e_.get('work_s')} entrained {e_.get('entrained')}")
+            fw = res.get("followed") or {}
+            if fw.get("jogs_only") != 1 or fw.get("entrained") != 3 or fw.get("songs") != 4:
+                fails.append(f"(b) followed block: {fw}")
+            conn = M._mdb()
+            try:
+                fl = sorted(r["spotify_id"] for r in conn.execute("SELECT spotify_id FROM follow WHERE run_id=77"))
+                rd_by = {r["spotify_id"]: r["read_s"] for r in conn.execute("SELECT spotify_id, read_s FROM follow WHERE run_id=77")}
+            finally:
+                conn.close()
+            if "c" in fl:
+                fails.append(f"(b) no follow row for the jogs-only song c: {fl}")
+            if rd_by.get("d") != 160:
+                fails.append(f"(b) follow row for d must carry its rep seconds as read_s: {rd_by}")
+
+        # (c) held_rung weighs the reps only and drops the jogs-only song
+        today_ = _d(2026, 9, 15)
+        cv_rows = [((today_ - _td(days=200 + i * 3)).isoformat(), 8 + (i % 9) * 0.5,
+                    152 + 2.5 * (8 + (i % 9) * 0.5), 90.0) for i in range(60)]
+        cv = M.cadence_curve(cv_rows, today_, {})
+        hr = M.held_rung([res], cv) if res.get("ok") else None
+        got["held_rung"] = hr
+        if not hr or hr.get("songs") != 4 or not hr.get("held") or abs(hr.get("ran", 0) - 173.7) > 0.5:
+            fails.append(f"(c) held_rung must weigh by rep seconds and drop the float-only song: {hr}")
+
+        # (d) REVERT TOOTH — the reps-only read never fires without work_spans
+        saved_spans = M.work_spans
+        M.work_spans = lambda *a, **k: []
+        try:
+            res0 = M.readback(db, 77)
+        finally:
+            M.work_spans = saved_spans
+        by0 = {x["spotify_id"]: x for x in (res0.get("songs") or [])}
+        d0 = by0.get("d") or {}
+        got["revert_d"] = {k: d0.get(k) for k in ("spm", "entrained", "work_s")}
+        if not (res0.get("ok") and res0.get("reps_read") is False):
+            fails.append(f"(d) without work_spans reps_read must be False: {res0.get('reps_read')}")
+        if "work_s" in d0 or d0.get("entrained") is not False or d0.get("spm") is None or not (170 <= d0["spm"] <= 174):
+            fails.append(f"(d) without work_spans song d must read whole-window and not entrained: {d0}")
+        hr0 = M.held_rung([res0], cv) if res0.get("ok") else None
+        got["held_rung_revert"] = hr0
+        if not hr0 or hr0.get("songs") != 5 or hr0.get("ran", 999) > 173.0:
+            fails.append(f"(d) without work_spans every song counts and the ladder runs cooler: {hr0}")
+        if not (hr and hr0 and hr["ran"] > hr0["ran"]):
+            fails.append(f"(d) the fixture must discriminate: with-spans ran {hr and hr.get('ran')} vs without {hr0 and hr0.get('ran')}")
+    finally:
+        M.music_db_path, M.fetch_fit, M.parse_fit = saved_path, saved_fetch, saved_parse
+        db.close()
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+    # (e) _coalesce_short tags the block, _seg_is_block reads an old spec by its label
+    segs4 = []
+    for i in range(4):
+        segs4.append({"label": f"Work {i+1}/4 — 3 min", "effort": "work", "minutes": 3, "pace_sec": 290, "floor": 0.6})
+        if i < 3:
+            segs4.append({"effort": "recovery", "minutes": 2, "pace_sec": 420, "floor": 0.5, "label": "Recovery"})
+    coal = M._coalesce_short(segs4)
+    if len(coal) != 1 or coal[0].get("reps") != 4:
+        fails.append(f"(e) _coalesce_short must tag the block with its rep count: {coal}")
+    by_new, _ = M.playlist_membership({"segments": [{"label": "Reps — 9 × work with recovery", "target_spm": 176.6,
+        "tracks": [{"id": "x", "artist": "A", "title": "T", "tempo": 177, "hit": "full"}]}]})
+    by_old, _ = M.playlist_membership({"segments": [{"label": "Work — 20 min tempo", "target_spm": 176.6,
+        "tracks": [{"id": "x", "artist": "A", "title": "T", "tempo": 177, "hit": "full"}]}]})
+    if by_new["x"][5] is not True or by_old["x"][5] is not False:
+        fails.append(f"(e) _seg_is_block by label: reps-labelled {by_new['x'][5]}, work-labelled {by_old['x'][5]}")
+
+    return _st("det", "music-reps-read",
+               "§BEAT9 (0.68.5) — a song in a reps block is read over the reps only",
+               passed=not fails, expect="4 rep spans; d rep-read ~177 spm / ~333 s/km / 160 s work, entrained; "
+               "c jogs-only and ungraded; held_rung weighs by rep seconds and drops c (songs 4, held); revert "
+               "tooth without work_spans reads the whole window, songs 5, and runs cooler",
+               got={"violations": fails or "none", **got})
 
 
 def _stc_music_follow():
