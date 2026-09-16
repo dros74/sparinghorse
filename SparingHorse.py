@@ -2274,9 +2274,10 @@ def suunto_status():
 # self-hoster can point it at their own instance; the neutral default is the project repo.
 SUUNTO_GUIDE_URL = os.environ.get("SH_GUIDE_URL") or "https://github.com/dros74/sparinghorse"
 SUUNTO_ACTIVITY_RUNNING = 1
-# Plan intensity zone → the app's HR zone band (hr_zones() Z1–Z5 tuples). "easy" spans Z1–Z2 —
-# the moving easy bar (§3.4) lives in pace; on the wrist the HR band is the honest easy guard.
-_SUUNTO_ZONE_TO_HRZ = {"easy": ("Z1", "Z2"), "easy_top": ("Z2", "Z2"), "lt1": ("Z2", "Z3"),
+# Plan intensity zone → the app's HR zone band (hr_zones() Z1–Z5 tuples). §SG5 (0.68.10) — "easy"
+# is Z1 only: its top is the Z1/Z2 cutoff, the same ceiling (LTHR_EASY_FRAC × LTHR) the
+# effort-discipline panel grades easy runs against, so the wrist band and the panel agree.
+_SUUNTO_ZONE_TO_HRZ = {"easy": ("Z1", "Z1"), "easy_top": ("Z2", "Z2"), "lt1": ("Z2", "Z3"),
                        "marathon": ("Z3", "Z3"), "threshold": ("Z4", "Z4"),
                        "interval": ("Z5", "Z5"), "p5k": ("Z5", "Z5")}
 _icon_png_cache = None
@@ -2396,11 +2397,26 @@ def _pace_zone_sec(pace_zones, zone):
     return int(m.group(1)) * 60 + int(m.group(2)) if m else None
 
 
-def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False):
+def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False, layout="easy"):
     """One fields step: countdown + optional pace/HR targets + a detail text line + the boundary
     popup (§SG3), advancing on its own duration (or distance, for the distance-framed simple runs).
     `text` arrives already composed (the rep counter and the "next" hand-over on a reps day are
-    §SG4's job, in `session_to_guide`); this only clamps it to the watch's 54-char text field."""
+    §SG4's job, in `session_to_guide`); this only clamps it to the watch's 54-char text field.
+
+    §SG5 (0.68.10) — on the 16 Sep easy run the athlete watched the countdown move and the gauge
+    track pace, while "HR 127" and the pace number both sat frozen. Suunto's guide.json spec explains
+    both: only the FIRST field in a step's array is drawn as a gauge (live band vs target), so a
+    second `target*` field just sits at its static `value` forever; and neither one was ever a live
+    reading — a live number comes from a separate METRIC field type (`heartRate`, `pace`, …), which
+    the step never sent. `layout` is the fix's dial: "easy" (the default — a simple run's single
+    step, or a rep whose effort isn't "work") puts the `targetHeartRate` band first so it gets the
+    gauge, then live `heartRate` and `pace` metric fields behind it — or, when `hr` is None (no HR
+    grid to band), falls back to the old shape: `targetPace` for the gauge plus a live `heartRate`
+    metric, so a self-hoster with no HR data still gets a moving gauge. "work" keeps `targetPace` as
+    the gauge (a work rep is paced by definition) and adds only a live `heartRate` metric, no
+    `targetHeartRate` field. `hr` still reaches this function on every layout regardless: the
+    boundary popup (`_guide_notification`) keeps its HR band on any step that has one, whether or not
+    the field itself was drawn."""
     fields, cond, dur = [], None, None
     if minutes:
         fields.append({"type": "stepDurationCountdown", "title": "left",
@@ -2413,10 +2429,19 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
         cond = {"type": "stepDistance", "value": round(km * 1000.0, 1)}
         dur = f"{km:g}km"
     pt = _pace_target(pace_sec)
-    if pt:
-        fields.append(pt)
-    if hr:
-        fields.append(hr)
+    if layout == "work":
+        if pt:
+            fields.append(pt)
+        fields.append({"type": "heartRate", "title": "HR"})
+    else:
+        if hr:
+            fields.append({**hr, "title": "HR band"})
+            fields.append({"type": "heartRate", "title": "HR"})
+            if pt:
+                fields.append({"type": "pace", "title": "pace"})
+        elif pt:
+            fields.append(pt)
+            fields.append({"type": "heartRate", "title": "HR"})
     txt = _guide_txt(text, 54)
     if txt:
         fields.append({"type": "text", "value": txt})
@@ -2450,7 +2475,21 @@ def session_to_guide(session, hrz=None, pace_zones=None):
       · the rep's pace target reads `pace_zones` (the plan's own m:ss/km table, passed by the
         caller) rather than re-deriving it from the rep's km/minutes — `_qblock` rounds a rep's km
         to 0.1, so that re-derivation used to read back a lossier pace than the zone actually prices
-        (see `_pace_zone_sec`)."""
+        (see `_pace_zone_sec`).
+
+    §SG5 (0.68.10) — on the 16 Sep easy run the athlete's guide screen showed the distance countdown
+    moving and the gauge tracking pace, while "HR 127" and the pace number both sat frozen the whole
+    run. Suunto's guide.json spec explains it: a step's FIRST field is the only one drawn as a gauge,
+    so the easy step's second target (`targetHeartRate`) just sat at its static midpoint value; and
+    neither target was ever a live reading in the first place — a live number needs its own METRIC
+    field type (`heartRate`, `pace`, …), which the step never sent. Now every step carries 4–5
+    fields and the class of the rep (not the kind of session) picks the shape, via `_guide_step`'s
+    `layout`: an easy-class rep — the simple run's one step, or any rep whose effort isn't "work" —
+    leads with the `targetHeartRate` band (so HR gets the gauge) and follows it with live `heartRate`
+    and `pace` metrics, because an easy effort is watching HR, not chasing a pace; a work rep keeps
+    `targetPace` as the gauge (a work rep is paced by definition) and adds a live `heartRate` metric
+    beside it, dropping the static `targetHeartRate` field — the boundary popup still carries the
+    HR band on a work step, unchanged."""
     kind = session.get("kind", "run")
     km = session.get("km") or 0
     if km <= 0:
@@ -2481,8 +2520,8 @@ def session_to_guide(session, hrz=None, pace_zones=None):
             if pace_sec is None:
                 pace_sec = _rep_pace_sec(r)
             steps.append(_guide_step(
-                title, text, minutes=r["minutes"],
-                pace_sec=pace_sec, hr=_hr_target(r["zone"], hrz), lap=work))
+                title, text, minutes=r["minutes"], pace_sec=pace_sec, hr=_hr_target(r["zone"], hrz),
+                lap=work, layout="work" if work else "easy"))
     else:
         pace_sec = session["minutes"] * 60.0 / km if session.get("minutes") else None
         steps.append(_guide_step("Run", session.get("note", ""), km=km,

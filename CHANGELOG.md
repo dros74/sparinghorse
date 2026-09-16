@@ -10,6 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.68.10] - 2026-09-17
+
+### Fixed
+
+- **The guide screen showed a frozen HR and a pace gauge on an easy run.**
+  On the 16 Sep easy run the distance countdown moved and the half-circle gauge tracked pace, while
+  "HR 127" and the pace number both sat frozen for the whole run. The watch draws a gauge only for a
+  step's first field, so the easy step's second target, `targetHeartRate`, was printed at its static
+  midpoint (127, the middle of the old Z1–Z2 band) instead of a live reading — and neither target was
+  ever a live number to begin with; a live reading needs its own metric field, which the step never
+  carried. An easy-class step (a simple run, or any rep whose effort isn't "work") now leads with the
+  HR band so it gets the gauge, then carries live HR and pace readings behind it; a work rep keeps
+  its pace gauge and adds a live HR reading, dropping the static HR field. The easy band itself
+  narrows to Z1. A guide already on the watch is not re-downloaded by an update — press "Rebuild
+  guides" (Settings), or wait for the nightly push, before the next run.
+
+## [0.68.9] - 2026-09-17
+
+### Fixed
+
+- **A song followed on the beat read as missed by 1.4 %, and the lists were built that much slow.**
+  The Suunto Race S writes cadence as a whole-number strides/min count that reads low against the
+  same file's own stride total — three original FITs (23 Aug, 6 Sep, 16 Sep) measured −2.1, −2.3,
+  −2.7 spm, mean −2.4 (−1.4 %). Every cadence the app holds is in that low unit; song tempo is not,
+  so the read-back called a song missed that the legs had locked on — the 16 Sep run read 5 of 20
+  songs followed, 18 of 20 once corrected — and the picker filled lists that much under the runner's
+  true cadence. A new `CADENCE_SENSOR_BIAS_SPM` (2.4) now applies only where legs meet songs; the
+  stored target, the curve and the rung still compare legs with legs. A list built before this
+  update carries no correction; press "Read again" to re-grade a run.
+
 ## [0.68.8] - 2026-09-16
 
 ### Fixed

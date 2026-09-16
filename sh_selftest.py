@@ -8163,9 +8163,26 @@ def _stc_guides():
     elif abs(tp["value"] - 1000.0 / zones["threshold"]) > 0.2 or not (1.5 < tp["value"] < 7.5):
         fails.append(f"targetPace not m/s of threshold pace: {tp['value']} vs "
                      f"{1000.0 / zones['threshold']:.3f}")
-    th = next((f for f in work["fields"] if f["type"] == "targetHeartRate"), None)
-    if not th or (th["min"], th["max"]) != (157, 166):
-        fails.append(f"work HR band != grid Z4: {th}")
+    # §SG5 (0.68.10) — a work step's static HR gauge is GONE (the wrist got a live reading instead);
+    # its targetPace stays first after the countdown, unchanged.
+    if any(f["type"] == "targetHeartRate" for f in work["fields"]):
+        fails.append(f"work step still carries a targetHeartRate field: {work['fields']}")
+    if not any(f["type"] == "heartRate" for f in work["fields"]):
+        fails.append("work step missing its live heartRate metric field")
+    if work["fields"][0]["type"] != "stepDurationCountdown" or work["fields"][1]["type"] != "targetPace":
+        fails.append(f"work targetPace not first after the countdown: "
+                     f"{[f['type'] for f in work['fields']]}")
+    # §SG5 — a non-work rep (the warm-up) leads with the targetHeartRate BAND (it gets the gauge),
+    # then live heartRate + pace metrics, and carries no targetPace at all.
+    warm = g["steps"][0]
+    warm_types = [f["type"] for f in warm["fields"]]
+    if warm_types != ["stepDurationCountdown", "targetHeartRate", "heartRate", "pace", "text"]:
+        fails.append(f"warm-up field order wrong: {warm_types}")
+    wth = next((f for f in warm["fields"] if f["type"] == "targetHeartRate"), None)
+    if not wth or (wth["min"], wth["max"]) != (95, 135):
+        fails.append(f"warm-up HR band != grid Z1 (95,135): {wth}")
+    if any(f["type"] == "targetPace" for f in warm["fields"]):
+        fails.append(f"warm-up step still carries a targetPace field: {warm_types}")
     if g["externalId"] != S.session_guide_external_id(sess) or g["externalId"] != "sh-2026-07-15-intervals":
         fails.append(f"externalId not stable/derived: {g['externalId']}")
     # simple easy run: single DISTANCE-framed step (metres), pace from km/minutes, no HR without a grid
@@ -8179,6 +8196,11 @@ def _stc_guides():
     tp2 = next((f for f in st2["fields"] if f["type"] == "targetPace"), None)
     if not tp2 or abs(tp2["value"] - 1000.0 / 360.0) > 0.01:
         fails.append(f"easy targetPace wrong: {tp2}")
+    if st2["fields"][0]["type"] != "stepDistanceCountdown" or st2["fields"][1]["type"] != "targetPace":
+        fails.append(f"easy(no grid) targetPace not first after the countdown: "
+                     f"{[f['type'] for f in st2['fields']]}")
+    if not any(f["type"] == "heartRate" for f in st2["fields"]):
+        fails.append("easy(no grid) missing its live heartRate metric field")
     if any(f["type"] == "targetHeartRate" for f in st2["fields"]):
         fails.append("HR target emitted without an HR grid")
     try:
@@ -9505,6 +9527,98 @@ def _stc_guide_reps_text():
                                                   if f["type"] == "text"), None),
                     "targetPace": tp["value"], "zone_pace_v": round(zone_v, 4),
                     "rounded_km_pace_v": round(rounded_v, 4)})
+
+
+def _stc_guide_screen_layout():
+    """§SG5 (0.68.10) det-lock — the 16 Sep easy run showed a moving distance countdown, a gauge
+    that only ever tracked pace, and "HR 127" frozen for the whole run: Suunto draws a gauge for
+    only the FIRST field in a step's array, so the step's second target field (`targetHeartRate`)
+    just sat at its static midpoint, and neither target was ever a live reading — that needs its own
+    METRIC field type, which the step never sent. Locked here: an easy-class rep (any effort that
+    isn't "work") and the simple run lead with the `targetHeartRate` BAND, so HR gets the gauge, then
+    carry live `heartRate` + `pace` metrics and no `targetPace`; a work rep keeps `targetPace` as the
+    gauge and adds only a live `heartRate` metric, no `targetHeartRate` field; the easy band is Z1
+    only (top = the effort-discipline panel's easy ceiling, not the old Z1–Z2 span); every field
+    title stays inside the watch's 9-char shared-step limit and no step exceeds 5 fields; the
+    boundary popup still carries a work step's HR band.
+
+    THE REVERT TOOTH is assertion block (f): on the OLD code every step in both guides carried
+    `targetPace` (an easy-class rep's or the simple run's ONLY target), and no step ever carried both
+    `targetPace` and `targetHeartRate` together (a step only ever got one target field). (f) asserts
+    the opposite — no easy-class step (nor the simple run) carries `targetPace`, and no step anywhere
+    carries both target fields at once — so this det fails outright on the pre-§SG5 code, no
+    monkeypatch required."""
+    from datetime import date as _d
+    fails = []
+    zones = S.pace_zones(50.0)
+    spec = {"zone": "threshold", "structure": "intervals", "rep_min": 5, "rec_min": 2,
+            "kind": "intervals", "label": "cruise intervals"}
+    sess = S._build_quality(spec, 78, _d(2026, 7, 13), 2, zones, zones["easy"])
+    hrz = {"anchor": "lthr", "ref": 166, "cutoffs": [135, 149, 157, 166],
+           "zones": [("Z1", None, 135), ("Z2", 135, 149), ("Z3", 149, 157),
+                     ("Z4", 157, 166), ("Z5", 166, None)], "lthr_confidence": "high"}
+    g, _b = S.session_to_guide(sess, hrz)
+    easy = {"date": "2026-07-14", "kind": "easy", "km": 8.0, "minutes": 48, "trimp": 48,
+            "pace_zone": "6:00/km easy", "note": "easy run"}
+    g2, _b2 = S.session_to_guide(easy, hrz)
+
+    # (a) field order on an easy-class rep, and on the simple run
+    warm = g["steps"][0]
+    warm_types = [f["type"] for f in warm["fields"]]
+    if warm_types != ["stepDurationCountdown", "targetHeartRate", "heartRate", "pace", "text"]:
+        fails.append(f"(a) easy-class rep field order wrong: {warm_types}")
+    simple = g2["steps"][0]
+    simple_types = [f["type"] for f in simple["fields"]]
+    if simple_types != ["stepDistanceCountdown", "targetHeartRate", "heartRate", "pace", "text"]:
+        fails.append(f"(a) simple-run field order wrong: {simple_types}")
+
+    # (b) field order on a work rep
+    work = next(st_ for st_, r in zip(g["steps"], sess["reps"]) if r["effort"] == "work")
+    work_types = [f["type"] for f in work["fields"]]
+    if work_types != ["stepDurationCountdown", "targetPace", "heartRate", "text"]:
+        fails.append(f"(b) work rep field order wrong: {work_types}")
+
+    # (c) the easy band is Z1 only: grid Z1 = (None, 135) -> (95, 135), value = the midpoint
+    wth = next((f for f in warm["fields"] if f["type"] == "targetHeartRate"), None)
+    if not wth or (wth["min"], wth["max"]) != (95, 135) or wth["value"] != 115:
+        fails.append(f"(c) easy band != Z1 (95,135) mid 115: {wth}")
+
+    # (d) every field title <=9 chars, and no step carries more than 5 fields, across BOTH guides
+    for guide in (g, g2):
+        for st_ in guide["steps"]:
+            for f in st_["fields"]:
+                if len(f.get("title") or "") > 9:
+                    fails.append(f"(d) field title >9 chars on {st_['title']!r}: {f}")
+            if len(st_["fields"]) > 5:
+                fails.append(f"(d) step exceeds 5 fields: {st_['title']!r} has {len(st_['fields'])}")
+
+    # (e) the work rep's boundary popup still ends with its "HR lo-hi" band (grid Z4 = 157-166)
+    notif = (work.get("notification") or {}).get("text", "")
+    if "HR 157-166" not in notif:
+        fails.append(f"(e) work popup lost its HR band: {notif!r}")
+
+    # (f) REVERT TOOTH — see docstring: both were true of every step before this change
+    for st_, r in zip(g["steps"], sess["reps"]):
+        types = {f["type"] for f in st_["fields"]}
+        if r["effort"] != "work" and "targetPace" in types:
+            fails.append(f"(f) REVERT TOOTH: easy-class rep still carries targetPace: {st_['title']!r}")
+        if {"targetPace", "targetHeartRate"} <= types:
+            fails.append(f"(f) REVERT TOOTH: step carries BOTH target fields: {st_['title']!r}")
+    if "targetPace" in simple_types:
+        fails.append("(f) REVERT TOOTH: the simple run still carries targetPace")
+    if {"targetPace", "targetHeartRate"} <= set(simple_types):
+        fails.append("(f) REVERT TOOTH: the simple run carries BOTH target fields")
+
+    return _st("det", "guide-screen-layout",
+               "§SG5 (0.68.10) — the two guide-step shapes (easy-class: targetHeartRate band + live "
+               "heartRate/pace metrics; work: targetPace band + a live heartRate metric) replace the "
+               "static, never-moving second target that produced the 16 Sep 'HR 127' freeze",
+               passed=not fails,
+               expect="(a)/(b) field order per step class, (c) Z1-only easy band, (d) title/field "
+               "count limits, (e) popup HR band on work, (f) revert tooth failing on the old code",
+               got={"failures": fails or "none", "warm_fields": warm_types, "work_fields": work_types,
+                    "simple_fields": simple_types, "easy_hr_band": None if not wth else
+                    (wth["min"], wth["max"], wth["value"])})
 
 
 def _stc_hr_zones():
@@ -17545,7 +17659,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -17567,7 +17681,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
                  lambda: _stc_guide_recreate(), lambda: _stc_guide_notify(),
-                 lambda: _stc_guide_reps_text(),
+                 lambda: _stc_guide_reps_text(), lambda: _stc_guide_screen_layout(),
                  lambda: _stc_stream_optin(),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
                  lambda: _stc_health_staleness(), lambda: _stc_explain_cache(), lambda: _stc_calibration_inventory(), lambda: _stc_track_record(),
@@ -17929,28 +18043,36 @@ def _stc_music_pick():
     mk = lambda i, tempo, energy, weight, mins=4.0, disc=0, title=None, artist=None: {
         "id": i, "title": title or i, "artist": artist or i, "duration_ms": int(mins * 60000),
         "tempo": tempo, "energy": energy, "weight": weight, "discovered": disc}
-    pool = ([mk(f"w{i}", 165 + i * 0.6, 0.5 + i * 0.03, 1.0 - i * 0.1) for i in range(4)]
-            + [mk(f"k{i}", 170 + i, 0.75 + i * 0.03, 0.8) for i in range(5)]
-            + [mk("klow", 172, 0.60, 2.0), mk("kmid", 172, 0.65, 2.0)]
-            + [mk(f"c{i}", 163 + i * 0.7, 0.45, 0.5) for i in range(3)]
-            + [mk("h1", 86, 0.85, 1.5), mk("h2", 82, 0.85, 1.5), mk("far", 180, 0.9, 3.0)]
+    # §BEAT12 — every pool tempo below is written target + M.CADENCE_SENSOR_BIAS_SPM + offset: the
+    # picker now matches songs against the target lifted by the sensor bias, so the pool has to sit
+    # there too for the offsets (and the exclusions) to mean what the comments say
+    B = M.CADENCE_SENSOR_BIAS_SPM
+    pool = ([mk(f"w{i}", 165 + B + i * 0.6, 0.5 + i * 0.03, 1.0 - i * 0.1) for i in range(4)]
+            + [mk(f"k{i}", 170 + B + i, 0.75 + i * 0.03, 0.8) for i in range(5)]
+            + [mk("klow", 172 + B, 0.60, 2.0), mk("kmid", 172 + B, 0.65, 2.0)]
+            + [mk(f"c{i}", 163 + B + i * 0.7, 0.45, 0.5) for i in range(3)]
+            # h2 doubles to 164 + B, the cool-down's lock band centre once the sensor bias lifts the
+            # target — the warm-up fills from its own w-group before a half-time hit is ever tried there
+            + [mk("h1", 86, 0.85, 1.5), mk("h2", 82 + B / 2, 0.85, 1.5), mk("far", 180, 0.9, 3.0)]
             # §BEAT7 — an ambient track in the window with the heaviest taste: under the plausibility floor
-            + [mk("amb", 172, 0.20, 3.0)]
+            + [mk("amb", 172 + B, 0.20, 3.0)]
             # the same song twice under two ids (single + album): only one may play
-            + [mk("dup1", 171.5, 0.80, 2.5, title="Same Song", artist="Same Band"),
-               mk("dup2", 172.5, 0.82, 2.5, title="Same Song (Remastered)", artist="Same Band")])
+            + [mk("dup1", 171.5 + B, 0.80, 2.5, title="Same Song", artist="Same Band"),
+               mk("dup2", 172.5 + B, 0.82, 2.5, title="Same Song (Remastered)", artist="Same Band")])
     segs = [{"label": "Warm-up", "effort": "warmup", "minutes": 10, "pace_sec": 420, "floor": 0.45},
             {"label": "Work", "effort": "work", "minutes": 15, "pace_sec": 330, "floor": 0.70},
             {"label": "Cool-down", "effort": "cooldown", "minutes": 8, "pace_sec": 430, "floor": 0.40}]
     targets = [166.0, 172.0, 164.0]
     out, notes = M.pick_for_segments(segs, pool, targets, half_time=False)
+    bias_note = f"songs sit {B:.1f} bpm above the target: the watch counts cadence that much low"
     seen = set()
     for sg in out:
         w = M.MUSIC_TEMPO_WINDOW
+        song_t = sg["target_spm"] + B                # §BEAT12 — legs meet songs at the target lifted by the bias
         for t in sg["tracks"]:
             eff = t["tempo"] * 2 if t["hit"] == "half" else t["tempo"]
-            if abs(eff - sg["target_spm"]) > w * sg["target_spm"] + 1e-9:
-                fails.append(f"(a) {t['id']} outside ±{w:.0%} of {sg['target_spm']} in {sg['label']}")
+            if abs(eff - song_t) > w * song_t + 1e-9:
+                fails.append(f"(a) {t['id']} outside ±{w:.0%} of {song_t} in {sg['label']}")
             if t["id"] in seen:
                 fails.append(f"(a) {t['id']} used twice")
             seen.add(t["id"])
@@ -17963,8 +18085,10 @@ def _stc_music_pick():
         fails.append(f"(a) energy must not gate: the two weight-2.0 tracks at 172 must be in the work picks, got {work_ids}")
     if len(seen & {"dup1", "dup2"}) != 1:
         fails.append(f"(a) the same song under two ids must play once: {seen & {'dup1', 'dup2'}}")
-    if notes:
+    if [n for n in notes if n != bias_note]:
         fails.append(f"(a) a full pool produced notes: {notes}")
+    elif notes != [bias_note]:                        # §BEAT12 — the one note every list carries
+        fails.append(f"(a) the sensor-bias note is missing or duplicated: {notes}")
     # (g) §BEAT7 — rotation: the two weight-2.0 tracks were on three recent lists → the fresh k
     # tracks fill the segment ahead of them, and the note counts the new; the legs' verdict: k0
     # followed (+1.0) leads the k tracks, k4 broke and dipped (−1.5) is not picked at all
@@ -17972,16 +18096,16 @@ def _stc_music_pick():
     # spread of k-tracks even gets looked at, so (g) and the verdict check below get their own
     # small pools, sized so the outcome is decided by score inside one rung rather than by which
     # rung a track happens to fall in
-    pool_r = ([mk(f"k{i}", 172 + d, 0.8, 0.8) for i, d in enumerate((-1.0, -0.5, 0.0, 0.5, 1.0))]
-              + [mk("klow", 172, 0.8, 2.0), mk("kmid", 172, 0.8, 2.0)])
+    pool_r = ([mk(f"k{i}", 172 + B + d, 0.8, 0.8) for i, d in enumerate((-1.0, -0.5, 0.0, 0.5, 1.0))]
+              + [mk("klow", 172 + B, 0.8, 2.0), mk("kmid", 172 + B, 0.8, 2.0)])
     out_r, notes_r = M.pick_for_segments(segs[1:2], pool_r, [172.0], served={"klow": 3, "kmid": 3})
     got_r = [t["id"] for t in out_r[0]["tracks"]]
     if "klow" in got_r or "kmid" in got_r or not any("new to the last" in n and "5 of 5" in n for n in notes_r):
         fails.append(f"(g) served tracks must yield to fresh ones and the note count them: picks={got_r} notes={notes_r}")
     if any(t.get("served") != 0 for t in out_r[0]["tracks"]) or out_r[0].get("fresh") != len(got_r):
         fails.append(f"(g) picks must carry served/fresh: {[(t['id'], t.get('served')) for t in out_r[0]['tracks']]} fresh={out_r[0].get('fresh')}")
-    pool_l = ([mk(f"k{i}", 171.0 + i * 0.5, 0.8, 0.8) for i in range(5)]
-              + [mk("f1", 171.5, 0.8, 0.8), mk("f2", 172.5, 0.8, 0.8)])
+    pool_l = ([mk(f"k{i}", 171.0 + B + i * 0.5, 0.8, 0.8) for i in range(5)]
+              + [mk("f1", 171.5 + B, 0.8, 0.8), mk("f2", 172.5 + B, 0.8, 0.8)])
     out_l, _ = M.pick_for_segments(segs[1:2], pool_l, [172.0], follow={"k0": 1.0, "k4": -1.5})
     got_l = [t["id"] for t in out_l[0]["tracks"]]
     ks = [i for i in got_l if i.startswith("k") and i not in ("klow", "kmid")]
@@ -17997,12 +18121,14 @@ def _stc_music_pick():
     if wu != sorted(wu):
         fails.append(f"(b) warm-up not calm-first: {wu}")
     out_h, _ = M.pick_for_segments(segs, pool, targets, half_time=True)
-    # §BEAT5 — half-time ON: the 82-bpm track lands on the COOL-DOWN (164) as 'half'; the 86-bpm one
-    # never lands on the WORK segment (172), whatever the setting — a beat per stride did not carry the
-    # tempo (2026-09-08)
-    hh = [t for sg in (out_h[0], out_h[2]) for t in sg["tracks"] if t["id"] == "h2"]   # warm-up 166 or cool-down 164: both in reach of 82 × 2
+    # §BEAT5 — half-time ON: the (82 + B/2)-bpm track doubles to 164 + B, the cool-down's lock-band
+    # centre once the sensor bias lifts the target, and lands there as 'half' (the warm-up's own
+    # w-group already fills its lock band, so a half-time hit is never even tried there); the 86-bpm
+    # one never lands on the WORK segment (172), whatever the setting — a beat per stride did not
+    # carry the tempo (2026-09-08)
+    hh = [t for sg in (out_h[0], out_h[2]) for t in sg["tracks"] if t["id"] == "h2"]   # cool-down: in reach of (82 + B/2) × 2
     if not hh or hh[0]["hit"] != "half":
-        fails.append("(c) half-time ON must accept the 82-bpm track on an easy segment (164/166) as 'half'")
+        fails.append("(c) half-time ON must accept the (82 + B/2)-bpm track on the cool-down as 'half'")
     if any(t["id"] == "h1" for t in out_h[1]["tracks"]):
         fails.append("(c) half-time ON must still refuse the 86-bpm track on the 172 WORK segment")
     # (f) §BEAT5 — set aside: a track ruled out for work stays out of the work segment; one ruled out
@@ -18018,10 +18144,12 @@ def _stc_music_pick():
     def discover(target, floor, window):
         calls.append((target, floor, window))
         return [mk(f"d{i}", 150 + i * 0.5, 0.8, 0.0, disc=1) for i in range(5)]
-    # 150 bpm is dry even at ±4 % (144–156): the nearest pool tracks sit at 163 and, half-time off, 86
+    # 150 raw (152.4 = 150 + B once the picker lifts it) is dry even at ±4 % (146.3–158.5): the
+    # nearest pool tracks sit at ~165–167 (the shifted c-group) and, half-time off, 86
     dry = [{"label": "Work", "effort": "work", "minutes": 12, "pace_sec": 300, "floor": 0.70}]
     out_d, notes_d = M.pick_for_segments(dry, pool, [150.0], discover=discover)
-    if len(calls) != 1 or not out_d[0]["tracks"] or not all(t.get("discovered") for t in out_d[0]["tracks"]) or notes_d:
+    if len(calls) != 1 or not out_d[0]["tracks"] or not all(t.get("discovered") for t in out_d[0]["tracks"]) \
+            or [n for n in notes_d if n != bias_note]:
         fails.append(f"(d) discovery: calls={calls} picks={[t['id'] for t in out_d[0]['tracks']]} notes={notes_d}")
     out_e, notes_e = M.pick_for_segments(dry, pool, [150.0], discover=lambda *a: [])
     if sum("widened" in n for n in notes_e) != 2 or any("relaxed" in n for n in notes_e) \
@@ -18042,14 +18170,17 @@ def _stc_music_climb():
     if M is None:
         return _music_skip("music-climb", "§BEAT10 — the climbing segments pick first")
     fails = []
+    B = M.CADENCE_SENSOR_BIAS_SPM
+    bias_note = f"songs sit {B:.1f} bpm above the target: the watch counts cadence that much low"
     mk = lambda i, tempo, energy, weight, mins=4.0: {
         "id": i, "title": i, "artist": i, "duration_ms": int(mins * 60000),
         "tempo": tempo, "energy": energy, "weight": weight, "discovered": 0}
     # taste weight RISES with tempo, so an unfixed picker (processing in running order, highest score
     # first) hands the earlier thirds the most-loved = highest-tempo songs and leaves the finish the
-    # leftovers — the 13 Sep defect this det pins.
+    # leftovers — the 13 Sep defect this det pins. §BEAT12: the pool sits at 166 + B .. 172 + B, since
+    # the picker now matches songs against the target lifted by the sensor bias.
     pool_of = lambda n, mins=4.0: [
-        mk(f"p{i}", 166.0 + i * (6.0 / (n - 1)), 0.7, 0.5 + (166.0 + i * (6.0 / (n - 1)) - 166.0) * 0.4, mins=mins)
+        mk(f"p{i}", 166.0 + B + i * (6.0 / (n - 1)), 0.7, 0.5 + (166.0 + i * (6.0 / (n - 1)) - 166.0) * 0.4, mins=mins)
         for i in range(n)]
 
     lng = M.session_segments({"date": "2026-09-13", "kind": "long", "km": 16, "minutes": 90})
@@ -18058,15 +18189,15 @@ def _stc_music_climb():
                      f"{[s['effort'] for s in lng]}")
     else:
         pool = pool_of(40)
-        if sum(1 for t in pool if t["tempo"] >= 169.0) < 20:
-            fails.append("fixture: the pool must carry at least 20 tracks at or above the 169 target")
+        if sum(1 for t in pool if t["tempo"] >= 169.0 + B) < 20:
+            fails.append("fixture: the pool must carry at least 20 tracks at or above the 169 + B target")
         out, notes = M.pick_for_segments(lng, pool, [169.0] * len(lng))
         if [s["effort"] for s in out] != ["long_1", "long_2", "long_3", "tail"]:
             fails.append(f"(a) the returned segments are not in running order: {[s['effort'] for s in out]}")
         l3 = next(s for s in out if s["effort"] == "long_3")
         l3_eff = [t["tempo"] * 2 if t.get("hit") == "half" else t["tempo"] for t in l3["tracks"]]
-        if any(e < 169.0 - 1e-9 for e in l3_eff):
-            fails.append(f"(b) long_3 holds a track under the 169 target: {l3_eff}")
+        if any(e < 169.0 + B - 1e-9 for e in l3_eff):
+            fails.append(f"(b) long_3 holds a track under the 169 + B target: {l3_eff}")
         if l3_eff != sorted(l3_eff):
             fails.append(f"(c) long_3 is not in rising tempo: {l3_eff}")
         seen, under, dup = set(), [], []
@@ -18081,7 +18212,7 @@ def _stc_music_climb():
             fails.append(f"(d) under-filled segments: {under}")
         if dup:
             fails.append(f"(d) tracks used twice: {dup}")
-        if notes:
+        if [n for n in notes if n != bias_note]:
             fails.append(f"(d) a full pool produced notes: {notes}")
 
     race = M.session_segments({"date": "2026-12-06", "kind": "race", "race": True, "km": 42.2, "minutes": 240})
@@ -18092,15 +18223,15 @@ def _stc_music_climb():
         out_r, notes_r = M.pick_for_segments(race, pool_of(80), [169.0] * len(race))
         grind = next(s for s in out_r if s["effort"] == "race_grind")
         g_eff = [t["tempo"] * 2 if t.get("hit") == "half" else t["tempo"] for t in grind["tracks"]]
-        if any(e < 169.0 - 1e-9 for e in g_eff):
-            fails.append(f"(f) race_grind holds a track under the 169 target: {g_eff}")
+        if any(e < 169.0 + B - 1e-9 for e in g_eff):
+            fails.append(f"(f) race_grind holds a track under the 169 + B target: {g_eff}")
         if g_eff != sorted(g_eff):
             fails.append(f"(f) race_grind is not in rising tempo: {g_eff}")
     return _st("det", "music-climb",
                "§BEAT10 (0.68.6) — the climbing segments (long_3, race_grind) pick first, take songs "
                "at or above the target before the rest of the window, and play in rising tempo",
                passed=not fails, expect="long_3/race_grind >= target and rising; running order kept; "
-               "every segment filled once with no notes",
+               "every segment filled once with no notes beyond the sensor-bias one",
                got={"violations": fails or "none"})
 
 
@@ -18109,22 +18240,26 @@ def _stc_music_lock_band():
     if M is None:
         return _music_skip("music-lock-band", "§BEAT11 — the picker fills the lock band first")
     fails = []
+    B = M.CADENCE_SENSOR_BIAS_SPM
+    bias_note = f"songs sit {B:.1f} bpm above the target: the watch counts cadence that much low"
     mk = lambda i, tempo, energy, weight, mins=4.0: {
         "id": i, "title": i, "artist": i, "duration_ms": int(mins * 60000),
         "tempo": tempo, "energy": energy, "weight": weight, "discovered": 0}
     seg = [{"label": "Easy run", "effort": "easy", "minutes": 20, "pace_sec": 360, "floor": 0.55}]
     target = 170.0
-    # inner: within ±1 % (168.3–171.7) of 170, low taste; outer: within ±2 % (166.6–173.4) but
-    # outside ±1 %, high taste — a picker that scored on taste alone would take the outer six first
-    inner = [mk(f"in{i}", t, 0.7, 0.3) for i, t in enumerate([168.6, 169.0, 169.4, 170.6, 171.0, 171.4])]
-    outer = [mk(f"out{i}", t, 0.7, 2.0) for i, t in enumerate([167.0, 167.2, 167.4, 172.6, 172.8, 173.0])]
+    # §BEAT12 — the picker matches songs against 170 + B (172.4), so every tempo below is written
+    # relative to that, not to the raw 170 target. inner: within ±1 % (170.7–174.1) of 172.4, low
+    # taste; outer: within ±2 % (169.0–175.8) but outside ±1 %, high taste — a picker that scored on
+    # taste alone would take the outer six first
+    inner = [mk(f"in{i}", B + t, 0.7, 0.3) for i, t in enumerate([168.6, 169.0, 169.4, 170.6, 171.0, 171.4])]
+    outer = [mk(f"out{i}", B + t, 0.7, 2.0) for i, t in enumerate([167.0, 167.2, 167.4, 172.6, 172.8, 173.0])]
     # (a) a full inner band (6 × 4 min = 24 min ≥ the 22 min need) fills the segment on its own —
-    # no outer track is picked, and no note (the basin never comes into play)
+    # no outer track is picked, and no note beyond the sensor-bias one (the basin never comes into play)
     out_a, notes_a = M.pick_for_segments(seg, inner + outer, [target])
     picked_a = {t["id"] for t in out_a[0]["tracks"]}
     if not picked_a <= {t["id"] for t in inner}:
         fails.append(f"(a) an outer track was picked while the inner band was not dry: {sorted(picked_a)}")
-    if notes_a:
+    if [n for n in notes_a if n != bias_note]:
         fails.append(f"(a) a full inner band produced notes: {notes_a}")
     # (b) only 3 inner tracks: the picker drains them, then widens to the basin for outer tracks —
     # silently, since the basin is the normal rung, not a widening worth naming
@@ -18136,7 +18271,7 @@ def _stc_music_lock_band():
         fails.append(f"(b) widening from the lock band to the basin must stay silent: {notes_b}")
     # (c) inner and outer both short: the picker must widen past the basin to ±3 %, and say so —
     # exactly once, for this segment
-    beyond = [mk(f"far{i}", t, 0.7, 1.0) for i, t in enumerate([174.5, 174.7, 174.9, 175.0])]
+    beyond = [mk(f"far{i}", B + t, 0.7, 1.0) for i, t in enumerate([174.5, 174.7, 174.9, 175.0])]
     out_c, notes_c = M.pick_for_segments(seg, inner[:2] + outer[:2] + beyond, [target])
     picked_c = {t["id"] for t in out_c[0]["tracks"]}
     if not picked_c & {t["id"] for t in beyond}:
@@ -18149,6 +18284,114 @@ def _stc_music_lock_band():
                "silent, only ±3 %/±4 % widening is named",
                passed=not fails, expect="inner band exhausted before the basin; basin silent; "
                "further widening still named",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_sensor_bias():
+    """§BEAT12 (0.68.9) — the watch's per-second cadence reads CADENCE_SENSOR_BIAS_SPM under its own
+    stride counter; the picker and the read-back's entrainment gate correct for it, everything else
+    (the curve, the targets, the rung) stays in watch units. (a) picker: a 170 target, a one-track
+    segment, and a pool at 169.0 (inside ±1 % of 170 but outside ±1 % of 170 + B), 172.4 (= 170 + B
+    exactly) and 176.0 — the pick is the 172.4 track, not the 169.0 one, and the list carries exactly
+    one 'songs sit … above the target' note. (b) read-back: legs reading 170.0 (watch) against a
+    172.4 tempo read entrained with delta≈0; the same legs against a 170.0 tempo do not. (c) REVERT
+    TOOTH — with the bias zeroed, (a) picks the 169.0 track and (b)'s first case is not entrained:
+    the det fails without the change."""
+    if M is None:
+        return _music_skip("music-sensor-bias", "§BEAT12 — the watch's cadence sensor reads low")
+    import tempfile, sqlite3, json as _json
+    fails = []
+    B = M.CADENCE_SENSOR_BIAS_SPM
+    mk = lambda i, tempo, energy, weight, mins=5.0: {
+        "id": i, "title": i, "artist": i, "duration_ms": int(mins * 60000),
+        "tempo": tempo, "energy": energy, "weight": weight, "discovered": 0}
+
+    # ── (a) the picker takes the +B track, not the raw-target one ───────────
+    seg_b = [{"label": "Easy run", "effort": "easy", "minutes": 4.0, "pace_sec": 360, "floor": 0.55}]
+    target_b = 170.0
+    pool_b = [mk("lo169", 169.0, 0.7, 1.0), mk("hi172", 170.0 + B, 0.7, 1.0), mk("far176", 176.0, 0.7, 1.0)]
+    out_b, notes_b = M.pick_for_segments(seg_b, pool_b, [target_b])
+    ids_b = [t["id"] for t in out_b[0]["tracks"]]
+    if ids_b != ["hi172"]:
+        fails.append(f"(a) the picker must take the 170 + B track, not the raw-target 169.0 one: {ids_b}")
+    bias_notes = [n for n in notes_b if "bpm above the target" in n]
+    if len(bias_notes) != 1:
+        fails.append(f"(a) exactly one sensor-bias note expected: {notes_b}")
+
+    # ── (b) read-back: legs at 170.0 (watch) against a 172.4 tempo entrain; against a 170.0 tempo they don't
+    run_start = 2_000_000.0
+    iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
+    samples = [(run_start + t, 170.0, 2.5 * t) for t in range(0, 601)]
+    spec = {"target_spm": 170.0, "segments": [{"label": "Easy run", "effort": "easy", "target_spm": 170.0,
+            "tracks": [{"id": "hi", "title": "Hi", "artist": "Band", "tempo": 170.0 + B, "hit": "full"},
+                       {"id": "lo", "title": "Lo", "artist": "Band", "tempo": 170.0, "hit": "full"}]}]}
+    played = [{"played_at": iso(run_start + 300), "duration_ms": 300_000, "title": "Hi", "artist": "Band", "spotify_id": "hi"},
+              {"played_at": iso(run_start + 600), "duration_ms": 300_000, "title": "Lo", "artist": "Band", "spotify_id": "lo"}]
+
+    saved_path, saved_fetch, saved_parse = M.music_db_path, M.fetch_fit, M.parse_fit
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    M.fetch_fit = lambda rid: b".FIT"
+    M.parse_fit = lambda raw: {"start": run_start, "samples": list(samples), "laps": []}
+    db = sqlite3.connect(":memory:"); db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, distance REAL, duration REAL, raw TEXT)")
+    db.execute("INSERT INTO activities VALUES(90, '2026-09-16', ?, 2.5, 600, '{}')", (iso(run_start),))
+    db.commit()
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO played(played_at, spotify_id, title, artist, duration_ms, pulled_at) VALUES(?,?,?,?,?,?)",
+                             [(x["played_at"], x["spotify_id"], x["title"], x["artist"], x["duration_ms"], "x") for x in played])
+            conn.executemany("INSERT INTO track(spotify_id, title, artist, duration_ms, tempo) VALUES(?,?,?,?,?)",
+                             [("hi", "Hi", "Band", 300_000, 170.0 + B), ("lo", "Lo", "Band", 300_000, 170.0)])
+            conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES('2026-09-16-easy', 'p', 'SH · test', '', 'x', ?)",
+                         (_json.dumps(spec),))
+            conn.execute("INSERT OR REPLACE INTO setting(key, value) VALUES('press_protocol_from', '2000-01-01')")
+            conn.commit()
+        finally:
+            conn.close()
+        res = M.readback(db, 90)
+        if not res.get("ok"):
+            fails.append(f"(b) readback failed: {res.get('error')}")
+        else:
+            by = {x["spotify_id"]: x for x in res["songs"]}
+            hi_, lo_ = by.get("hi") or {}, by.get("lo") or {}
+            hi_dp = hi_.get("delta_pct")
+            if hi_.get("entrained") is not True or hi_dp is None or abs(hi_dp) > 0.001:
+                fails.append(f"(b) legs at 170.0 against a 170 + B tempo must read entrained, delta≈0: "
+                             f"{hi_.get('entrained')} {hi_dp}")
+            if lo_.get("entrained") is not False or abs((lo_.get("delta_pct") or 0) - 0.0141) > 0.001:
+                fails.append(f"(b) the same legs against a 170.0 tempo must NOT read entrained, delta≈+1.4 %: "
+                             f"{lo_.get('entrained')} {lo_.get('delta_pct')}")
+
+        # (c) REVERT TOOTH — with the bias zeroed, (a) and (b) must flip
+        saved_bias = M.CADENCE_SENSOR_BIAS_SPM
+        M.CADENCE_SENSOR_BIAS_SPM = 0.0
+        try:
+            out_rev, _ = M.pick_for_segments(seg_b, pool_b, [target_b])
+            ids_rev = [t["id"] for t in out_rev[0]["tracks"]]
+            if ids_rev != ["lo169"]:
+                fails.append(f"(c) with the bias zeroed the picker must take the raw-target 169.0 track: {ids_rev}")
+            res_rev = M.readback(db, 90)
+            by_rev = {x["spotify_id"]: x for x in (res_rev.get("songs") or [])}
+            hi_rev = by_rev.get("hi") or {}
+            if not res_rev.get("ok") or hi_rev.get("entrained") is not False:
+                fails.append(f"(c) with the bias zeroed the 170 + B tempo song must NOT read entrained: "
+                             f"{res_rev.get('ok')} {hi_rev.get('entrained')}")
+        finally:
+            M.CADENCE_SENSOR_BIAS_SPM = saved_bias
+    finally:
+        M.music_db_path, M.fetch_fit, M.parse_fit = saved_path, saved_fetch, saved_parse
+        db.close()
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-sensor-bias",
+               "§BEAT12 (0.68.9) — the picker matches songs against the target lifted by the sensor bias, "
+               "and the read-back's entrainment gate corrects the watch's cadence by the same amount",
+               passed=not fails, expect="picker takes 170 + B over raw 170; one bias note; legs at 170 "
+               "entrain to a 170 + B tempo and not to a 170 tempo; zeroing the constant flips both",
                got={"violations": fails or "none"})
 
 
@@ -18457,6 +18700,7 @@ def _stc_music_gap_infer():
         return _music_skip("music-gap-infer", "§BEAT8 — the songs the history dropped")
     import tempfile, sqlite3, json as _json
     fails = []
+    B = M.CADENCE_SENSOR_BIAS_SPM
     run_start = 1_000_000.0
     iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
     seam = M.MUSIC_SONG_SEAM_S
@@ -18465,7 +18709,8 @@ def _stc_music_gap_infer():
             "tracks": [{"id": i, "title": i.title(), "artist": "Band", "tempo": 168.0, "hit": "full"} for i, _ in tracks]}]}
     durs = {i: float(d) for i, d in tracks}
     run_end = run_start + 796                    # one 0–300 · gap 70 · three 370–616 · tail 180
-    samples = [(run_start + t, 168.0, 2.5 * t) for t in range(0, 797)]
+    # §BEAT12 — the watch's own cadence reads B under the 168 tempo, so (b)'s songs still read entrained
+    samples = [(run_start + t, 168.0 - B, 2.5 * t) for t in range(0, 797)]
     played = [{"played_at": iso(run_start + 300), "duration_ms": 300_000, "title": "One", "artist": "Band", "spotify_id": "one"},
               {"played_at": iso(run_start + 616), "duration_ms": 246_000, "title": "Three", "artist": "Band", "spotify_id": "three"}]
     songs = M.align_songs(run_start, run_end, played, samples)
@@ -18474,7 +18719,7 @@ def _stc_music_gap_infer():
     want = [("two", 300, 70 - seam, True, True), ("four", 616, 180 - seam, False, True)]
     if got != want:
         fails.append(f"(a) inferred {got}, want {want}")
-    if inf and (abs(inf[0]["spm"] - 168.0) > 0.01 or inf[0].get("steady") != 1.0):
+    if inf and (abs(inf[0]["spm"] - (168.0 - B)) > 0.01 or inf[0].get("steady") != 1.0):
         fails.append(f"(a) the inferred song's legs were not read from the stream: {inf[0].get('spm')} {inf[0].get('steady')}")
     tight = [dict(played[0]), {**played[1], "played_at": iso(run_start + 566)}]      # three at 320: a 20-s gap
     ts = M.align_songs(run_start, run_start + 566, tight, samples)
@@ -18623,14 +18868,19 @@ def _stc_music_reps_read():
 
     tracks = [("a", 300_000, 168.0), ("b", 180_000, 177.0), ("c", 120_000, 178.0),
               ("d", 300_000, 176.0), ("e", 480_000, 177.0)]
+    B = M.CADENCE_SENSOR_BIAS_SPM
+    # §BEAT12 — `held_rung` reads spm/seg_target only (never a track's tempo, so the raw cadence
+    # samples and the held-rung numbers below are untouched); entrainment reads the spec's per-track
+    # tempo, so a/b/d/e (the songs a read must call entrained) sit at their old tempo + B here. c's
+    # tempo stays 178 — it is jogs-only, ungraded, and its literal value is asserted on below.
     spec = {"target_spm": 176.6, "segments": [
         {"label": "Warm-up — easy", "effort": "warmup", "minutes": 5, "target_spm": 168,
-         "tracks": [{"id": "a", "title": "A", "artist": "Band", "tempo": 168, "hit": "full"}]},
+         "tracks": [{"id": "a", "title": "A", "artist": "Band", "tempo": 168 + B, "hit": "full"}]},
         {"label": "Reps — 4 × work with recovery", "effort": "work", "minutes": 20, "target_spm": 177, "reps": 4,
-         "tracks": [{"id": "b", "title": "B", "artist": "Band", "tempo": 177, "hit": "full"},
+         "tracks": [{"id": "b", "title": "B", "artist": "Band", "tempo": 177 + B, "hit": "full"},
                     {"id": "c", "title": "C", "artist": "Band", "tempo": 178, "hit": "full"},
-                    {"id": "d", "title": "D", "artist": "Band", "tempo": 176, "hit": "full"},
-                    {"id": "e", "title": "E", "artist": "Band", "tempo": 177, "hit": "full"}]}]}
+                    {"id": "d", "title": "D", "artist": "Band", "tempo": 176 + B, "hit": "full"},
+                    {"id": "e", "title": "E", "artist": "Band", "tempo": 177 + B, "hit": "full"}]}]}
     plays = [("a", run_start + 300, 300_000), ("b", run_start + 480, 180_000), ("c", run_start + 600, 120_000),
              ("d", run_start + 900, 300_000), ("e", run_start + 1380, 480_000)]
     played = [{"played_at": iso(t), "duration_ms": dur, "title": i.upper(), "artist": "Band", "spotify_id": i}
