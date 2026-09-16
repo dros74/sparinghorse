@@ -9392,6 +9392,121 @@ def _stc_guide_notify():
                     "overflow_popup": _txt(g3["steps"][0]), "failures": fails or "none"})
 
 
+def _stc_guide_reps_text():
+    """§SG4 (0.68.8) — a reps-day guide carries the rep counter in the step text, the recovery names
+    the next rep, and the rep pace is the zone's, not the rounded km's."""
+    import inspect
+    from datetime import date as _d
+    fails = []
+    zones = S.pace_zones(50.0)
+    # The same string shape `plan["pace_zones"]` is built in (`sh_engine._gen_plan`): fmt_pace + "/km".
+    pace_zones = {k: f"{E.fmt_pace(v)}/km" for k, v in zones.items()}
+    spec = {"zone": "interval", "structure": "intervals", "rep_min": 3, "rec_min": 2,
+            "kind": "intervals", "label": "VO2 intervals"}
+    sess = S._build_quality(spec, 78, _d(2026, 7, 13), 2, zones, zones["easy"])
+    reps = sess["reps"]
+    n_work = sum(1 for r in reps if r["effort"] == "work")
+    if n_work < 2:
+        fails.append(f"fixture needs >1 work rep to exercise the counter, got {n_work}")
+
+    g, _b = S.session_to_guide(sess, None, pace_zones=pace_zones)
+    steps = g["steps"]
+
+    # (a) every work step's title AND text carry the counter, i counting 1..n in order, text ≤ 40
+    wi = 0
+    for st_, r in zip(steps, reps):
+        if r["effort"] != "work":
+            continue
+        wi += 1
+        if st_["title"] != f"Work {wi}/{n_work}":
+            fails.append(f"work title != Work {wi}/{n_work}: {st_['title']!r}")
+        txt = next((f["value"] for f in st_["fields"] if f["type"] == "text"), "")
+        if not txt.startswith(f"Rep {wi}/{n_work} - "):
+            fails.append(f"work text missing the rep counter: {txt!r}")
+        if len(txt) > 40:
+            fails.append(f"work text >40 chars: {txt!r}")
+
+    # (b) a recovery step followed by a work step names it; one followed by the cool-down does not.
+    # `_build_quality` never emits the latter shape (recovery only ever sits BETWEEN two work reps),
+    # so a second, hand-built fixture exercises the guard directly.
+    wi = 0
+    for i, r in enumerate(reps):
+        if r["effort"] != "recovery":
+            continue
+        wi_at_r = sum(1 for x in reps[:i] if x["effort"] == "work")
+        txt = next((f["value"] for f in steps[i]["fields"] if f["type"] == "text"), "")
+        next_work = i + 1 < len(reps) and reps[i + 1]["effort"] == "work"
+        if not next_work:
+            fails.append("fixture's recovery reps are all followed by work — the 'next' guard is untested")
+            continue
+        want_suffix = f" - next {wi_at_r + 1}/{n_work}"
+        if not txt.endswith(want_suffix):
+            fails.append(f"recovery before work missing the hand-over {want_suffix!r}: {txt!r}")
+        if len(txt) > 40:
+            fails.append(f"recovery text >40 chars: {txt!r}")
+    tail = {"date": "2026-07-17", "kind": "intervals", "km": 3.0,
+            "reps": [{"effort": "work", "zone": "interval", "minutes": 3, "km": 0.8,
+                      "detail": "3min @ interval"},
+                     {"effort": "recovery", "zone": "easy", "minutes": 2, "km": 0.4,
+                      "detail": "easy jog recovery"},
+                     {"effort": "cooldown", "zone": "easy", "minutes": 10, "km": 1.8,
+                      "detail": "easy cool-down"}]}
+    g_tail, _bt = S.session_to_guide(tail, None, pace_zones=pace_zones)
+    rec_txt = next((f["value"] for f in g_tail["steps"][1]["fields"] if f["type"] == "text"), "")
+    if rec_txt != "easy jog recovery" or "next" in rec_txt:
+        fails.append(f"recovery before the cool-down must keep its plain detail: {rec_txt!r}")
+
+    # (c) the work targetPace reads the ZONE's pace (pace_zones), not the rounded-km re-derivation —
+    # and the fixture must actually make the two differ, or this proves nothing.
+    work0 = next(r for r in reps if r["effort"] == "work")
+    work0_step = next(st_ for st_, r in zip(steps, reps) if r is work0)
+    tp = next(f for f in work0_step["fields"] if f["type"] == "targetPace")
+    int_sec = S._pace_zone_sec(pace_zones, "interval")
+    zone_v = 1000.0 / int_sec
+    rounded_sec = work0["minutes"] * 60.0 / work0["km"]     # _qblock rounds km to 0.1
+    rounded_v = 1000.0 / rounded_sec
+    if abs(rounded_v - zone_v) < 0.005:
+        fails.append(f"fixture's rounded-km pace does not differ from the zone pace — "
+                     f"rounded={rounded_v:.4f} zone={zone_v:.4f}: the test proves nothing")
+    if abs(tp["value"] - zone_v) > 0.005:
+        fails.append(f"work targetPace != the zone's pace: {tp['value']} vs {zone_v:.4f}")
+
+    # (d) called WITHOUT pace_zones, the OLD fallback (a rep's own km/minutes) is pinned
+    g_old, _bo = S.session_to_guide(sess, None)
+    work0_step_old = next(st_ for st_, r in zip(g_old["steps"], reps) if r is work0)
+    tp_old = next(f for f in work0_step_old["fields"] if f["type"] == "targetPace")
+    want_old = 1000.0 / S._rep_pace_sec(work0)
+    if abs(tp_old["value"] - want_old) > 0.001:
+        fails.append(f"no-pace_zones fallback drifted from _rep_pace_sec: {tp_old['value']} vs {want_old}")
+
+    # (e) the boundary popup names the rep and does not announce its duration twice
+    notif = (work0_step.get("notification") or {}).get("text", "")
+    if f"Rep 1/{n_work}" not in notif:
+        fails.append(f"work notification missing its rep counter: {notif!r}")
+    dur_tag = f"{work0['minutes']:g}min"
+    if notif.count(dur_tag) > 1:
+        fails.append(f"work notification announces its duration twice: {notif!r}")
+
+    # (f) conformance — push_guides must pass the plan's own pace table down
+    if "pace_zones=" not in inspect.getsource(S.push_guides):
+        fails.append("push_guides no longer passes pace_zones to session_to_guide")
+
+    return _st("det", "guide-reps-text",
+               "§SG4 (0.68.8) — a reps-day guide carries the rep counter in the step text, the "
+               "recovery names the next rep, and the rep pace is the zone's, not the rounded km's",
+               passed=not fails,
+               expect="counter in every work step's text (≤40 chars), a recovery names its next work "
+               "rep (and stays plain before a cool-down), targetPace reads pace_zones over the "
+               "rounded-km re-derivation, the old fallback holds without a table, push_guides wired",
+               got={"failures": fails or "none",
+                    "sample_work_text": next((f["value"] for f in work0_step["fields"]
+                                              if f["type"] == "text"), None),
+                    "sample_recovery_text": next((f["value"] for f in steps[2]["fields"]
+                                                  if f["type"] == "text"), None),
+                    "targetPace": tp["value"], "zone_pace_v": round(zone_v, 4),
+                    "rounded_km_pace_v": round(rounded_v, 4)})
+
+
 def _stc_hr_zones():
     """§ HR-zone model (slice #3) — assert the ANCHOR-SELECTION + grid shape, NOT 'recovered the right
     zones' (flat synthetic HR can't tell a right LTHR from a wrong one). The ladder: a trustworthy
@@ -17452,6 +17567,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
                  lambda: _stc_guide_recreate(), lambda: _stc_guide_notify(),
+                 lambda: _stc_guide_reps_text(),
                  lambda: _stc_stream_optin(),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
                  lambda: _stc_health_staleness(), lambda: _stc_explain_cache(), lambda: _stc_calibration_inventory(), lambda: _stc_track_record(),

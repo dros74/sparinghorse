@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.68.8] - 2026-09-16
+
+### Fixed
+
+- **A reps day's counter, hand-over, and pace target were all hard to read on the guide screen.**
+  The rep count lived only in the step title ("Work 3/9"), not the step text; a recovery step said
+  only "easy jog recovery" with no word of the rep it led into; and the rep pace was re-derived from
+  a rep's own km and minutes, which rounds a rep's km to 0.1 — a 3-minute interval rep read back at
+  5:00/km against a 4:55/km zone. Work steps now show "Rep i/n - <detail>" in the step text, a
+  recovery before another rep adds "- next i+1/n", and the pace reads the plan's own zone table
+  first. A guide already on the watch is not re-downloaded by an update — push the week again
+  (recreate on) or wait for the nightly before the next reps day.
+
 ## [0.68.7] - 2026-09-16
 
 ### Fixed

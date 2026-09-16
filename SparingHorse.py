@@ -2385,9 +2385,22 @@ def _rep_pace_sec(rep):
     return None
 
 
+def _pace_zone_sec(pace_zones, zone):
+    """§SG4 (0.68.8) — a plan's `pace_zones` table (the m:ss/km strings shown on the plan, e.g.
+    `{"interval": "4:55/km"}`) read back to sec/km for one zone, or None on any missing/unparseable
+    value. `_rep_pace_sec` re-derives a rep's pace from its own km/minutes, but `_qblock` ROUNDS a
+    rep's km to 0.1 — a 3-minute interval rep becomes 0.6 km, and re-deriving from that rounded km
+    reads back as 5:00/km when the zone itself prices at 4:55/km. Reading the zone's own number
+    skips that lossy round-trip entirely."""
+    m = re.match(r"\s*(\d+):(\d\d)", str((pace_zones or {}).get(zone) or ""))
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else None
+
+
 def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False):
     """One fields step: countdown + optional pace/HR targets + a detail text line + the boundary
-    popup (§SG3), advancing on its own duration (or distance, for the distance-framed simple runs)."""
+    popup (§SG3), advancing on its own duration (or distance, for the distance-framed simple runs).
+    `text` arrives already composed (the rep counter and the "next" hand-over on a reps day are
+    §SG4's job, in `session_to_guide`); this only clamps it to the watch's 54-char text field."""
     fields, cond, dur = [], None, None
     if minutes:
         fields.append({"type": "stepDurationCountdown", "title": "left",
@@ -2422,11 +2435,22 @@ def session_guide_external_id(session):
     return f"sh-{session['date']}-{session.get('kind', 'run')}"[:64]
 
 
-def session_to_guide(session, hrz=None):
+def session_to_guide(session, hrz=None, pace_zones=None):
     """PURE: one plan session dict → (guide_dict, zip_bytes). Structured sessions (reps arrays from
     _build_quality/_build_long_mp) become one step per rep — duration-framed, with the work reps
     lap-marked; simple easy/long runs become a single distance-framed step. Raises on a session
-    with nothing to guide (km≤0)."""
+    with nothing to guide (km≤0).
+
+    §SG4 (0.68.8) — three reps-day readability fixes, all in how a rep becomes a step:
+      · the counter that used to live ONLY in the step TITLE ("Work 3/9", small on the watch) is
+        folded into the step TEXT too ("Rep 3/9 - 3min at interval"), so it is on-screen with the
+        pace gauge and not just the header;
+      · a recovery step that is followed by another work rep names what's coming ("... - next 4/9"),
+        so the athlete reads the hand-over instead of discovering it at the next beep;
+      · the rep's pace target reads `pace_zones` (the plan's own m:ss/km table, passed by the
+        caller) rather than re-deriving it from the rep's km/minutes — `_qblock` rounds a rep's km
+        to 0.1, so that re-derivation used to read back a lossier pace than the zone actually prices
+        (see `_pace_zone_sec`)."""
     kind = session.get("kind", "run")
     km = session.get("km") or 0
     if km <= 0:
@@ -2438,14 +2462,27 @@ def session_to_guide(session, hrz=None):
         wi = 0
         titles = {"warmup": "Warm up", "recovery": "Recover", "cooldown": "Cool down",
                   "easy_base": "Easy base"}
-        for r in reps:
+        for i, r in enumerate(reps):
             work = r["effort"] == "work"
             if work:
                 wi += 1
             title = f"Work {wi}/{n_work}" if (work and n_work > 1) else titles.get(r["effort"], "Work")
+            detail = r.get("detail", "")
+            next_work = reps[i + 1]["effort"] == "work" if i + 1 < len(reps) else False
+            if work and n_work > 1:
+                text = _guide_txt(f"Rep {wi}/{n_work} - {detail}", 40)
+            elif r["effort"] == "recovery" and next_work:
+                text = _guide_txt(f"{detail} - next {wi + 1}/{n_work}", 40)
+            else:
+                text = detail
+            pace_sec = r.get("pace_sec")
+            if pace_sec is None:
+                pace_sec = _pace_zone_sec(pace_zones, r["zone"])
+            if pace_sec is None:
+                pace_sec = _rep_pace_sec(r)
             steps.append(_guide_step(
-                title, r.get("detail", ""), minutes=r["minutes"],
-                pace_sec=_rep_pace_sec(r), hr=_hr_target(r["zone"], hrz), lap=work))
+                title, text, minutes=r["minutes"],
+                pace_sec=pace_sec, hr=_hr_target(r["zone"], hrz), lap=work))
     else:
         pace_sec = session["minutes"] * 60.0 / km if session.get("minutes") else None
         steps.append(_guide_step("Run", session.get("note", ""), km=km,
@@ -2570,7 +2607,7 @@ def push_guides(db, days=None, recreate=False):
     for s in sessions:
         ext = session_guide_external_id(s)
         try:
-            _, blob = session_to_guide(s, hrz)
+            _, blob = session_to_guide(s, hrz, pace_zones=plan.get("pace_zones"))
             gid = existing.get(ext)
             if gid:
                 r = requests.put(f"{SUUNTO_API_BASE}/v2/guides/files/{gid}",
