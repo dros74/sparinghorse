@@ -17,8 +17,9 @@ COPY sh_engine.py .
 # cannot take the web app and the nightly scheduler down at import time. It is also the entry
 # point the /api/selftest/run route spawns as its own process.
 COPY sh_selftest.py .
-# §BEAT (0.61.0): the music module — imported inside a try, so a tree without it boots without the
-# page. publish_mirror.sh drops this line (and the file) from the public mirror until it graduates.
+# §BEAT (0.61.0): the music module — optional, imported inside a try, so a tree without it boots
+# without the page. Ships in the mirror since 0.69.0.
+COPY sh_music.py .
 COPY test/golden ./test/golden
 # The front end (TECH-11): shell + stylesheet + script, served from /static. Without these the
 # app boots and then serves a page with no CSS and no JS — it must fail the build, not the user.

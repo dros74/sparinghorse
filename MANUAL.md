@@ -21,13 +21,14 @@ capability matrix are in the [README](README.md); this is the longer how-to behi
 6. [Reading the dashboard, panel by panel](#6-reading-the-dashboard-panel-by-panel)
 7. [The AI layer](#7-the-ai-layer)
 8. [Sending the plan to a Suunto watch (optional)](#8-sending-the-plan-to-a-suunto-watch-optional)
-9. [Day-to-day and week-to-week](#9-day-to-day-and-week-to-week)
-10. [Easing, medical holds and adjustments](#10-easing-medical-holds-and-adjustments)
-11. [The privacy model](#11-the-privacy-model)
-12. [Settings and secrets](#12-settings-and-secrets)
-13. [Backing up your data](#13-backing-up-your-data)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Glossary](#15-glossary)
+9. [Cadence playlists (optional)](#9-cadence-playlists-optional)
+10. [Day-to-day and week-to-week](#10-day-to-day-and-week-to-week)
+11. [Easing, medical holds and adjustments](#11-easing-medical-holds-and-adjustments)
+12. [The privacy model](#12-the-privacy-model)
+13. [Settings and secrets](#13-settings-and-secrets)
+14. [Backing up your data](#14-backing-up-your-data)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Glossary](#16-glossary)
 
 ---
 
@@ -91,7 +92,7 @@ optional AI layer only narrates and parses; it never overrides the deterministic
 - **Anthropic API key** *(optional)* — enables the natural-language layer. Leave it blank and every AI
   feature stays dormant; the deterministic engine is unaffected.
 
-You can supply both **in the app's Settings window** (recommended — see [§12](#12-settings-and-secrets)); no
+You can supply both **in the app's Settings window** (recommended — see [§13](#13-settings-and-secrets)); no
 file editing is required for day-to-day use.
 
 ### Run locally
@@ -118,7 +119,7 @@ file editing is required for day-to-day use.
 
 **Why separate containers and not one with a toggle?** The public container has no token and a
 query-only DB connection, so it cannot sync, write, or call the AI. The split is the security boundary;
-see [§11](#11-the-privacy-model).
+see [§12](#12-the-privacy-model).
 
 ### Install it as an app (PWA)
 
@@ -139,7 +140,7 @@ served until one exists; `SH_PASSPHRASE` in the environment sets it without the 
 shows a three-step guided card. In order:
 
 1. **Connect Runalyze.** Open **Settings → Connections & keys** and paste your Personal API token. (It is
-   stored in a private-only secrets store, never the shared DB — see [§12](#12-settings-and-secrets).)
+   stored in a private-only secrets store, never the shared DB — see [§13](#13-settings-and-secrets).)
 2. **Pull your history.** Hit **Sync now**, then **Backfill all** once to load your full activity history.
    The first backfill can take a minute or two depending on how many years you have.
 3. **Add your first race.** Open the **Objectives** panel and add a goal race (label, date, type, target,
@@ -447,7 +448,7 @@ with a **confidence** flag that decays as the data ages (LTHR drifts up as fitne
 data it falls back to a %HRmax estimate, flagged *provisional*. Known limitation: for *structured* tempos the
 warm-up/cool-down dilute the whole-run average, so this method **understates** LTHR, which is why the easy
 ceiling is pinned to the conservative (lower) Friel boundary, never a looser one. A field-tested LTHR can be
-entered under **Settings → Manual LTHR** ([§12](#12-settings-and-secrets)); the 30-minute protocol is there
+entered under **Settings → Manual LTHR** ([§13](#13-settings-and-secrets)); the 30-minute protocol is there
 too, and the app only suggests the test when every readiness clearance holds.
 
 **Pace vs HR coherence.** Because prescription and judgment are independent estimates, the app cross-checks
@@ -574,7 +575,92 @@ a different screen, not looking at a broken guide.
 
 ---
 
-## 9. Day-to-day and week-to-week
+## 9. Cadence playlists (optional)
+
+Every planned session is cut into segments — warm-up, work, recovery, cool-down; a race into settle,
+cruise and grind — and each segment gets a target cadence read off your own speed–cadence curves: the
+recent one, and the trained one (the fittest third of your past runs), stepped up a little over the
+recent line. The step defaults to 1.5 % on easy segments and 3 % on work efforts, never past your
+comfort ceiling and never past what you have already done at that speed — the target is never a fixed
+number like 180. Entirely optional — the app is complete without it — and **private container only**;
+the public box and the demo have no music page.
+
+**Setup.** The keys go into **Settings → Connections & keys**, beside the Suunto ones: the Spotify
+app's client id and secret (a developer app you register yourself at developer.spotify.com/dashboard —
+Development Mode needs a Premium account and allows up to five users), an optional last.fm API key,
+and an optional ListenBrainz user token. The **Music** tab next to it takes your last.fm and
+ListenBrainz usernames, the comfort ceiling and the step, shows the exact redirect URI your Spotify
+app must carry — `https://<your private hostname>/api/music/spotify/callback`, or
+`http://127.0.0.1:8770/api/music/spotify/callback` for a local run; Spotify refuses `localhost`
+itself — and holds **Connect**. Press it and approve the Spotify prompt. last.fm needs only its key
+and your username; ListenBrainz your username, and the token for its radio.
+
+**Build** writes a private Spotify playlist named for the session; **Rebuild** replaces its tracks.
+Songs come from your own listening — Spotify's saved tracks, top tracks and playlists, and last.fm's
+top and loved tracks, with a ListenBrainz account adding a few songs you have never run to from the
+most similar listeners there, its collaborative picks and its weekly exploration lists, refreshed every
+Monday — scored for tempo by ReccoBeats (a free service reproducing the audio features Spotify
+withdrew) and picked inside the entrainment window, ±1 % of the target first, widening to ±2 % only
+when that band is dry. A race list follows a ramp toward the race's cadence over the weeks before it
+and takes the ramp of the day it is built — rebuild it in race week. After the run, the read-back grades
+every song by the cadence your legs held through it, from the run's original FIT file when Runalyze
+holds one or the streams otherwise: a song run within 1 % of its tempo is followed. **One lap press
+during a song means "the beat lost me here"; two presses within six seconds mean "never again."** A
+headset skip sets the song aside for that kind of segment, and a cadence drop of 4 spm under the song's
+median for 4 seconds or more counts as a dip. The next list is picked from these grades, so the ladder
+climbs from what you ran, not from what was asked — and on a reps day a song is read over the reps
+only.
+
+**Limits.** ReccoBeats does not cover every song — one without a tempo is never picked. Spotify keeps
+only your last 50 plays, so your play history is pulled when the Music page opens and again every
+night. A cadence curve needs a few synced runs with cadence before it can set a target.
+
+**The science it leans on.**
+
+- Van Dyck E, Moens B, Buhmann J, et al. (2015). Spontaneous entrainment of running cadence to music
+  tempo. Sports Medicine – Open. https://doi.org/10.1186/s40798-015-0025-9 — spontaneous entrainment
+  holds only within a few per cent of the runner's own cadence (the basis of the ±1–2 % window).
+- Bood RJ, Nijssen M, van der Kamp J, Roerdink M (2013). The power of auditory-motor synchronization in
+  sports: enhancing running performance by coupling cadence with the right beats. PLoS ONE.
+  https://doi.org/10.1371/journal.pone.0070758 — cadence-synced sound extended time to exhaustion;
+  music, not the beat alone, lowered perceived effort.
+- Buhmann J, Moens B, Van Dyck E, et al. (2018). Optimizing beat synchronized running to music. PLoS
+  ONE. https://doi.org/10.1371/journal.pone.0208702 — tempo-matching alone does not move cadence; the
+  beat's timing relative to the footfall does.
+- Sellés-Pérez S, Eza-Casajús L, Fernández-Sáez J, et al. (2022). Using musical feedback increases
+  stride frequency in recreational runners. International Journal of Environmental Research and Public
+  Health. https://doi.org/10.3390/ijerph19073870 — six weeks of music above the preferred cadence raised
+  it.
+- Terry PC, Karageorghis CI, Curran ML, et al. (2020). Effects of music in exercise and sport: a
+  meta-analytic review. Psychological Bulletin. https://pubmed.ncbi.nlm.nih.gov/31804098/ —
+  small-to-moderate benefits on affect, perceived exertion and performance.
+- Karageorghis CI, et al. (2011). Revisiting the relationship between exercise heart rate and music
+  tempo preference. Research Quarterly for Exercise and Sport. https://shura.shu.ac.uk/18185/ —
+  preferred music intensity rises with exercise intensity (the energy floors' direction).
+- de Ruiter CJ, Verdijk PW, Werker W, et al. (2014). Stride frequency in relation to oxygen consumption
+  in experienced and novice runners. European Journal of Sport Science.
+  https://pubmed.ncbi.nlm.nih.gov/23581294/ — trained runners self-select about 3 % under their
+  energetic optimum (why the step is small).
+- van Oeveren BT, de Ruiter CJ, Beek PJ, van Dieën JH (2017). Optimal stride frequencies in running at
+  different speeds. PLOS ONE. https://doi.org/10.1371/journal.pone.0184273 — the optimum rises with
+  speed (why the target is a curve, not a number).
+- Heiderscheit BC, Chumanov ES, Michalski MP, et al. (2011). Effects of step rate manipulation on joint
+  mechanics during running. Medicine & Science in Sports & Exercise.
+  https://doi.org/10.1249/MSS.0b013e3181ebedf4 — a 5–10 % higher step rate at the same speed lowers
+  per-step joint loading.
+- Burns GT, Zendler JM, Zernicke RF (2019). Step frequency patterns of elite ultramarathon runners
+  during a 100-km road race. Journal of Applied Physiology. https://pubmed.ncbi.nlm.nih.gov/30543498/ —
+  elites span roughly 155–203 spm; cadence rises with speed; "180" is not a rule.
+- Davis JJ (2026). A comprehensive guide to the science of cadence for runners. Running Writings.
+  https://runningwritings.com/2026/01/science-of-cadence.html — cadence is meaningless without speed; a
+  runner's own curve is the reference; retrain by at most +5–10 %, on easy runs.
+
+The ±1–2 % window, the step sizes, the energy floors and the follow window are our own
+operationalisation, tuned on one athlete, not prescriptions from these authors.
+
+---
+
+## 10. Day-to-day and week-to-week
 
 - **Daily:** glance at readiness before a hard session. Log nothing manually — your runs flow in from
   Runalyze on the next sync and attach themselves to the matching prescribed session.
@@ -592,7 +678,7 @@ a different screen, not looking at a broken guide.
 
 ---
 
-## 10. Easing, medical holds and adjustments
+## 11. Easing, medical holds and adjustments
 
 - A **qualitative check-in** ("legs flat", "easy week, travelling") applies a *clamped* load adjustment for a
   bounded window — the engine eases volume, never raises it from a complaint.
@@ -612,7 +698,7 @@ a different screen, not looking at a broken guide.
 
 ---
 
-## 11. The privacy model
+## 12. The privacy model
 
 The private and public containers **share one `./data` DB**, so the hard rule is: **anything written to the
 shared DB is readable by the public container.** Sparing Horse is built around that constraint:
@@ -620,6 +706,8 @@ shared DB is readable by the public container.** Sparing Horse is built around t
 - **Secrets never touch the shared DB.** Tokens and the Claude key live in a **private-only** secrets store
   (`SH_SECRETS_DB`, default `./secrets`) mounted *only* to the private container. The public box has no
   tokens.
+- **The music module is private-only, where it is installed at all.** Your listening history, your
+  Spotify tokens and your song ratings never reach the shared DB or the public box.
 - **Sensitive endpoints are withheld server-side**, not merely hidden in the UI. On the read-only container
   the route map (GPS), blood/health markers, the per-run HR effort detail, the readiness inputs, and the
   post-race reckoning all return 403 / are sanitized — the public mirror physically cannot serve them.
@@ -645,14 +733,14 @@ The decision line: *training shape + plan* can be public; *medical / location / 
 
 ---
 
-## 12. Settings and secrets
+## 13. Settings and secrets
 
 The **Settings** window (private container only) is where you configure the app without editing files.
 It has one tab per concern, each with its own **Save** that writes only the fields changed on that tab
 (and any key pasted into it): **Athlete** (context, age, LTHR, units, the week's shape, away days),
 **Connections** (the Runalyze, Claude and Suunto keys, the watch link, the AI switches), **Music** (only
-when the music module is installed: Spotify, last.fm and ListenBrainz, the matching knobs, the library)
-and **Console** (access, system, links, backup and export). The blocks:
+when the optional music module is installed: Spotify, last.fm and ListenBrainz, the matching knobs, the
+library) and **Console** (access, system, links, backup and export). The blocks:
 
 - **Console access** — how this session is signed in (the passphrase, or a proxy identity when
   `SH_TRUST_PROXY_AUTH` is on), **Change passphrase** (signs every other device out, keeps this one) and
@@ -731,7 +819,7 @@ Anything you would rather set via environment still works; see the env table in 
 
 ---
 
-## 13. Backing up your data
+## 14. Backing up your data
 
 Everything the app knows lives in one SQLite file — but only some of it can be rebuilt. Runalyze can
 re-backfill your activities and fitness history any time; what **cannot** be rebuilt is what you put
@@ -756,7 +844,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
@@ -771,7 +859,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 ---
 
-## 15. Glossary
+## 16. Glossary
 
 - **CTL** — Chronic Training Load. A slow (~42-day) average of training load; the app's proxy for *fitness*.
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.

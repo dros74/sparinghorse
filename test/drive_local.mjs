@@ -338,8 +338,12 @@ async function runFull() {
     const roleNoTab = [...document.querySelectorAll('[role="button"]')]
       .filter(e => e.getAttribute('tabindex') !== '0' && e.tagName !== 'BUTTON')
       .map(e => e.className || e.tagName);
+    // §A11Y-PAN — a focus stop must announce something: role="button", or any explicit role that
+    // carries an accessible name (the weekly chart is a keyboard-pannable role="group" with an
+    // aria-label naming its keys — a group, not a button)
     const tabNoRole = [...document.querySelectorAll('[tabindex="0"]')]
-      .filter(e => e.getAttribute('role') !== 'button')
+      .filter(e => e.getAttribute('role') !== 'button'
+                   && !(e.getAttribute('role') && (e.getAttribute('aria-label') || e.getAttribute('aria-labelledby'))))
       .map(e => e.className || e.tagName);
     // a tablist whose children are not tabs tells a screen reader about a structure that isn't there
     const orphanTablists = [...document.querySelectorAll('[role="tablist"]')]
@@ -349,7 +353,7 @@ async function runFull() {
   });
   ok(`custom buttons are keyboard-reachable (${aria.custom} found, 0 missing a tab stop)`,
      aria.custom >= 4 && aria.roleNoTab.length === 0);
-  ok(`no focus stop without a role${aria.tabNoRole.length ? ' — ' + aria.tabNoRole.join(', ') : ''}`,
+  ok(`no focus stop without a role and a name${aria.tabNoRole.length ? ' — ' + aria.tabNoRole.join(', ') : ''}`,
      aria.tabNoRole.length === 0);
   ok('no tablist without tabs (the drift control is a group of pressed buttons)',
      aria.orphanTablists === 0);

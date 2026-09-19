@@ -31,8 +31,9 @@ the quick start; MANUAL.md covers using the app.
   wall, not a reason to expose it: everything it holds — the Runalyze token, the Claude key, Suunto
   tokens, blood markers, readiness notes, a one-click full-database download — still deserves a
   proxy in front. **Never publish port 8770 to a network you do not fully trust.** The compose file
-  publishes no ports at all; the proxy reaches the containers by service name over the
-  `sparinghorse-edge` network.
+  publishes no ports at all; the proxy reaches the containers by service name over two Docker
+  networks — `sparinghorse-edge` (the private box) and `sparinghorse-edge-public` (the public and
+  demo boxes) — and joins both.
 - **The public box** serves a read-only projection over the same database file. It cannot write
   (query-only connection, every mutation refused), holds no token, and withholds the medical,
   location and personal fields server-side. It is safe to expose.
@@ -108,11 +109,27 @@ the quick start; MANUAL.md covers using the app.
 Whatever you use, the rule is the same: the private service is reachable only by authenticated
 you; the public and demo services may be open.
 
-**Cloudflare Tunnel + Access (what the reference deployment uses).** Run `cloudflared` on the same
-Docker network (`sparinghorse-edge`) and point three public hostnames at `http://sparinghorse:8770`,
-`http://sparinghorse-public:8770` and `http://sparinghorse-demo:8770`. Put a Cloudflare Access policy
-on the private hostname (an email allowlist is enough). The tunnel sets `CF-Connecting-IP` and
-`X-Forwarded-Proto`, which the rate limiter and the HSTS header read.
+**Cloudflare Tunnel + Access (what the reference deployment uses).** `sparinghorse-edge` carries
+only the private service; `sparinghorse-public` and `sparinghorse-demo` sit on their own
+`sparinghorse-edge-public` instead, so the demo box — driven by strangers — cannot resolve the
+private console by name. `cloudflared` must join **both** networks: in its own compose file, list
+both under the service's `networks:` and both again as `external: true` at the top level. With
+that done, point three public hostnames at `http://sparinghorse:8770`,
+`http://sparinghorse-public:8770` and `http://sparinghorse-demo:8770`. Put a Cloudflare Access
+policy on the private hostname (an email allowlist is enough). The tunnel sets `CF-Connecting-IP`
+and `X-Forwarded-Proto`, which the rate limiter and the HSTS header read.
+
+**Moving an existing deployment onto the split.** The stack creates `sparinghorse-edge-public`
+on its next `up` (do not create it by hand first: Compose refuses to adopt a network it did not
+label). The public and demo hostnames are dark from that `up` until the tunnel joins the new
+network, so keep the two steps together:
+
+1. Rebuild the sparinghorse stack (`docker compose up -d --build` in this directory).
+2. `docker network connect sparinghorse-edge-public <cloudflared container name>` — the tunnel
+   reaches the public and demo boxes again at once.
+3. Make it permanent: add the network to cloudflared's compose file (the service's `networks:`
+   list and a top-level entry with `external: true`), so its next `up -d` keeps the attachment.
+4. Open the three hostnames.
 
 **Caddy on the host (any VPS or home server).** The console has its own login; Caddy's
 `basic_auth` (or `forward_auth` to an identity provider) stays a good second wall on the private
@@ -133,7 +150,8 @@ demo.example.com {
 }
 ```
 
-Run Caddy on the `sparinghorse-edge` network (or add `ports: ["127.0.0.1:8770:8770"]` to the private
+Run Caddy on both networks — `sparinghorse-edge` for the private box, `sparinghorse-edge-public`
+for the public and demo boxes — (or add `ports: ["127.0.0.1:8770:8770"]` to the private
 service and proxy to loopback — never to `0.0.0.0`). Caddy sets `X-Forwarded-For` and
 `X-Forwarded-Proto` by default.
 

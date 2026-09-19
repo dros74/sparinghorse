@@ -1,0 +1,8 @@
+# Exists only to move the SHA pins in .github/workflows/ci.yml forward as the upstream @vN tags
+# advance (SH-26) — the Python side is hash-pinned by hand in requirements.lock, see DEPLOY.md §7.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

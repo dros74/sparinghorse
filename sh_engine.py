@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.68.13"
+ENGINE_VERSION = "0.69.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -4762,6 +4762,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             sessions, dt = _sess_r, _dt_r
             ctl, atl, eow, peak, eow_flat, _ = _project_week(_race_seed[0], _race_seed[1],
                                                              wk_start, dt, actual_floor=act_floor)
+        # §PRO23 — computed ONCE so the published field can tell "the search never produced a
+        # reading" (None) apart from "the search produced 0.0" (a real value). `or 0.0` used to
+        # collapse both into 0.0, which is a number the search never decided.
+        _soft = (None if _gov_flat is None and _gov_eow is None else
+                 _eow_soft(_gov_eow, _gov_flat, m_ctl_n, ctl_n, atl_n, assertive, soft_ctl_floor))
         week = {**wk, "start": wk_start, "sessions": sessions,
                 # §PRO9 — honest count (the cap can add easy days to hold volume). §CARD — non-rest
                 # only: _apply_adjustment turns a 0×-eased day into a `rest` session, which stays in
@@ -4778,9 +4783,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §RACE — `_gov_*` is `eow`/`eow_flat` on every week but a race week, where it is
                 # the pre-race pair: this field must equal what the SEARCH compared, never the
                 # honesty re-roll laid on top of it.
-                "proj_acwr_soft": (None if _gov_flat is None and _gov_eow is None else
-                                   round(_eow_soft(_gov_eow, _gov_flat, m_ctl_n, ctl_n, atl_n,
-                                                   assertive, soft_ctl_floor) or 0.0, 4)),
+                "proj_acwr_soft": None if _soft is None else round(_soft, 4),
                 "proj_ctl": round(ctl, 1),    # §PRO5 — projected end-of-week CTL (the response feedback signal)
                 # §PRO25 — publish the intent the week was actually GOVERNED to, not the skeleton's
                 # template km. In CAUTION `chosen = min(intent_trimp, allowed)`, so the skeleton IS the

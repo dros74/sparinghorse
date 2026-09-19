@@ -9497,8 +9497,9 @@ def _render_app(page="dash"):
     cfg = config()      # TECH-4 — one snapshot for the whole page render
     # §BEAT (0.61.0) — the music module, when present, fills five placeholders in the shell: the header
     # link, the mobile tab, and on its own page the stylesheet, the section and the script. Absent
-    # module (the public mirror strips it) or READONLY → every one of them is the empty string.
-    mb = sh_music.render_bits(page, READONLY) if sh_music is not None else {}
+    # module (optional: a tree without it boots without the page), READONLY or DEMO (the module does
+    # not register on the demo, 0.69.0) → every one of them is the empty string.
+    mb = sh_music.render_bits(page, READONLY or DEMO) if sh_music is not None else {}
     hublink = (f'<a class="hublink" href="{html.escape(cfg.house_url, quote=True)}">'
                f'← {html.escape(cfg.house_name or cfg.house_url)}</a>'
                if cfg.house_url else "")
@@ -10717,13 +10718,12 @@ if not _CLI and DEMO:
     print(f"[demo] DEMO MODE — full private console over synthetic data, "
           f"reset every {DEMO_RESET_EVERY_S}s")
 
-# ── §BEAT (0.61.0) — the music module: optional, private, unpublished until it graduates ──────
-# `sh_music.py` is imported INSIDE a try so a tree without it (the public mirror strips the file
-# and its two static siblings) boots exactly as before: no page, no routes, no secrets in the spec,
-# empty placeholders in the shell. With it present, register() adds the /music page, the
-# /api/music/* routes (private-only via _private_only_path) and three rows to SECRET_SPEC. The
-# module reaches back into this one through the object handed to it — never by name — so it works
-# whether the app was imported as `SparingHorse` or is running as `__main__`.
+# ── §BEAT (0.61.0) — the music module: optional, a tree without it boots without the page ──────
+# `sh_music.py` is imported INSIDE a try so a tree without it boots exactly as before: no page, no
+# routes, no secrets in the spec, empty placeholders in the shell. With it present, register() adds
+# the /music page, the /api/music/* routes (private-only via _private_only_path) and three rows to
+# SECRET_SPEC. The module reaches back into this one through the object handed to it — never by
+# name — so it works whether the app was imported as `SparingHorse` or is running as `__main__`.
 try:
     import sh_music
 except ImportError:

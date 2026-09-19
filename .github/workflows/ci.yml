@@ -23,8 +23,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      # Every `uses:` in this file is pinned to the commit its @vN tag resolves to today, not the
+      # tag itself: a tag is a moving pointer the action's maintainer (or a compromise of their
+      # account) can re-point, and the next checkout then runs different code under the same
+      # familiar name. The SHA is the code that ran. `.github/dependabot.yml` opens a weekly PR to
+      # move these pins forward as the upstream tags advance, so a stale pin does not go unnoticed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'          # matches the Dockerfile's base image
           cache: pip
@@ -39,9 +44,8 @@ jobs:
 
       - name: Every module compiles
         run: |
-          # sh_*.py rather than a fixed list: the public mirror carries fewer modules than the
-          # private tree (§BEAT's sh_music.py stays private until it graduates), and one recipe
-          # must compile both.
+          # sh_*.py rather than a fixed list: the music module is optional; one recipe must
+          # compile a tree with it and without it.
           python -m py_compile SparingHorse.py sh_*.py
 
       - name: The front end parses
@@ -111,7 +115,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build the image (digest-pinned base, hash-pinned wheels)
         run: docker build -t sparinghorse:ci .
       - name: Run it exactly as compose does and wait for healthy
@@ -179,15 +183,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
           cache: pip
       # The same hash-pinned set the image installs (0.55.2): CI must not pass on a dependency
       # the container would then refuse.
       - run: pip install --require-hashes -r requirements.lock
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # The Node the BROWSER TESTS run on — a different axis from the `node24` runtime the
           # actions themselves use, and not what the deprecation notice was about. 20 went
@@ -198,7 +202,7 @@ jobs:
           node-version: '24'
       - name: Install Playwright (chromium only)
         run: |
-          npm install --no-save playwright
+          npm install --no-save playwright@1.63.0
           npx playwright install --with-deps chromium
       - name: Drive the real UI in 9 modes
         env:

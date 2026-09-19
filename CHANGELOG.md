@@ -10,6 +10,129 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.69.0] - 2026-09-19
+
+### Added
+
+- **The cadence-playlist module ships in the public mirror.** `publish_mirror.sh`'s `EXCLUDES`
+  array no longer names `sh_music.py`, `static/music.js` or `static/music.css` (17 entries down to
+  14) and no longer deletes the Dockerfile's `COPY sh_music.py` line; the module was already
+  optional — imported inside a try, so a tree without it boots without the page — and the comments
+  that said "until it graduates" in the Dockerfile, `SparingHorse.py`, `sh_music.py`,
+  `sh_selftest.py` and `.github/workflows/ci.yml` now just say it's optional. New
+  `det/music-graduated` checks that `EXCLUDES` names none of the three files (with an anti-vacuity
+  limb that the private docs, `PROJECT_LOG.md` and `CLAUDE.md`, still are), that no `sed` step
+  touches the Dockerfile's `COPY`, that the `COPY` line itself survives, and that a `DEMO` host
+  handed to `register()` gets no route and no secret row while the private app registers `/music`
+  as normal; it fails with the `EXCLUDES` line reverted.
+
+- **The docs name the module's own science.** README gets a "Cadence playlists" *(optional)* bullet
+  in Features — what it builds, whose listening it draws on, the read-back, what it needs — and its
+  "Scientific basis" blockquote now links Gabbett 2016 (BJSM), Nielsen et al. 2014 (JOSPT) and Jones
+  2023 (J Physiol) by DOI, names Friel and Daniels (with Gilbert) as books, and points to MANUAL §9.
+  MANUAL's new "§9. Cadence playlists (optional)" covers what it does, setup, Build/Rebuild and the
+  read-back's press protocol, limits, and eleven references under "The science it leans on"; every
+  later section renumbers to make room, 9→10 through 15→16, with every anchor updated. Each DOI was
+  resolved through the Crossref API and each PMID through NCBI's E-utilities and checked against the
+  claim it supports before it was cited; nothing that failed to resolve made the cut.
+
+### Changed
+
+- **The demo drops the music page entirely.** `sh_music.register()` now returns before it binds
+  anything when the host it's handed carries `DEMO` — no `/music` route, no `/api/music/*` routes,
+  no `SECRET_SPEC` rows — because the demo holds no secret and refuses to take one, so its music
+  page could only ever sit on "connect Spotify" while its own refresh routes reached last.fm,
+  ListenBrainz and ReccoBeats on a stranger's behalf. `SparingHorse.py`'s call into `render_bits`
+  now passes `READONLY or DEMO`, so the shell's five placeholders (the header link, the mobile tab,
+  and, on its own page, the stylesheet, the section and the script) stay empty on the demo exactly
+  as they already do on the public box.
+
+- **The four Music keys join the env-fallback pattern.** `.env.example` gains a commented block for
+  `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `LASTFM_API_KEY` and `LISTENBRAINZ_TOKEN`;
+  `docker-compose.yml` passes all four through on the private service only, the same shape the
+  Runalyze token and Claude key already use. The mirror's own leak scan over the three files stays
+  clean, and `det/copy-posture` now reads `static/music.js` too, under both its third-person and
+  direct-address rules.
+
+## [0.68.14] - 2026-09-19
+
+### Fixed
+
+- **A short run's own automatic kilometre laps read as the athlete's presses.** `press_times`'s
+  modal-distance rule needs at least three untriggered laps to find a distance most of them share;
+  under that — a very short run, or Runalyze's `splits` fallback, which never carries a trigger
+  field at all — the rule had nothing to run, and every untriggered lap fell through as a manual
+  press: a phantom "the beat lost me here" verdict on the song playing at each kilometre. Below
+  three untriggered laps, each is now judged on its own: a lap landing within ±5% of a whole
+  multiple of a kilometre or a mile (new `MUSIC_AUTOLAP_UNITS_M`) is the watch's own autolap,
+  anything else is a press; a lap on the boundary itself (the zero-th multiple) is not a pattern
+  and stays a press. The ≥3-lap modal rule, named triggers and the final-stub grace are unchanged.
+  New `det/music-short-run-laps` (eight cases; on the reverted rule two exact-kilometre laps both
+  read as presses). The constant is tabled in ENGINE_SCIENCE.md §10 (inventory now 277 constants,
+  203 tabled).
+
+- **A plan's own risk governor published a zero it never decided.** `generate_block` wrote
+  `proj_acwr_soft` as `round(_eow_soft(...) or 0.0, 4)` — when `_eow_soft` returned `None` (the
+  search never priced a soft ACWR that week), the `or 0.0` turned "nobody decided" into a number
+  the search never produced, indistinguishable from a real reading of zero. A governor's decision
+  variable has to publish what it actually decided. It now publishes `None if _soft is None else
+  round(_soft, 4)`; a real 0.0 still prints as 0.0. Golden plans are byte-identical — no golden
+  plan ever held a 0.0 in this field. New `det/soft-acwr-none` monkeypatches `_eow_soft` to `None`
+  across a three-week assertive block and requires every week to publish `None`; it fails on the
+  reverted line, which would publish 0.0 instead.
+
+- **The FIT parser had never once faced a real FIT file.** Every det exercising `parse_fit` mocked
+  it, so fitdecode's actual field names, its lap-trigger enum-to-string decode, the per-leg
+  cadence doubling and its truncation handling had never been checked against the library that
+  reads every FIT this app is given. `sh_selftest.py` now carries a from-scratch FIT encoder
+  (`_fit_bytes`, `_fit_crc`: header, definition and data messages for file_id/record/lap/session,
+  the format's own CRC-16), and a new `det/fit-parse` drives it through fitdecode itself: strict
+  mode accepts the encoded bytes; 700 one-second records decode to 169.0 spm (an 84.5-per-leg
+  cadence doubled); distance is strictly increasing; `start` is pinned to the session's own
+  `start_time`; lap triggers decode to the real strings "manual"/"distance", and `press_times`
+  returns exactly the one manual press — the first time the "manual" string contract has been
+  tested end to end; a truncated copy and pure junk both fail through fitdecode's own `FitError`
+  family, and a corrupted file CRC raises `FitCRCError` (the det's own revert tooth). Writing the
+  encoder against fitdecode's bundled profile also corrected two lap field numbers the FIT spec's
+  plain numbering suggests but does not use: `total_timer_time` is field 8 and `total_distance` is
+  field 9, not the ordinal-looking 0/2.
+
+- **Three accessibility gaps: the weekly chart, the run calendar's popover, and the check-in
+  selects.** The weekly volume chart panned by drag and wheel only — a keyboard had no way in. It
+  is now focusable (`role="group"`, an aria-label naming the keys); Left/Right pan a week,
+  PageUp/PageDown a window, Home/End go to the ends, all under the same clamp the wheel path uses,
+  with a visible focus ring and an `aria-live` range caption. The run calendar's multi-run popover
+  closed only on a click outside it — Escape now closes it too and returns focus to the day cell
+  that opened it, and focus lands on the first run chip when the popover opens, so a keyboard user
+  is never left stranded on a control that just vanished. The check-in selects showed one label
+  ("energy"/"sleep") while announcing a different one to a screen reader (`aria-label="Legs"` /
+  `"Sleep"`) — the visible label now names its select with `for=`, and the separate aria-label is
+  gone. No new det: `det/keyboard-reach`'s existing rules cover the chart and were kept as they
+  stood.
+
+- **The public and demo boxes could resolve the private console by name.** All three services sat
+  on one Docker network, `sparinghorse-edge`; anything on it, including the demo box that any
+  stranger drives, could reach the private console by its service name — the compose network, not
+  any app-level check, was the only thing that had ever ruled that out. `sparinghorse-edge` now
+  carries the private service alone; `sparinghorse-public` and `sparinghorse-demo` sit on a new
+  `sparinghorse-edge-public`, and the proxy joins both. DEPLOY.md documents the split and the
+  migration order for an existing deployment: rebuild the stack first (Compose creates the new
+  network on that `up`; never create it by hand — Compose refuses to adopt a network it did not
+  label itself), then `docker network connect sparinghorse-edge-public <cloudflared container>` so
+  the public and demo hostnames come back together, then add the network to cloudflared's own
+  compose file to make the join permanent on its next `up -d`. Between the rebuild and the
+  connect, the public and demo hostnames are unreachable — the operator should run both steps in
+  the same pass.
+
+- **Hygiene — CI supply chain.** Every `uses:` in `.github/workflows/ci.yml` is now pinned to the
+  commit its `@vN` tag resolves to today, with the tag kept in a comment (`actions/checkout` →
+  v7.0.1, `actions/setup-python` → v7.0.0, `actions/setup-node` → v7.0.0) — a tag is a pointer its
+  maintainer, or an account compromise, can re-point to different code under the same familiar
+  name, while a SHA is the code that actually ran. Playwright is pinned to 1.63.0. A new
+  `.github/dependabot.yml` opens a weekly PR moving these pins forward as the upstream tags
+  advance, so a stale pin does not go unnoticed. `det/ci-cache` is unaffected — it reads only the
+  cache/no-cache lines.
+
 ## [0.68.13] - 2026-09-19
 
 ### Fixed

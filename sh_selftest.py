@@ -55,9 +55,9 @@ import sh_engine as E
 APP_MODULES = (S, E)                                  # every module the app's own code lives in
 APP_SOURCES = ("SparingHorse.py", "sh_engine.py")     # …and the files they live in
 
-# §BEAT (0.61.0) — the music module is OPTIONAL: the app imports it inside a try and the public
-# mirror ships without it. When it is in the tree it joins both registers (so the shadow check, the
-# constant inventory and the source scans cover it) and its dets run; when it is not, `M` is None
+# §BEAT (0.61.0) — the music module is OPTIONAL: the app imports it inside a try, and a tree may
+# not carry it — it is optional. When it is in the tree it joins both registers (so the shadow check,
+# the constant inventory and the source scans cover it) and its dets run; when it is not, `M` is None
 # and every music det reports itself skipped rather than failing a build that never had it.
 try:
     import sh_music as M
@@ -549,6 +549,94 @@ def _stc_module_split():
                passed=not fails, expect="one-way arrow · no drifted re-export · patches land · registers complete",
                got={"re_exported": len(shared), "app_modules": sorted(mod_names),
                     "app_sources": list(APP_SOURCES), "failures": fails or "none"})
+
+
+def _stc_music_graduated():
+    """§BEAT graduation (0.69.0) — the mirror ships the music module now, so publish_mirror.sh must
+    no longer strip it, while the docs that are private for their own separate reasons (PROJECT_LOG.md,
+    the owner's Claude Code routing config) still are. Static, on the script's own text — a mirror run
+    needs a real remote and a network, which this suite must not depend on.
+
+    (a) parses EXCLUDES=( … ) the same way the CI leak-scan gate and tools/gemini_review.py do (the
+        array's CODE part — a trailing comment's own ")" must not end it) and asserts none of the
+        three music files are named there any more.
+    (c) ANTI-VACUITY: PROJECT_LOG.md and CLAUDE.md — which have nothing to do with §BEAT — must still
+        be named, so a parser bug that returns an empty or truncated array cannot pass by finding
+        nothing left to complain about.
+    (b) no `sed` line deletes the Dockerfile's `COPY sh_music.py` line — the trick that used to keep
+        the private tree's COPY from failing a public build that never had the file.
+    (d) the Dockerfile still COPYs the module. det/image-completeness only checks the other direction
+        (nothing IMPORTED is missing from the image); it would not notice a COPY line quietly dropped
+        for a file the app still imports lazily inside a try.
+
+    Skipped where publish_mirror.sh is not shipped (the mirror strips the script itself)."""
+    path = S.Path(S.__file__).resolve().parent / "publish_mirror.sh"
+    if not path.exists():
+        return _st("det", "music-graduated",
+                   "§BEAT graduation (0.69.0) — the mirror ships the music module: publish_mirror.sh "
+                   "no longer strips sh_music.py / static/music.* nor the Dockerfile's COPY of it, "
+                   "while the private docs stay stripped (skipped: no publish_mirror.sh in this image)",
+                   passed=None, expect="run on a checkout", got={"publish_mirror.sh": "absent"})
+    lines = path.read_text(encoding="utf-8").splitlines()
+    fails, excludes = [], set()
+    start = next((i for i, l in enumerate(lines) if l.startswith("EXCLUDES=(")), None)
+    if start is None:
+        fails.append("EXCLUDES=( … ) array not found")
+    else:
+        chunk, end = [], None
+        for i in range(start, len(lines)):
+            bare = lines[i].split("#", 1)[0]     # strip a trailing comment before hunting for ")"
+            chunk.append(bare)
+            if bare.rstrip().endswith(")"):
+                end = i
+                break
+        if end is None:
+            fails.append("EXCLUDES=( … ) array never closes on a code line")
+        else:
+            tokens = " ".join(chunk).split()
+            tokens[0] = tokens[0][len("EXCLUDES=("):]
+            tokens[-1] = tokens[-1][:-1]
+            excludes = {t for t in tokens if t}
+    # (a)
+    music_files = {"sh_music.py", "static/music.js", "static/music.css"}
+    named = excludes & music_files
+    if named:
+        fails.append(f"EXCLUDES still names the music module: {sorted(named)}")
+    # (c) anti-vacuity — the array still strips the private docs it always has, so an empty/broken
+    # parse (which would also show no music files) cannot pass this det by accident.
+    for still in ("PROJECT_LOG.md", "CLAUDE.md"):
+        if still not in excludes:
+            fails.append(f"EXCLUDES no longer names {still} — the parse is broken, not the graduation")
+    # (b)
+    for i, line in enumerate(lines, 1):
+        code = line.split("#", 1)[0]
+        if "sed" in code and "sh_music" in code:
+            fails.append(f"line {i}: a sed step still touches sh_music — {line.strip()!r}")
+    # (d)
+    df = S.Path(S.__file__).resolve().parent / "Dockerfile"
+    if df.exists() and not S.re.search(r"^COPY sh_music\.py \.\s*$", df.read_text(encoding="utf-8"), S.re.M):
+        fails.append("Dockerfile no longer COPYs sh_music.py")
+    # (e) the demo registers NOTHING — no /music page, no /api/music routes, no secret rows — while the
+    # real (private) app does register the page (the anti-vacuity half).
+    if M is not None:
+        import flask as _fl, types as _ty
+        if "/music" not in {r.rule for r in S.app.url_map.iter_rules()}:
+            fails.append("the private app does not register /music — the demo limb below proves nothing")
+        probe = _fl.Flask("sh-demo-probe")
+        before = len(list(probe.url_map.iter_rules()))
+        host = _ty.SimpleNamespace(DEMO=True, SECRET_SPEC=[], SECRET_BY_KEY={})
+        M.register(probe, host)
+        if len(list(probe.url_map.iter_rules())) != before or host.SECRET_SPEC:
+            fails.append(f"a DEMO host still got {len(list(probe.url_map.iter_rules())) - before} route(s) and "
+                         f"{len(host.SECRET_SPEC)} secret row(s) from register()")
+    return _st("det", "music-graduated",
+               "§BEAT graduation (0.69.0) — the mirror ships the music module: publish_mirror.sh no "
+               "longer strips sh_music.py / static/music.* nor the Dockerfile's COPY of it, while the "
+               "private docs stay stripped",
+               passed=not fails,
+               expect="music files absent from EXCLUDES · PROJECT_LOG.md/CLAUDE.md still there · no "
+               "sed touches sh_music · Dockerfile still COPYs it",
+               got={"excludes": sorted(excludes), "failures": fails or "none"})
 
 
 def _stc_ci_cache():
@@ -14253,6 +14341,42 @@ def _stc_regime_plan():
                     "failures": fails or "none"})
 
 
+def _stc_soft_acwr_none():
+    """§PRO23 — `proj_acwr_soft` is the governor's own decision variable, and a governor that keeps
+    a private variable forces its own readers to guess (see det/regime-plan's `feow`, which prefers
+    this field precisely so it never has to reconstruct it). Its publish line used to read
+    `round(_eow_soft(...) or 0.0, 4)` — a None reading from the search (nobody decided a ratio)
+    collapsed into 0.0 (a ratio search DID decide), and no reader could tell the two apart. Patch
+    `_eow_soft` to always return None and require every week to publish None, never a manufactured
+    0.0. Anti-vacuity: the SAME call, unpatched, must publish a real float somewhere, or patching
+    `_eow_soft` changed nothing this fixture could see."""
+    from datetime import date
+    fails = []
+    a_shape = E.base_shape(3, 40)
+    bs = date(2026, 7, 6)          # a Monday; §PRO's own fixed-clock convention
+    kw = dict(regime="assertive", zones=E.pace_zones(34.8))
+    wks_real, _ = E.generate_block(a_shape, bs, 55.0, 60.0, 428.0, **kw)
+    reals = [w.get("proj_acwr_soft") for w in wks_real]
+    if not any(isinstance(v, float) for v in reals):
+        fails.append(f"anti-vacuity: the unpatched call published no float proj_acwr_soft — {reals}")
+    undo = _patch_globals(_eow_soft=(lambda *a, **k: None))
+    try:
+        wks_none, _ = E.generate_block(a_shape, bs, 55.0, 60.0, 428.0, **kw)
+    finally:
+        undo()
+    nones = [w.get("proj_acwr_soft") for w in wks_none]
+    if any(v is not None for v in nones):
+        fails.append(f"a week published a non-None proj_acwr_soft while _eow_soft always returns None: {nones}")
+    if any(v == 0.0 for v in nones):
+        fails.append(f"a week published 0.0 (the old `or 0.0`) instead of None: {nones}")
+    return _st("det", "soft-acwr-none",
+               "§PRO23 — proj_acwr_soft follows _eow_soft to None rather than manufacturing a 0.0 "
+               "the search never produced",
+               passed=not fails, expect="every week None (none 0.0) once _eow_soft returns None; "
+                                        "the unpatched call publishes a real float",
+               got={"unpatched": reals, "patched": nones, "failures": fails or "none"})
+
+
 def _stc_regime_assertive():
     """§PRO2 — the assertive regime RIDES the safe headroom the caution baseline leaves on the table,
     on the SAME fit seed (CTL 70) det/caution-baseline pins. It must: (a) lift the build peak above the
@@ -15522,8 +15646,9 @@ def _stc_copy_posture(db):
     # a glob would sweep in untracked working notes (the plan/review drafts) that never reach the
     # mirror at all — and fail on documents whose whole job is to discuss the athlete. PROJECT_LOG.md
     # and ENGINE_SCIENCE.md are tracked but stripped by EXCLUDES, so they are out too.
-    for path in list(APP_SOURCES) + ["static/app.js", "README.md", "MANUAL.md",
-                                     "CHANGELOG.md", "AUTHORS.md"]:
+    for path in (list(APP_SOURCES) + ["static/app.js", "README.md", "MANUAL.md",
+                                       "CHANGELOG.md", "AUTHORS.md"]
+                 + (["static/music.js"] if M is not None else [])):
         try:
             body = open(path, encoding="utf-8").read()
         except OSError:
@@ -15570,14 +15695,15 @@ def _stc_copy_posture(db):
             elif t.type == _tok.STRING and t.string[:3] in TRIPLES:
                 for k, ln in enumerate(t.string[3:-3].split("\n")):
                     _addr_flag(path, t.start[0] + k, ln)
-    try:
-        js = open("static/app.js", encoding="utf-8").read().split("\n")
-    except OSError:
-        js = []
-    for i, line in enumerate(js, 1):
-        st = line.lstrip()
-        if st.startswith("//") or st.startswith("*"):
-            _addr_flag("static/app.js", i, line)
+    for _jsf in ["static/app.js"] + (["static/music.js"] if M is not None else []):   # the music script ships too (0.69.0)
+        try:
+            js = open(_jsf, encoding="utf-8").read().split("\n")
+        except OSError:
+            js = []
+        for i, line in enumerate(js, 1):
+            st = line.lstrip()
+            if st.startswith("//") or st.startswith("*"):
+                _addr_flag(_jsf, i, line)
 
     # (d) — raw sinks + secrets-store mode.
     if "${e}" in S.UI_SOURCE:
@@ -18000,7 +18126,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -18049,7 +18175,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_day_preference(), lambda: _stc_long_run_day(),
                  lambda: _stc_trimp_price(), lambda: _stc_week_trimp_bound(),
                  lambda: _stc_regime_assertive(), lambda: _stc_regime_gate(), lambda: _stc_regime_compare(),
-                 lambda: _stc_regime_plan(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
+                 lambda: _stc_regime_plan(), lambda: _stc_soft_acwr_none(), lambda: _stc_tissue_limiter(), lambda: _stc_meso_rephase(),
                  lambda: _stc_straddle_streak(), lambda: _stc_straddle_caps(),
                  lambda: _stc_straddle_remainder(), lambda: _stc_quality_mix(),
                  lambda: _stc_progression_run(),
@@ -18228,6 +18354,83 @@ def _selftest_text(report):
 # never had would be a battery nobody trusts. ──────────────────────────────────────────────────
 def _music_skip(sid, desc):
     return _st("det", sid, desc, skipped=True, note="sh_music.py is not in this tree")
+
+
+# §SH-24 — a minimal FIT ENCODER, so det/fit-parse can drive the real fitdecode library instead of
+# a mock: every other FIT det stands in for fitdecode entirely, which has never once caught a wrong
+# field name, a mis-decoded enum or a truncation the library itself would raise on. No binary
+# fixture lives in the repo; this builds one from scratch, bit for bit, CRCs included.
+def _fit_crc(data, crc=0):
+    """CRC-16 exactly as the FIT SDK defines it — table-driven, a nibble of each byte at a time.
+    `_fit_bytes` folds this once over the header's first 12 bytes and once over the whole file, per
+    the format's own two CRCs."""
+    table = (0x0000, 0xCC01, 0xD801, 0x1400, 0xF001, 0x3C00, 0x2800, 0xE401,
+             0xA001, 0x6C00, 0x7800, 0xB401, 0x5000, 0x9C01, 0x8801, 0x4400)
+    for b in data:
+        tmp = table[crc & 0xF]
+        crc = (crc >> 4) & 0x0FFF
+        crc = crc ^ tmp ^ table[b & 0xF]
+        tmp = table[crc & 0xF]
+        crc = (crc >> 4) & 0x0FFF
+        crc = crc ^ tmp ^ table[(b >> 4) & 0xF]
+    return crc & 0xFFFF
+
+
+def _fit_bytes(records, laps, session_start):
+    """A minimal, CRC-VALID FIT file. `records`: [(t_unix, dist_m, cadence, frac_cadence_raw)] at
+    1 Hz; `laps`: [(t_unix, timer_s, dist_m, trigger)] (trigger 0 = manual, 2 = distance);
+    `session_start` is the SESSION message's own start_time (unix) — independent of the first
+    record's timestamp, which is the gap §BEAT6's `anchor_fit` exists to close. Emits file_id, then
+    the whole record block, then the whole lap block, then the session message LAST, one
+    definition per block on its own local message type, exactly as real files do.
+
+    Field-def numbers below are the real Garmin profile's, verified against fitdecode's own
+    `MESSAGE_TYPES` — NOT the ordinal-looking (0, 2) a first reading of the FIT SDK docs suggests
+    for a lap's `total_timer_time`/`total_distance`: those two numbers name `event`/`start_time` in
+    the real profile, and fitdecode would decode them as such, leaving `parse_fit`'s
+    `g("total_timer_time")`/`g("total_distance")` reading nothing. The correct numbers are 8 and 9."""
+    import struct
+
+    def u8(v): return struct.pack("<B", v)
+    def u16(v): return struct.pack("<H", v)
+    def u32(v): return struct.pack("<I", v)
+
+    FIT_EPOCH_OFFSET = 631065600   # FIT timestamps count seconds from 1989-12-31T00:00:00Z
+    ENUM, UINT8, UINT16, UINT32, UINT32Z = 0x00, 0x02, 0x84, 0x86, 0x8C
+
+    def fit_ts(t): return u32(int(round(t)) - FIT_EPOCH_OFFSET)
+
+    def definition(local_type, global_num, fields):
+        out = bytes([0x40 | local_type, 0x00, 0x00]) + struct.pack("<H", global_num) + bytes([len(fields)])
+        for field_num, size, base_type in fields:
+            out += bytes([field_num, size, base_type])
+        return out
+
+    def data_msg(local_type, *values):
+        out = bytes([local_type])
+        for v in values:
+            out += v
+        return out
+
+    LT_FILE_ID, LT_RECORD, LT_LAP, LT_SESSION = 0, 1, 2, 3
+    body = bytearray()
+    body += definition(LT_FILE_ID, 0, [(0, 1, ENUM), (1, 2, UINT16), (2, 2, UINT16),
+                                        (3, 4, UINT32Z), (4, 4, UINT32)])
+    body += data_msg(LT_FILE_ID, u8(4), u16(255), u16(0), u32(1234), fit_ts(session_start))
+    body += definition(LT_RECORD, 20, [(253, 4, UINT32), (5, 4, UINT32), (4, 1, UINT8), (53, 1, UINT8)])
+    for t, dist_m, cad, frac in records:
+        body += data_msg(LT_RECORD, fit_ts(t), u32(round(dist_m * 100)), u8(cad), u8(frac))
+    body += definition(LT_LAP, 19, [(253, 4, UINT32), (8, 4, UINT32), (9, 4, UINT32), (24, 1, ENUM)])
+    for t, timer_s, dist_m, trig in laps:
+        body += data_msg(LT_LAP, fit_ts(t), u32(round(timer_s * 1000)), u32(round(dist_m * 100)), u8(trig))
+    body += definition(LT_SESSION, 18, [(253, 4, UINT32), (2, 4, UINT32), (5, 1, ENUM)])
+    last_t = records[-1][0] if records else session_start
+    body += data_msg(LT_SESSION, fit_ts(last_t), fit_ts(session_start), u8(1))
+
+    header = bytes([14, 0x20]) + struct.pack("<H", 2132) + struct.pack("<I", len(body)) + b".FIT"
+    header += struct.pack("<H", _fit_crc(header))
+    whole = header + bytes(body)
+    return whole + struct.pack("<H", _fit_crc(whole))
 
 
 def _stc_music_curve():
@@ -19027,6 +19230,151 @@ def _stc_music_readback():
                "seams excluded, pace from distance; ratings import; routes private; old token asks to reconnect",
                passed=not fails, expect="two songs, 170/176 spm, 400 s/km; 2 ratings; 403s; reconnect flag",
                got={"violations": fails or "none"})
+
+
+def _stc_fit_parse():
+    """§SH-24 — `parse_fit` has run behind a mock in every det until now: the fitdecode field
+    names, the lap_trigger enum→string decode, the per-leg cadence doubling and the truncated-file
+    behaviour were never once exercised against the real library. `_fit_bytes`/`_fit_crc` (above,
+    by `_music_skip`) encode a FIT from scratch, so this det drives fitdecode itself.
+
+    A 700-record 1 Hz run from 2026-09-13T07:00:00Z at 3.0 m/s, cadence 84/leg with fractional
+    cadence 64/128 (84.5 spm — under MUSIC_CAD_SPM_RANGE[0]=120, so parse_fit doubles it to 169.0),
+    three laps (a manual press at t=150s/450m, automatic distance laps at ≈333s/1000m and
+    ≈667s/2000m), and a session start_time 5 s BEFORE the first record — the gap §BEAT6's
+    `anchor_fit` exists to close.
+
+    (a) fitdecode itself, run in RAISE/RAISE mode, accepts the encoded bytes without complaint —
+    the anti-vacuity for every limb below: wrong CRCs would make the rest of this meaningless.
+    (b) parse_fit reads 700 samples, every one doubled to 169.0 spm, strictly increasing distances,
+    and `start` pinned to the session's start_time. (c) the laps decode with fitdecode's OWN enum
+    strings ("manual"/"distance"/"distance"), and press_times — reading `trig == "manual"` against
+    a live string for the first time in this battery — returns exactly the one press. (d) a file
+    truncated at 60% and pure junk each fail through fitdecode's own error classes (FitEOFError /
+    FitHeaderError, both FitError), never something else. (e) THE REVERT TOOTH: flip one byte of
+    the file's trailing CRC and (a) must now fail, specifically with FitCRCError — reported below
+    as proof the CRCs above are real and not a rubber stamp."""
+    if M is None:
+        return _music_skip("fit-parse", "§SH-24 — parse_fit on a real, encoded FIT")
+    import io
+    import fitdecode
+    from datetime import datetime, timezone
+    fails = []
+    run_epoch = datetime(2026, 9, 13, 7, 0, 0, tzinfo=timezone.utc).timestamp()
+    n = 700
+    records = [(run_epoch + i, 3.0 * i, 84, 64) for i in range(n)]
+    laps = [(run_epoch + 150, 150.0, 450.0, 0),           # manual — the only press
+            (run_epoch + 333, 333.0, 1000.0, 2),          # automatic — distance
+            (run_epoch + 667, 667.0, 2000.0, 2)]          # automatic — distance
+    session_start = run_epoch - 5
+    fit_bytes = _fit_bytes(records, laps, session_start)
+
+    # (a) — the encoder's own CRCs must satisfy fitdecode in its strictest mode.
+    try:
+        with fitdecode.FitReader(io.BytesIO(fit_bytes), check_crc=fitdecode.CrcCheck.RAISE,
+                                  error_handling=fitdecode.ErrorHandling.RAISE) as f:
+            list(f)
+    except Exception as e:
+        fails.append(f"(a) fitdecode rejected the encoder's own bytes under RAISE/RAISE: "
+                     f"{type(e).__name__}: {e}")
+
+    # (b) — parse_fit itself.
+    fit = M.parse_fit(fit_bytes)
+    if fit is None:
+        fails.append("(b) parse_fit returned None for a clean, well-formed FIT")
+    else:
+        samples = fit["samples"]
+        dists = [s[2] for s in samples]
+        if len(samples) != n:
+            fails.append(f"(b) expected {n} samples, got {len(samples)}")
+        if any(s[1] != 169.0 for s in samples):
+            fails.append(f"(b) not every sample doubled to 169.0 spm: {sorted(set(s[1] for s in samples))}")
+        if not all(dists[i] < dists[i + 1] for i in range(len(dists) - 1)):
+            fails.append("(b) distances are not strictly increasing")
+        if fit["start"] != session_start:
+            fails.append(f"(b) start={fit['start']}, expected the session start_time {session_start}")
+
+        # (c) — real fitdecode enum strings, and press_times reading them for the first time.
+        trigs = [l[3] for l in fit["laps"]]
+        if trigs != ["manual", "distance", "distance"]:
+            fails.append(f"(c) lap triggers did not decode to real strings: {trigs}")
+        run_end = records[-1][0] + 5
+        presses = M.press_times(fit["laps"], run_end)
+        if presses != [run_epoch + 150]:
+            fails.append(f"(c) press_times off the real trigger strings: {presses}, want {[run_epoch + 150]}")
+
+    # (d) — truncated / junk must fail through fitdecode's OWN hierarchy, nothing else.
+    for label, corrupt in (("truncated at 60%", fit_bytes[:int(len(fit_bytes) * 0.6)]),
+                           ("pure junk", b"junk" * 50)):
+        try:
+            r = M.parse_fit(corrupt)
+            if r is not None:
+                fails.append(f"(d) {label}: parse_fit returned samples instead of None/raising: {r}")
+        except Exception as e:
+            if not isinstance(e, fitdecode.FitError):
+                fails.append(f"(d) {label}: parse_fit raised {type(e).__name__}, not a fitdecode.FitError")
+
+    # (e) — THE REVERT TOOTH: corrupt one byte of the file's own trailing CRC; (a) must now fail,
+    # specifically with FitCRCError.
+    corrupted = bytearray(fit_bytes)
+    corrupted[-1] ^= 0xFF
+    crc_err = None
+    try:
+        with fitdecode.FitReader(io.BytesIO(bytes(corrupted)), check_crc=fitdecode.CrcCheck.RAISE,
+                                  error_handling=fitdecode.ErrorHandling.RAISE) as f:
+            list(f)
+        fails.append("(e) revert tooth: a corrupted file CRC was WRONGLY accepted under RAISE/RAISE")
+    except Exception as e:
+        crc_err = type(e).__name__
+        if not isinstance(e, fitdecode.FitCRCError):
+            fails.append(f"(e) revert tooth: corrupting the file CRC raised {crc_err}, not FitCRCError")
+
+    return _st("det", "fit-parse",
+               "§SH-24 — parse_fit against a real, from-scratch-encoded FIT: fitdecode's own field "
+               "names, the cadence doubling, the lap_trigger enum→string decode and the "
+               "truncated/junk error hierarchy",
+               passed=not fails, expect="700×169.0 spm samples, increasing distance, start=session "
+                                        "start_time, triggers manual/distance/distance, 1 press, "
+                                        "FitError subclasses on truncation/junk",
+               got={"revert_tooth_crc_error": crc_err, "failures": fails or "none"})
+
+
+def _stc_music_short_run_laps():
+    """§BEAT13 — with fewer than 3 untriggered laps the modal-distance rule (det/music-readback's
+    a4) cannot run, so `auto` stayed False and EVERY untriggered lap read as a manual press: a very
+    short run with one or two automatic kilometre laps (or Runalyze's `splits` fallback, which never
+    carries a trigger field) turned each autolap into a phantom 'the beat lost me here'. Below 3
+    untriggered laps, each is now checked on its own against a whole multiple of
+    MUSIC_AUTOLAP_UNITS_M (km/mile); the ≥3-lap modal rule, named triggers and the final-stub grace
+    are all unchanged."""
+    if M is None:
+        return _music_skip("music-short-run-laps", "§BEAT13 — short-run autolap fallback")
+    mk = lambda t, d, trig=None: (t, d, 0.0, trig)
+    fails = []
+    cases = [
+        ("two exact-km laps, both automatic", [mk(400, 1000), mk(800, 1000)], None, []),
+        ("a km lap then one cut short", [mk(400, 1000), mk(800, 640)], None, [800]),
+        ("a single mile lap, automatic", [mk(400, 1609)], None, []),
+        ("a single short lap, a press", [mk(400, 730)], None, [400]),
+        ("a single 2 km lap, automatic (a multiple)", [mk(400, 2000)], None, []),
+        ("≥3 laps unchanged — the short one is the press",
+         [mk(400, 1000), mk(800, 1000), mk(1200, 1000), mk(1600, 620)], None, [1600]),
+        ("≥3 laps unchanged — all regular, none",
+         [mk(400, 1000), mk(800, 1000), mk(1200, 1000)], None, []),
+        ("a named 'manual' trigger is still a press in a 2-lap file",
+         [mk(400, 1000, "manual"), mk(800, 1000)], None, [400]),
+    ]
+    for desc, laps, run_end, expect in cases:
+        got = M.press_times(laps, run_end)
+        if got != expect:
+            fails.append(f"{desc}: expected {expect}, got {got}")
+    return _st("det", "music-short-run-laps",
+               "§BEAT13 — under 3 untriggered laps, each is checked against a whole km/mile multiple "
+               "instead of a modal-distance vote with nothing to average over",
+               passed=not fails, expect="autolap laps read as automatic, short/irregular laps read "
+                                        "as presses, the ≥3-lap and trigger rules unchanged",
+               got={"failures": fails or "none"})
+
 
 def _stc_music_gap_infer():
     """§BEAT8 (0.68.3) — THE SONGS THE PLAY HISTORY DROPPED ARE READ FROM THE LIST ORDER, SO A PRESS ALWAYS

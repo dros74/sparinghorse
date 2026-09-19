@@ -58,6 +58,11 @@ services:
       - RUNALYZE_TOKEN=${RUNALYZE_TOKEN:-}
       # The LLM adjustment layer (the plan engine's language/judgment).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # §BEAT — cadence playlists (optional module); same fallback pattern, private box only.
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-}
+      - LASTFM_API_KEY=${LASTFM_API_KEY:-}
+      - LISTENBRAINZ_TOKEN=${LISTENBRAINZ_TOKEN:-}
       - SH_DB=/data/sparinghorse.db
       # Private-only secrets store — keys set in the Settings window land here, NOT in ./data (which
       # the public container shares + can read). This volume is mounted ONLY on this private service.
@@ -126,8 +131,10 @@ services:
       - edge
     # NO host-published port. This instance has the tokens + medical data and NO app-level auth —
     # it trusts Cloudflare Access entirely, so it must be unreachable except through the tunnel.
-    # cloudflared reaches it by service name (http://sparinghorse:8770) over the shared `edge`
-    # network. For host-local debugging only, bind to loopback (never 0.0.0.0):
+    # cloudflared reaches it by service name (http://sparinghorse:8770) over `sparinghorse-edge`.
+    # The proxy joins BOTH `sparinghorse-edge` and `sparinghorse-edge-public`; this service joins
+    # only the first, so neither the public site nor the demo box can resolve it by name.
+    # For host-local debugging only, bind to loopback (never 0.0.0.0):
     #   ports: ["127.0.0.1:8770:8770"]
 
   # ── Public — always-open, read-only showcase (no Access) ─────────────────────
@@ -160,8 +167,11 @@ services:
       # query_only PRAGMA + the request guard are the write barrier instead.
       - ./data:/data
     networks:
-      - edge
-    # Reached by the tunnel via service name (http://sparinghorse-public:8770) over `edge`.
+      - edge-public
+    # Reached by the tunnel via service name (http://sparinghorse-public:8770) over
+    # `sparinghorse-edge-public`. The proxy joins both networks; this service joins only the
+    # public one, so it can reach the demo box and the proxy — nothing else, never the private
+    # console.
     # Host-local debug only: ports: ["127.0.0.1:8771:8770"]
 
   # ── Demo — the FULL private console over a SYNTHETIC athlete, open to anyone ─
@@ -207,16 +217,25 @@ services:
       # Wipe it, if ever needed, with:  docker compose down && docker volume rm sparinghorse_demo-data
       - demo-data:/data
     networks:
-      - edge
-    # Reached by the tunnel via service name (http://sparinghorse-demo:8770) over `edge`.
+      - edge-public
+    # Reached by the tunnel via service name (http://sparinghorse-demo:8770) over
+    # `sparinghorse-edge-public`. The proxy joins both networks; this service joins only the
+    # public one, so it can reach the public box and the proxy — nothing else, never the private
+    # console.
     # Host-local debug only: ports: ["127.0.0.1:8772:8770"]
 
 volumes:
   demo-data:      # the demo's synthetic database — disposable by design (see the service above)
 
-# Shared network for the Cloudflare tunnel to reach both instances by service name. cloudflared
-# (its own stack, currently on the default `bridge`) must join this same network — see the deploy
-# runbook. Naming it explicitly keeps the name stable regardless of the compose project/dir name.
+# Two networks split the private console from the boxes strangers drive (SH-23). `edge`
+# (sparinghorse-edge) carries the private service only. `edge-public` (sparinghorse-edge-public)
+# carries the public and demo services, which can reach each other and the proxy over it but
+# nothing on `edge` — so the demo box, open to anyone, cannot resolve the private console by name.
+# cloudflared (its own stack, currently on the default `bridge`) must join BOTH networks to reach
+# all three by service name — see the deploy runbook. Naming them explicitly keeps the names
+# stable regardless of the compose project/dir name.
 networks:
   edge:
     name: sparinghorse-edge
+  edge-public:
+    name: sparinghorse-edge-public

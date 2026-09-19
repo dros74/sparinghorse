@@ -1,0 +1,99 @@
+/* §BEAT (0.61.0) — the /music page. Loaded on that page only: it hides the dashboard's sections and
+   styles the music cards. app.css stays untouched, so the public mirror (which strips this file)
+   renders exactly as before. */
+#sec-music{display:block}
+body[data-page="music"] .section:not(#sec-music):not(.msub),
+body[data-page="music"] #objbar, body[data-page="music"] #firstrun, body[data-page="music"] #dqbanner,
+body[data-page="music"] #syncBtn, body[data-page="music"] #settingsBtn, body[data-page="music"] #backfillBtn,
+body[data-page="music"] #planBtn{display:none!important}
+body[data-page="music"] #sec-recent{display:none!important}
+.mgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch;margin-bottom:16px}
+@media(max-width:760px){.mgrid{grid-template-columns:1fr}}
+.mcard h3,#musicSessions h3,#musicResult h3{margin:0 0 8px;font-size:15px}
+.mcard .sub,#musicSessions .sub{font-size:12px;color:var(--muted);margin:0 0 10px}
+.mtbl{width:100%;border-collapse:collapse;font-size:13px}
+.mtbl th{text-align:left;font-weight:500;color:var(--muted);font-size:11px;letter-spacing:.02em;
+  text-transform:uppercase;padding:4px 6px;border-bottom:1px solid color-mix(in oklab,var(--text),transparent 86%)}
+.mtbl td{padding:6px 6px;border-bottom:1px solid color-mix(in oklab,var(--text),transparent 92%);vertical-align:top}
+.mtbl td.n{font-family:var(--mono);text-align:right;white-space:nowrap}
+.mtbl tr.race td{background:color-mix(in oklab,var(--accent),transparent 92%)}
+.mtbl .why{font-size:11px;color:var(--muted)}
+.mrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.mrow label{font-size:12px;color:var(--muted);min-width:9em}
+.mrow input[type=text],.mrow input[type=number]{font:inherit;font-size:13px;padding:5px 8px;
+  border:1px solid color-mix(in oklab,var(--text),transparent 78%);border-radius:8px;background:var(--bg);
+  color:var(--text);width:9em}
+.mrow .chk{font-size:12px;display:inline-flex;gap:6px;align-items:center}
+.mrow button,.mseg button,#musicSessions button{font-size:12px;padding:5px 10px}
+.mpill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:999px;
+  border:1px solid color-mix(in oklab,var(--text),transparent 80%);color:var(--muted);margin-left:4px}
+.mpill.ok{color:var(--accent);border-color:color-mix(in oklab,var(--accent),transparent 50%)}
+.mpill.warn{color:#b0642a}
+.mbands{display:flex;gap:3px;align-items:flex-end;height:44px;margin:8px 0 2px}
+.mbands div{flex:1;background:color-mix(in oklab,var(--accent),transparent 60%);border-radius:3px 3px 0 0;
+  position:relative;min-height:2px}
+.mbands div span{position:absolute;bottom:-16px;left:0;right:0;text-align:center;font-family:var(--mono);
+  font-size:9px;color:var(--muted)}
+.mbandcap{font-size:11px;color:var(--muted);margin:16px 0 0}
+.mseg{margin:12px 0;padding:10px 12px;border-radius:10px;background:color-mix(in oklab,var(--text),transparent 95%)}
+.mseg .mhead{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;font-size:13px}
+.mseg .mhead b{font-weight:600}
+.mseg ol{margin:6px 0 0;padding-left:20px;font-size:13px}
+.mseg li{margin:2px 0}
+.mseg li .meta{font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:6px}
+.mseg li .new{font-size:10px;color:var(--accent);margin-left:4px}
+.mnote{font-size:12px;color:#b0642a;margin:4px 0}
+.merr{font-size:12px;color:#b0642a;margin:6px 0}
+.mok{font-size:12px;color:var(--accent);margin:6px 0}
+.mprog{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.msub summary h3{display:inline;font-size:14px}
+.msub .panel.help{font-size:13px;line-height:1.55}
+.msub .panel.help p{margin:0 0 10px}
+.mhint{font-size:11px;color:var(--muted);margin-top:8px;line-height:1.5}
+.mhint code{font-family:var(--mono);font-size:11px;word-break:break-all}
+.mlink{font-size:13px}
+/* 0.68.0 — the page's job is the next run: a title row with one status line, the hero, then the glances */
+.mtitle{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:0 0 14px}
+.mtitle h2{margin:0}
+.mtitle .ghost{margin-left:auto;font-size:12px;padding:5px 10px}
+.mhero{display:grid;grid-template-columns:1.1fr 1.2fr 1fr;gap:24px;margin-bottom:16px}
+@media(max-width:760px){.mhero{grid-template-columns:1fr;gap:14px}}
+.mhero .mcol{display:flex;flex-direction:column;gap:6px;min-width:0}
+.mhero .mcol+.mcol{border-left:1px solid var(--line);padding-left:24px}
+@media(max-width:760px){.mhero .mcol+.mcol{border-left:none;padding-left:0;border-top:1px solid var(--line);padding-top:12px}}
+.mk{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.mbig{font-family:var(--serif);font-weight:600;font-size:26px;line-height:1.1}
+.mnum{font-family:var(--serif);font-weight:600;font-size:34px;line-height:1.05}
+.mnum small,.mbig small{font-family:var(--sans);font-weight:400;font-size:13px;color:var(--muted)}
+.mchips{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
+.mchip{font-family:var(--mono);font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid color-mix(in oklab,var(--text),transparent 72%);color:var(--muted);white-space:nowrap}
+.mhero .mact{justify-content:center;align-items:stretch;gap:8px}
+.mhero .mact .primary{font-size:14px;padding:11px 18px;min-height:44px}
+.mhero .mact .ghost{font-size:12px;padding:6px 10px}
+.mstats{display:flex;gap:28px;flex-wrap:wrap;margin:4px 0 8px}
+.mstat .v{font-family:var(--serif);font-weight:600;font-size:28px;line-height:1.05}
+.mstat .v small{font-family:var(--sans);font-weight:400;font-size:13px;color:var(--muted)}
+.mbar{height:8px;border-radius:4px;background:var(--line);position:relative;margin:6px 0}
+.mbar i{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--accent)}
+.mtbl td.act{text-align:right;white-space:nowrap}
+.mtbl td.act button{font-size:12px;padding:4px 9px}
+.mrow select{font:inherit;font-size:13px;padding:5px 8px;border:1px solid color-mix(in oklab,var(--text),transparent 78%);border-radius:8px;background:var(--bg);color:var(--text);max-width:100%}
+/* the Settings → Music tab */
+.msetgrid{margin-bottom:10px}
+.mstatus{border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+.mstatus .mhead{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.mstatus .dot{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:none}
+.mstatus .dot.ok{background:var(--ok)}
+.mstatus .mhead .mprog{margin-left:auto;font-weight:400}
+.mstatus .mrow{margin:4px 0 0}
+.mkeys summary{font-size:13px;cursor:pointer;color:var(--muted);margin:8px 0}
+.mkeys .setrow{margin-top:10px}
+.mlibnums{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-end}
+.mlibnums .v{font-family:var(--serif);font-weight:600;font-size:22px;line-height:1.1}
+.mlibnums .l{font-size:12px;color:var(--muted)}
+.mlink{color:var(--accent-ink)}
+#musicSessions .mtbl td:first-child{white-space:nowrap}
+@media(max-width:760px){
+  #musicSessions .mtbl [data-prev]{display:none}   /* a phone gets Build; the preview is a desktop read */
+  #musicSessions .mtbl td.act button{padding:8px 10px;min-height:44px}
+}

@@ -311,6 +311,22 @@ function wireWeeklyDrag(){
     const ne=Math.max(lo, Math.min(WEEKLY_ALL.length, WEEKLY_END-step));
     if(ne!==WEEKLY_END){ WEEKLY_END=ne; renderWeekly(); }
   }, {passive:false});
+  // §A11Y-PAN — the keyboard equivalent of the drag/wheel pan above: same clamp, same step sizes.
+  chart.addEventListener("keydown", e=>{
+    if(WEEKLY_ALL.length<=WEEKLY_WIN) return;   // nothing to pan
+    const lo=Math.min(WEEKLY_WIN, WEEKLY_ALL.length);
+    let ne=WEEKLY_END;
+    if(e.key==="ArrowLeft") ne=WEEKLY_END-1;
+    else if(e.key==="ArrowRight") ne=WEEKLY_END+1;
+    else if(e.key==="PageDown") ne=WEEKLY_END-WEEKLY_WIN;
+    else if(e.key==="PageUp") ne=WEEKLY_END+WEEKLY_WIN;
+    else if(e.key==="Home") ne=lo;
+    else if(e.key==="End") ne=WEEKLY_ALL.length;
+    else return;
+    e.preventDefault();
+    ne=Math.max(lo, Math.min(WEEKLY_ALL.length, ne));
+    if(ne!==WEEKLY_END){ WEEKLY_END=ne; renderWeekly(); }
+  });
 }
 async function loadWeekly(){
   let all;
@@ -720,11 +736,22 @@ async function loadRunsCal(month){
         rcalPick(+c.dataset.id, cell.dataset.date, cell);
       });
       cell.appendChild(pop);
+      pop.querySelector(".rcal-chip")?.focus();   // §A11Y-POP — a keyboard user gets somewhere to land, not just an open popover
       ev.stopPropagation();
     });
   });
 }
 document.addEventListener("click", e=>{ if(!e.target.closest(".rcal-day")) rcalCloseAllPops(); });
+// §A11Y-POP — Escape closes an open popover and gives focus back to the day cell that opened it,
+// so a keyboard user isn't left stranded on a chip that just vanished.
+document.addEventListener("keydown", e=>{
+  if(e.key!=="Escape") return;
+  const pops=document.querySelectorAll(".rcal-pop");
+  if(!pops.length) return;
+  const cell=pops[0].parentElement;
+  rcalCloseAllPops();
+  cell?.focus();
+});
 
 // ── Workout route map (private only) ────────────────────────────────────────
 // Leaflet is loaded lazily from a CDN and ONLY on the private instance — the public read-only
@@ -901,7 +928,7 @@ function renderReadiness(d){
   const hrv=a.hrv||{};
   const hrvTxt = hrv.state==null ? "HRV: no data"
     : `HRV ${hrv.baseline} vs ${hrv.band[0]}–${hrv.band[1]} — ${hrv.state}`;
-  const sel=(name,val,opts)=>`<label>${name}</label><select id="ci_${name}" aria-label="${name==="energy"?"Legs":"Sleep"}">`+
+  const sel=(name,val,opts)=>`<label for="ci_${name}">${name}</label><select id="ci_${name}">`+
     opts.map(([v,t])=>`<option value="${v}" ${v===val?"selected":""}>${t}</option>`).join("")+`</select>`;
   let aiLine="";
   if(a.source && a.source.startsWith("llm"))

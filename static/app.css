@@ -311,6 +311,7 @@
   /* weekly bars */
   .chart{cursor:grab}
   .chart.grabbing{cursor:grabbing}
+  .chart:focus-visible{outline:2px solid var(--accent);outline-offset:2px}   /* §A11Y-PAN — keyboard pan needs a visible focus stop */
   .chart .bars,.chart .ruler{user-select:none}
   .chart .bars{display:flex;align-items:flex-end;gap:4px;height:150px}
   .chart .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px;min-width:0}

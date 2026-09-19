@@ -86,6 +86,12 @@ everything.
   Guides (steps with pace and HR bands), through your own Suunto partner-app keys. The nightly push
   updates guides in place. If you delete them on the watch itself, use **Rebuild on watch** in Settings:
   the watch only fetches guide ids it has never seen, so an update alone will not bring them back.
+- **Cadence playlists** *(optional)*. Builds a private Spotify playlist for each planned session,
+  targeting a cadence read from your own speed–cadence curve, never a fixed number, from your Spotify
+  and last.fm listening (a ListenBrainz account also mixes in songs you have never run to). After the
+  run, the read-back grades every song by the cadence your legs held and feeds the next list. Needs
+  Spotify Premium and a Spotify developer app of your own; last.fm and ListenBrainz are optional.
+  Private container only.
 
 **AI layer** *(optional: set `ANTHROPIC_API_KEY`; blank means dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), advice on closely spaced A-races, plain-language
@@ -356,12 +362,17 @@ the build (SSmax plus near-race-pace economy), and the peak pivots to resilience
 marathon-pace segment extends week over week at constant speed, longer, not faster. The conservative
 regime keeps its gentler classic mix; only the tags show there.
 
-> **Scientific basis.** The safety model is informed by John Davis (*Marathon Excellence for Everyone*;
-> runningwritings.com) and builds on primary work by Gabbett (ACWR), Nielsen et al. (the Aarhus
-> load-change injury cohort), Friel (%LTHR zones), Daniels (VDOT pacing) and Jones (physiological
-> resilience). The specific thresholds (the `eq_km` damage weighting, the 80 %-of-5k LT1, the +10 %
-> long-run cap, and the maintenance/progression fractions of the component periodization) are our own
-> operationalization, tuned to one athlete's data, not prescriptions issued by any of these authors.
+> **Scientific basis.** The safety model is informed by John Davis
+> ([*Marathon Excellence for Everyone*](https://runningwritings.com)) and builds on primary work by
+> [Gabbett](https://doi.org/10.1136/bjsports-2015-095788) (ACWR),
+> [Nielsen et al.](https://doi.org/10.2519/jospt.2014.5164) (the Aarhus load-change injury cohort),
+> Friel (*Total Heart Rate Training*, %LTHR zones), Daniels (*Daniels' Running Formula*, VDOT pacing;
+> with Gilbert, *Oxygen Power*, the oxygen-cost tables behind it) and
+> [Jones](https://doi.org/10.1113/JP284205) (physiological resilience). The specific thresholds (the
+> `eq_km` damage weighting, the 80 %-of-5k LT1, the +10 % long-run cap, and the maintenance/progression
+> fractions of the component periodization) are our own operationalization, tuned to one athlete's
+> data, not prescriptions issued by any of these authors. The cadence-playlist feature's own references
+> are in [MANUAL §9](MANUAL.md#9-cadence-playlists-optional).
 
 ### The goal, not just the week
 For a marathon the engine predicts a **finish time**, and the prediction is a **range, not a number**: an
