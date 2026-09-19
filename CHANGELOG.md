@@ -10,6 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.70.0] - 2026-09-19
+
+### Added
+
+- **A song can leave the picker by a verdict given after the run, not only one caught during it.**
+  On tonight's easy run (19 Sep) the athlete tripped on the second song, Stinkfist (TOOL), and never
+  reached the lap button; the read-back had it as the one song not entrained, legs 1.5 % above its
+  tempo. The song's felt pulse is a half-time 86 bpm in 4/4 with bars of 6/4 and 7/4; ReccoBeats
+  reports the doubled tempo, 171.4, so the picker treats it as an ordinary full-time 171 song — no
+  data source this app reads carries a time signature, so a half-time pulse riding odd bars is
+  invisible to the data, and every footfall alternates on and off the beat until an odd bar flips
+  which foot lands the downbeat. Until now a song left the picker only through an in-run verdict: a
+  headset skip, or two lap presses within six seconds; couch ratings weigh taste and never exclude.
+  Each song row on the read-back now carries **leave it out** — the same verdict as two presses,
+  given after the run while the feel is fresh — and **keep** to undo it. A new `manual_verdict`
+  table (run_id, spotify_id, rating, role, at) sits beside `rating_run`, not inside it, because
+  `readback()` deletes and rewrites `rating_run` whole on every recompute; `set_aside()` now reads
+  `manual_verdict` too — a "never" sets a song aside for both segment roles, exactly as a double
+  press does — and a new `apply_manual_verdicts()` overlays the verdicts onto a read-back payload
+  both where it is computed and where a stored one is served: `run_rating` becomes "never", `manual`
+  is true, and `set_aside` is bumped. New `POST /api/music/verdict` takes `run_id`, `spotify_id` and
+  `verdict` (`never`/`keep`), validated, private-only under `/api/music`; the read-back page's last
+  column is now "Verdict" in place of "Presses", with a delegated click handler that posts the
+  verdict and re-fetches the stored read-back, reusing app.css's `.linkbtn`. MANUAL §9 gains the
+  sentence. New `det/music-verdict`: a "never" verdict answers 200 and the stored read-back shows
+  the song as never/manual with `set_aside` +1; `set_aside()` maps it to both roles; wiping
+  `rating_run` — what a recompute does first — leaves the verdict in place; "keep" puts it back to
+  none; a verdict of "maybe", and a run_id that will not parse as an integer, both answer 400. Seen
+  to fail with the route removed (every limb 404s).
+
 ## [0.69.0] - 2026-09-19
 
 ### Added

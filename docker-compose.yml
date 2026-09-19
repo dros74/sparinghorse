@@ -10,8 +10,8 @@
 #   mem_limit      the app sits at ~80 MB and the self-test child peaks at ~180 MB on a real-size
 #                  database (measured 2026-09-02); 512 MB is 2× headroom, and a runaway is killed
 #                  rather than taking the host with it
-#   pids_limit     caps the process/thread count per container — a fork bomb or a runaway thread
-#                  pool is capped rather than free to exhaust the host's PID table
+#   (no pids_limit: the Synology kernel mounts no pids cgroup, so Compose discarded it with a warning
+#                  on every rebuild — a limit that never applies is noise, not a guard)
 #   logging        json-file, size- and count-capped — container logs no longer grow without bound
 #   healthcheck    what `docker ps` shows as healthy/unhealthy — /healthz, which also carries the
 #                  scheduler's failure count (the Dockerfile declares the same probe)
@@ -29,7 +29,6 @@ x-hardening: &hardening
   security_opt:
     - no-new-privileges:true
   mem_limit: 512m
-  pids_limit: 256
   logging:
     driver: json-file
     options:

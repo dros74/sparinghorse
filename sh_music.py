@@ -190,6 +190,10 @@ def _mdb():
         PRIMARY KEY(run_id, spotify_id));
       CREATE TABLE IF NOT EXISTS disco(mbid TEXT PRIMARY KEY, artist TEXT, title TEXT, sources TEXT,
         first_seen TEXT, searched_at TEXT, spotify_id TEXT);
+      -- §BEAT14: the athlete's own word after the run ("leave it out"), kept apart from rating_run
+      -- because readback() DELETEs and rewrites that table whole on every recompute
+      CREATE TABLE IF NOT EXISTS manual_verdict(run_id INTEGER, spotify_id TEXT, rating TEXT, role TEXT, at TEXT,
+        PRIMARY KEY(run_id, spotify_id));
     """)
     # 0.67.0 — §DISCO: a track that came in from ListenBrainz carries where it came from (the sources,
     # comma-joined), so the legs' verdicts can be read per source
@@ -1259,8 +1263,9 @@ def set_aside(conn):
     """§BEAT5 — tracks earlier runs have ruled out, by segment role, from the run verdicts: a track
     SKIPPED from the headset is set aside for the role it was skipped in (both roles when the run
     had no playlist to say which). §BEAT7 — two presses say "never again": set aside for both roles.
-    Rows written under the older press protocol ('pushes' / 'relaxes', up to 0.65.x) rule nothing.
-    Returns {spotify_id: set(roles)}."""
+    §BEAT14 — a verdict given after the run ("leave it out") sets aside for both roles too, exactly
+    as a double press does. Rows written under the older press protocol ('pushes' / 'relaxes', up to
+    0.65.x) rule nothing. Returns {spotify_id: set(roles)}."""
     out = {}
     for r in conn.execute("SELECT spotify_id, rating, role FROM rating_run"):
         if r["rating"] == "skip":
@@ -1271,7 +1276,30 @@ def set_aside(conn):
             continue
         if r["spotify_id"]:
             out.setdefault(r["spotify_id"], set()).update(roles)
+    for r in conn.execute("SELECT spotify_id FROM manual_verdict WHERE rating='never'"):
+        if r["spotify_id"]:
+            out.setdefault(r["spotify_id"], set()).update({"work", "easy"})
     return out
+
+
+def apply_manual_verdicts(conn, run_id, payload):
+    """§BEAT14 — overlay the athlete's own after-the-run verdicts onto a read-back payload: a song
+    marked "never" in `manual_verdict` for this run reads as `run_rating` "never" and carries
+    `manual: True`, on top of whatever the run itself produced. Called both where a read-back is
+    computed and where a stored one is served, so a verdict given after the payload was stored still
+    shows — the manual table survives a recompute by construction, since it lives beside
+    `rating_run`, not in it."""
+    never = {r["spotify_id"] for r in conn.execute(
+        "SELECT spotify_id FROM manual_verdict WHERE run_id=? AND rating='never'", (run_id,))}
+    if not never:
+        return payload
+    for sg in payload.get("songs") or []:
+        if sg.get("spotify_id") in never:
+            if sg.get("run_rating") != "never":
+                payload["set_aside"] = payload.get("set_aside", 0) + 1
+            sg["run_rating"] = "never"
+            sg["manual"] = True
+    return payload
 
 
 def align_songs(run_start, run_end, played, samples):
@@ -1810,6 +1838,7 @@ def readback(db, run_id):
                "set_aside": n_aside, "clock_shift_s": round(clock_shift),
                "seam_s": MUSIC_SONG_SEAM_S, "sensor_bias_spm": CADENCE_SENSOR_BIAS_SPM,  # §BEAT12
                "computed_at": _now_iso()}
+        res = apply_manual_verdicts(conn, run_id, res)     # §BEAT14 — survives the recompute by construction
         conn.execute("INSERT INTO readback(run_id, date, computed_at, payload) VALUES(?,?,?,?) "
                      "ON CONFLICT(run_id) DO UPDATE SET computed_at=excluded.computed_at, payload=excluded.payload",
                      (run_id, a["date"], res["computed_at"], json.dumps(res)))
@@ -2794,6 +2823,36 @@ def register(app, host):
         n = import_ratings([{"spotify_id": str(d.get("spotify_id") or ""), "rating": d.get("rating"), "note": d.get("note")}])
         return (jsonify(ok=True), 200) if n else (jsonify(ok=False, error="rating must be pushes, relaxes, neutral or mixed"), 400)
 
+    @app.post("/api/music/verdict")
+    def api_music_verdict():
+        """§BEAT14 — "leave it out": a verdict given on the read-back page after the run, equivalent
+        to two lap presses, with "keep" to undo it. Kept in `manual_verdict`, apart from the run's
+        own `rating_run`, so it survives a "Read again"."""
+        d = S.body()
+        try:
+            run_id = int(d.get("run_id"))
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="run_id must be a number"), 400
+        spotify_id = d.get("spotify_id")
+        if not isinstance(spotify_id, str) or not spotify_id:
+            return jsonify(ok=False, error="spotify_id is required"), 400
+        verdict = d.get("verdict")
+        if verdict not in ("never", "keep"):
+            return jsonify(ok=False, error="verdict must be never or keep"), 400
+        conn = _mdb()
+        try:
+            if verdict == "never":
+                conn.execute("INSERT OR REPLACE INTO manual_verdict(run_id, spotify_id, rating, role, at) "
+                             "VALUES(?, ?, 'never', 'both', ?)", (run_id, spotify_id, _now_iso()))
+                state = "never"
+            else:
+                conn.execute("DELETE FROM manual_verdict WHERE run_id=? AND spotify_id=?", (run_id, spotify_id))
+                state = None
+            conn.commit()
+        finally:
+            conn.close()
+        return jsonify(ok=True, verdict=state)
+
     @app.get("/api/music/runs")
     def api_music_runs():
         return jsonify(ok=True, runs=recent_runs(S.get_db()))
@@ -2805,15 +2864,16 @@ def register(app, host):
         conn = _mdb()
         try:
             r = conn.execute("SELECT payload, computed_at FROM readback WHERE run_id=?", (run_id,)).fetchone()
+            if not r:
+                return jsonify(ok=False, error="no read-back stored for this run"), 404
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except ValueError:
+                return jsonify(ok=False, error="the stored read-back is unreadable"), 500
+            payload["computed_at"] = r["computed_at"]
+            payload = apply_manual_verdicts(conn, run_id, payload)     # §BEAT14 — a verdict given since
         finally:
             conn.close()
-        if not r:
-            return jsonify(ok=False, error="no read-back stored for this run"), 404
-        try:
-            payload = json.loads(r["payload"] or "{}")
-        except ValueError:
-            return jsonify(ok=False, error="the stored read-back is unreadable"), 500
-        payload["computed_at"] = r["computed_at"]
         return jsonify(**payload)
 
     @app.post("/api/music/readback")

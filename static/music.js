@@ -259,7 +259,17 @@
     });
     if(r.readback_at) getJ(`/api/music/readback/${id}`).then(renderReadback).catch(e => { q("#musicRb").innerHTML = `<div class="merr">${esc(e.message || "could not load the read-back")}</div>`; });
   }
+  let CURRENT_RB = null;
+  function verdictCell(s){
+    const badge = s.manual ? `<b>never again</b> <span class="mprog">(yours)</span> <button type="button" class="linkbtn" data-keep="${esc(s.spotify_id)}">keep</button>`
+      : s.run_rating === "never" ? `<b>never again</b>`
+      : s.run_rating === "break" ? `<b>break${s.breaks > 1 ? ` ×${s.breaks}` : ""}</b> <span class="mprog">at ${(s.break_at || []).map(t => fmtPace(t)).join(", ")}</span>`
+      : s.run_rating ? `<b>${esc(s.run_rating)}</b> <span class="mprog">(older protocol)</span>` : "";
+    const leave = s.run_rating !== "never" ? ` <button type="button" class="linkbtn" data-never="${esc(s.spotify_id)}">leave it out</button>` : "";
+    return badge + leave;
+  }
   function renderReadback(r){
+    CURRENT_RB = r;
     const host = q("#musicRb");
     if(!r.ok){ host.innerHTML = `<div class="merr">${esc(r.error || "could not read the run")}</div>`; return; }
     const f = r.followed || {}, ran = r.songs.filter(s => s.spm).map(s => s.spm);
@@ -274,11 +284,30 @@
         <td class="n">${Math.round(s.read_s/60)}′</td><td class="n"><b>${Math.round(s.spm)}</b>${s.work_s != null && !s.jogs_only ? ` <span class="mprog">reps ${Math.round(s.work_s/60)}′</span>` : ""}${s.vs_target != null ? ` <span class="mprog">${s.vs_target > 0 ? "+" : ""}${s.vs_target.toFixed(1)}</span>` : ""}</td>
         <td class="n">${s.pace_sec ? fmtPace(s.pace_sec) : "—"}</td>
         <td>${s.jogs_only ? `<span class="mprog">on the jogs</span>` : s.entrained == null ? `<span class="mprog">no tempo</span>` : `${s.entrained ? `<span class="mpill ok">followed</span>` : `<span class="mprog">${s.delta_pct > 0 ? "+" : ""}${(100*s.delta_pct).toFixed(1)} %</span>`}${s.dips ? ` <span class="mpill warn">${s.dips} dip${s.dips > 1 ? "s" : ""}</span>` : ""}${s.follow != null ? ` <span class="mprog">legs ${s.follow > 0 ? "+" : ""}${s.follow.toFixed(1)}</span>` : ""}`}</td>
-        <td>${s.run_rating === "never" ? `<b>never again</b>` : s.run_rating === "break" ? `<b>break${s.breaks > 1 ? ` ×${s.breaks}` : ""}</b> <span class="mprog">at ${(s.break_at || []).map(t => fmtPace(t)).join(", ")}</span>` : s.run_rating ? `<b>${esc(s.run_rating)}</b> <span class="mprog">(older protocol)</span>` : ""}</td></tr>`).join("");
+        <td>${verdictCell(s)}</td></tr>`).join("");
     const unmatched = (r.presses || []).filter(p => !p.spotify_id).length;
     host.innerHTML = `${stats}
       <p class="mhint" style="margin:0 0 8px">Read from the ${r.stream_source === "fit" ? "FIT file (1 Hz, lap presses)" : "summary stream"}${r.computed_at ? ` on ${esc(String(r.computed_at).slice(0, 16).replace("T", " "))}` : ""}${r.skipped ? ` · ${r.skipped} skipped` : ""}${r.off_playlist ? ` · ${r.off_playlist} off the playlist (not read for the rung)` : ""}${r.inferred ? ` · ${r.inferred} read from the list` : ""}${r.clock_shift_s ? ` · the file's clock ran ${Math.round(Math.abs(r.clock_shift_s)/60)} min ${r.clock_shift_s < 0 ? "ahead of" : "behind"} the run and was re-anchored` : ""}${unmatched ? ` · ${unmatched} press${unmatched > 1 ? "es" : ""} outside any song` : ""}</p>
-      <div style="overflow-x:auto"><table class="mtbl"><thead><tr><th>At</th><th>Song</th><th>Read</th><th>Cadence</th><th>Pace</th><th>Legs</th><th>Presses</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+      <div style="overflow-x:auto"><table class="mtbl"><thead><tr><th>At</th><th>Song</th><th>Read</th><th>Cadence</th><th>Pace</th><th>Legs</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    if(!host.dataset.wired){
+      host.dataset.wired = "1";
+      host.addEventListener("click", async e => {
+        const btn = e.target.closest("[data-never],[data-keep]");
+        if(!btn || !CURRENT_RB) return;
+        const old = host.querySelector(".merr"); if(old) old.remove();
+        const spotify_id = btn.dataset.never || btn.dataset.keep;
+        const verdict = btn.dataset.never ? "never" : "keep";
+        btn.disabled = true;
+        const d = await postJ("/api/music/verdict", {run_id: CURRENT_RB.run_id, spotify_id, verdict});
+        if(!d.ok){
+          btn.disabled = false;
+          host.insertAdjacentHTML("beforeend", `<p class="merr">${esc(d.error || "could not save the verdict")}</p>`);
+          return;
+        }
+        let res; try{ res = await getJ(`/api/music/readback/${CURRENT_RB.run_id}`); }catch(err){ res = {ok:false, error: err.message}; }
+        renderReadback(res);
+      });
+    }
   }
 
   loadStatus(); loadSessions(); loadRuns();

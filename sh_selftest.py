@@ -18126,7 +18126,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -19229,6 +19229,104 @@ def _stc_music_readback():
                "§BEAT2 — songs lined up with the run from Spotify's play history (played_at = end of play), "
                "seams excluded, pace from distance; ratings import; routes private; old token asks to reconnect",
                passed=not fails, expect="two songs, 170/176 spm, 400 s/km; 2 ratings; 403s; reconnect flag",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_verdict():
+    """§BEAT14 — "leave it out": a verdict given on the read-back page after the run, equivalent to
+    two lap presses, with "keep" to undo it. A song whose meter trips the legs (a half-time pulse
+    doubled by ReccoBeats, bars of 6/4 and 7/4) has no meter field to catch it, and the athlete does
+    not always press the button in the moment — the verdict right after the run is the only way to
+    remove such a song. (a) POST /api/music/verdict {run_id, spotify_id: "A", verdict: "never"} → 200
+    ok. (b) the stored read-back overlays it: A reads run_rating "never" and manual True, B is
+    untouched, set_aside counts it. (c) `set_aside()` maps A to both segment roles, exactly as a
+    double press does. (d) recompute safety: wiping `rating_run` for the run (what `readback()` does
+    first) does not drop the verdict — it lives in `manual_verdict`, beside that table, not in it.
+    (e) "keep" undoes it everywhere: the read-back, and `set_aside()`. (f) a verdict that is neither
+    "never" nor "keep", and a run_id that will not parse as int, both answer 400 ok:false."""
+    if M is None:
+        return _music_skip("music-verdict", "§BEAT14 — leave it out / keep on the read-back")
+    import tempfile
+    fails = []
+    saved_path = M.music_db_path
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    run_id = 424242
+    try:
+        payload = {"ok": True, "run_id": run_id, "songs": [
+            {"spotify_id": "A", "title": "Song A", "run_rating": None},
+            {"spotify_id": "B", "title": "Song B", "run_rating": None}], "set_aside": 0}
+        conn = M._mdb()
+        try:
+            conn.execute("INSERT INTO readback(run_id, date, computed_at, payload) VALUES(?,?,?,?)",
+                         (run_id, "2026-09-01", "2026-09-01T12:00:00", M.json.dumps(payload)))
+            conn.commit()
+        finally:
+            conn.close()
+        c = S.app.test_client()
+        saved_ro = S.READONLY
+        try:
+            S.READONLY = False
+            r1 = c.post("/api/music/verdict", json={"run_id": run_id, "spotify_id": "A", "verdict": "never"})
+            if r1.status_code != 200 or not (r1.get_json() or {}).get("ok"):
+                fails.append(f"(a) never on A: {r1.status_code} {r1.get_json()}")
+            r2 = c.get(f"/api/music/readback/{run_id}").get_json() or {}
+            songs2 = {s["spotify_id"]: s for s in r2.get("songs", [])}
+            if songs2.get("A", {}).get("run_rating") != "never" or songs2.get("A", {}).get("manual") is not True \
+                    or songs2.get("B", {}).get("run_rating") is not None or songs2.get("B", {}).get("manual") \
+                    or r2.get("set_aside") != 1:
+                fails.append(f"(b) overlay on the stored read-back: {r2}")
+            conn = M._mdb()
+            try:
+                aside = M.set_aside(conn)
+            finally:
+                conn.close()
+            if aside.get("A") != {"work", "easy"}:
+                fails.append(f"(c) set_aside must map A to both roles: {aside}")
+            conn = M._mdb()
+            try:
+                conn.execute("DELETE FROM rating_run WHERE run_id=?", (run_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            r3 = c.get(f"/api/music/readback/{run_id}").get_json() or {}
+            songs3 = {s["spotify_id"]: s for s in r3.get("songs", [])}
+            if songs3.get("A", {}).get("run_rating") != "never":
+                fails.append(f"(d) A must survive a rating_run wipe (the recompute's own first step): {songs3.get('A')}")
+            r4 = c.post("/api/music/verdict", json={"run_id": run_id, "spotify_id": "A", "verdict": "keep"})
+            if r4.status_code != 200 or not (r4.get_json() or {}).get("ok"):
+                fails.append(f"(e) keep on A: {r4.status_code} {r4.get_json()}")
+            r5 = c.get(f"/api/music/readback/{run_id}").get_json() or {}
+            songs5 = {s["spotify_id"]: s for s in r5.get("songs", [])}
+            if songs5.get("A", {}).get("run_rating") is not None or songs5.get("A", {}).get("manual") or r5.get("set_aside") != 0:
+                fails.append(f"(e) keep must undo the verdict: {songs5.get('A')} set_aside={r5.get('set_aside')}")
+            conn = M._mdb()
+            try:
+                aside2 = M.set_aside(conn)
+            finally:
+                conn.close()
+            if "A" in aside2:
+                fails.append(f"(e) set_aside must no longer list A once kept: {aside2}")
+            r6 = c.post("/api/music/verdict", json={"run_id": run_id, "spotify_id": "A", "verdict": "maybe"})
+            if r6.status_code != 400 or (r6.get_json() or {}).get("ok") is not False:
+                fails.append(f"(f) a verdict of 'maybe' must 400 ok:false: {r6.status_code} {r6.get_json()}")
+            r7 = c.post("/api/music/verdict", json={"run_id": "x", "spotify_id": "A", "verdict": "never"})
+            if r7.status_code != 400:
+                fails.append(f"(f) a run_id that will not parse as int must 400: {r7.status_code} {r7.get_json()}")
+        finally:
+            S.READONLY = saved_ro
+    finally:
+        M.music_db_path = saved_path
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-verdict",
+               "§BEAT14 a verdict given after the run — 'leave it out' on the read-back — sets a song "
+               "aside for every segment kind like two presses do, survives a read-back recompute (it "
+               "lives beside rating_run, not in it), shows on the stored read-back as the athlete's "
+               "own, and 'keep' undoes it",
+               passed=not fails, expect="never → aside both roles, survives recompute, keep undoes it, bad input 400",
                got={"violations": fails or "none"})
 
 
