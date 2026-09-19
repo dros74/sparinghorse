@@ -33,12 +33,12 @@ const fmt = (n, d=1) => (n==null ? "—" : Number(n).toFixed(d));
 // Per-workout calendar date, e.g. "Jun 23 - Tue" — so the runner can schedule life around the plan.
 const sessDate = iso => { if(!iso) return ""; const d=new Date(iso+"T00:00:00");
   return d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" - "+d.toLocaleDateString(undefined,{weekday:"short"}); };   // 0.56.1: the one hard-coded en-US literal (review U5) — the browser's locale, like every other date on the page
-const getJSON = (url, opts) => fetch(url, opts).then(r => r.json().then(d => {
+const getJSON = (url, opts) => fetch(url, opts).then(r => r.json().catch(()=>null).then(d => {
   if(r.status===401 && !SH_READONLY && !SH_DEMO){   // 0.56.0 — the session ended (or none yet): go and log in
     location.href = (d && d.setup) || ("/login?next=" + encodeURIComponent(location.pathname + location.search));
     return new Promise(()=>{});                       // never resolves; the navigation takes over
   }
-  if(!r.ok) throw new Error((d && d.error) || ("http " + r.status));   // an error body is a failure, not renderable data
+  if(!r.ok) throw new Error((d && d.error) || ("http " + r.status));   // an error body is a failure, not renderable data — a non-JSON one still names its status
   return d;
 }));   // fetch + parse; callers keep their own try/catch
 // UX-3 — every loader ends somewhere: data, an honest empty state, or a FAILURE TERMINUS with a retry
@@ -501,13 +501,17 @@ function renderProfile(hoverKind){
   });
 }
 let CURACT=null;   // the activity currently shown in the tile (null = the latest)
+let ACT_SEQ=0;   // §ACT-SEQ — a fast day-switch fires a newer request before the older one lands
+let TODAY_LINES="";   // §TODAY-LINES — the plan's "Binding limit"/"Deload" lines, built once and re-appended across renderReadiness's own innerHTML rewrites
 function loadRecent(){ return loadActivity(); }   // default tile = latest activity
 async function loadActivity(aid){
   CURACT = aid || null;
+  const seq = ++ACT_SEQ;
   const host=$("#recent");
   let a;
   try{ a = await getJSON(aid?`/api/activity/${aid}`:"/api/activity/latest"); }
-  catch(e){ tileFail(host, aid ? "That activity" : "Latest activity", ()=>loadActivity(aid), e); return; }
+  catch(e){ if(seq!==ACT_SEQ) return; tileFail(host, aid ? "That activity" : "Latest activity", ()=>loadActivity(aid), e); return; }
+  if(seq!==ACT_SEQ) return;   // a newer request superseded this one
   // a non-run is the most-recent activity → note it (private view only). Its load still counts toward
   // the plan via Runalyze's all-sport fitness/fatigue, so this just explains why an older run shows.
   const cx = (!SH_READONLY && a && a.cross_training) ? a.cross_training : null;
@@ -574,6 +578,7 @@ async function loadActivity(aid){
     }).catch(()=>{});
     try{ ACTPROFILE = await getJSON(`/api/activity/${a.id}/profile`); }
     catch(e){ ACTPROFILE={}; }
+    if(seq!==ACT_SEQ) return;   // §ACT-SEQ — the same guard on the profile fetch, or a stale profile draws on the newer card
   }
   if(!ACTPROFILE || !ACTPROFILE.has_pace) LOCKED = (ACTPROFILE&&ACTPROFILE.has_hr)?"hr":(ACTPROFILE&&ACTPROFILE.has_cadence)?"cadence":(ACTPROFILE&&ACTPROFILE.has_elevation)?"elevation":"pace";
   // drop the hover affordance from any metric whose channel didn't come through, so the cursor never
@@ -888,7 +893,8 @@ function renderReadiness(d){
   if(d.zones) ZONESD=d.zones;              // §W1 — current zones ride along (private), so the card never races the zones fetch
   const a=d.assessment||{};
   if(SH_READONLY || a.public){   // public view: verdict card + planned session only
-    $("#readiness").innerHTML = statusCard(a, "") + plannedSession(d.session) + (SH_PAGE==="today" ? whyLine(d.session) : "");
+    $("#readiness").innerHTML = statusCard(a, "") + plannedSession(d.session)
+      + (SH_PAGE==="today" ? whyLine(d.session) + (TODAY_LINES ? `<div data-today-lines="1">${TODAY_LINES}</div>` : "") : "");   // §TODAY-LINES — the public day reads the limit line too
     return;
   }
   const c=d.checkin||{};
@@ -919,6 +925,7 @@ function renderReadiness(d){
       <button class="primary" id="ciBtn" style="font-size:13px;padding:7px 12px">Save check-in</button>
     </div>`;
   if(SH_PAGE==="today") $("#readiness").insertAdjacentHTML("beforeend", whyLine(d.session));   // 0.57.0 — the why line, on the Today page only
+  if(SH_PAGE==="today" && TODAY_LINES) $("#readiness").insertAdjacentHTML("beforeend", `<div data-today-lines="1">${TODAY_LINES}</div>`);   // §TODAY-LINES — survive this rewrite even if the plan fetch landed first
   $("#ciBtn").addEventListener("click", async ()=>{
     const btn=$("#ciBtn");
     const body={energy:$("#ci_energy").value, sleep:$("#ci_sleep").value,
@@ -1272,7 +1279,7 @@ function objManager(p){
   // Priority chip: static on the public view; an inline A|B|C selector on the private console
   // (clicking a letter POSTs /priority and re-periodizes — same path as the adjudication "Set B").
   const priBadge = o => SH_READONLY
-    ? `<span class="pr ${o.priority}">${o.priority}</span>`
+    ? `<span class="pr ${esc(o.priority)}">${esc(o.priority)}</span>`
     : `<span class="prsel" role="group" aria-label="priority for ${esc(o.label)}">${['A','B','C'].map(x=>
         `<button type="button" class="prseg ${x===o.priority?'on':''}" data-oid="${o.id}" data-pri="${x}" title="Set priority ${x}">${x}</button>`).join("")}</span>`;
   // 0.55.1 (review U1) — on the public box the row is TEXT: the date picker and the remove button
@@ -1304,7 +1311,7 @@ function objManager(p){
   };
   const past = OBJECTIVES.filter(o=>o.status==='done'||o.status==='lapsed')
     .sort((a,b)=>b.date.localeCompare(a.date)).slice(0,5).map(o=>
-      `<div class="obj past"><span class="pr ${o.priority}">${o.priority}</span>
+      `<div class="obj past"><span class="pr ${esc(o.priority)}">${esc(o.priority)}</span>
         <span>${esc(o.label)}</span>
         <span class="od">${esc(o.date)} · ${esc(o.type)} · ${pastChip(o)}</span></div>`).join("");
   const pastRow = past ? `<div class="muted" style="font-size:11px;margin-top:8px">Past races</div>
@@ -1921,8 +1928,8 @@ function renderPlan(p){
   const header = o
     ? `<div class="objline">
         <span class="race">${esc(o.label)}</span>
-        <span class="away">${o.weeks_away} weeks away · ${o.date}</span>
-        <span class="away" style="color:var(--muted)">goal: ${o.target} · priority ${o.priority||'A'}</span>
+        <span class="away">${o.weeks_away} weeks away · ${esc(o.date)}</span>
+        <span class="away" style="color:var(--muted)">goal: ${esc(o.target)} · priority ${esc(o.priority||'A')}</span>
       </div>`
     : `<div class="objline"><span class="race">Maintenance</span>
         <span class="away" style="color:var(--muted)">no objective — holding fitness</span></div>`;
@@ -2534,7 +2541,7 @@ async function loadTrack(){
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
   let d; try{ d=await getJSON("/api/plandrift"); }catch(e){ tileFail(host, "Plan drift", loadDrift, e); return; }
-  if(!d || !d.ok){ host.innerHTML=`<div class="empty">${(d&&d.error)||"No plan history yet."}</div>`; return; }
+  if(!d || !d.ok){ host.innerHTML=`<div class="empty">${esc((d&&d.error)||"No plan history yet.")}</div>`; return; }
   const MUTED="var(--muted)", ACC="var(--accent)";
   // 1 — cumulative distance
   const dc=d.distance.current||[];
@@ -3335,10 +3342,12 @@ if(SH_PAGE==="today"){
     if(!cur||!cur.limits) return;
     const L=cur.limits, b=L.binding, ax=b?L[b]:null;
     const line = b ? `This week is held by <b>${esc(LIMIT_NAMES[b]||b)}</b>${ax&&ax.ceiling!=null?` — ${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit||""))}`:""}${ax&&ax.basis?` <span class="muted">(${esc(BASIS_NAMES[ax.basis]||ax.basis)})</span>`:""}.` : "No limit binds this week.";
-    const host=$("#readiness"); if(host) host.insertAdjacentHTML("beforeend", `<div class="whyline"><b>Binding limit:</b> ${line}</div>`);
+    let lines = `<div class="whyline"><b>Binding limit:</b> ${line}</div>`;
     // §C (0.59.0) — the judged down week's read, when this is one
     const dl=cur.deload;
-    if(host&&dl&&dl.judged) host.insertAdjacentHTML("beforeend", `<div class="whyline"><b>Deload:</b> ${dl.retired?"retired — ":dl.offer?"not owed by the numbers — answer on the week card. ":""}${esc(dl.why||"")}</div>`);
+    if(dl&&dl.judged) lines += `<div class="whyline"><b>Deload:</b> ${dl.retired?"retired — ":dl.offer?"not owed by the numbers — answer on the week card. ":""}${esc(dl.why||"")}</div>`;
+    TODAY_LINES = lines;   // §TODAY-LINES — this fetch races renderReadiness's own rewrites; the string outlives either order
+    if($("#readiness .statuscard") && !$("[data-today-lines]")) $("#readiness").insertAdjacentHTML("beforeend", `<div data-today-lines="1">${TODAY_LINES}</div>`);
   }).catch(()=>{});
 }else if(SH_PAGE==="runs"){
   // §RB — explorer chrome: the header link points back home; the mobile Runs tab reads active.
@@ -3373,7 +3382,6 @@ if(SH_PAGE==="today"){
     const b = e.target.closest(".mnav-btn");
     if(b && b.dataset.goto && SH_PAGE!=="dash"){ location.href = "/?tab="+b.dataset.goto; return; }   // 0.57.0: /today and /runs hand the tab to the dashboard
     if(!b || !b.dataset.goto) return;                   // the Runs tab is a real <a> — let it navigate
-    if(SH_PAGE==="runs"){ location.href = "/#"+b.dataset.goto; return; }   // §RB — tabs live on the dashboard
     go(b.dataset.goto, true);
   });
   if(SH_PAGE!=="runs") go((location.hash || "").replace("#",""), false);   // restore tab from the URL (defaults to today)

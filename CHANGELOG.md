@@ -10,6 +10,186 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.68.13] - 2026-09-19
+
+### Fixed
+
+- **A CLI subcommand could race the scheduler it was replacing.** `python SparingHorse.py restore
+  <file>` ran the module's boot block first — the nightly scheduler (a catch-up sync, a re-plan, a
+  backup rotation) could start against the database the command was about to replace, and
+  `selftest` inside the container started a second scheduler beside the server's. A subcommand now
+  sets `_CLI = (__name__ == "__main__" and len(sys.argv) > 1)`, and both the scheduler and the demo
+  boot-seed skip when it's set; the import path (waitress) is unchanged. New `det/cli-no-scheduler`
+  runs the `access-seen` subcommand with a token in the environment and asserts the scheduler's
+  boot line never prints; it fails on the reverted guard.
+
+- **A direct deploy's login lockout and rate limiter could be walked around by rotating a header.**
+  `_client_ip()` believed `CF-Connecting-IP` and `X-Forwarded-For` from any peer, and both the
+  login lockout and the rate limiter key on the address it returns — so on a box with no proxy in
+  front, a caller could send a fresh forwarded address on every request and outrun its own
+  per-address lockout (only the global rate brake still held). A forwarded address is now believed
+  only from a peer that could be a proxy: one inside `SH_PROXY_CIDR` when it's configured, else a
+  private-network or loopback peer — the compose network cloudflared sits on qualifies, so the demo
+  box keeps per-visitor keying with no CIDR set; a public peer is keyed on itself. New
+  `det/client-ip-trust` covers a public peer, a private peer with and without a configured CIDR,
+  `CF-Connecting-IP` precedence over `X-Forwarded-For`, and loopback with no headers (its
+  public-peer case reads 8.8.8.8, not an RFC 5737 documentation address — Python's `ipaddress`
+  classes that range as private, which would have exercised the wrong branch).
+  `.env.example` and DEPLOY.md now say to name the proxy's own /32, never the shared network, and
+  note the same rule keys the rate limits.
+
+- **The backup hook ran with the container's full secrets, and a keep-count of zero kept every
+  snapshot.** `SH_BACKUP_PUSH` executed with the whole environment — the Runalyze token, the Claude
+  key, the passphrase, the secrets-store key all reached it, to push one file off the host.
+  `BACKUP_HOOK_ENV_DROP` now strips those before the hook runs; `SH_BACKUP_FILE` still reaches it.
+  A limb on `det/backup-export` runs a hook that writes the secret variables to a file and asserts
+  the file is empty; it fails on the old, unstripped environment. Separately, `SH_BACKUP_KEEP=0`
+  was meant to keep nothing but `[:-0]` slices to `[:0]`, keeping everything instead — it's now
+  clamped to at least 1.
+
+- **Two public API routes served their whole payload with no allowlist.** `/api/projector` and
+  `/api/vo2max` sat outside `det/public-view-coverage-all`'s register and outside any `_pv_project`
+  allowlist — nothing on the public page reads their raw fields, but nothing enforced that either.
+  New `_PV_PROJECTOR` (history date/ctl/atl/tsb/acwr, the validation block, duplicate_count) and
+  `_PV_VO2MAX` (months, n, points date/vo2max) now gate both; `projector.history[].trimp` and
+  `vo2max.points[].raw` are registered withheld. The coverage det now drives eleven resources, and
+  its own register test learned that a withheld parent covers its subtree — on a copy of the live
+  database it had been failing on fields only live data produces
+  (`track.overrides.rows[].week/ratio/checkins/…`, `readiness.assessment.hrv.band/baseline`, both
+  children of withheld parents), a failure carried forward from 0.68.12 and now green on both
+  databases. `_pv_project` also fails closed: a dict spec meeting a value of another shape now
+  publishes nothing rather than the value verbatim.
+
+- **A plan week saved before 0.59.0 could crash a straddle regen with a KeyError.** Two reads of a
+  carried-verbatim week's `["intent_km"]` (§PRO11's deload pull, and the rebase remainder) assumed
+  the key always exists; §P2 only started writing it in 0.59.0, so a week frozen before that date
+  and read back inside its own block would raise. Both sites now read `.get("intent_km") or km`.
+  The path needs a specific, old, still-live plan to reach — the golden-plan fixtures all postdate
+  0.59.0, so no det exercises it; this is a defensive fix, not one proven red before green.
+
+- **Music: an unbounded fetch, a masked Runalyze outage, a misread retry header, and a playlist
+  rename that could leave two playlists behind.** `fetch_fit` buffered any 200 response whole; it
+  now streams and abandons past `MUSIC_FIT_MAX_BYTES` (20 MB). `readback`'s call into Runalyze for
+  a run with no FIT was unguarded, so an outage surfaced as the app's blanket "internal error" — it
+  now answers a named, retryable error instead. A `Retry-After` header given as an HTTP-date
+  (rather than a delta in seconds) raised `ValueError` instead of falling back to the 2 s default.
+  And a playlist replace that renamed successfully but failed on the items write used to fall
+  through and create a second playlist; only a 404 on the rename (the playlist was deleted on
+  Spotify) falls through now — any other failure raises instead of duplicating.
+
+- **Front-end: two panels went stale on their own, and music.js's transport had no error
+  handling.** The Today page's "Binding limit" and "Deload" lines were appended once from a fetch
+  racing the readiness render, then lost outright on the next check-in re-render; they're now held
+  in module state and re-appended on every render, on the public view too (§TODAY-LINES).
+  `loadActivity` had no request sequencing, so switching days quickly could land an older activity
+  — or its profile — on the tile after a newer one arrived; a monotonic token now discards a
+  response superseded before it lands (§ACT-SEQ). music.js's `postJ` had no try/catch, so a
+  transport failure (offline, the server down) left the buttons disabled and "Building the
+  playlist…" on screen for good, and `getJ` never redirected on a 401; both now match app.js's
+  shapes (§MUSIC-XPORT). Also: `getJSON` no longer loses its 401 redirect when the body isn't JSON,
+  and a dead branch in the mobile-nav handler — unreachable since §RB made the Runs tab a real link
+  — is removed.
+
+- **Hygiene — backend and engine.** `/api/suunto/push` now validates `days` (JSON 400 on junk or a
+  value outside 1–60, a limb on `det/api-validation`); an IPv6 host literal (`[::1]:8770`) broke
+  the CSRF origin check, the cookie warning and the Suunto redirect URI, since `.split(":")[0]`
+  truncates a bracketed address at its first colon — `_req_hostname()` now parses it properly
+  (`det/csrf-origin-ipv6`); `/api/demo/reset`'s gap check was check-then-act, now under a lock. In
+  the engine: `IS NOT ''` let NULL-dated rows into the duplicate finder and the daily series, where
+  two such rows of equal distance read as duplicates of each other; §PRO11's deload pull mutated
+  shape dicts in place that were a shallow slice of the `REBASE_SHAPE` constant —
+  `generate_block` now copies the shape first (byte-identical output: `det/golden-plans`,
+  `det/clock-purity`); `feasibility` guards a `None weeks_away`; three stale docstrings
+  (`project_forward`'s seed, `generate_block`'s remainder since §6o-QF, `generate_rebase`'s §6e
+  graduation) are rewritten.
+
+- **Hygiene — deploy and CI.** A new `.dockerignore` (deny-all, re-admitting exactly the
+  Dockerfile's `COPY` sources) means a build no longer tars `.env`, `data/`, `backups/` and
+  `venv/` into the daemon's build context; `det/image-completeness` checks the two lists stay in
+  step. The CI workflow now declares `permissions: contents: read`. The compose hardening anchor
+  gains `pids_limit: 256` and size-capped `json-file` logging. `prepare_env.sh` now passes a value
+  to `awk` through the environment rather than `-v`, which decoded backslash escapes in a
+  passphrase, and writes its temp file under `umask 077`.
+
+## [0.68.12] - 2026-09-19
+
+### Fixed
+
+- **A stranger-written objective could inject HTML into the plan header.** `renderPlan`'s `objline`
+  block interpolated an objective's `target`, `date` and `priority` into innerHTML without `esc()`,
+  while three sibling sinks already escaped the same fields; two `priBadge` renders (the public and
+  past-race rows) printed `priority` raw too. On the demo box any visitor can write an objective, so
+  the field is stranger-written. The CSP (nonce + strict-dynamic, base-uri none) already blocks
+  script execution, so the reach was HTML injection — defacement, a planted link — not script; every
+  objective string field now passes `esc()`, including the drift tile's error text. New
+  `det/plan-header-escaped` scans the shipped `app.js` for any raw
+  `${o.target|label|date|type|priority}` interpolation and counts the escaped sinks, so it cannot
+  pass by finding nothing to check; it fails on the reverted lines.
+
+- **The self-test battery could inherit a saved athlete setting and fail on a database it was never
+  meant to depend on.** `apply_settings_overrides` seeds the engine global `_DAY_PREF` (§DAYPREF's
+  long-run day and rest-day ranking) from the database at import; `run_server_selftest` pinned
+  `RATE_LIMITING` and `_AUTH_ACTIVE` for the run but not this pair. Reproduced on a copy of the live
+  database with `rest_day_rank = fri,mon,wed` set: 11 dets failed at HEAD (golden-plans, day-spacing,
+  rest-streaks, lived-days-pinned, straddle-intent, straddle-deload-invariant, race-session,
+  today-actual, long-run-step, long-run-identity, plus `det/public-view-coverage-all` for an
+  unrelated reason). CI stayed green only because the seed database carries no saved settings; the
+  in-app `/selftest` run went red on the live box for the same cause. A new context manager,
+  `_pinned_engine_globals()`, pins the pair to unset for the run and restores the athlete's setting
+  after; `run_server_selftest` wraps the battery in it. New `det/battery-hermetic` proves the pin
+  holds during the run and is restored after, and greps the runner's own source for the call site
+  (anchored at column 0, after an unanchored version self-matched the det). The live copy now runs
+  222/229; the one remaining failure is `det/public-view-coverage-all`, a register gap on fields
+  only live data produces (`track.overrides.rows[].*`, `readiness.assessment.hrv.band/baseline`),
+  carried to the next release.
+
+- **A Runalyze account with no heart-rate data crashed plan generation instead of asking for a
+  sync.** `plan_seed` returned the newest snapshot's `effective_vo2max` unguarded; with no HR data
+  Runalyze stores NULL there, `pace_zones(None)` returns `{}`, and `generate_plan` raised
+  `KeyError: 'easy_top'`. A NULL VO2max now borrows its pace anchor from a cold-start race effort
+  (`_ft_cold_start`, `vo2_seed`) when one exists in the FT5 window — the snapshot's measured CTL/ATL
+  are kept, and `shape.seed.vo2_fallback = "race effort"` records the substitution (`_PV_PLAN`
+  carries the field) — else the plan answers `ok:false` naming what to sync: a run with heart rate,
+  or one hard race-distance effort from the last twelve months. New `det/vo2-null-seed` plans the
+  race fixture on its real seed first, then nulls the VO2max and pushes every run off the
+  race-distance buckets and asserts `ok:false` naming VO2max rather than raising; it fails with the
+  `KeyError` on the reverted code.
+
+- **On race day itself, the A-race dropped out of the chain.** `select_chain` filtered objectives
+  with `date > today` while `_road_ahead` reads `date >= today`, so on the race's own date
+  `select_chain` no longer saw it and crowned the next B-race — or maintenance — as the goal.
+  `select_chain` now reads `>= today` too; race lifecycle resolution (§RL) is unchanged and still
+  only resolves a race once its date has passed. `det/multi-a-chain` gained two limbs: a marathon
+  dated today with a later B-race must chain as the marathon alone with no tune-ups, and a marathon
+  dated yesterday must be excluded; both fail on the reverted comparison.
+
+- **The private review tool's exclude list had drifted from the mirror's.** `tools/gemini_review.py`
+  (private, not in the mirror) kept a hand-copied list of 4 excludes against `publish_mirror.sh`'s
+  17, so its "public tree" scan bundled `DESIGN.md` and other private files as though they were
+  public. It now reads `EXCLUDES`, `LEAK_RE` and `ALLOW_RE` from `publish_mirror.sh` at import
+  (fails loudly if any is missing) and applies `ALLOW_RE` before the leak test, matching the script
+  and CI.
+
+## [0.68.11] - 2026-09-17
+
+### Fixed
+
+- **The guide screen's big slots held the countdown and a static HR midpoint, not the live
+  readings.** Simulating a run on the Suunto Race S the evening 0.68.10 (§SG5) went live, an easy
+  step drew the HR-band gauge on top, working, then four slots below it in array order — the first
+  two in a large font, the last two small. The large slots held the distance countdown and "HR band
+  123" (the static midpoint of the Z1 band, 103–143); live HR and live pace sat in the small ones.
+  The midpoint is not useful at a glance — the band's only real edge is its top, and the gauge
+  already shows that — yet it and the countdown held the big slots while the live numbers sat small.
+  Suunto's guide.json spec (apizone.suunto.com/suuntoplus-guide-description) says array order sets
+  size — "the watch will give best location / biggest size" to the first field — and a target field
+  is always drawn as both a value and a gauge, so `targetHeartRate` can be demoted but not dropped.
+  An easy-class step (a simple run, or any rep whose effort isn't "work") now sends live HR, live
+  pace (when the step has one), the countdown, then the HR band; a work rep keeps its old order —
+  countdown, pace gauge, live HR — since a rep's target pace earns the big slot. A guide already on
+  the watch is not re-downloaded by an update — press "Rebuild guides" (Settings) and let the watch
+  sync before the next run.
+
 ## [0.68.10] - 2026-09-17
 
 ### Fixed

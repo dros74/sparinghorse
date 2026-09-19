@@ -2416,32 +2416,39 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
     the gauge (a work rep is paced by definition) and adds only a live `heartRate` metric, no
     `targetHeartRate` field. `hr` still reaches this function on every layout regardless: the
     boundary popup (`_guide_notification`) keeps its HR band on any step that has one, whether or not
-    the field itself was drawn."""
-    fields, cond, dur = [], None, None
+    the field itself was drawn.
+
+    §SG6 (0.68.11) — the athlete looked at the §SG5 screen: the gauge on top, then four slots in
+    array order, the first two in a large font, the last two small — countdown (large), the band's
+    static midpoint "123" (large), live HR (small), live pace (small). Suunto's guide.json
+    description is explicit that order is priority ("the watch will give best location / biggest
+    size" to the first field) and that a target field is always drawn "as value and as gauge
+    element" — so the static midpoint cannot be dropped without losing the gauge, only demoted.
+    Easy-class steps with an HR band now send: live `heartRate`, live `pace`, the countdown,
+    `targetHeartRate` (gauge), text. Work steps and the no-grid fallback keep their order
+    (countdown, `targetPace`, live HR): a rep's target pace is a number worth the big slot."""
+    fields, cond, dur, cd = [], None, None, None
     if minutes:
-        fields.append({"type": "stepDurationCountdown", "title": "left",
-                       "value": round(minutes * 60.0, 1)})
+        cd = {"type": "stepDurationCountdown", "title": "left", "value": round(minutes * 60.0, 1)}
         cond = {"type": "stepDuration", "value": round(minutes * 60.0, 1)}
         dur = f"{minutes:g}min"
     elif km:
-        fields.append({"type": "stepDistanceCountdown", "title": "left",
-                       "value": round(km * 1000.0, 1)})
+        cd = {"type": "stepDistanceCountdown", "title": "left", "value": round(km * 1000.0, 1)}
         cond = {"type": "stepDistance", "value": round(km * 1000.0, 1)}
         dur = f"{km:g}km"
     pt = _pace_target(pace_sec)
-    if layout == "work":
-        if pt:
-            fields.append(pt)
-        fields.append({"type": "heartRate", "title": "HR"})
+    live_hr = {"type": "heartRate", "title": "HR"}
+    if layout == "work" or not hr:
+        # the countdown leads, then the pace target (the gauge, and a number worth the big slot),
+        # then the live HR
+        fields = [f for f in (cd, pt) if f] + [live_hr]
     else:
-        if hr:
-            fields.append({**hr, "title": "HR band"})
-            fields.append({"type": "heartRate", "title": "HR"})
-            if pt:
-                fields.append({"type": "pace", "title": "pace"})
-        elif pt:
-            fields.append(pt)
-            fields.append({"type": "heartRate", "title": "HR"})
+        # §SG6 (0.68.11) — array order is slot size: live HR and live pace take the two big slots; the
+        # countdown and the HR band's static midpoint go to the two small ones. The band field stays
+        # in the array because it is what draws the gauge; its printed value is the least useful
+        # number on the screen (the middle of a band whose only real edge is the top).
+        fields = [live_hr] + ([{"type": "pace", "title": "pace"}] if pt else []) \
+            + ([cd] if cd else []) + [{**hr, "title": "HR band"}]
     txt = _guide_txt(text, 54)
     if txt:
         fields.append({"type": "text", "value": txt})
@@ -6373,7 +6380,7 @@ def _csrf_origin_guard():
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return
     origin = request.headers.get("Origin")
-    if origin and urlparse(origin).hostname != request.host.split(":")[0]:
+    if origin and urlparse(origin).hostname != _req_hostname():
         return jsonify(ok=False, error="cross-origin request refused"), 403
 
 
@@ -6429,14 +6436,32 @@ _rate = _RateLimiter()
 
 
 def _client_ip():
-    """The address a limit is keyed on. Behind the Cloudflare tunnel every request arrives from
-    cloudflared, so the real client is `CF-Connecting-IP`; a plain reverse proxy sets
-    `X-Forwarded-For`. Neither can be trusted for AUTH — a direct caller can forge them — but for a
-    damper the worst a forged header buys is evading one's own bucket, which is what a second
-    address would buy anyway."""
+    """§XFF — the address the login lockout and the rate limiter key on. A forwarded header
+    (Cloudflare's `CF-Connecting-IP`, or a plain reverse proxy's `X-Forwarded-For`) is believed
+    only from a peer that could only be a proxy: one inside PROXY_CIDRS when SH_PROXY_CIDR
+    configures it, else a private-network or loopback peer (a container network or a LAN proxy —
+    the Cloudflare tunnel's cloudflared sits on the compose network, so the demo box keeps
+    per-visitor keying without any CIDR set). A public peer, or one that fails to parse, is keyed
+    on `request.remote_addr` itself — trusting its own header there would let a direct caller
+    rotate a forwarded address past its own lockout, leaving only the global brake."""
+    peer = request.remote_addr or "?"
+    try:
+        peer_addr = ipaddress.ip_address(peer)
+        trusted = (any(peer_addr in net for net in PROXY_CIDRS) if PROXY_CIDRS
+                   else (peer_addr.is_private or peer_addr.is_loopback))
+    except ValueError:
+        trusted = False
+    if not trusted:
+        return peer
     h = request.headers
     return (h.get("CF-Connecting-IP") or (h.get("X-Forwarded-For") or "").split(",")[0].strip()
-            or request.remote_addr or "?")
+            or peer)
+
+
+def _req_hostname():
+    """request.host without its port — `.split(":")[0]` truncates an IPv6 literal at its first
+    colon (`[::1]:8770` becomes `[`); urlparse's own bracket-aware host parsing does not."""
+    return urlparse("//" + (request.host or "")).hostname or ""
 
 
 def _rate_bucket_for(method, path):
@@ -6844,7 +6869,7 @@ def _cookie_will_stick():
     context in every current browser."""
     if not COOKIE_SECURE or request.is_secure or request.headers.get("X-Forwarded-Proto", "").lower() == "https":
         return True
-    return request.host.split(":")[0] in ("localhost", "127.0.0.1", "::1")
+    return _req_hostname() in ("localhost", "127.0.0.1", "::1")
 
 
 _AUTH_CSS = (
@@ -7224,7 +7249,7 @@ _PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ct
                          "was_from": True},
             "shape": {"atl": True, "ctl": True, "effective_vo2max": True,
                       "seed": {"bridged_days": True, "fallback": True, "from": True,
-                               "stale_skipped": True, "stale_unresolved": True,
+                               "stale_skipped": True, "stale_unresolved": True, "vo2_fallback": True,
                                "tainted_skipped": True}},
             # `ratio` matters more than it looks: the ease line renders `Math.round((ratio||0)*100)%`,
             # so withholding it does not blank the line — it prints "measured fitness 0% of
@@ -7373,6 +7398,19 @@ _PV_TRACK = {"ok": True,
              "summary": {"races_scored": True, "banded": True, "in_band": True, "in_band_rate": True,
                          "lead_days": True, "t8_days": True}}
 
+# §PV projector/vo2max (0.68.13) — two endpoints the public box has served since they shipped,
+# with no allowlist at all: `_pv_project` fails closed now, but an unaudited route still needs its
+# own spec to publish anything. The projector draws CTL/ATL/TSB/ACWR and the
+# validation-against-Runalyze numbers; the daily TRIMP behind them stays private. The VO₂max tile
+# draws the smoothed series only; the raw per-run estimate stays private.
+_PV_PROJECTOR = {"history": {"date": True, "ctl": True, "atl": True, "tsb": True, "acwr": True},
+                 "validation": {"modeled": {"ctl": True, "atl": True, "tsb": True},
+                                "runalyze": {"ctl": True, "atl": True, "tsb": True},
+                                "ctl_err": True, "atl_err": True,
+                                "tau_ctl": True, "tau_atl": True},
+                 "duplicate_count": True}
+_PV_VO2MAX = {"months": True, "n": True, "points": {"date": True, "vo2max": True}}
+
 _PV_WITHHELD = {
     "track.races[].p50_hms",                 # §TR — publishing the prediction beside its error
     "track.races[].err_pct",                 #   hands back the RESULT: actual = p50 × (1 + err)
@@ -7457,13 +7495,18 @@ _PV_WITHHELD = {
     #                                          (bpm-derived).
     "profile.streams_final",                  # the empty-stream branch's own marker; not on the
                                                # public box
+
+    "projector.history[].trimp",              # §PV projector — the daily load number; the public
+                                               # page draws CTL/ATL/TSB/ACWR only
+    "vo2max.points[].raw",                    # §PV vo2max — the unsmoothed per-run estimate; the
+                                               # tile draws the smoothed series
 }
 
 PUBLIC_VIEWS = {"activity": _PV_ACTIVITY, "drift": _PV_DRIFT, "healthz": _PV_HEALTHZ,
                 "track_record": _PV_TRACK,
                 "log": _PV_LOG, "objectives": _PV_OBJECTIVES, "plan": _PV_PLAN,
                 "profile": _PV_PROFILE, "readiness": _PV_READINESS, "shape": _PV_SHAPE,
-                "weekly": _PV_WEEKLY}
+                "weekly": _PV_WEEKLY, "projector": _PV_PROJECTOR, "vo2max": _PV_VO2MAX}
 
 
 def _pv_project(spec, value):
@@ -7474,7 +7517,8 @@ def _pv_project(spec, value):
     if isinstance(value, list):
         return [_pv_project(spec, v) for v in value]
     if not isinstance(value, dict):
-        return value            # a spec'd key holding a scalar (or None) — nothing to project
+        return None              # a dict spec meeting a shape that changed under it (or None) —
+                                  # fail closed rather than publish an unaudited shape verbatim
     return {k: _pv_project(sub, value[k]) for k, sub in spec.items() if k in value}
 
 
@@ -7738,8 +7782,8 @@ def api_projector():
             "atl_err": round(modeled["atl"] - (snap["fatigue"] or 0), 2),
             "tau_ctl": TAU_CTL, "tau_atl": TAU_ATL,
         }
-    return jsonify(history=hist[-days:], validation=valid,
-                   duplicate_count=len(find_duplicates(db)))
+    out = {"history": hist[-days:], "validation": valid, "duplicate_count": len(find_duplicates(db))}
+    return jsonify(public_view("projector", out) if READONLY else out)
 
 
 # ── Plan drift (§6b made visible — the initial road vs the road as it stands) ─
@@ -9121,7 +9165,8 @@ def api_vo2max():
     months, err = _int_arg("months", 6, hi=120)
     if err:
         return err
-    return jsonify(vo2max_trend(db, months))
+    out = vo2max_trend(db, months)
+    return jsonify(public_view("vo2max", out) if READONLY else out)
 
 
 def vo2max_trend(db, months=6):
@@ -9368,7 +9413,7 @@ def _suunto_redirect_uri():
     the Suunto OAuth app. https behind the proxy (Cloudflare terminates TLS, so request.url_root
     says http), plain http only for local dev hosts."""
     host = request.host
-    scheme = "http" if host.split(":")[0] in ("127.0.0.1", "localhost", "0.0.0.0") else "https"
+    scheme = "http" if _req_hostname() in ("127.0.0.1", "localhost", "0.0.0.0") else "https"
     return f"{scheme}://{host}/api/suunto/callback"
 
 
@@ -9421,8 +9466,17 @@ def api_suunto_push():
     rebuilds the window's guides under fresh ids (§SG2) so a wrist they were deleted from takes
     them back; the plain push only UPDATES them, which the watch never sees."""
     d = body()
-    res = push_guides(get_db(), days=int(d.get("days") or SUUNTO_PUSH_DAYS),
-                      recreate=bool(d.get("recreate")))
+    raw_days = d.get("days")
+    if raw_days is None or (isinstance(raw_days, str) and not raw_days.strip()):
+        days = SUUNTO_PUSH_DAYS
+    else:
+        try:
+            days = int(raw_days)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="days must be a whole number"), 400
+    if not (1 <= days <= 60):
+        return jsonify(ok=False, error="days must be between 1 and 60"), 400
+    res = push_guides(get_db(), days=days, recreate=bool(d.get("recreate")))
     if res.get("ok") and not res.get("skipped"):            # 0.56.1 — the System block reads this
         set_meta(get_db(), "suunto:last_push", _now_iso()); get_db().commit()
     return jsonify(**res), (200 if res.get("ok") or res.get("skipped") else 502)
@@ -9594,8 +9648,13 @@ def _daily_replan():
 # own volume; SH_BACKUP_PUSH runs a command after each snapshot (inside the container, with the
 # snapshot's path in SH_BACKUP_FILE) for whatever carries it off the host; `restore` puts one back.
 BACKUP_DIR = Path(os.environ["SH_BACKUP_DIR"]) if os.environ.get("SH_BACKUP_DIR") else None   # None: beside the DB
-BACKUP_KEEP = int(os.environ.get("SH_BACKUP_KEEP", "7"))
+BACKUP_KEEP = max(1, int(os.environ.get("SH_BACKUP_KEEP", "7")))   # 0 makes the rotation slice `[:-0]`, which is `[:0]` — an empty slice that deletes nothing, keeping every snapshot forever instead of none
 BACKUP_PUSH = (os.environ.get("SH_BACKUP_PUSH") or "").strip()
+# §BKENV — the push hook runs with the container's whole environment today; drop the secrets that
+# hook has no business seeing (the Runalyze token, the Claude key, the passphrase and session/secrets
+# store material) so a compromised or careless hook script cannot exfiltrate them alongside the backup.
+BACKUP_HOOK_ENV_DROP = frozenset({"RUNALYZE_TOKEN", "ANTHROPIC_API_KEY", "SH_PASSPHRASE", "SH_SECRET_KEY",
+                                   "SH_SECRETS_DB", "SH_SECRETS_KEY_FILE"})
 
 
 def _backup_dir():
@@ -9627,8 +9686,10 @@ def _backup_rotate():
         f.unlink()
     if BACKUP_PUSH:
         try:
+            hook_env = {k: v for k, v in os.environ.items() if k not in BACKUP_HOOK_ENV_DROP}
+            hook_env["SH_BACKUP_FILE"] = str(target)
             res = subprocess.run(BACKUP_PUSH, shell=True, timeout=900, capture_output=True, text=True,
-                                 env={**os.environ, "SH_BACKUP_FILE": str(target)})
+                                 env=hook_env)
             tail = (res.stdout + res.stderr).strip()[-300:]
             print(f"[backup] push hook exit {res.returncode}" + (f": {tail}" if tail else ""))
         except Exception as e:                  # the snapshot is on disk either way
@@ -10594,6 +10655,8 @@ def _demo_reset_loop():
 
 
 _demo_last_reset = 0.0          # monotonic time of the last MANUAL reset (0.55.1)
+_demo_reset_lock = threading.Lock()   # claims the slot before the reseed runs — the gap check and the
+                                       # timestamp write used to straddle two concurrent calls unguarded
 
 
 @app.post("/api/demo/reset")
@@ -10606,16 +10669,17 @@ def api_demo_reset():
     global _demo_last_reset
     if not DEMO:
         return jsonify(ok=False, error="not a demo instance"), 404
-    wait = DEMO_RESET_MIN_GAP_S - (time.monotonic() - _demo_last_reset)
-    if wait > 0:
-        resp = jsonify(ok=False, demo=True, retry_after=int(wait) + 1,
-                       error=f"The athlete was reset a moment ago — try again in {int(wait) + 1} s.",
-                       reset_at=get_meta(get_db(), "demo_reset_at"))
-        resp.status_code = 429
-        resp.headers["Retry-After"] = str(int(wait) + 1)
-        return resp
+    with _demo_reset_lock:
+        wait = DEMO_RESET_MIN_GAP_S - (time.monotonic() - _demo_last_reset)
+        if wait > 0:
+            resp = jsonify(ok=False, demo=True, retry_after=int(wait) + 1,
+                           error=f"The athlete was reset a moment ago — try again in {int(wait) + 1} s.",
+                           reset_at=get_meta(get_db(), "demo_reset_at"))
+            resp.status_code = 429
+            resp.headers["Retry-After"] = str(int(wait) + 1)
+            return resp
+        _demo_last_reset = time.monotonic()   # claimed before the reseed runs, so a racing call sees the gap
     demo_reset(get_db())
-    _demo_last_reset = time.monotonic()
     return jsonify(ok=True, reset_at=get_meta(get_db(), "demo_reset_at"))
 
 
@@ -10629,8 +10693,15 @@ except Exception as e:
 _secrets_boot()            # 0.56.0 — store permissions, encryption at rest, SH_PASSPHRASE
 apply_secret_overrides()   # overlay window-set secrets (Runalyze token / Claude key) before the scheduler
 _configure_sessions()      # 0.56.0 — the signed session cookie's key and flags
-start_scheduler()   # runs under waitress (import) and the dev server alike (logs the effective TZ)
-if DEMO:
+# §CLI — a subcommand (restore, selftest, seed, passphrase, access-seen, demo-bake, …) dispatches
+# below and must not also start the nightly scheduler or the demo boot-seed in this same process:
+# `restore` could race a boot catch-up sync/re-plan/backup rotation while it replaces the DB file,
+# and `selftest` inside the container would run a second scheduler beside the server's. The import
+# path (waitress, and the plain dev server) still starts both — this only skips them for a CLI call.
+_CLI = (__name__ == "__main__" and len(sys.argv) > 1)
+if not _CLI:
+    start_scheduler()   # runs under waitress (import) and the dev server alike (logs the effective TZ)
+if not _CLI and DEMO:
     # Seed on boot when the mounted volume is empty (a fresh container, or a wiped one), so the
     # deploy is `up -d` and nothing else — no separate seeding step to forget. An existing synthetic
     # DB is left alone; the timer will restore it on its own schedule.

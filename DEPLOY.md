@@ -76,7 +76,9 @@ the quick start; MANUAL.md covers using the app.
     valid one falls back to the passphrase.
   - **A proxy on a dedicated network:** `SH_PROXY_CIDR=` the network the proxy speaks from; a request
     from inside it carrying `X-Forwarded-User` is trusted. Anything on that network can forge the
-    header, so use this only where the proxy is the only thing there.
+    header, so name the proxy's own address (a /32), not the network it shares with other containers.
+    The same CIDR (or, when it is unset, any private-network or loopback peer) is also where a
+    forwarded client address is believed for the rate limits and the login lockout (§XFF).
 - **The secrets store is encrypted at rest.** Put a long random `SH_SECRET_KEY` in `.env` to keep the
   key off the `./secrets` volume; without it a random `secrets.key` (0600) is written beside the
   store on first start. Losing the key means re-entering the tokens in Settings — the passphrase is

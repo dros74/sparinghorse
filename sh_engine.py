@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.68.10"
+ENGINE_VERSION = "0.68.13"
 
 
 def _zones_asof(db, date_iso=None):
@@ -242,7 +242,7 @@ def find_duplicates(db):
     (e.g. a watch/Strava double-upload). Returns the list of duplicate ids to drop (keeps
     the lowest id of each group). Such dups inflate Runalyze's own fitness/fatigue too."""
     rows = db.execute(
-        "SELECT id, date_time, distance, sport FROM activities WHERE date_time IS NOT ''"
+        "SELECT id, date_time, distance, sport FROM activities WHERE date_time IS NOT NULL AND date_time != ''"
     ).fetchall()
     groups = {}
     for r in rows:
@@ -274,7 +274,7 @@ def daily_trimp_series(db):
     drop = dropped_ids(db)
     out = {}
     for r in db.execute(
-        "SELECT id, date, trimp FROM activities WHERE date IS NOT '' AND trimp IS NOT NULL"
+        "SELECT id, date, trimp FROM activities WHERE date IS NOT NULL AND date != '' AND trimp IS NOT NULL"
     ).fetchall():
         if r["id"] in drop:
             continue
@@ -477,8 +477,10 @@ def _snapshot_stale(db, snapshot_date, captured_at):
 def project_forward(planned, ctl0, atl0, start_date):
     """Engine-facing: roll fitness/fatigue FORWARD under a planned load.
     `planned`: {YYYY-MM-DD: TRIMP} for future days (missing days = rest = 0). Seeds from
-    today's observed CTL/ATL (`ctl0`/`atl0` — use Runalyze's authoritative values). Returns
-    the projected daily curve so the engine can keep projected ACWR inside the 0.8–1.3 band."""
+    whatever CTL/ATL the caller passes as `ctl0`/`atl0` — since §PRO20 that is the
+    end-of-yesterday snapshot, bridged by measurement, never today's own (already-advanced)
+    snapshot. Returns the projected daily curve, which is what the governors read the
+    end-of-week ACWR off when bounding how much a week may still grow."""
     if not planned:
         return []
     start = _date(start_date)
@@ -3962,10 +3964,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     true: this docstring claimed it from the start, but the elapsed slice was cut from a FRESH re-lay
     of the whole week, so it silently tracked today's intent (§PAST — see `_pinned_sessions`). Pass
     `(pinned, covered)` from there and each already-lived day shows the prescription that was in force
-    on it; default None ⇒ the old re-lay, so every direct-fixture caller stays byte-identical. The remaining days are generated EASY (a
-    partially-done week's remainder is governed recovery volume; a missed quality day isn't crammed
-    into the back of the week). Load already done this week therefore shrinks the remaining allowance,
-    and the EOW ACWR ceiling still holds. §6o-B: when `week_actuals` is supplied, the km already RUN
+    on it; default None ⇒ the old re-lay, so every direct-fixture caller stays byte-identical. Since
+    §6o-QF a quality session whose laid day is still AHEAD keeps that day, pinned with its kind; the
+    rest of the remainder is generated EASY (a missed quality day — one whose day has already passed —
+    is still never crammed into the back of the week). Load already done this week therefore shrinks
+    the remaining allowance, and the EOW ACWR ceiling still holds. §6o-B: when `week_actuals` is supplied, the km already RUN
     this week is also charged against the week's km intent (one-way — it only ever reduces the
     remainder), so an over-run week stops laying sessions on the remaining days instead of
     re-prescribing volume as if the week were fiction. Default None = full-week behaviour.
@@ -3976,6 +3979,12 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     §WKMEAN (0.68.2) — `day_series` (default None ⇒ byte-identical) is {date: whole-body TRIMP} for the
     lived days; the straddling week hands its days before today to the remainder search so the
     shape-neutral reading spans the whole week, not the days left to place."""
+    # §PRO11 — the forced-deload pull swaps two weeks' fields IN PLACE on these dicts; `generate_rebase`
+    # hands in `REBASE_SHAPE[:n]`, a shallow slice of a MODULE constant, so an in-place swap would
+    # mutate REBASE_SHAPE itself for every later caller. A fence, not a behaviour change: byte-identical
+    # (det/golden-plans, det/clock-purity) because the swap never fires on the re-base block today — it
+    # needs the assertive regime, which the re-base path doesn't run.
+    shape = [dict(w) for w in shape]
     from datetime import timedelta
     weeks = []
     ctl, atl = ctl0, atl0
@@ -4857,10 +4866,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
 
 
 def generate_rebase(block_start, ctl0, atl0, easy_pace_sec, adjust=None, shape=None):
-    """The Phase-0 re-base block (§6d) — `generate_block` over `REBASE_SHAPE` (or a §6e-shortened
-    slice when a well-absorbed block graduates early; volumes and the ACWR ceiling are identical,
-    only the week count changes). Thin wrapper kept so callers and diffs stay stable now that the
-    generator is phase-agnostic for base-build (§6f)."""
+    """The Phase-0 re-base block (§6d) — `generate_block` over `REBASE_SHAPE` (or a shorter slice —
+    §FORM1 removed adherence-earned graduation; the slice is the §PER1 runway clamp, taken when the
+    first race is closer than re-base + taper; volumes and the ACWR ceiling are identical, only the
+    week count changes). Thin wrapper kept so callers and diffs stay stable now that the generator
+    is phase-agnostic for base-build (§6f)."""
     return generate_block(shape or REBASE_SHAPE, block_start, ctl0, atl0, easy_pace_sec, adjust)
 
 
@@ -5096,7 +5106,7 @@ def feasibility(objective, ctl0, vo2max, weeks_away, projected_ctl=None,
     the PEAK CTL carried into the taper, realized on race day through its freshness — chained
     through the actual generated blocks under the ACWR ceiling) it is preferred over the generic
     ~3.4%/wk estimate, so the verdict 're-reads each block' instead of a hand-wave."""
-    est = round(ctl0 * (1.034 ** max(0, weeks_away)), 0)         # generic ~3.4%/wk fallback
+    est = round(ctl0 * (1.034 ** max(0, weeks_away or 0)), 0)    # generic ~3.4%/wk fallback
     proj = round(projected_ctl) if projected_ctl is not None else est
     src = ("the engine's projection through the planned blocks (ACWR-capped)"
            if projected_ctl is not None else "~3–4%/wk sustained")
@@ -5980,13 +5990,13 @@ def _recovery_weeks(race_type):
 
 
 def select_chain(objs, today):
-    """§6q — order the upcoming A-races into a periodization CHAIN toward the FINAL A (the ultimate
-    peak), tagging each earlier A's role by separation. Returns (chain, tune_ups):
+    """§6q — order the upcoming (dated today or later) A-races into a periodization CHAIN toward the
+    FINAL A (the ultimate peak), tagging each earlier A's role by separation. Returns (chain, tune_ups):
       chain    — ordered list of {**objective, "role": ...} with role ∈ {goal, coequal, subordinate};
                  the LAST entry is always 'goal'. With no A flagged, falls back to [nearest race].
       tune_ups — upcoming NON-chain races (B/C) on or before the final anchor's date.
     Pure function of (objectives, today) — adjudication stays human (reads set priorities)."""
-    future = sorted((o for o in objs if _date(o["date"]) > today), key=lambda o: _date(o["date"]))
+    future = sorted((o for o in objs if _date(o["date"]) >= today), key=lambda o: _date(o["date"]))
     a_races = [o for o in future if o.get("priority") == "A"]
     if not a_races:                                   # no A → nearest race is the lone peak (legacy)
         if not future:
@@ -6318,6 +6328,20 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         seed_meta = None
     else:
         vo2, ctl0, atl0, seed_meta = seed
+        # §VO2SEED — `plan_seed` hands back the newest snapshot's `effective_vo2max` unguarded; a
+        # Runalyze account whose runs carry no heart rate (or a fresh account) stores NULL there,
+        # `pace_zones(None)` is `{}` and `zones["easy_top"]` below raised KeyError. Keep the
+        # snapshot's CTL/ATL (measured); only the pace anchor is borrowed from a cold-start effort.
+        if not vo2:
+            cold = _ft_cold_start(db, today)
+            if cold and cold.get("vo2_seed"):
+                vo2 = cold["vo2_seed"]
+                seed_meta = {**(seed_meta or {}), "vo2_fallback": "race effort"}
+            else:
+                return {"ok": False, "error": ("no VO₂max estimate yet — Runalyze derives it from "
+                                               "runs with heart rate; sync a run with HR (or one "
+                                               "hard race-distance effort from the last 12 months) "
+                                               "and regenerate")}
     zones = pace_zones(vo2)
 
     block_start = _rebase_start(db, today)
@@ -6506,7 +6530,9 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         SHAPERS = {"base": base_shape, "build": build_shape, "bridge": build_shape,
                    "peak": peak_shape, "taper": taper_shape}
         cur_start = block_start + timedelta(weeks=rebase_weeks_n)
-        cur_km = (rb["weeks"][-1]["intent_km"] if rb["weeks"] else REBASE_SHAPE[-1]["km"])
+        # §6f — `.get(...) or ["km"]`: a week carried verbatim from a plan saved before 0.59.0 has no `intent_km` key
+        cur_km = ((rb["weeks"][-1].get("intent_km") or rb["weeks"][-1]["km"]) if rb["weeks"]
+                  else REBASE_SHAPE[-1]["km"])
         proj_end_ctl = rb["end_ctl"]
         # §PRO7b — race fitness = the PEAK CTL carried INTO the taper (end of the last building/peak
         # phase), realized on race day through the taper's FRESHNESS — not the depressed taper-bottom CTL.
@@ -6598,7 +6624,8 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
                     nd = [w["km"] for w in block["weeks"] if not _is_down(w)]
                     cur_km = max(nd) if nd else cur_km
                 else:
-                    cur_km = block["weeks"][-1]["intent_km"]
+                    # §6f — a week carried verbatim from a plan saved before 0.59.0 has no `intent_km` key
+                    cur_km = block["weeks"][-1].get("intent_km") or block["weeks"][-1]["km"]
             proj_end_ctl = end_ctl
             if kind == "taper":
                 race_proj[key] = peak_ctl  # §PRO7b — the fitness carried INTO this taper (not its trough)

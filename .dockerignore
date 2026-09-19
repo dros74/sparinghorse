@@ -1,0 +1,15 @@
+# Without this, every `docker build` tarred `.env`, `data/`, `backups/` and `venv/` into the
+# daemon's build context — secrets and a live database sent to the builder on every image build,
+# regardless of what the Dockerfile's COPY lines actually reach. `*` excludes everything, then each
+# `!` line re-admits exactly one of the Dockerfile's COPY sources — nothing else. det/image-
+# completeness checks this list stays in step with the Dockerfile's own COPY lines.
+*
+!requirements.txt
+!requirements.lock
+!SparingHorse.py
+!sh_engine.py
+!sh_selftest.py
+!sh_music.py
+!test/golden/
+!static/
+!entrypoint.sh

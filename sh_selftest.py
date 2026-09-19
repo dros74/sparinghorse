@@ -132,6 +132,31 @@ def _stc_clamp():
                got="all bounded" if not bad else f"violations: {bad}", output=detail)
 
 
+def _stc_plan_header_escaped():
+    """§PV-XSS — the plan header and the drift error banner interpolate objective/plan strings straight
+    into innerHTML; a raw `${o.target}` (or label/date/type/priority) is a sink an objective's OWNER
+    writes on the demo box, not just the athlete. Read the shipped source rather than render it, so a
+    regression anywhere in the file trips this, not just the two spots that prompted it."""
+    src = (S.Path(S.__file__).parent / "static/app.js").read_text(encoding="utf-8")
+    raw = [m.group(0) for m in S.re.finditer(r"\$\{o\.(target|label|date|type|priority)(\|\|[^}]*)?\}", src)]
+    bad = []
+    if raw:
+        bad.append(f"raw ${{o.*}} interpolation(s): {raw}")
+    if "${(d&&d.error)||" in src:
+        bad.append("drift error banner interpolated unescaped")
+    # anti-vacuity — the sinks this det exists to guard must still be there, escaped, not deleted.
+    n_esc_target = len(S.re.findall(r"esc\([^)]*o\.target[^)]*\)", src))
+    if n_esc_target < 3:
+        bad.append(f"only {n_esc_target} esc(o.target) sink(s) found — expected ≥3")
+    return _st("det", "plan-header-escaped",
+               "§PV-XSS every objective string field (label, target, date, type, priority) is "
+               "HTML-escaped before it reaches an innerHTML sink — the plan header interpolated "
+               "`target` raw while three sibling sinks escaped it; on the demo box that field is "
+               "written by strangers",
+               passed=not bad, expect="no raw ${o.*} interpolation, error banner escaped, ≥3 esc(o.target) sinks",
+               got="clean" if not bad else "; ".join(bad))
+
+
 def _stc_pwa():
     """PWA wiring — the manifest + service worker are installable, public-safe static assets that must
     serve on BOTH containers (not in _private_only_path, no secrets), so the public box is installable
@@ -633,6 +658,16 @@ def _stc_image_completeness():
         fails.append("the HEALTHCHECK does not probe /healthz")
     if not (root / "static" / "vendor" / "leaflet-1.9.4" / "leaflet.js").exists():
         fails.append("static/vendor/leaflet-1.9.4/leaflet.js is not in the tree the image COPYs")
+    # §BKENV/deploy — a `.dockerignore` of `*` plus re-admits is only as good as its re-admit list:
+    # every COPY source in the Dockerfile needs its own `!<source>` line, or the build context (and
+    # what actually reaches `docker build`) silently drifts from what this det already checked above.
+    dockerignore = root / ".dockerignore"
+    if dockerignore.exists():
+        admitted = {ln.strip()[1:].rstrip("/") for ln in dockerignore.read_text(encoding="utf-8").splitlines()
+                   if ln.strip().startswith("!")}
+        not_admitted = sorted(src for src in copied if src not in admitted)
+        if not_admitted:
+            fails.append(f".dockerignore does not re-admit: {not_admitted}")
     return _st("det", "image-completeness",
                "every local module the app imports — and the static/ tree it reads at import — is "
                "COPYed into the image, every COPYed module still exists, and the image is the "
@@ -1377,6 +1412,19 @@ def _pv_classified(path, spec):
     return True
 
 
+def _pv_withheld(p):
+    """Is `p` covered by `_PV_WITHHELD` — named exactly, or a child of a withheld parent? A dict
+    field named in the register (e.g. `track.overrides.rows`) drops its whole subtree from the
+    allowlist — `_pv_project` never descends into a key the spec omits — so a child path
+    (`track.overrides.rows[].week`) is exactly as private as its parent even though it is never
+    itself listed. Module-level so both coverage dets share it (SH-16: on the LIVE database,
+    `track.overrides.rows[].week/ratio/checkins/…` and `readiness.assessment.hrv.band/baseline` —
+    children of withheld parents, absent from the seed DB — failed both dets under the old exact-match
+    test for exactly this reason)."""
+    return p in S._PV_WITHHELD or any(p.startswith(w + ".") or p.startswith(w + "[]")
+                                      for w in S._PV_WITHHELD)
+
+
 def _stc_public_view_coverage(db):
     """§PV — EVERY field the engine can put on a public payload must be CLASSIFIED: named in a
     `PUBLIC_VIEWS` spec (published) or in `_PV_WITHHELD` (private on purpose). A field in neither is
@@ -1420,7 +1468,7 @@ def _stc_public_view_coverage(db):
     for plan in plans:
         seen |= _pv_paths(plan, "plan", set())
     for path in sorted(seen):
-        if _pv_classified(path, S._PV_PLAN) or path in S._PV_WITHHELD:
+        if _pv_classified(path, S._PV_PLAN) or _pv_withheld(path):
             continue
         # a phase block itself is matched structurally by plan_public_view
         if path == "plan.<phase>":
@@ -1444,27 +1492,29 @@ def _stc_public_view_coverage(db):
                     "failures": fails or "none"})
 
 
-# SH-10 — the resource → path-prefix map for the OTHER nine public views. `track_record`'s register
+# SH-10 — the resource → path-prefix map for the OTHER eleven public views. `track_record`'s register
 # entries spell its root `track` (not `track_record`, the PUBLIC_VIEWS/spec key) — see `_PV_WITHHELD`;
 # `objectives` is a LIST payload, so its own paths come out of `_pv_paths` as `objectives[].field`.
 _PV_ALL_ROOTS = {"healthz": "healthz", "shape": "shape", "drift": "drift",
                  "track_record": "track", "objectives": "objectives", "log": "log",
                  "readiness": "readiness", "activity": "activity", "profile": "profile",
-                 "weekly": "weekly"}
+                 "weekly": "weekly", "projector": "projector", "vo2max": "vo2max"}
 
 
 def _stc_public_view_coverage_all(db):
-    """§PV — the same proof as det/public-view-coverage, for the other nine public resources: every
+    """§PV — the same proof as det/public-view-coverage, for the other eleven public resources: every
     field the engine puts on {healthz, shape, drift, track_record, objectives, log, readiness,
-    activity, profile, weekly} must be CLASSIFIED, either published by that resource's own
-    `PUBLIC_VIEWS` spec or named in `_PV_WITHHELD`.
+    activity, profile, weekly, projector, vo2max} must be CLASSIFIED, either published by that
+    resource's own `PUBLIC_VIEWS` spec or named in `_PV_WITHHELD`.
 
     det/public-view-coverage only ever walked the PLAN. The withheld register already carried paths
-    on these nine resources too (`track.races[].p50_hms`, `shape.latest.raw`, `activity.hr_avg`,
+    on these eleven resources too (`track.races[].p50_hms`, `shape.latest.raw`, `activity.hr_avg`,
     `profile.hr`, `healthz.last_sync` …) — each one added by hand the day a specific leak was found
     and fixed — but nothing ever checked the register was COMPLETE for them: a new field on any of
-    these nine payloads could ship unclassified the exact way the plan's governor chips did on
+    these eleven payloads could ship unclassified the exact way the plan's governor chips did on
     0.31.0, and nothing would say so until someone found it in the field. This is that check.
+    `projector` and `vo2max` (SH-16, 2026-09-19) joined the other nine having been served on the
+    public box with no allowlist at all — this det is what should have caught that.
 
     Drives the REAL endpoints (test client, READONLY=False, so the private payload is the one
     audited — the public box would trim before this det ever saw the field). A resource whose
@@ -1478,7 +1528,7 @@ def _stc_public_view_coverage_all(db):
     SAFE DIRECTION ONLY: every unclassified path this det finds belongs in `_PV_WITHHELD`, never in
     an allowlist — deciding a field is safe to PUBLISH is a judgement call about what it reveals, not
     something a coverage det gets to make for itself. It also re-runs the plan det's register-honesty
-    check for these nine roots: a path listed withheld that the resource's own spec would still
+    check for these eleven roots: a path listed withheld that the resource's own spec would still
     publish is a register that is lying about what it protects."""
     fails, seen_by = [], {}
     saved_ro = S.READONLY
@@ -1499,7 +1549,7 @@ def _stc_public_view_coverage_all(db):
         paths = _pv_paths(r.get_json(), _PV_ALL_ROOTS[resource], set())
         spec = S.PUBLIC_VIEWS[resource]
         unclassified = [p for p in sorted(paths)
-                        if not (_pv_classified(p, spec) or p in S._PV_WITHHELD)]
+                        if not (_pv_classified(p, spec) or _pv_withheld(p))]
         seen_by[resource] = {"fields_seen": len(paths), "unclassified": unclassified or "none"}
         if unclassified:
             fails.append(f"{resource}: {len(unclassified)} field(s) in NEITHER the spec nor "
@@ -1535,6 +1585,8 @@ def _stc_public_view_coverage_all(db):
             _audit("profile", c.get(f"/api/activity/{aid}/profile"),
                    f"GET /api/activity/{aid}/profile")
         _audit("weekly", c.get("/api/weekly"), "GET /api/weekly")
+        _audit("projector", c.get("/api/projector?days=30"), "GET /api/projector")
+        _audit("vo2max", c.get("/api/vo2max?months=6"), "GET /api/vo2max")
     finally:
         S.READONLY = saved_ro
         if seeded_cache:                         # put back what the ambient DB had (a dev DB's real cache)
@@ -1559,13 +1611,15 @@ def _stc_public_view_coverage_all(db):
         fails.append(f"listed as withheld but the spec publishes it: {both}")
 
     return _st("det", "public-view-coverage-all",
-               "§PV the other nine public resources get the same proof det/public-view-coverage "
+               "§PV the other eleven public resources get the same proof det/public-view-coverage "
                "gives the plan — every field CLASSIFIED, published by that resource's spec or named "
                "in _PV_WITHHELD; the register carried paths for these resources already but nothing "
-               "had ever checked it was complete",
+               "had ever checked it was complete (projector and vo2max joined the list SH-16, having "
+               "been served with no allowlist at all)",
                passed=not fails,
                expect="every field on healthz/shape/drift/track_record/objectives/log/readiness/"
-                      "activity/profile/weekly classified; nothing both published and withheld",
+                      "activity/profile/weekly/projector/vo2max classified; nothing both published "
+                      "and withheld",
                got={"by_resource": seen_by, "failures": fails or "none"})
 
 
@@ -6679,8 +6733,20 @@ def _stc_multi_a_chain():
     chain, tune = S.select_chain([race(1,5,"10k","B"), race(2,14,"marathon","A")], today)
     if [c["id"] for c in chain] != [2] or [t["id"] for t in tune] != [1]:
         fails.append(f"B-before-A: chain={[c['id'] for c in chain]} tune={[t['id'] for t in tune]}")
+    # race day itself is still upcoming — the anchor does not drop on its own date; the later B is
+    # after the anchor's date, so it stays a plain future race, neither chained nor a tune-up
+    chain, tune = S.select_chain([race(1, 0, "marathon", "A"), race(2, 2, "10k", "B")], today)
+    if [c["id"] for c in chain] != [1] or chain[0]["role"] != "goal" or tune != []:
+        fails.append(f"race-day anchor: chain={[(c['id'],c['role']) for c in chain]} tune={[t['id'] for t in tune]}")
+    # a race dated YESTERDAY is no longer upcoming — excluded outright, not crowned goal
+    chain, _ = S.select_chain([{"id": 3, "date": (today - S.timedelta(days=1)).isoformat(),
+                                "type": "marathon", "priority": "A"}], today)
+    if chain != []:
+        fails.append(f"yesterday's race still chained: {chain}")
     return _st("det", "multi-a-chain",
-               "select_chain: role by race-type-scaled separation (marathon 6wk vs 10k 3wk), no-A fallback, B→tune-ups",
+               "select_chain: role by race-type-scaled separation (marathon 6wk vs 10k 3wk), no-A "
+               "fallback, B→tune-ups; a race dated TODAY is still the goal (race day used to drop "
+               "it and crown the next B-race)",
                passed=not fails, expect="roles + chain/tune split correct",
                got={"violations": fails or "none"})
 
@@ -7313,6 +7379,27 @@ def _stc_backup_export():
         ok, msg = S.restore_db(other)
         if ok:
             fails.append("restore accepted a SQLite file that is not a Sparing Horse database")
+        # §BKENV — the push hook must not inherit the container's secrets; only SH_BACKUP_FILE reaches it.
+        saved_push, saved_rt = S.BACKUP_PUSH, os.environ.get("RUNALYZE_TOKEN")
+        os.environ["RUNALYZE_TOKEN"] = "det-secret"
+        S.BACKUP_PUSH = ('sh -c \'printf "%s" "$RUNALYZE_TOKEN$ANTHROPIC_API_KEY$SH_SECRET_KEY" > '
+                         '"$SH_BACKUP_FILE.hookenv"; printf "%s" "$SH_BACKUP_FILE" > "$SH_BACKUP_FILE.hookfile"\'')
+        try:
+            target = S._backup_rotate()
+            hookenv = S.Path(str(target) + ".hookenv")
+            hookfile = S.Path(str(target) + ".hookfile")
+            if not hookenv.exists() or hookenv.read_text():
+                fails.append(f"backup push hook saw a secret: "
+                             f"{hookenv.read_text() if hookenv.exists() else 'hookenv file missing'!r}")
+            if not hookfile.exists() or hookfile.read_text() != str(target):
+                fails.append(f"backup push hook did not receive SH_BACKUP_FILE: "
+                             f"{hookfile.read_text() if hookfile.exists() else 'hookfile missing'!r}")
+        finally:
+            S.BACKUP_PUSH = saved_push
+            if saved_rt is None:
+                os.environ.pop("RUNALYZE_TOKEN", None)
+            else:
+                os.environ["RUNALYZE_TOKEN"] = saved_rt
     finally:
         S.BACKUP_DIR, S.DB_PATH, S.BACKUP_KEEP = saved_bd, saved_db, saved_keep
         _sh.rmtree(tdir, ignore_errors=True)
@@ -7320,6 +7407,152 @@ def _stc_backup_export():
                "JSON export round-trips all non-rebuildable tables; import refuses non-empty/foreign/newer; VACUUM snapshot complete + secret-free; endpoints private-only",
                passed=not fails, expect="round-trip faithful + guards hold",
                got={"violations": fails or "none"})
+
+
+def _stc_cli_no_scheduler():
+    """§CLI — a CLI subcommand (restore, selftest, seed, passphrase, access-seen, demo-bake, …) must
+    not start the nightly scheduler and its boot catch-up in the CLI's OWN process: `restore` could
+    race a catch-up sync/re-plan/backup rotation while it replaces the database file underneath it,
+    and `selftest` inside the container would run a second scheduler beside the server's.
+
+    Drives the REAL dispatch as a subprocess — the guard sits at module scope, between `if __name__
+    == "__main__"` and the subcommand dispatch, so nothing short of actually running the file as a
+    script exercises it. `access-seen` is the probe: it needs no Runalyze reach and exits (1, "none
+    seen yet") on a fresh DB, so it is cheap and deterministic. RUNALYZE_TOKEN + SH_SCHEDULE=1 are
+    both set so that a MISSING guard would satisfy start_scheduler()'s own gate and print — the
+    positive case (nothing printed) is not vacuous.
+
+    ANTI-VACUITY: the import path (what waitress runs — `waitress-serve … SparingHorse:app`, and the
+    plain dev server) must still start the scheduler, or the fix would have gone too far. RUNALYZE_BASE
+    is env-configurable (checked below by grepping the source, rather than assumed), so `python -c
+    "import SparingHorse"` is run for real, pointed at a dead local port — connection refused, no
+    network needed — and the scheduler's own startup print must appear. Only if RUNALYZE_BASE were
+    NOT configurable would this fall back to a source check instead (that the guard sits immediately
+    before the module-level start_scheduler() call)."""
+    import subprocess as _sp, tempfile as _tf2
+    root = S.Path(S.__file__).resolve().parent
+    fails, detail = [], {}
+    src = (root / "SparingHorse.py").read_text(encoding="utf-8")
+    with _tf2.TemporaryDirectory() as td:
+        td = S.Path(td)
+        base_env = {**os.environ, "SH_DB": str(td / "cli.db"), "SH_SECRETS_DB": str(td / "secrets.db"),
+                   "RUNALYZE_TOKEN": "det-token", "SH_SCHEDULE": "1"}
+        r = _sp.run([S.sys.executable, "SparingHorse.py", "access-seen"], cwd=str(root), timeout=120,
+                    capture_output=True, text=True, env=base_env)
+        detail["cli"] = {"returncode": r.returncode, "stdout": r.stdout[-300:], "stderr": r.stderr[-300:]}
+        if r.returncode != 1 or "none seen yet" not in r.stdout:
+            fails.append(f"access-seen on a fresh DB answered rc={r.returncode} — want 1 + 'none seen "
+                         f"yet': stdout={r.stdout!r} stderr={r.stderr!r}")
+        if "scheduled daily sync" in r.stdout or "scheduled daily sync" in r.stderr:
+            fails.append("a CLI subcommand started the nightly scheduler (printed 'scheduled daily sync')")
+        base_configurable = bool(S.re.search(r'RUNALYZE_BASE\s*=\s*os\.environ\.get\(\s*[\'"]RUNALYZE_BASE[\'"]', src))
+        if base_configurable:
+            imp_env = {**base_env, "RUNALYZE_BASE": "http://127.0.0.1:9/"}
+            r2 = _sp.run([S.sys.executable, "-c", "import SparingHorse"], cwd=str(root), timeout=120,
+                        capture_output=True, text=True, env=imp_env)
+            detail["import"] = {"returncode": r2.returncode, "stdout": r2.stdout[-300:], "stderr": r2.stderr[-300:]}
+            if "scheduled daily sync" not in r2.stdout:
+                fails.append(f"importing SparingHorse (the waitress path) did not start the scheduler: "
+                             f"stdout={r2.stdout!r} stderr={r2.stderr!r}")
+        else:
+            detail["anti_vacuity"] = "source check — RUNALYZE_BASE is not env-configurable"
+            if "if not _CLI:\n    start_scheduler()" not in src:
+                fails.append("RUNALYZE_BASE is not env-configurable and the source no longer reads "
+                             "'if not _CLI:' immediately before the module-level start_scheduler() call")
+    return _st("det", "cli-no-scheduler",
+              "§CLI a CLI subcommand (restore, selftest, seed, passphrase, …) no longer starts the "
+              "nightly scheduler and its boot catch-up before dispatch — a restore could race a "
+              "catch-up sync while replacing the database file; the import path (waitress) still "
+              "starts it",
+              passed=not fails,
+              expect="no scheduler print from a CLI subcommand; the import path still prints it",
+              got={**detail, "failures": fails or "none"})
+
+
+def _stc_client_ip_trust():
+    """§XFF — `_client_ip()` believes a forwarded header (CF-Connecting-IP / X-Forwarded-For) only
+    from a peer that could only be a proxy: one inside PROXY_CIDRS when SH_PROXY_CIDR configures it,
+    else a private-network or loopback peer. A public peer, or one that fails to parse, is keyed on
+    `request.remote_addr` itself — otherwise a direct caller could rotate a forwarded address past
+    its own login lockout, leaving only the global brake.
+
+    Cases (a)-(e) below are the contract: a public peer is always keyed on itself regardless of what
+    it claims (a); with no CIDR configured, a private/loopback peer is trusted (b, c); a configured
+    CIDR narrows trust to exactly that network — a private peer OUTSIDE it is no longer trusted (d,
+    first half) while a peer INSIDE it is (d, second half); loopback with no headers at all reads
+    back its own address (e).
+
+    (a) reads 8.8.8.8, not the RFC 5737 documentation address a first draft used: `ipaddress`
+    classifies 203.0.113.0/24 (TEST-NET-3) as `.is_private` (it is IANA special-purpose, not
+    globally routed) — exactly the algorithm this det exercises — so it would have exercised the
+    TRUSTED branch it was meant to prove untrusted. 8.8.8.8 is genuinely global."""
+    fails, detail = [], {}
+
+    def ip_for(peer, headers=None):
+        with S.app.test_request_context("/", environ_base={"REMOTE_ADDR": peer}, headers=headers or {}):
+            return S._client_ip()
+
+    for label, peer, headers, want in (
+        ("a", "8.8.8.8", {"X-Forwarded-For": "1.2.3.4"}, "8.8.8.8"),
+        ("b", "172.18.0.9", {"X-Forwarded-For": "1.2.3.4"}, "1.2.3.4"),
+        ("c", "172.18.0.9", {"CF-Connecting-IP": "9.9.9.9", "X-Forwarded-For": "1.2.3.4"}, "9.9.9.9"),
+        ("e", "127.0.0.1", {}, "127.0.0.1"),
+    ):
+        got = ip_for(peer, headers)
+        detail[label] = got
+        if got != want:
+            fails.append(f"({label}) peer={peer} headers={headers} → {got!r}, want {want!r}")
+
+    saved_cidrs = list(S.PROXY_CIDRS)
+    try:
+        S.PROXY_CIDRS[:] = [S.ipaddress.ip_network("10.0.0.0/8")]
+        d1 = ip_for("172.18.0.9", {"X-Forwarded-For": "1.2.3.4"})
+        detail["d1"] = d1
+        if d1 != "172.18.0.9":
+            fails.append(f"(d) peer 172.18.0.9 outside the configured CIDR → {d1!r}, want '172.18.0.9'")
+        d2 = ip_for("10.1.1.1", {"X-Forwarded-For": "1.2.3.4"})
+        detail["d2"] = d2
+        if d2 != "1.2.3.4":
+            fails.append(f"(d) peer 10.1.1.1 inside the configured CIDR → {d2!r}, want '1.2.3.4'")
+    finally:
+        S.PROXY_CIDRS[:] = saved_cidrs
+    return _st("det", "client-ip-trust",
+              "§XFF a forwarded client address is believed only from a proxy (SH_PROXY_CIDR when "
+              "set, else a private-network or loopback peer); a public peer is keyed on itself, so "
+              "a direct caller cannot rotate X-Forwarded-For past the login lockout",
+              passed=not fails, expect="see docstring cases (a)-(e)",
+              got={**detail, "failures": fails or "none"})
+
+
+def _stc_csrf_origin_ipv6():
+    """§XFF/CSRF — `_csrf_origin_guard` compares the request's Origin against its OWN host through
+    `_req_hostname()`, not `.split(':')[0]`: the split truncated an IPv6 Host at its first colon
+    (`[::1]:8770` became `[`), so a browser POSTing to the app over an IPv6 literal was refused as
+    cross-origin even though Origin and Host named the same address.
+
+    No existing det exercised `_csrf_origin_guard` at all — grepping sh_selftest.py for its own
+    error text ("cross-origin request refused") found nothing before this — so this is a new det,
+    not a limb on one. RATE_LIMITING is off in the battery and _AUTH_ACTIVE is flipped off for the
+    whole run, so a harmless private POST is free to send twice."""
+    fails = []
+    c = S.app.test_client()
+    body = {"note": "", "date": "2000-01-01"}   # a no-op write: deletes a reflection that never existed
+    same = c.post("/api/log/note", json=body, base_url="http://[::1]:8770",
+                 headers={"Origin": "http://[::1]:8770"})
+    if same.status_code == 403:
+        fails.append(f"a same-origin IPv6 POST ([::1]:8770) was refused as cross-origin: {same.get_json()}")
+    cross = c.post("/api/log/note", json=body, base_url="http://[::1]:8770",
+                  headers={"Origin": "http://evil.example"})
+    if cross.status_code != 403:
+        fails.append(f"a genuinely cross-origin POST answered {cross.status_code}, want 403")
+    return _st("det", "csrf-origin-ipv6",
+              "§XFF/CSRF the origin guard's own-host read uses _req_hostname() (bracket-aware "
+              "IPv6), not `.split(':')[0]` — an IPv6 Host ([::1]:8770) used to truncate to '[' and "
+              "refuse a same-origin POST as cross-origin",
+              passed=not fails,
+              expect="same-origin IPv6 POST allowed; a genuinely cross-origin POST still refused",
+              got={"same_origin": same.status_code, "cross_origin": cross.status_code,
+                   "failures": fails or "none"})
 
 
 def _stc_chain_drift():
@@ -8172,11 +8405,12 @@ def _stc_guides():
     if work["fields"][0]["type"] != "stepDurationCountdown" or work["fields"][1]["type"] != "targetPace":
         fails.append(f"work targetPace not first after the countdown: "
                      f"{[f['type'] for f in work['fields']]}")
-    # §SG5 — a non-work rep (the warm-up) leads with the targetHeartRate BAND (it gets the gauge),
-    # then live heartRate + pace metrics, and carries no targetPace at all.
+    # §SG5 — a non-work rep (the warm-up) carries the targetHeartRate BAND (it draws the gauge) plus
+    # live heartRate + pace metrics, and no targetPace at all. §SG6 (0.68.11) — the live metrics lead
+    # (the two big slots), the countdown and the band's static midpoint trail (the two small ones).
     warm = g["steps"][0]
     warm_types = [f["type"] for f in warm["fields"]]
-    if warm_types != ["stepDurationCountdown", "targetHeartRate", "heartRate", "pace", "text"]:
+    if warm_types != ["heartRate", "pace", "stepDurationCountdown", "targetHeartRate", "text"]:
         fails.append(f"warm-up field order wrong: {warm_types}")
     wth = next((f for f in warm["fields"] if f["type"] == "targetHeartRate"), None)
     if not wth or (wth["min"], wth["max"]) != (95, 135):
@@ -9535,8 +9769,9 @@ def _stc_guide_screen_layout():
     only the FIRST field in a step's array, so the step's second target field (`targetHeartRate`)
     just sat at its static midpoint, and neither target was ever a live reading — that needs its own
     METRIC field type, which the step never sent. Locked here: an easy-class rep (any effort that
-    isn't "work") and the simple run lead with the `targetHeartRate` BAND, so HR gets the gauge, then
-    carry live `heartRate` + `pace` metrics and no `targetPace`; a work rep keeps `targetPace` as the
+    isn't "work") and the simple run carry the `targetHeartRate` BAND, so HR gets the gauge, plus
+    live `heartRate` + `pace` metrics and no `targetPace` (§SG6 0.68.11 put the live metrics FIRST —
+    array order is slot size on the wrist — and the countdown + band behind them); a work rep keeps `targetPace` as the
     gauge and adds only a live `heartRate` metric, no `targetHeartRate` field; the easy band is Z1
     only (top = the effort-discipline panel's easy ceiling, not the old Z1–Z2 span); every field
     title stays inside the watch's 9-char shared-step limit and no step exceeds 5 fields; the
@@ -9565,11 +9800,11 @@ def _stc_guide_screen_layout():
     # (a) field order on an easy-class rep, and on the simple run
     warm = g["steps"][0]
     warm_types = [f["type"] for f in warm["fields"]]
-    if warm_types != ["stepDurationCountdown", "targetHeartRate", "heartRate", "pace", "text"]:
+    if warm_types != ["heartRate", "pace", "stepDurationCountdown", "targetHeartRate", "text"]:
         fails.append(f"(a) easy-class rep field order wrong: {warm_types}")
     simple = g2["steps"][0]
     simple_types = [f["type"] for f in simple["fields"]]
-    if simple_types != ["stepDistanceCountdown", "targetHeartRate", "heartRate", "pace", "text"]:
+    if simple_types != ["heartRate", "pace", "stepDistanceCountdown", "targetHeartRate", "text"]:
         fails.append(f"(a) simple-run field order wrong: {simple_types}")
 
     # (b) field order on a work rep
@@ -13310,6 +13545,48 @@ def _stc_ft_coldstart():
                     "failures": fail or "none"})
 
 
+def _stc_vo2_null_seed():
+    """§VO2SEED — a shape_snapshot with a NULL effective_vo2max used to crash generate_plan with a
+    bare KeyError on `zones["easy_top"]` (`pace_zones(None)` is `{}`): a Runalyze account whose runs
+    carry no heart rate — or a fresh one — stores exactly that. The fix borrows the pace anchor from
+    a cold-start race effort when one exists in the trailing FT5 window, else answers with what to
+    sync instead of a stack trace.
+
+    Fixture note — `_race_fixture_db`'s plain history is eight weeks of 10.0km/60min runs, which lands
+    EXACTLY on the 10k RACE_KM bucket at a sane pace: left alone, it would itself qualify as the
+    cold-start effort and mask the branch this det exists to prove (the plan would just succeed via
+    the fallback). Distance is pushed off every RACE_KM bucket (±10%) before the vo2max is nulled, so
+    the second call genuinely has nowhere to fall back to."""
+    fx, t = _race_fixture_db("marathon")
+    p0 = S.generate_plan(fx, today=t)
+    bad = []
+    # ANTI-VACUITY — the fixture must plan on its own real seed, or a crash below proves the fixture
+    # broken, not the fix.
+    if not (isinstance(p0, dict) and p0.get("ok")
+            and any(isinstance(v, dict) and v.get("weeks") for v in p0.values())):
+        bad.append(f"fixture did not plan on its own real vo2max seed: "
+                   f"{p0.get('error') if isinstance(p0, dict) else p0!r}")
+    fx.execute("UPDATE activities SET distance=3.0, duration=900, elapsed_time=900")  # off every bucket
+    fx.execute("UPDATE shape_snapshots SET effective_vo2max=NULL")
+    fx.commit()
+    try:
+        p1 = S.generate_plan(fx, today=t)
+    except Exception as e:
+        bad.append(f"generate_plan raised on a NULL vo2max seed: {type(e).__name__}: {e}")
+        p1 = None
+    if p1 is not None and not (isinstance(p1, dict) and p1.get("ok") is False
+                               and "VO₂max" in (p1.get("error") or "")):
+        bad.append(f"NULL vo2max with no cold-start effort did not answer ok:false naming VO₂max: {p1}")
+    return _st("det", "vo2-null-seed",
+               "§VO2SEED a snapshot with no effective VO₂max (runs without heart rate, or a fresh "
+               "Runalyze account) no longer crashes generate_plan with a KeyError on the pace grid: "
+               "the pace anchor is borrowed from a cold-start race effort when one exists, else the "
+               "plan answers with what to sync",
+               passed=not bad, expect="plans on a real seed; ok:false naming VO₂max with none and no "
+               "fallback available",
+               got="clean" if not bad else "; ".join(bad))
+
+
 def _stc_tissue_limiter():
     """§PRO6 — the duration-aware tissue limiter caps consecutive near-ceiling weeks in the ASSERTIVE
     regime. On a pathological shape (6 straight building weeks, NO down week) it forces a deload at the
@@ -15073,6 +15350,8 @@ def _stc_api_validation(db):
       (d) the integer query args (effort-discipline days, projector days, weekly weeks, vo2max months)
           answer junk with JSON 400 — not a bare int() ValueError and an HTML 500 — and the happy path
           still serves.
+      (e) POST /api/suunto/push rejects a non-numeric `days` with JSON 400 before any Suunto call —
+          before: `int(d.get("days") or SUUNTO_PUSH_DAYS)` raised straight into a bare JSON 500.
     Runs against whatever DB the battery was pointed at (the live one for an inline CLI run, a
     snapshot when the app spawned it) through app.test_client(); every probe is a REJECTED write, and the
     row counts are asserted unchanged so the det leaves nothing behind."""
@@ -15139,6 +15418,11 @@ def _stc_api_validation(db):
             r = c.get(path)
             if r.status_code != 200 or not is_json(r):
                 fails.append(f"(d) the happy path {path} answered {r.status_code}")
+        # (e) POST /api/suunto/push — `days` junk answers JSON 400 before any Suunto call is made
+        r = c.post("/api/suunto/push", json={"days": "x"})
+        if r.status_code != 400 or not is_json(r) or (r.get_json() or {}).get("ok") is not False:
+            fails.append(f"(e) suunto push junk days answered {r.status_code} "
+                         f"{'json' if is_json(r) else 'non-json'} — want JSON 400")
     finally:
         S.READONLY, S.regenerate = saved_ro, saved_regen
     return _st("det", "api-validation",
@@ -17631,6 +17915,62 @@ class SelfTestBusy(RuntimeError):
 _battery_lock = S.threading.Lock()
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _pinned_engine_globals():
+    """TECH-1b — the battery tests the ENGINE, not the athlete's plan. `apply_settings_overrides`
+    seeds `_DAY_PREF` (§DAYPREF long-run day + rest ranking) from the database at import, via
+    `E.set_day_preferences` — so a saved preference on the DB under test (the live DB carries
+    `set:rest_day_rank = fri,mon,wed`) polices every layout det the same code path polices the athlete's real
+    plan with, and the seed DB's dets go red or green depending on whose database they happen to run
+    against. Pinned to the unset pair for the run; the athlete's own setting goes back after."""
+    saved = E.day_preferences()
+    E.set_day_preferences(None, None)
+    try:
+        yield
+    finally:
+        E._DAY_PREF = saved          # restore the parsed pair as-is
+
+
+def _stc_battery_hermetic():
+    """TECH-1b — prove the pin above actually holds during the run, and that the athlete's own
+    setting comes back after. A det that only unit-tests `_pinned_engine_globals()` in isolation could
+    stay green while the call into it quietly fell out of `run_server_selftest` again, so this also
+    greps the runner's own source for the call site."""
+    from pathlib import Path
+    E.set_day_preferences("sat", "fri,mon")
+    try:
+        with _pinned_engine_globals():
+            inside = E.day_preferences()
+        after = E.day_preferences()
+    finally:
+        E._DAY_PREF = (None, ())
+    want_after = (E._parse_day("sat"), E._parse_day_rank("fri,mon"))
+    bad = []
+    if inside != (None, ()):
+        bad.append(f"inside the pin: {inside!r}, want (None, ())")
+    if after != want_after:
+        bad.append(f"after the pin: {after!r}, want {want_after!r}")
+    # anchored at column 0 — this det's OWN source names both defs too, and it is defined earlier
+    # in the file than either, so an unanchored find() would match itself, not the runner.
+    src = Path(__file__).read_text(encoding="utf-8")
+    m0 = S.re.search(r"^def run_server_selftest\(", src, S.re.M)
+    m1 = S.re.search(r"^def _run_server_selftest\(", src, S.re.M)
+    if not (m0 and m1 and m0.start() < m1.start()
+            and "_pinned_engine_globals()" in src[m0.start():m1.start()]):
+        bad.append("_pinned_engine_globals() is not called inside run_server_selftest")
+    return _st("det", "battery-hermetic",
+               "TECH-1b the battery pins the settings-seeded engine globals (§DAYPREF long-run day + "
+               "rest ranking) for its run and puts the athlete's back after — on a database with a "
+               "saved ranking ten layout dets went red under the same code that was green on the "
+               "seed DB",
+               passed=not bad, expect="(None, ()) inside the pin, the athlete's setting restored "
+               "after, wired into run_server_selftest",
+               got="clean" if not bad else "; ".join(bad))
+
+
 def run_server_selftest(db, categories=None):
     """Run the battery. Returns the full report dict (the caller persists it). One at a time WITHIN a
     process — which, since TECH-1, is normally a process of its own: the app spawns this module rather
@@ -17649,7 +17989,8 @@ def run_server_selftest(db, categories=None):
             S.RATE_LIMITING = False
         if saved_auth is not None:
             S._AUTH_ACTIVE = False
-        return _run_server_selftest(db, categories)
+        with _pinned_engine_globals():
+            return _run_server_selftest(db, categories)
     finally:
         if saved_rl is not None:
             S.RATE_LIMITING = saved_rl
@@ -17659,7 +18000,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -17674,6 +18015,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_race_session(),   # §RACE
                  lambda: _stc_tuneup_session(),  # §TT2
                  lambda: _stc_race_lifecycle(), lambda: _stc_backup_export(),
+                 lambda: _stc_cli_no_scheduler(), lambda: _stc_client_ip_trust(),
+                 lambda: _stc_csrf_origin_ipv6(),
                  lambda: _stc_chain_drift(), lambda: _stc_goal_moved(),
                  lambda: _stc_ctl_forecast_bias(), lambda: _stc_multi_a_plan(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
@@ -17713,7 +18056,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_shape_response(), lambda: _stc_finish_time(), lambda: _stc_ft_monotone(),
                  lambda: _stc_ft_evo2(), lambda: _stc_ft_sessions(), lambda: _stc_ft_band(),
                  lambda: _stc_ft_ledger(),
-                 lambda: _stc_ft_coldstart(), lambda: _stc_restart_dose(),
+                 lambda: _stc_ft_coldstart(), lambda: _stc_vo2_null_seed(), lambda: _stc_restart_dose(),
                  lambda: _stc_ft_scale(), lambda: _stc_polarized(),
                  lambda: _stc_polarization_floor(), lambda: _stc_components(),
                  lambda: _stc_ctl_floor_removed(),

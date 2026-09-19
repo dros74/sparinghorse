@@ -56,8 +56,12 @@ is_empty()  { ! grep -q "^$1=." "$ENV_FILE"; }         # absent, or present with
 gen_key()   { head -c 48 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 replace_or_append() {                                  # $1 key, $2 value — in place when an empty line exists
   if has_key "$1"; then
-    awk -v k="$1" -v v="$2" 'BEGIN{done=0} $0 ~ ("^" k "=") && !done {print k "=" v; done=1; next} {print}' \
-      "$ENV_FILE" > "$ENV_FILE.tmp" && cat "$ENV_FILE.tmp" > "$ENV_FILE" && rm -f "$ENV_FILE.tmp"
+    # the value rides through the environment, not -v: awk's -v decodes backslash escapes, so a
+    # passphrase containing "\n" or "\t" came out mangled. umask 077 while the temp file is CREATED —
+    # it holds the whole .env, secrets included, and a loose umask would make it briefly world-readable.
+    ( umask 077
+      V="$2" awk -v k="$1" 'BEGIN{done=0} $0 ~ ("^" k "=") && !done {print k "=" ENVIRON["V"]; done=1; next} {print}' \
+        "$ENV_FILE" > "$ENV_FILE.tmp" ) && cat "$ENV_FILE.tmp" > "$ENV_FILE" && rm -f "$ENV_FILE.tmp"
   else
     printf '%s=%s\n' "$1" "$2" >> "$ENV_FILE"
   fi
