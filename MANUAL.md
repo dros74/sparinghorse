@@ -608,8 +608,10 @@ holds one or the streams otherwise: a song run within 1 % of its tempo is follow
 during a song means "the beat lost me here"; two presses within six seconds mean "never again."** A
 headset skip sets the song aside for that kind of segment, and a cadence drop of 4 spm under the song's
 median for 4 seconds or more counts as a dip. Each song row on the read-back also carries **leave it
-out** — the same verdict as two presses, given after the run while the feel is fresh — and **keep** to
-undo it. The next list is picked from these grades, so the ladder climbs from what you ran, not from
+out** — the same verdict as two presses, given after the run while the feel is fresh — and **keep**,
+which pardons whatever the run itself found too — a headset skip, or two presses — so the song
+returns to the picker. A guide's own laps, one at the start of each work step, are never read as a
+press. The next list is picked from these grades, so the ladder climbs from what you ran, not from
 what was asked — and on a reps day a song is read over the reps only.
 
 **Limits.** ReccoBeats does not cover every song — one without a tempo is never picked. Spotify keeps

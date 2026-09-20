@@ -8927,7 +8927,15 @@ def _stc_calibration_inventory():
                 "MUSIC_PLAYED_KEEP_DAYS", "MUSIC_READBACK_RUNS", "MUSIC_LAP_END_GRACE_S",
                 # 0.67.0 — §DISCO plumbing: how many ListenBrainz rows are read per call, per refresh
                 "MUSIC_LB_NEIGHBOURS", "MUSIC_LB_PER_USER", "MUSIC_LB_CF", "MUSIC_LB_WEEKLY_LISTS",
-                "MUSIC_LB_RADIO_SEEDS", "MUSIC_LB_LOOKUPS", "MUSIC_LB_NAMES_BATCH"}
+                "MUSIC_LB_RADIO_SEEDS", "MUSIC_LB_LOOKUPS", "MUSIC_LB_NAMES_BATCH",
+                # §BEAT15 (0.70.x) — lap-matching tolerances of the same plumbing shape as
+                # MUSIC_LAP_END_GRACE_S above (a boundary a lap is matched against, not a magnitude a
+                # plan is computed from): MUSIC_AUTOLAP_UNIT_TOL keeps the unit-relative fraction
+                # beside the old (still-calibration) MUSIC_AUTOLAP_TOL, MUSIC_GUIDE_LAP_TOL_S is a
+                # clock-agreement window like MUSIC_FIT_CLOCK_TOL_S, just narrower, and
+                # MUSIC_GUIDE_LAP_DECODE_WINDOW_S is the same match against the run's own §RD decode
+                # instead of the plan's offset
+                "MUSIC_AUTOLAP_UNIT_TOL", "MUSIC_GUIDE_LAP_TOL_S", "MUSIC_GUIDE_LAP_DECODE_WINDOW_S"}
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -18126,7 +18134,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -19234,18 +19242,26 @@ def _stc_music_readback():
 
 def _stc_music_verdict():
     """§BEAT14 — "leave it out": a verdict given on the read-back page after the run, equivalent to
-    two lap presses, with "keep" to undo it. A song whose meter trips the legs (a half-time pulse
-    doubled by ReccoBeats, bars of 6/4 and 7/4) has no meter field to catch it, and the athlete does
-    not always press the button in the moment — the verdict right after the run is the only way to
-    remove such a song. (a) POST /api/music/verdict {run_id, spotify_id: "A", verdict: "never"} → 200
-    ok. (b) the stored read-back overlays it: A reads run_rating "never" and manual True, B is
-    untouched, set_aside counts it. (c) `set_aside()` maps A to both segment roles, exactly as a
-    double press does. (d) recompute safety: wiping `rating_run` for the run (what `readback()` does
-    first) does not drop the verdict — it lives in `manual_verdict`, beside that table, not in it.
-    (e) "keep" undoes it everywhere: the read-back, and `set_aside()`. (f) a verdict that is neither
-    "never" nor "keep", and a run_id that will not parse as int, both answer 400 ok:false."""
+    two lap presses. A song whose meter trips the legs (a half-time pulse doubled by ReccoBeats,
+    bars of 6/4 and 7/4) has no meter field to catch it, and the athlete does not always press the
+    button in the moment — the verdict right after the run is the only way to remove such a song.
+    §BEAT16 — "keep" pardons a manual never AND the run's own skip or double press for that run,
+    leaving what the run itself found on screen. (a) POST /api/music/verdict {run_id, spotify_id:
+    "A", verdict: "never"} → 200 ok. (b) the stored read-back overlays it: A reads run_rating "never"
+    and manual "never", B is untouched, set_aside counts it. (c) `set_aside()` maps A to both
+    segment roles, exactly as a double press does. (d) recompute safety: wiping `rating_run` for the
+    run (what `readback()` does first) does not drop the verdict — it lives in `manual_verdict`,
+    beside that table, not in it. (e) "keep" on A leaves its own reading in place (run_rating back to
+    what the run itself found, here None) but marks it "keep" and drops it from `set_aside()` and the
+    read-back's count. (f) a verdict that is neither "never" nor "keep", and a run_id that will not
+    parse as int, both answer 400 ok:false. (g) a song the run itself set aside by a SKIP survives
+    "keep" the same way: still reads `skipped`, but pardoned from `set_aside()` and the count, and
+    the pardon survives the DELETE+re-INSERT a recompute does to `rating_run`. (h) the same for a
+    song the run set aside by a double PRESS ('never', no manual): "keep" pardons it while the
+    read-back still shows the run's own "never". (i) "leave it out" on an already-kept song replaces
+    the row (same primary key) rather than stacking one beside the other."""
     if M is None:
-        return _music_skip("music-verdict", "§BEAT14 — leave it out / keep on the read-back")
+        return _music_skip("music-verdict", "§BEAT14/§BEAT16 — leave it out / keep on the read-back")
     import tempfile
     fails = []
     saved_path = M.music_db_path
@@ -19272,7 +19288,7 @@ def _stc_music_verdict():
                 fails.append(f"(a) never on A: {r1.status_code} {r1.get_json()}")
             r2 = c.get(f"/api/music/readback/{run_id}").get_json() or {}
             songs2 = {s["spotify_id"]: s for s in r2.get("songs", [])}
-            if songs2.get("A", {}).get("run_rating") != "never" or songs2.get("A", {}).get("manual") is not True \
+            if songs2.get("A", {}).get("run_rating") != "never" or songs2.get("A", {}).get("manual") != "never" \
                     or songs2.get("B", {}).get("run_rating") is not None or songs2.get("B", {}).get("manual") \
                     or r2.get("set_aside") != 1:
                 fails.append(f"(b) overlay on the stored read-back: {r2}")
@@ -19298,8 +19314,10 @@ def _stc_music_verdict():
                 fails.append(f"(e) keep on A: {r4.status_code} {r4.get_json()}")
             r5 = c.get(f"/api/music/readback/{run_id}").get_json() or {}
             songs5 = {s["spotify_id"]: s for s in r5.get("songs", [])}
-            if songs5.get("A", {}).get("run_rating") is not None or songs5.get("A", {}).get("manual") or r5.get("set_aside") != 0:
-                fails.append(f"(e) keep must undo the verdict: {songs5.get('A')} set_aside={r5.get('set_aside')}")
+            if songs5.get("A", {}).get("run_rating") is not None or songs5.get("A", {}).get("manual") != "keep" \
+                    or r5.get("set_aside") != 0:
+                fails.append(f"(e) keep must leave A's own reading in place and mark it kept: "
+                             f"{songs5.get('A')} set_aside={r5.get('set_aside')}")
             conn = M._mdb()
             try:
                 aside2 = M.set_aside(conn)
@@ -19313,6 +19331,101 @@ def _stc_music_verdict():
             r7 = c.post("/api/music/verdict", json={"run_id": "x", "spotify_id": "A", "verdict": "never"})
             if r7.status_code != 400:
                 fails.append(f"(f) a run_id that will not parse as int must 400: {r7.status_code} {r7.get_json()}")
+
+            # (g) the run's own SKIP, pardoned by "keep" — and the pardon survives a recompute's
+            # DELETE+re-INSERT of `rating_run` (what `readback()` does on every call)
+            run_g = 424243
+            payload_g = {"ok": True, "run_id": run_g, "songs": [
+                {"spotify_id": "C", "title": "Song C", "skipped": True, "run_rating": None}], "set_aside": 1}
+            conn = M._mdb()
+            try:
+                conn.execute("INSERT INTO readback(run_id, date, computed_at, payload) VALUES(?,?,?,?)",
+                             (run_g, "2026-09-02", "2026-09-02T12:00:00", M.json.dumps(payload_g)))
+                conn.execute("INSERT INTO rating_run(run_id, spotify_id, rating, at_s, role) VALUES(?,?,?,?,?)",
+                             (run_g, "C", "skip", 100, "easy"))
+                conn.commit()
+                aside_g = M.set_aside(conn)
+            finally:
+                conn.close()
+            if aside_g.get("C") != {"easy"}:
+                fails.append(f"(g) set_aside must map the skipped C to its own role: {aside_g}")
+            rg1 = c.post("/api/music/verdict", json={"run_id": run_g, "spotify_id": "C", "verdict": "keep"})
+            if rg1.status_code != 200 or not (rg1.get_json() or {}).get("ok"):
+                fails.append(f"(g) keep on the skipped C: {rg1.status_code} {rg1.get_json()}")
+            conn = M._mdb()
+            try:
+                aside_g2 = M.set_aside(conn)
+            finally:
+                conn.close()
+            if "C" in aside_g2:
+                fails.append(f"(g) set_aside must no longer list C once kept: {aside_g2}")
+            rg2 = c.get(f"/api/music/readback/{run_g}").get_json() or {}
+            c_g = {s["spotify_id"]: s for s in rg2.get("songs", [])}.get("C", {})
+            if c_g.get("manual") != "keep" or not c_g.get("skipped") or rg2.get("set_aside") != 0:
+                fails.append(f"(g) kept C must still read skipped, with set_aside decremented: {c_g} set_aside={rg2.get('set_aside')}")
+            conn = M._mdb()
+            try:
+                conn.execute("DELETE FROM rating_run WHERE run_id=?", (run_g,))       # the recompute's own first step
+                conn.execute("INSERT INTO rating_run(run_id, spotify_id, rating, at_s, role) VALUES(?,?,?,?,?)",
+                             (run_g, "C", "skip", 100, "easy"))                       # …and its own re-insert of the skip
+                conn.commit()
+                aside_g3 = M.set_aside(conn)
+            finally:
+                conn.close()
+            if "C" in aside_g3:
+                fails.append(f"(g) the pardon must survive rating_run's recompute churn: {aside_g3}")
+
+            # (h) the run's own double PRESS ('never', no manual verdict), pardoned by "keep" while
+            # the read-back still shows what the run itself found
+            run_h = 424244
+            payload_h = {"ok": True, "run_id": run_h, "songs": [
+                {"spotify_id": "D", "title": "Song D", "skipped": False, "run_rating": "never"}], "set_aside": 1}
+            conn = M._mdb()
+            try:
+                conn.execute("INSERT INTO readback(run_id, date, computed_at, payload) VALUES(?,?,?,?)",
+                             (run_h, "2026-09-03", "2026-09-03T12:00:00", M.json.dumps(payload_h)))
+                conn.execute("INSERT INTO rating_run(run_id, spotify_id, rating, at_s, role) VALUES(?,?,?,?,?)",
+                             (run_h, "D", "never", 200, "easy"))
+                conn.commit()
+                aside_h = M.set_aside(conn)
+            finally:
+                conn.close()
+            if aside_h.get("D") != {"work", "easy"}:
+                fails.append(f"(h) set_aside must map a double-pressed D to both roles: {aside_h}")
+            rh1 = c.post("/api/music/verdict", json={"run_id": run_h, "spotify_id": "D", "verdict": "keep"})
+            if rh1.status_code != 200 or not (rh1.get_json() or {}).get("ok"):
+                fails.append(f"(h) keep on the double-pressed D: {rh1.status_code} {rh1.get_json()}")
+            conn = M._mdb()
+            try:
+                aside_h2 = M.set_aside(conn)
+            finally:
+                conn.close()
+            if "D" in aside_h2:
+                fails.append(f"(h) set_aside must no longer list D once kept: {aside_h2}")
+            rh2 = c.get(f"/api/music/readback/{run_h}").get_json() or {}
+            d_h = {s["spotify_id"]: s for s in rh2.get("songs", [])}.get("D", {})
+            if d_h.get("manual") != "keep" or d_h.get("run_rating") != "never" or rh2.get("set_aside") != 0:
+                fails.append(f"(h) kept D must still show the run's own 'never', with set_aside decremented: "
+                             f"{d_h} set_aside={rh2.get('set_aside')}")
+
+            # (i) "leave it out" on the already-kept C replaces the manual_verdict row (same primary
+            # key: run_id, spotify_id) rather than leaving the "keep" beside a new "never"
+            ri1 = c.post("/api/music/verdict", json={"run_id": run_g, "spotify_id": "C", "verdict": "never"})
+            if ri1.status_code != 200 or not (ri1.get_json() or {}).get("ok"):
+                fails.append(f"(i) leave-it-out on the already-kept C: {ri1.status_code} {ri1.get_json()}")
+            conn = M._mdb()
+            try:
+                rows_i = conn.execute("SELECT rating FROM manual_verdict WHERE run_id=? AND spotify_id='C'", (run_g,)).fetchall()
+                aside_i = M.set_aside(conn)
+            finally:
+                conn.close()
+            if [r["rating"] for r in rows_i] != ["never"]:
+                fails.append(f"(i) 'leave it out' must replace the kept row, not stack a second one: {[r['rating'] for r in rows_i]}")
+            ri2 = c.get(f"/api/music/readback/{run_g}").get_json() or {}
+            c_i = {s["spotify_id"]: s for s in ri2.get("songs", [])}.get("C", {})
+            if c_i.get("manual") != "never" or aside_i.get("C") != {"work", "easy"}:
+                fails.append(f"(i) leaving C out again must read manual 'never' and set it aside for both roles: "
+                             f"{c_i.get('manual')} {aside_i.get('C')}")
         finally:
             S.READONLY = saved_ro
     finally:
@@ -19325,8 +19438,10 @@ def _stc_music_verdict():
                "§BEAT14 a verdict given after the run — 'leave it out' on the read-back — sets a song "
                "aside for every segment kind like two presses do, survives a read-back recompute (it "
                "lives beside rating_run, not in it), shows on the stored read-back as the athlete's "
-               "own, and 'keep' undoes it",
-               passed=not fails, expect="never → aside both roles, survives recompute, keep undoes it, bad input 400",
+               "own; §BEAT16 'keep' pardons a manual never or the run's own skip/double press while "
+               "leaving the run's own reading on screen, and survives the same recompute",
+               passed=not fails, expect="never → aside both roles, survives recompute, keep pardons a "
+                                        "manual or a run verdict without hiding it, bad input 400",
                got={"violations": fails or "none"})
 
 
@@ -19471,6 +19586,192 @@ def _stc_music_short_run_laps():
                "instead of a modal-distance vote with nothing to average over",
                passed=not fails, expect="autolap laps read as automatic, short/irregular laps read "
                                         "as presses, the ≥3-lap and trigger rules unchanged",
+               got={"failures": fails or "none"})
+
+
+def _stc_music_guide_laps():
+    """§BEAT15 — a session with reps lays its own laps (`session_to_guide` marks every WORK rep
+    `createManualLap`, cut by the watch when that step begins), and those are not presses. Without
+    telling them apart from a press, the 20 Sep long run's one genuine press (90 s into a song) sat
+    right beside the guide's own lap at the marathon-pace step's start (5700 s, 11598 m — read as
+    "12 km" by the old multiple-scaled autolap tolerance regardless), and the 16 Sep double press
+    lost one of its two presses to the same tolerance.
+
+    The CURRENT plan's own offset (`guide_s`) is not enough by itself: a lived day can be re-priced
+    after the run (the 20 Sep session's 95-min easy base became 94 once the plan re-anchored, so the
+    plan's own offset reads 5640 while the wrist's guide — built before the re-price — still laps at
+    5700), and the wrist can be running a rep count the plan has since dropped (an update never
+    re-downloads). A second, independent source — the run's own §RD-decoded work-span starts
+    (`decoded_s`) — reads the run itself rather than the plan, and catches what the drifted offset
+    misses; `guide_laid` checks a lap against both.
+
+    (a) `guide_lap_offsets`: a reps day's offsets are the cumulative duration of the work reps' own
+    predecessors; a session without reps lays none. (b) THE REVERT TOOTH — `session_to_guide` itself:
+    the steps it flags `createManualLap` are exactly the work reps, and the running sum of the
+    PRECEDING steps' `stepDuration` seconds equals `guide_lap_offsets` for the same session, so a
+    change to which steps lap moves both functions together or this fails. (c) the five measured lap
+    sets through `press_times`, guide laps included. (d) the match tolerance: within
+    MUSIC_GUIDE_LAP_TOL_S is the guide's even under a 'manual' trigger; past it, a press. (e)
+    `_near_autolap_unit` against the unit-relative tolerance §BEAT15 put in its place. (f)
+    `press_times_from_splits` threads `guide_s` through. (g) drift: the plan's offset alone misses
+    the 20 Sep lap once it has moved, the decode alone still catches it. (h) the decode window's
+    edges: MUSIC_GUIDE_LAP_DECODE_WINDOW_S = (45, 5). (i) a count mismatch (plan has nine reps, the
+    wrist's guide has ten): the orphan tenth lap is caught by the decode, and a genuine press beside
+    it still survives. (j) `guide_laid` itself, both sources."""
+    if M is None:
+        return _music_skip("music-guide-laps", "§BEAT15 — the guide's own laps are not presses")
+    fails = []
+
+    # (a) guide_lap_offsets
+    reps_a = [{"effort": "warmup", "minutes": 10}, {"effort": "work", "minutes": 3},
+              {"effort": "recovery", "minutes": 2}, {"effort": "work", "minutes": 3},
+              {"effort": "recovery", "minutes": 2}, {"effort": "work", "minutes": 3},
+              {"effort": "cooldown", "minutes": 10}]
+    got_a = S.guide_lap_offsets({"reps": reps_a})
+    if got_a != [600.0, 900.0, 1200.0]:
+        fails.append(f"(a) reps-day offsets: {got_a}")
+    got_a2 = S.guide_lap_offsets({"reps": [{"effort": "easy_base", "minutes": 95},
+                                           {"effort": "work", "minutes": 23}]})
+    if got_a2 != [5700.0]:
+        fails.append(f"(a) long-run offsets: {got_a2}")
+    got_a3 = S.guide_lap_offsets({"kind": "easy", "km": 8})
+    if got_a3 != []:
+        fails.append(f"(a) a session without reps must lay no lap: {got_a3}")
+
+    # (b) THE REVERT TOOTH — the builder's own laps must match guide_lap_offsets
+    session_b = {"date": "2026-09-15", "kind": "reps", "km": 10.0, "reps": [
+        {"effort": "warmup", "zone": "easy", "minutes": 10, "km": 1.5, "detail": "Warm up", "pace_sec": 360},
+        {"effort": "work", "zone": "interval", "minutes": 3, "km": 0.6, "detail": "3min at interval", "pace_sec": 295},
+        {"effort": "recovery", "zone": "easy", "minutes": 2, "km": 0.35, "detail": "Recover", "pace_sec": 360},
+        {"effort": "work", "zone": "interval", "minutes": 3, "km": 0.6, "detail": "3min at interval", "pace_sec": 295},
+        {"effort": "recovery", "zone": "easy", "minutes": 2, "km": 0.35, "detail": "Recover", "pace_sec": 360},
+        {"effort": "work", "zone": "interval", "minutes": 3, "km": 0.6, "detail": "3min at interval", "pace_sec": 295},
+        {"effort": "cooldown", "zone": "easy", "minutes": 10, "km": 1.5, "detail": "Cool down", "pace_sec": 360}]}
+    steps = S.session_to_guide(session_b, None, None)[0]["steps"]
+    lapped = [i for i, st in enumerate(steps) if st.get("createManualLap")]
+    work_idx = [i for i, r in enumerate(session_b["reps"]) if r["effort"] == "work"]
+    if lapped != work_idx:
+        fails.append(f"(b) createManualLap steps {lapped}, want the work reps {work_idx}")
+    prefix, total = [], 0.0
+    for st in steps:
+        prefix.append(total)
+        total += st["transitions"][0]["condition"]["value"]
+    offsets_from_steps = [prefix[i] for i in lapped]
+    want_offsets = S.guide_lap_offsets(session_b)
+    if offsets_from_steps != want_offsets:
+        fails.append(f"(b) builder lap offsets {offsets_from_steps} != guide_lap_offsets {want_offsets}")
+
+    # (c) the five measured lap sets
+    mk = lambda t, d, timer, trig=None: (t, d, timer, trig)
+    cases_c = [
+        ("20 Sep long run", [mk(1215, 3272, 1215), mk(5700, 11598, 4485), mk(7274, 4762, 1574), mk(7275, 0, 1)],
+         7275, [5700], [1215]),
+        ("16 Sep double press", [mk(3163, 8240, 3163), mk(3165, 5, 2), mk(4913, 4771, 1748)], 4913, [], [3163, 3165]),
+        ("17 Sep", [mk(2791, 7352, 2791), mk(2793, 5, 2), mk(3148, 920, 355), mk(3150, 5, 2), mk(4189, 2730, 1039)],
+         4189, [], [2791, 2793, 3148, 3150]),
+        ("19 Sep real autolaps", [mk(368, 998, 368), mk(747, 1001, 379), mk(1132, 1000, 385), mk(1509, 1001, 377),
+         mk(1892, 997, 383), mk(2280, 1001, 388), mk(2666, 1002, 386), mk(3044, 1000, 378), mk(3422, 995, 378),
+         mk(3801, 1003, 379), mk(3975, 453, 174)], 3975, [], []),
+        ("15 Sep reps day", [mk(600, 1588, 600), mk(900, 922, 300), mk(1200, 951, 300), mk(1500, 902, 300),
+         mk(1800, 912, 300), mk(2100, 906, 300), mk(2400, 931, 300), mk(2700, 914, 300), mk(3000, 949, 300),
+         mk(3808, 2279, 808), mk(3813, 15, 5)], 3813,
+         [600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000], []),
+    ]
+    for desc, laps, run_end, guide_s, expect in cases_c:
+        got = M.press_times(laps, run_end, guide_s=guide_s)
+        if got != expect:
+            fails.append(f"(c) {desc}: expected {expect}, got {got}")
+
+    # (c2) the 15 Sep day plus a genuine press at 2050, which also shortens the guide's own 2100 lap
+    laps_press = [mk(600, 1588, 600), mk(900, 922, 300), mk(1200, 951, 300), mk(1500, 902, 300),
+                  mk(1800, 912, 300), mk(2050, 480, 250), mk(2100, 426, 50), mk(2400, 931, 300),
+                  mk(2700, 914, 300), mk(3000, 949, 300), mk(3808, 2279, 808), mk(3813, 15, 5)]
+    got_press = M.press_times(laps_press, 3813,
+                              guide_s=[600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000])
+    if got_press != [2050]:
+        fails.append(f"(c2) 15 Sep plus a press: {got_press}")
+
+    # (d) the match tolerance
+    if M.press_times([mk(5703, 11598, 5703), mk(7000, 3000, 1297)], 7100, guide_s=[5700]) != []:
+        fails.append("(d) a lap 3 s off a guide lap must be dropped as the guide's own")
+    if M.press_times([mk(5720, 11598, 5720), mk(7000, 3000, 1280)], 7100, guide_s=[5700]) != [5720]:
+        fails.append("(d) a lap 20 s off a guide lap must stand as a press")
+    if M.press_times([mk(5700, 11598, 5700, "manual"), mk(7000, 2990, 1300)], 7100, guide_s=[5700]) != []:
+        fails.append("(d) a guide lap must be dropped even under a 'manual' trigger")
+
+    # (e) _near_autolap_unit against the unit-relative tolerance
+    near_cases = [(3272, False), (8240, False), (11598, False), (7352, False),
+                  (1003, True), (995, True), (1609, True), (2000, True), (640, False)]
+    for d, expect in near_cases:
+        got = M._near_autolap_unit(d)
+        if got != expect:
+            fails.append(f"(e) _near_autolap_unit({d}) = {got}, want {expect}")
+
+    # (f) press_times_from_splits threads guide_s through
+    splits_f = [{"duration": 600, "distance": 1.588}, {"duration": 300, "distance": 0.922}]
+    if M.press_times_from_splits(splits_f, 0, guide_s=[600, 900]) != []:
+        fails.append("(f) splits with guide_s did not drop the guide's own laps")
+    if M.press_times_from_splits(splits_f, 0) != [900]:
+        fails.append("(f) splits without guide_s must still find the press")
+
+    # (g) drift — the amendment: the plan's own offset alone can miss the live case (a lived day
+    # re-priced after the run: the 20 Sep plan's offset drifted from 5700 to 5640), while the run's
+    # own decoded work-span start reads the run itself and still catches it
+    laps_20sep = [mk(1215, 3272, 1215), mk(5700, 11598, 4485), mk(7274, 4762, 1574), mk(7275, 0, 1)]
+    got_g1 = M.press_times(laps_20sep, 7275, guide_s=[5640], decoded_s=[5730])
+    if got_g1 != [1215]:
+        fails.append(f"(g) both sources catch the drifted lap: {got_g1}")
+    got_g2 = M.press_times(laps_20sep, 7275, guide_s=[5640])
+    if got_g2 != [1215, 5700]:
+        fails.append(f"(g) the plan offset alone misses it once it has drifted: {got_g2}")
+    got_g3 = M.press_times(laps_20sep, 7275, decoded_s=[5730])
+    if got_g3 != [1215]:
+        fails.append(f"(g) the decode alone still catches it: {got_g3}")
+
+    # (h) the decode window's edges — MUSIC_GUIDE_LAP_DECODE_WINDOW_S = (45, 5). The lap distance is
+    # held at 11598 m throughout (the actual 20 Sep value): not near any whole km/mile, so the
+    # near-autolap fallback never rules on shape alone and the window boundary is what's on test.
+    got_h1 = M.press_times([mk(5684, 11598, 5684), mk(7000, 2990, 1316)], None, decoded_s=[5730])
+    if got_h1 != [5684]:
+        fails.append(f"(h) 46 s before the decoded start must stand as a press: {got_h1}")
+    got_h2 = M.press_times([mk(5735, 11598, 5735), mk(7000, 2990, 1265)], None, decoded_s=[5730])
+    if got_h2 != []:
+        fails.append(f"(h) 5 s after the decoded start is still the guide's: {got_h2}")
+    got_h3 = M.press_times([mk(5741, 11598, 5741), mk(7000, 2990, 1259)], None, decoded_s=[5730])
+    if got_h3 != [5741]:
+        fails.append(f"(h) 11 s after the decoded start must stand as a press again: {got_h3}")
+
+    # (i) a count mismatch — the wrist's guide has ten reps, the current plan only nine (a rep the
+    # plan has since dropped): the orphan tenth lap has no guide_s match but is caught by the
+    # decode's own ten work-span starts; a genuine press beside the mismatch still survives.
+    laps_i = [mk(600, 1588, 600)] + [mk(t, 920, 300) for t in range(900, 3301, 300)] + [mk(3900, 500, 600)]
+    guide_i = [600, 900, 1200, 1500, 1800, 2100, 2400, 2700, 3000]              # nine reps only
+    decoded_i = [608, 908, 1208, 1508, 1808, 2108, 2408, 2708, 3008, 3308]      # ten, 8 s after each lap
+    got_i1 = M.press_times(laps_i, 3905, guide_s=guide_i, decoded_s=decoded_i)
+    if got_i1 != []:
+        fails.append(f"(i) the orphan tenth guide lap must be caught by the decode: {got_i1}")
+    laps_i2 = laps_i[:5] + [mk(2050, 480, 250), mk(2100, 426, 50)] + laps_i[6:]
+    got_i2 = M.press_times(laps_i2, 3905, guide_s=guide_i, decoded_s=decoded_i)
+    if got_i2 != [2050]:
+        fails.append(f"(i) a genuine press survives the count mismatch too: {got_i2}")
+
+    # (j) guide_laid itself, both sources
+    laid = M.guide_laid(laps_20sep, guide_s=[5640], decoded_s=[5730])
+    if laid != [False, True, False, False]:
+        fails.append(f"(j) guide_laid: {laid}")
+
+    return _st("det", "music-guide-laps",
+               "§BEAT15 — the guide's own laps (createManualLap, one per work rep, cut when the step "
+               "begins) are matched by activity-timer position and dropped before anything else, so "
+               "a genuine press beside one is no longer lost to the autolap tolerance; two sources "
+               "(the plan's own offset, the run's decoded work-span start) catch a drifted or "
+               "count-mismatched guide the other alone would miss",
+               passed=not fails,
+               expect="guide_lap_offsets matches the builder's own lapped steps; the five measured "
+                      "runs read correctly with guide laps excluded; a lap within "
+                      "MUSIC_GUIDE_LAP_TOL_S of a guide lap is the guide's even under a manual "
+                      "trigger; _near_autolap_unit is unit-relative; a drifted plan offset or a "
+                      "count mismatch is still caught by the decode",
                got={"failures": fails or "none"})
 
 

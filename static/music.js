@@ -261,11 +261,14 @@
   }
   let CURRENT_RB = null;
   function verdictCell(s){
-    const badge = s.manual ? `<b>never again</b> <span class="mprog">(yours)</span> <button type="button" class="linkbtn" data-keep="${esc(s.spotify_id)}">keep</button>`
-      : s.run_rating === "never" ? `<b>never again</b>`
+    const badge = s.manual === "keep" ? `<b>kept</b> <span class="mprog">(yours${s.skipped ? ", skipped on the run" : s.run_rating === "never" ? ", two presses on the run" : ""})</span>`
+      : s.manual === "never" ? `<b>never again</b> <span class="mprog">(yours)</span> <button type="button" class="linkbtn" data-keep="${esc(s.spotify_id)}">keep</button>`
+      : s.run_rating === "never" ? `<b>never again</b> <button type="button" class="linkbtn" data-keep="${esc(s.spotify_id)}">keep</button>`
       : s.run_rating === "break" ? `<b>break${s.breaks > 1 ? ` ×${s.breaks}` : ""}</b> <span class="mprog">at ${(s.break_at || []).map(t => fmtPace(t)).join(", ")}</span>`
+      : s.skipped ? `<b>set aside</b> <span class="mprog">(skipped)</span> <button type="button" class="linkbtn" data-keep="${esc(s.spotify_id)}">keep</button>`
       : s.run_rating ? `<b>${esc(s.run_rating)}</b> <span class="mprog">(older protocol)</span>` : "";
-    const leave = s.run_rating !== "never" ? ` <button type="button" class="linkbtn" data-never="${esc(s.spotify_id)}">leave it out</button>` : "";
+    const hideLeave = s.manual === "never" || (s.run_rating === "never" && s.manual !== "keep");
+    const leave = hideLeave ? "" : ` <button type="button" class="linkbtn" data-never="${esc(s.spotify_id)}">leave it out</button>`;
     return badge + leave;
   }
   function renderReadback(r){

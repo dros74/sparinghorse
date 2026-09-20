@@ -1264,10 +1264,16 @@ def set_aside(conn):
     SKIPPED from the headset is set aside for the role it was skipped in (both roles when the run
     had no playlist to say which). §BEAT7 — two presses say "never again": set aside for both roles.
     §BEAT14 — a verdict given after the run ("leave it out") sets aside for both roles too, exactly
-    as a double press does. Rows written under the older press protocol ('pushes' / 'relaxes', up to
-    0.65.x) rule nothing. Returns {spotify_id: set(roles)}."""
+    as a double press does. §BEAT16 — "keep" pardons the run's own reading: a (run_id, spotify_id)
+    marked kept is skipped here even though its `rating_run` row still says skip or never. Rows
+    written under the older press protocol ('pushes' / 'relaxes', up to 0.65.x) rule nothing.
+    Returns {spotify_id: set(roles)}."""
+    kept = {(r["run_id"], r["spotify_id"])
+            for r in conn.execute("SELECT run_id, spotify_id FROM manual_verdict WHERE rating='keep'")}
     out = {}
-    for r in conn.execute("SELECT spotify_id, rating, role FROM rating_run"):
+    for r in conn.execute("SELECT run_id, spotify_id, rating, role FROM rating_run"):
+        if (r["run_id"], r["spotify_id"]) in kept:
+            continue
         if r["rating"] == "skip":
             roles = {r["role"]} if r["role"] in ("work", "easy") else {"work", "easy"}
         elif r["rating"] == "never":
@@ -1285,20 +1291,31 @@ def set_aside(conn):
 def apply_manual_verdicts(conn, run_id, payload):
     """§BEAT14 — overlay the athlete's own after-the-run verdicts onto a read-back payload: a song
     marked "never" in `manual_verdict` for this run reads as `run_rating` "never" and carries
-    `manual: True`, on top of whatever the run itself produced. Called both where a read-back is
+    `manual: "never"`, on top of whatever the run itself produced. §BEAT16 — "keep" leaves the run's
+    own reading in place (`run_rating`, `skipped`, `breaks` untouched, so the page still shows what
+    the run itself found) and only sets `manual: "keep"`, uncounting the song from `set_aside` when
+    the run had counted it there (a skip, or a double press). Called both where a read-back is
     computed and where a stored one is served, so a verdict given after the payload was stored still
     shows — the manual table survives a recompute by construction, since it lives beside
     `rating_run`, not in it."""
-    never = {r["spotify_id"] for r in conn.execute(
-        "SELECT spotify_id FROM manual_verdict WHERE run_id=? AND rating='never'", (run_id,))}
-    if not never:
+    rows = conn.execute("SELECT spotify_id, rating FROM manual_verdict WHERE run_id=? AND rating IN ('never', 'keep')",
+                        (run_id,))
+    never, kept = set(), set()
+    for r in rows:
+        (never if r["rating"] == "never" else kept).add(r["spotify_id"])
+    if not never and not kept:
         return payload
     for sg in payload.get("songs") or []:
-        if sg.get("spotify_id") in never:
+        sid = sg.get("spotify_id")
+        if sid in never:
             if sg.get("run_rating") != "never":
                 payload["set_aside"] = payload.get("set_aside", 0) + 1
             sg["run_rating"] = "never"
-            sg["manual"] = True
+            sg["manual"] = "never"
+        elif sid in kept:
+            sg["manual"] = "keep"
+            if sg.get("skipped") or sg.get("run_rating") == "never":
+                payload["set_aside"] = max(0, payload.get("set_aside", 0) - 1)
     return payload
 
 
@@ -1544,6 +1561,22 @@ MUSIC_AUTOLAP_TOL = 0.05       # laps within ±5 % of the modal distance are the
 MUSIC_AUTOLAP_SHARE = 0.6      # …when at least this share of the laps sit there; a press cuts one short
 MUSIC_AUTOLAP_UNITS_M = (1000.0, 1609.344)   # §BEAT13 — km/mile: the units a watch autolaps on, for the
 #                                short-run fallback below, where there are too few laps to find a modal one
+MUSIC_AUTOLAP_UNIT_TOL = 0.02  # §BEAT15: the under-3-laps fallback's tolerance as a fraction of the UNIT
+#                                itself (±20 m on a km, ±32 m on a mile). A watch's own autolap lands
+#                                within metres of the unit (19 Sep: ten laps at 995–1003 m). The old ±5 %
+#                                of the MULTIPLE grew with the lap: it called 3272 m "2 miles" (±161 m)
+#                                and 11598 m "12 km" (±600 m), and past ~9.5 km every lap was near some
+#                                kilometre — the 20 Sep press was lost to it.
+MUSIC_GUIDE_LAP_TOL_S = 5.0    # §BEAT15: a lap whose activity timer sits within this of a guide step
+#                                lap (`SparingHorse.guide_lap_offsets`) is the guide's, never a press.
+MUSIC_GUIDE_LAP_DECODE_WINDOW_S = (45.0, 5.0)   # §BEAT15 — a lap from this long BEFORE to this long
+#                                AFTER a decoded work span's start is the guide's lap too: the plan's
+#                                offsets drift on a lived day (the 20 Sep session re-priced 95 → 94 min
+#                                after the run, the wrist's guide still lapped at 95:00) and can
+#                                disagree in count (the wrist keeps the guide it first downloaded),
+#                                while the §RD decode reads the run itself; the window is asymmetric
+#                                because the legs speed up AFTER the beep, so the decode's start lags
+#                                the lap (30 s on 20 Sep: lap 5700, decoded work start 5730).
 MUSIC_LAP_END_GRACE_S = 15     # a lap ending within this of the run's end is the closing stub, never a press
 MUSIC_FIT_CLOCK_TOL_S = 60     # §BEAT6 (0.65.1) — a FIT whose start sits further than this from the run's own
 #                                start is re-clocked onto it: Runalyze's re-export writes the local wall time
@@ -1568,17 +1601,47 @@ def anchor_fit(fit, run_start):
 
 
 def _near_autolap_unit(dist_m):
-    """§BEAT13 — is `dist_m` close to a whole (≥ 1) multiple of a km or a mile, within
-    MUSIC_AUTOLAP_TOL relative to that multiple? The zero-th multiple is excluded: a lap of a few
-    metres sits "near" 0 × anything, which is not the watch's pattern, just a short lap."""
+    """§BEAT13 — is `dist_m` close to a whole (≥ 1) multiple of a km or a mile? §BEAT15 — the
+    tolerance is MUSIC_AUTOLAP_UNIT_TOL of the UNIT ITSELF, not of the multiple: a watch's own
+    autolap lands within metres of the unit whatever the lap count (995–1003 m laps on a ten-lap
+    run), while a tolerance scaled by the multiple grows without bound — at 5 % of the multiple,
+    3272 m read as "2 miles" (±161 m) and every lap past ~9.5 km was "near" some kilometre. The
+    zero-th multiple is excluded: a lap of a few metres sits "near" 0 × anything, which is not the
+    watch's pattern, just a short lap."""
     for unit in MUSIC_AUTOLAP_UNITS_M:
         k = round(dist_m / unit)
-        if k >= 1 and abs(dist_m - k * unit) <= MUSIC_AUTOLAP_TOL * k * unit:
+        if k >= 1 and abs(dist_m - k * unit) <= MUSIC_AUTOLAP_UNIT_TOL * unit:
             return True
     return False
 
 
-def press_times(laps, run_end):
+def guide_laid(laps, guide_s=(), decoded_s=()):
+    """PURE — §BEAT15: one bool per lap, in file order, true when the lap is the guide's own lap,
+    not a press. A lap's own position on the activity timer is the running sum of `timer_s` over the
+    laps in file order; a lap whose `timer_s` is None has no known position and is never laid. Two
+    independent sources say a position is the guide's: within MUSIC_GUIDE_LAP_TOL_S of a value in
+    `guide_s` (the CURRENT plan's own step offsets, `SparingHorse.guide_lap_offsets`), or within
+    MUSIC_GUIDE_LAP_DECODE_WINDOW_S of a value in `decoded_s` (the run's own §RD-decoded work-span
+    starts, in the same seconds-from-run-start frame as `guide_s`). The plan drifts on a lived day —
+    it can be re-priced after the run (20 Sep: 95 min became 94) and it can disagree with the wrist
+    in COUNT (an update never re-downloads, so the watch keeps whichever guide it first fetched) —
+    while the decode reads what the run itself did, so the two sources catch different failures of
+    the same kind."""
+    before, after = MUSIC_GUIDE_LAP_DECODE_WINDOW_S
+    pos, out = 0.0, []
+    for l in laps:
+        timer = l[2]
+        if timer is None:
+            out.append(False)
+            continue
+        pos += timer
+        laid = any(abs(pos - g) <= MUSIC_GUIDE_LAP_TOL_S for g in guide_s) \
+            or any(d - before <= pos <= d + after for d in decoded_s)
+        out.append(laid)
+    return out
+
+
+def press_times(laps, run_end, guide_s=(), decoded_s=()):
     """PURE — which laps are presses. `laps`: (t_end_abs, dist_m, timer_s, trigger). A lap whose
     trigger says 'manual' is a press; one with any other named trigger is not; without a trigger
     (the re-exported file), the watch's automatic kilometre laps are recognised by their
@@ -1589,7 +1652,20 @@ def press_times(laps, run_end):
     untriggered lap is judged on its own instead: one that lands near a whole multiple of
     MUSIC_AUTOLAP_UNITS_M (km or mile) is the watch's own autolap, not a press — a lap landing on
     the boundary itself (the zero-th multiple) is not a pattern and stays a press. A lap closing
-    within MUSIC_LAP_END_GRACE_S of the run's end is the final stub."""
+    within MUSIC_LAP_END_GRACE_S of the run's end is the final stub.
+
+    §BEAT15 — `guide_s`/`decoded_s`: two sources for the guide's own laps (`guide_laid`), for the
+    reps day and long-run-with-a-work-step cases where the WATCH cuts a lap the athlete never
+    pressed. A lap `guide_laid` marks true is dropped before anything else — before the end-grace
+    filter, out of the modal vote, out of the fallback, and even when its trigger reads 'manual' (an
+    original FIT names a createManualLap lap 'manual' too, guide-laid or not). The 20 Sep long run
+    carried both a genuine press (a single lap at 1215 s) and the guide's own lap at the
+    marathon-pace step's start (5700 s, 11598 m — read as "12 km" by the old multiple-scaled
+    tolerance and lost either way, and off the re-priced plan's own offset by 60 s, caught instead by
+    the §RD decode's work span at 5730 s): dropping the guide's lap by position, rather than by
+    shape, recovers the press regardless of either source drifting on its own."""
+    laid = guide_laid(laps, guide_s, decoded_s)
+    laps = [l for l, g in zip(laps, laid) if not g]
     body = [l for l in laps if run_end is None or l[0] < run_end - MUSIC_LAP_END_GRACE_S]
     out = []
     untriggered = [l for l in body if l[3] is None]
@@ -1611,9 +1687,10 @@ def press_times(laps, run_end):
     return sorted(out)
 
 
-def press_times_from_splits(splits, run_start):
+def press_times_from_splits(splits, run_start, guide_s=(), decoded_s=()):
     """The same, from Runalyze's own `splits` (the rounds of the original file): tolerant of the
-    field names, cumulative durations give the end times, distances feed the same autolap rule."""
+    field names, cumulative durations give the end times, distances feed the same autolap rule.
+    `guide_s`/`decoded_s` pass through to `press_times` unchanged."""
     laps, t = [], run_start
     for sp in splits or []:
         if not isinstance(sp, dict):
@@ -1624,7 +1701,7 @@ def press_times_from_splits(splits, run_start):
             continue
         t += float(dur)
         laps.append((t, float(dist) * (1000.0 if dist and dist < 100 else 1.0), float(dur), None))
-    return press_times(laps, None)
+    return press_times(laps, None, guide_s=guide_s, decoded_s=decoded_s)
 
 
 def press_ratings(presses, songs, run_start, pair_s=MUSIC_PRESS_PAIR_S, legacy=False):
@@ -1707,6 +1784,21 @@ def readback(db, run_id):
         if not played:
             return {"ok": False, "error": "no plays stored around this run — pull the play history soon after a run "
                                           "(Spotify keeps only the last fifty)"}
+        # §BEAT15 — the guide's own laps (one at the start of each work step) are not presses. Two
+        # sources, since either can drift out from under the wrist's own guide: the CURRENT plan's
+        # offsets (a lived day can be re-priced after the run, or the wrist can be running a rep
+        # count the plan has since dropped), and the §RD decode of the run itself (cached-only: a
+        # read-back must not fan out into stream fetches; superseded semantics are not evidence,
+        # §RD9b). Both are read against the run's OWN run_start/run_end, before the FIT re-anchoring
+        # below — a lap's own position (the running sum of `timer_s`) is in the same frame.
+        sess = _session_on(db, a["date"])
+        guide_s = S.guide_lap_offsets(sess) if sess else []
+        try:
+            st, _ = S._structure_cached(db, run_id, a["date"], fetch=False, stale_ok=False)
+        except Exception as e:
+            st = None
+            print(f"[music] structure unreadable for {run_id}: {e}")
+        decoded_s = [a_ - run_start for a_, b in work_spans(st, run_start, run_end)]
         # the original FIT first: one-second cadence and the lap presses; the MCP streams otherwise
         fit, stream_source = None, "streams"
         try:
@@ -1714,14 +1806,15 @@ def readback(db, run_id):
             fit = parse_fit(raw) if raw else None
         except Exception as e:
             print(f"[music] fit read failed for {run_id}: {e}")
-        presses, clock_shift = [], 0.0
+        presses, clock_shift, n_guide_laps = [], 0.0, 0
         if fit:
             fit, clock_shift = anchor_fit(fit, run_start)     # §BEAT6 — the file's clock, anchored to the run's
             samples = fit["samples"]
             run_start = fit["start"] or run_start
             run_end = samples[-1][0]
             stream_source = "fit"
-            presses = press_times(fit["laps"], run_end)
+            presses = press_times(fit["laps"], run_end, guide_s=guide_s, decoded_s=decoded_s)
+            n_guide_laps = sum(guide_laid(fit["laps"], guide_s, decoded_s))   # §BEAT15 — laps actually dropped
         else:
             try:
                 act = S.activity_details(run_id)
@@ -1730,7 +1823,7 @@ def readback(db, run_id):
                                               f"({type(e).__name__}) — try again"}
             s = act.get("streams") or {}
             try:
-                presses = press_times_from_splits(act.get("splits"), run_start)
+                presses = press_times_from_splits(act.get("splits"), run_start, guide_s=guide_s, decoded_s=decoded_s)
             except Exception as e:
                 print(f"[music] splits unreadable for {run_id}: {e}")
             tim, cad, dist = s.get("time") or [], s.get("cadence") or [], s.get("distance") or []
@@ -1757,13 +1850,8 @@ def readback(db, run_id):
             songs = sorted(songs + infer_gap_songs(songs, spec, durs, run_start, run_end, samples),
                            key=lambda x: x["start_s"])
         by_id_m, by_name_m = playlist_membership(spec)
-        # §BEAT9 — the reps of a reps day, from the §RD decode (cached-only: a read-back must not fan out
-        # into stream fetches; superseded semantics are not evidence, §RD9b)
-        try:
-            st, _ = S._structure_cached(db, run_id, a["date"], fetch=False, stale_ok=False)
-        except Exception as e:
-            st = None
-            print(f"[music] structure unreadable for {run_id}: {e}")
+        # §BEAT9 — the reps of a reps day, from the same §RD decode read above (`st`), against
+        # run_start/run_end as they stand HERE — the FIT path has already re-anchored them
         spans = work_spans(st, run_start, run_end) if pl else []
         tempos = {r["spotify_id"]: r["tempo"] for r in conn.execute("SELECT spotify_id, tempo FROM track WHERE tempo IS NOT NULL")}
         for sg in songs:
@@ -1837,6 +1925,7 @@ def readback(db, run_id):
                "reps_read": bool(spans), "work_spans": len(spans),                # §BEAT9
                "set_aside": n_aside, "clock_shift_s": round(clock_shift),
                "seam_s": MUSIC_SONG_SEAM_S, "sensor_bias_spm": CADENCE_SENSOR_BIAS_SPM,  # §BEAT12
+               "guide_laps": n_guide_laps,                                       # §BEAT15
                "computed_at": _now_iso()}
         res = apply_manual_verdicts(conn, run_id, res)     # §BEAT14 — survives the recompute by construction
         conn.execute("INSERT INTO readback(run_id, date, computed_at, payload) VALUES(?,?,?,?) "
@@ -2489,6 +2578,22 @@ def _find_session(plan, key):
     return None
 
 
+def _session_on(db, day):
+    """The current plan's session on `day` (lived weeks keep their lay, so a past day's reps are
+    still there), or None. A `db` with no `plans` table (a bare fixture, as several music dets build
+    to isolate `readback()` from the rest of the app's schema) reads the same as one with no plan."""
+    try:
+        row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        return None
+    plan = json.loads(row["plan"]) if row else None
+    for wk in S._plan_all_weeks(plan or {}):
+        for s in wk.get("sessions") or []:
+            if s.get("date") == day:
+                return s
+    return None
+
+
 def plan_for_session(session, curve, pool, settings, discover=None, ramp=None, set_aside=None,
                      follow=None, served=None, fresh=None):
     """PURE given its inputs: the session's segments, targets and picks — what the page shows before
@@ -2826,8 +2931,9 @@ def register(app, host):
     @app.post("/api/music/verdict")
     def api_music_verdict():
         """§BEAT14 — "leave it out": a verdict given on the read-back page after the run, equivalent
-        to two lap presses, with "keep" to undo it. Kept in `manual_verdict`, apart from the run's
-        own `rating_run`, so it survives a "Read again"."""
+        to two lap presses. §BEAT16 — "keep" = this song stays, whatever the run said: it pardons a
+        manual never and the run's own skip or double press for that run. Kept in `manual_verdict`,
+        apart from the run's own `rating_run`, so either verdict survives a "Read again"."""
         d = S.body()
         try:
             run_id = int(d.get("run_id"))
@@ -2844,14 +2950,13 @@ def register(app, host):
             if verdict == "never":
                 conn.execute("INSERT OR REPLACE INTO manual_verdict(run_id, spotify_id, rating, role, at) "
                              "VALUES(?, ?, 'never', 'both', ?)", (run_id, spotify_id, _now_iso()))
-                state = "never"
             else:
-                conn.execute("DELETE FROM manual_verdict WHERE run_id=? AND spotify_id=?", (run_id, spotify_id))
-                state = None
+                conn.execute("INSERT OR REPLACE INTO manual_verdict(run_id, spotify_id, rating, role, at) "
+                             "VALUES(?, ?, 'keep', 'both', ?)", (run_id, spotify_id, _now_iso()))
             conn.commit()
         finally:
             conn.close()
-        return jsonify(ok=True, verdict=state)
+        return jsonify(ok=True, verdict=verdict)
 
     @app.get("/api/music/runs")
     def api_music_runs():

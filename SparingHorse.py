@@ -2467,6 +2467,21 @@ def session_guide_external_id(session):
     return f"sh-{session['date']}-{session.get('kind', 'run')}"[:64]
 
 
+def guide_lap_offsets(session):
+    """§BEAT15 — the activity-timer seconds at which the guide `session_to_guide` builds lays a lap.
+    `_guide_step` marks every WORK rep `createManualLap`, and the watch cuts the lap when that step
+    begins: at the end of the reps before it (the 20 Sep long run's lap at 5700.0 s is the 95-min
+    easy base; the 15 Sep reps day's at 600, 900, …, 3000 s are the warm-up and each 3 + 2 min
+    pair). A simple run — one distance-framed step, no reps — lays none. Kept beside the builder
+    so that a change to which steps lap changes both."""
+    out, t = [], 0.0
+    for r in (session or {}).get("reps") or []:
+        if r.get("effort") == "work":
+            out.append(t)
+        t += float(r.get("minutes") or 0) * 60.0
+    return out
+
+
 def session_to_guide(session, hrz=None, pace_zones=None):
     """PURE: one plan session dict → (guide_dict, zip_bytes). Structured sessions (reps arrays from
     _build_quality/_build_long_mp) become one step per rep — duration-framed, with the work reps

@@ -10,6 +10,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.70.1] - 2026-09-20
+
+### Fixed
+
+- **A guide's own lap, or a lap read as a whole kilometre or mile, could eat the athlete's own
+  press.** The watch lays a km autolap on some runs (19 Sep: ten laps at 995–1003 m) and none on
+  others, and under a guide with work steps it lays a further lap at the start of every work rep.
+  On the 20 Sep long run (activity 209689625) the watch cut three laps — 1215 s/3272 m, 5700
+  s/11598 m, 7274 s/4762 m — plus a closing stub; the read-back returned no presses at all. The
+  1215 s lap was the athlete's single press, 90 seconds into julie – tenebrist ("the beat lost me
+  here"); the 5700 s lap was the guide's own, laid at the start of the run's marathon-pace step.
+  §BEAT13's fallback (fewer than three untriggered laps) had checked each lap against a whole
+  multiple of a kilometre or a mile within ±5 % *of that multiple*, so the tolerance grew with the
+  lap: 3272 m read as "2 miles" (53 m off, 161 m allowed), 11598 m as "12 km" (402 off, 600
+  allowed), and past roughly 9.5 km every lap sat near some kilometre. The 16 Sep run's double
+  press (3163 s/8240 m and 3165 s/5 m) folded into one press the same way (8240 m ≈ 5 miles); the
+  17 Sep pair survived by 2 metres. New `SparingHorse.guide_lap_offsets(session)` reads the
+  activity-timer seconds where the current plan's guide lays a lap. That offset alone missed a live
+  case: the plan re-prices a lived day, and the 20 Sep session's easy base moved from 95 to 94
+  minutes (18.3 to 18.4 km) after the run, so the plan's own offset read 5640 s while the guide on
+  the wrist — built from the plan as it stood before that edit, and never re-downloaded — had laid
+  its lap at 5700 s. 60 s apart is outside the 5-s match, so the lap would have stayed a "press" and
+  landed a false break on whatever song was playing there; the wrist and the plan can also disagree
+  in count, not only position (22 Sep: the wrist carries ten 3-minute reps from the earlier plan,
+  the plan itself nine). A second source now backs the plan offset: `readback()` already holds the
+  run's own §RD decode, and a lap from `MUSIC_GUIDE_LAP_DECODE_WINDOW_S` (45 s before to 5 s after)
+  a decoded work-span start is the guide's lap too — asymmetric because the legs speed up after the
+  beep, so the decode's own start lags the lap (30 s on 20 Sep: lap 5700, decoded start 5730). New
+  `guide_laid(laps, guide_s, decoded_s)` drops a lap matched by either source, before any other rule
+  runs and even under a 'manual' trigger; `press_times()` and `press_times_from_splits()` take it in
+  place of the raw offsets. `_near_autolap_unit` separately now measures its own tolerance against
+  the unit itself — `MUSIC_AUTOLAP_UNIT_TOL` is ±2 % of a kilometre or a mile (±20 m / ±32 m), not
+  of the multiple — so a watch's own autolap still passes while a multi-kilometre lap no longer
+  does. The read-back payload gains `guide_laps`, the count of laps actually dropped. After the fix
+  the 20 Sep run reads its one press (the tenebrist break) and nothing on Space Dementia, the 16 Sep
+  run reads both of its presses, and the 17 and 19 Sep runs are unchanged. New
+  `det/music-guide-laps`; `det/music-short-run-laps` and `det/music-readback` stay green.
+
+- **"keep" now pardons a verdict the run itself gave, not only a manual "never".** Until now `POST
+  /api/music/verdict` with "keep" only deleted a manual "never" (§BEAT14); a song the run itself
+  set aside — a headset skip, or two lap presses — read as excluded again on the next "Read again",
+  with no way to put it back. On the 20 Sep long run Muse's Space Dementia skipped five minutes in
+  (its last 40 seconds turn orchestral and lose the beat, and the athlete wanted to reach the
+  faster songs sooner), and the athlete wants it kept. "keep" now writes a 'keep' row in
+  `manual_verdict` (the run/song pair replaces a stored "never"); `set_aside()` skips any
+  `rating_run` row whose pair is kept; `apply_manual_verdicts()` marks the song `manual: "keep"`,
+  leaves the run's own reading (`run_rating`, `skipped`, `breaks`) in place, and uncounts it from
+  `set_aside` when the run had counted it there. The read-back page now shows "kept (yours, skipped
+  on the run / two presses on the run)" with "leave it out" beside it, and offers "keep" on any
+  song the run set aside, not only a manually-excluded one. `det/music-verdict` extended: a keep
+  pardons a skip and survives the recompute's wipe-and-reinsert of `rating_run`; a keep pardons a
+  double press with the run's own "never" still shown; "leave it out" after a keep replaces it.
+
 ## [0.70.0] - 2026-09-19
 
 ### Added
