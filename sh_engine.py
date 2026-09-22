@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.70.1"
+ENGINE_VERSION = "0.70.2"
 
 
 def _zones_asof(db, date_iso=None):
@@ -3577,7 +3577,9 @@ def shape_response(db, today, prior_plan):
     factor ∈ [RESPONSE_MIN, 1.0] for the assertive ceiling. Compares today's reconstructed CTL to the
     most recent ELAPSED week's `proj_ctl` carried in the prior plan: realised ≥ projected ⇒ on/ahead of
     track ⇒ 1.0 (full ceiling); below ⇒ ease proportionally (floored). No prior projection (first plan
-    after this shipped, or a fresh DB) ⇒ 1.0 (full, graceful). Pure read; never exceeds the safety cap."""
+    after this shipped, or a fresh DB) ⇒ 1.0 (full, graceful). Pure read; never exceeds the safety cap.
+    §PRO5c: the projection is rolled from the elapsed week's end to the end of yesterday over the
+    prior plan's own laid load, so both sides sit on the same day boundary."""
     from datetime import timedelta
     # §PRO5 reads the curve as of the plan's OWN day, not the wall clock. `reconstruct_history`
     # defaults `end` to datetime.now(), and this call used to take that default while holding `today`
@@ -3609,6 +3611,32 @@ def shape_response(db, today, prior_plan):
     if realized is None or not projected:
         return {"factor": 1.0, "realized": realized, "projected": projected,
                 "basis": "no prior projection yet — riding the full ceiling"}
+    # §PRO5c (0.70.2) — ROLL THE PROJECTION TO THE SAME DAY BOUNDARY. `projected` is the elapsed
+    # week's END-OF-SUNDAY value; `realized` is the end of YESTERDAY. On any day but Monday the two
+    # sit on different boundaries, and after a rest day the measured side has decayed one EWMA
+    # step (×41/43 = −4.65 %, past the 2 % dead-band) that the projection never took. Live: every
+    # Tuesday after the Monday rest read the athlete as 4 % behind (plans 212–214 on 15 Sep: 82.0 vs
+    # 85.7, the week 61.7 → 58.8 km; plan 230 on 22 Sep: 86.5 vs 90.4, 64.9 → 61.6 km), and the next
+    # regen after a training day restored it. So the projection is rolled forward from the week's
+    # end to yesterday over the PRIOR PLAN'S OWN laid daily TRIMP (rest = 0, the same `_ewma_step`
+    # as the projector), never over today's own lay: a rest day the plan itself laid is not
+    # under-response, and a laid day the athlete skipped still reads behind by exactly its load.
+    week_end = _date(max(elapsed, key=lambda c: c[0])[0]) + timedelta(days=6)
+    yday = td - timedelta(days=1)
+    if yday > week_end:
+        laid = {}
+        for blk in (prior_plan or {}).values():
+            if not isinstance(blk, dict):
+                continue
+            for w in blk.get("weeks") or []:
+                for s in w.get("sessions") or []:
+                    if s.get("date") and isinstance(s.get("trimp"), (int, float)):
+                        laid[s["date"]] = laid.get(s["date"], 0.0) + float(s["trimp"])
+        cur = week_end + timedelta(days=1)
+        while cur <= yday:
+            projected = _ewma_step(projected, laid.get(cur.isoformat(), 0.0), TAU_CTL)
+            cur += timedelta(days=1)
+        projected = round(projected, 1)
     ratio = realized / projected
     factor = 1.0 if ratio >= RESPONSE_ONTRACK else max(RESPONSE_MIN, round(ratio, 3))
     basis = ("measured fitness is tracking or ahead of projection — full ceiling" if factor >= 1.0 else
@@ -4048,6 +4076,31 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             lived = ({(wk_start_d + timedelta(days=i)).isoformat():
                       float(day_series.get((wk_start_d + timedelta(days=i)).isoformat(), 0.0) or 0.0)
                       for i in range(today_off)} if day_series is not None else None)
+            # §WKMEAN2 (0.70.2) — THE WEEK'S INTENT IS BOUNDED FROM THE WEEK-START STATE. The full-week
+            # search below rolls Monday→Sunday, so its seed must be the state at the END OF SUNDAY; on a
+            # straddling day (ctl, atl) is the §PRO20 end of YESTERDAY, which already holds the lived
+            # days. Rolling the week again from there anchors the chronic ceiling (`ramp_max`: +5 CTL
+            # over the WEEK) on a moving point: after the Monday rest the anchor had decayed by 2/43, so
+            # Tuesday's regeneration bounded the week at 86 + 5 where Monday's had bounded it at 91 + 5
+            # (plans 229 → 230, 22 Sep 2026: 738.9 → 681.2 TRIMP, 68.4 → 63.0 km, the days ahead cut
+            # 3.9 km for a 0.6 km over-run), and after a training day the anchor rises and the week is
+            # allowed the lived gain PLUS five. `ws_ctl`/`ws_atl` — read back from the seed with
+            # `_ewma_unstep`, the §WKMEAN read — recover that fixed point. The intent is the plan as the
+            # Monday regeneration computes it: lived days are neither charged (a missed day is not made
+            # up, `prorate` drops its share) nor floored (a skipped lay is not fiction against the
+            # ceiling — a floor on the straddle-regen-day fixture cut Sunday's long run to 10.4 km for a
+            # Monday run the athlete never did); the remainder search prices what was actually run
+            # (real seed, `roll_from=today`, `act_floor`, `lived_trimps`, all unchanged below). Note the
+            # seed is Runalyze's integer, so the un-stepped anchor carries the same ±0.5 CTL the Monday
+            # seed does. `lived` is None when the caller has no series ⇒ byte-identical.
+            ws_ctl, ws_atl = ctl, atl
+            if lived:
+                for _d in sorted(lived, reverse=True):
+                    ws_ctl = _ewma_unstep(ws_ctl, lived[_d], TAU_CTL)
+                    ws_atl = _ewma_unstep(ws_atl, lived[_d], TAU_ATL)
+                # a true cold start un-steps to zero; float noise must not hand the search a
+                # negative fitness (the cold-start golden read −0.01 / −0.02)
+                ws_ctl, ws_atl = max(0.0, ws_ctl), max(0.0, ws_atl)
             # §LRH-2 (0.60.5) — A DAY ALREADY RUN IS LIVED, NOT LAID. The nightly regeneration runs after
             # the evening run, so on the daily path `today` is a day with a logged run; it stayed a
             # remainder slot, the lay put a session on it, §JR shed that session because the long run's
@@ -4114,14 +4167,15 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # regeneration laid three, four apart. Which DAY the plan is regenerated on had
                 # re-phased the deload road, which is the exact invariant the fold below claims.
                 # §PRO17's rule, restated: search the week that will actually be LAID, caps and all.
-                _full_allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones,
+                _full_allowed = _max_week_trimp(ws_ctl, ws_atl, wk, wk_start, easy_pace_sec, eff_cap, zones,
                                                 ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
                                                 days_override=av_days, av_blocked=av_off,
                                                 prog_floor=_prog, shape_neutral=assertive,
                                                 session_eq_cap=_session_eq_cap,   # §STRAD — §3.1/§PRO17
                                                 week_eq_cap=_bio_cap,             # §STRAD — §3.1
                                                 long_km_cap=long_km_cap,          # §STRAD — §PRO9
-                                                actual_floor=act_floor, ladder=True,   # §PRO24
+                                                actual_floor=None, ladder=True,   # §PRO24 — §WKMEAN2: the
+                                                #        plan as Monday computes it, no lived-day floor
                                                 prev_tail=prev_tail)   # §REST
                 _target = ((BUILD_DOWN_FRAC * last_nondown)
                            if (_sd and last_nondown) else _full_allowed)
@@ -4446,7 +4500,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 pweek["long_held"] = {"km": (_held[0].get("km") if _held else None),
                                       "rung_km": _full_long["km"], "basis": "full-week lay"}
             pweek["limits"] = _week_limits(          # §LIMITS (0.58.0) — the straddling week's read; the
-                assertive=assertive, eff_cap=eff_cap,   # streak/ramp governors are not reproduced here (§PRO13)
+                assertive=assertive, eff_cap=eff_cap,   # ramp IS reproduced here (§WKMEAN2); the streak is not (§PRO13)
                 # §LRH — `clipped` used to be a constant False here, so the ACWR axis could never read
                 # "binds" on the one week the remainder search actually governs. It binds when the
                 # search answered less than the remainder asked for.
@@ -4454,7 +4508,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions), long_bound=bool(long_km_cap and any(s.get("long_step_capped") for s in sessions)),
                 eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=False,
                 eq_sess_cap=_session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
-                streak=None, streak_bound=False, ramp_cap=None, ctl_gain=None)
+                # §WKMEAN2 — `ctl` is the week's projected end-of-week CTL (`_project_week(... roll_from=today
+                # ...)` just above); `ws_ctl` is the week-start state, so this reads the week's CTL gain
+                # against the +5 ceiling exactly as the full-week path does (`ctl_gain=(ctl - _ctl_start)`).
+                streak=None, streak_bound=False, ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None))
             # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to
             # done+ahead below: the honest record of what was PRESCRIBED, kept distinct from what
             # was run (the header). Display/history provenance only since §FORM1 — no decision

@@ -15,20 +15,23 @@
           "adherence_basis": "sheet_km",
           "diverge": true,
           "governor_basis": "intent_km",
-          "intent_km": 14.6,
+          "intent_km": 12.1,
           "note": "the sheet and the bar diverge beyond 10 %",
-          "ratio": 0.692,
+          "ratio": 0.835,
           "sheet_km": 10.1,
           "training_km": 10.1
         },
         "clipped": false,
         "day_share": true,
         "elapsed": false,
-        "freq_actual": null,
+        "freq_actual": [
+          1,
+          10.1
+        ],
         "frequency_met": false,
         "frozen": false,
         "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
-        "intent_km": 14.6,
+        "intent_km": 12.1,
         "intent_runs": 2,
         "km": 10.1,
         "km_ahead": 0,
@@ -43,28 +46,36 @@
             "unit": "ratio"
           },
           "binding": "acwr",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 1.69,
+            "laid": 3.31,
+            "unit": "CTL/wk"
+          },
           "eq_session": {
             "basis": "S",
             "binds": false,
             "ceiling": 6.5,
-            "headroom": 3.8,
-            "laid": 2.7,
+            "headroom": 3.6,
+            "laid": 2.9,
             "unit": "eq-km"
           },
           "eq_week": {
             "basis": "A",
             "binds": false,
             "ceiling": 16.9,
-            "headroom": 11.8,
-            "laid": 5.1,
+            "headroom": 11.4,
+            "laid": 5.5,
             "unit": "eq-km"
           },
           "long_step": {
             "basis": "L",
             "binds": false,
             "ceiling": 5.5,
-            "headroom": 2.8,
-            "laid": 2.7,
+            "headroom": 2.6,
+            "laid": 2.9,
             "unit": "km"
           },
           "regime": "assertive",
@@ -92,26 +103,26 @@
           {
             "date": "2026-06-29",
             "kind": "easy",
-            "km": 2.4,
-            "minutes": 15,
+            "km": 2.6,
+            "minutes": 16,
             "note": "easy run",
             "pace_zone": "6:15/km easy",
-            "trimp": 24.6
+            "trimp": 25.9
           },
           {
             "date": "2026-06-30",
             "kind": "easy",
-            "km": 2.7,
-            "minutes": 17,
+            "km": 2.9,
+            "minutes": 18,
             "note": "easy run",
             "pace_zone": "6:15/km easy",
-            "trimp": 28.1
+            "trimp": 29.5
           }
         ],
         "start": "2026-06-29",
         "strides": 2,
-        "trimp_total": 52.7,
-        "volume_met": false,
+        "trimp_total": 55.4,
+        "volume_met": true,
         "wk": 1
       },
       {

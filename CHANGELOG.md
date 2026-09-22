@@ -10,6 +10,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.70.2] - 2026-09-22
+
+### Fixed
+
+- **The week in progress bounded its plan from a seed that kept moving, cutting three of the days
+  ahead for load the athlete never laid (§WKMEAN2).** `generate_block`'s straddle branch (§6o)
+  computes the week's intent with a full-week `_max_week_trimp` search, Monday through Sunday,
+  bound by `CTL_RAMP_MAX` (the +5 CTL/week chronic ceiling), seeded from the §PRO20
+  end-of-yesterday state — which already carries the lived days rolled in — so the lived days were
+  rolled twice and the ceiling anchored on a point that moved with every rest day as well as every
+  run. A regeneration preview on 22 Sep, the evening of the athlete's 10×3 min session (12.31 km,
+  reps at 4:41 mean against 4:52 asked, HR 170), cut the week from 64.9 to 61.6 km after a 0.6 km
+  over-run: Wed 11.9 → 10.4, Thu 10.5 → 9.2, Sat 9.3 → 8.1 (the long run held at 21.6 km by §LRH);
+  the down week 54.5 → 50.2, its long easy run 20.8 → 19.1; feasibility 3:50:16 → 3:51:31. The
+  plan history showed the same shape on 15 Sep (plans 212–214: week 61.7 → 58.8, restored on
+  Wednesday by plan 215). Instrumented on live copies: Monday's own regeneration (plan 229) read
+  ctl 91.0 → bound 96.0 → allowed 738.9 TRIMP, intent 68.4 km, the chronic axis binding; Tuesday's
+  (plan 230), after Monday's laid rest had decayed the seed by one EWMA step, read ctl 86.0 →
+  bound 91.0 → allowed 681.2 TRIMP, intent 63.0 km — 5.4 km of intent lost between two
+  regenerations of the same week, for a day of rest rather than of running. The intent search is
+  now anchored on the week-START state instead — the seed un-stepped back over the lived days with
+  `_ewma_unstep`, clamped at zero for a true cold start — with no floor on the lived days: a
+  missed day is neither charged for load it never carried (`prorate` already drops its own share
+  of the remainder) nor made up against the ceiling. The remainder search, which prices what
+  actually ran, is unchanged, so an over-run still passes straight through and the week's own axis
+  reads it. The straddling week now publishes a `chronic` axis (`ceiling`, `laid`, `binds`) it
+  never carried before; Tuesday's regeneration after the fix reads anchor 90.2, allowed 731.4
+  TRIMP, intent 67.7 km, week 66.1 km. A first attempt — charging the lived days' actual loads
+  into the search as a floor — was tried and dropped: on the det `straddle-regen-day` fixture (the
+  live 12 Sep week) it floored Monday's rest day at 38 TRIMP for load that was never laid, and the
+  ceiling cut Sunday's long run from 16.5 to 10.4 km. New det `straddle-intent-anchor` (seven
+  limbs: the fixture; Tuesday's intent within 0.3 km of Monday's; matching projected end-of-week
+  CTL; the chronic axis published and binding on Tuesday and Wednesday; Wednesday matching Monday;
+  a skipped Tuesday leaving the days ahead at 90% or more of their laid km; the no-day-series path
+  still diverging); `det/straddle-regen-day` unchanged (Sunday still 16.5 km on both
+  regenerations, its binding axis now `chronic`).
+
+- **The plan's own ride factor read a rest day it had laid itself as the athlete falling behind
+  (§PRO5c).** `shape_response` compares CTL measured at the end of yesterday (§PRO5b) against
+  `proj_ctl`, the last fully-elapsed week's own end-of-Sunday projection; on any day but Monday
+  the two sit on different day boundaries, and after a rest day the measured side has decayed by
+  one EWMA step (×41/43, a 4.65% drop) that the projection never took — past `RESPONSE_ONTRACK`'s
+  2% dead-band. Every Tuesday after the Monday rest read the factor at 0.957: 15 Sep (plans
+  212–214) measured 82.0 against a projected 85.7; 22 Sep (plan 230) measured 86.5 against 90.4;
+  both eased the ride cap to 1.239 for a calendar day passing, not a change in fitness.
+  `projected` is now rolled forward from the elapsed week's end to the end of yesterday over the
+  prior plan's own laid daily TRIMP (rest priced at 0, the same `_ewma_step`/`TAU_CTL` the
+  projector uses), never over today's own lay, so a Monday regeneration reads byte-identical to
+  before. New `det/shape-response` limbs: a laid Monday rest reads the factor as 1.0 (0.952
+  without the fix); a laid Monday the athlete skipped still eases it; today's own lay never enters
+  the roll; Monday's own reading is unchanged. On its own this fix did not restore the 22 Sep
+  week: the ACWR axis carried 0.13 of headroom on both regenerations and never bound, so easing
+  its ride cap could not have cut anything — the actual cut was the chronic ceiling's moving
+  anchor, above (§WKMEAN2).
+
 ## [0.70.1] - 2026-09-20
 
 ### Fixed

@@ -133,6 +133,14 @@
             "unit": "ratio"
           },
           "binding": "eq_week",
+          "chronic": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 5.0,
+            "headroom": 13.62,
+            "laid": -8.62,
+            "unit": "CTL/wk"
+          },
           "eq_session": {
             "basis": "S",
             "binds": false,

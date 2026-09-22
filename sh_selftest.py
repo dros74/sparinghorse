@@ -5936,6 +5936,147 @@ def _stc_straddle_regen_day():
                     sun["limits"].get("binding")), "days_left": (o_sat, o_sun), "failures": fails or "none"})
 
 
+def _stc_straddle_intent_anchor():
+    """§WKMEAN2 (0.70.2) — THE WEEK'S INTENT IS THE PLAN AS THE MONDAY REGENERATION COMPUTES IT, ON
+    WHICHEVER DAY THE STRADDLING WEEK IS ACTUALLY REGENERATED. The full-week intent search seeded from
+    the end of yesterday, so the +5 CTL/week ceiling was anchored on a moving point: on the live plan a
+    Monday regeneration bounded the week at 91 + 5 (738.9 TRIMP, 68.4 km) and Tuesday's, after the rest
+    day's 2/43 decay, at 86 + 5 (681.2 TRIMP, 63.0 km) — the days ahead cut 3.9 km for a 0.6 km over-run
+    (plans 229 → 230, 22 Sep 2026). `ws_ctl`/`ws_atl` (read back from the seed with `_ewma_unstep`)
+    recover that week-start anchor, and the search carries NO floor for the lived days: a missed day is
+    neither charged (`prorate` already drops its share) nor made up (only the remainder search, unchanged,
+    prices what was actually run). An earlier version of this fix floored the lived days into the intent
+    search, and on the live det/straddle-regen-day fixture that charged a fictional Monday lay (the
+    skeleton's own run, never actually made) and cut Sunday's long run for load that never happened — so
+    this fixture ranks Monday as the rest day (§DAYPREF) and checks it against the lay before trusting it:
+    'Monday = 0' must be the plan's OWN rest day, not a missed run standing in for one. Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 9, 21)
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    seed, easy = (91.0, 117.0), 393                            # end of Sunday 20 Sep; easy 6:33/km
+    shape = {"wk": 1, "km": 65, "runs": 5, "long": 21, "strides": 0, "quality": [], "intent": "Build"}
+    A = dict(regime="assertive", last_nondown=699.0, recent_longs=[19.0, 20.0, 20.5, 21.0],
+             recent_eq=[100.0, 105.0, 110.0, 115.0], recent_session_eq=[24.0, 25.0, 26.0, 27.0])
+    fails = []
+    w_tue = w_wed = w_miss = no_series_tue = None
+
+    def _walk(upto, series):
+        c, a = seed
+        for d in days[:upto]:
+            t = (series or {}).get(d, 0.0) or 0.0
+            c = E._ewma_step(c, t, E.TAU_CTL); a = E._ewma_step(a, t, E.TAU_ATL)
+        return c, a
+
+    def _gen(today_i, actuals, series):
+        c, a = _walk(today_i, series)
+        return E.generate_block([dict(shape)], mon, c, a, easy, today=mon + timedelta(days=today_i),
+                                week_actuals=actuals, day_series=series, **A)[0][0]
+
+    saved = E._DAY_PREF
+    E.set_day_preferences("sun", "mon")   # §DAYPREF — long run Sunday, Monday the ranked rest day
+    try:
+        w_mon = _gen(0, (0, 0.0), series={days[0]: 0.0})          # today == week start: the full-week path
+
+        m_chr = w_mon["limits"].get("chronic") or {}
+        if not m_chr.get("binds"):
+            fails.append(f"fixture — the chronic ceiling does not bind on the Monday regen ({m_chr})")
+        mon_sessions = {s["date"]: s for s in w_mon["sessions"]}
+        mon_s0 = mon_sessions.get(days[0])
+        if mon_s0 and (mon_s0.get("kind") or "") != "rest":
+            fails.append("fixture — the lay put a run on the ranked rest day")
+        tue_s = mon_sessions.get(days[1])
+        if not tue_s or (tue_s.get("kind") or "") == "rest":
+            fails.append("fixture — no Tuesday session to base the over-run on")
+
+        if not fails:
+            tue_lay = float(tue_s.get("trimp") or 0.0)
+            L = {days[0]: 0.0, days[1]: tue_lay + 4.0}           # a 4-TRIMP over-run on Tuesday
+            w_tue = _gen(1, (0, 0.0), series=L)
+            w_wed = _gen(2, (1, 12.3), series=L)
+
+            # (b) the tooth
+            if abs(w_tue["intent_km"] - w_mon["intent_km"]) > 0.3:
+                fails.append(f"Tuesday's intent {w_tue['intent_km']} differs from Monday's {w_mon['intent_km']}: "
+                             "the chronic anchor moved with the rest day")
+
+            # (c) the week's projected end CTL is the same target on every day
+            if abs(w_tue["proj_ctl"] - w_mon["proj_ctl"]) > 0.3:
+                fails.append(f"Tuesday's proj_ctl {w_tue['proj_ctl']} differs from Monday's {w_mon['proj_ctl']}")
+            if abs(w_wed["proj_ctl"] - w_mon["proj_ctl"]) > 0.5:
+                fails.append(f"Wednesday's proj_ctl {w_wed['proj_ctl']} differs from Monday's {w_mon['proj_ctl']}")
+
+            # (d) the straddling week publishes the chronic axis that governs it
+            for tag, w in (("Tue", w_tue), ("Wed", w_wed)):
+                chr_ax = w["limits"].get("chronic")
+                if not chr_ax:
+                    fails.append(f"{tag} regen: no chronic axis published ({w['limits']})")
+                else:
+                    if chr_ax.get("ceiling") != E.CTL_RAMP_MAX:
+                        fails.append(f"{tag} regen: chronic ceiling {chr_ax.get('ceiling')} != CTL_RAMP_MAX {E.CTL_RAMP_MAX}")
+                    if not chr_ax.get("binds"):
+                        fails.append(f"{tag} regen: chronic axis does not bind ({chr_ax})")
+
+            # (e) the intent is the plan on Wednesday too
+            if abs(w_wed["intent_km"] - w_mon["intent_km"]) > 0.3:
+                fails.append(f"Wednesday's intent {w_wed['intent_km']} differs from Monday's {w_mon['intent_km']}")
+
+            # (f) anti-vacuity — without a series the search reads the days left (the pre-§WKMEAN2 path,
+            # kept byte-identical for callers that pass none): on this fixture that MUST split Tuesday
+            # from Monday, or the invariant above was never at risk here.
+            no_series_tue = _gen(1, (0, 0.0), series=None)
+            if abs(no_series_tue["intent_km"] - w_mon["intent_km"]) <= 0.3:
+                fails.append("revert limb — the fixture cannot show the defect "
+                             f"(no-series Tuesday intent {no_series_tue['intent_km']} ~= Monday's {w_mon['intent_km']})")
+
+            # (g) a missed day is neither charged nor crammed — Tuesday's run never happened (L2), read
+            # back on Wednesday's regen. The intent stays Monday's (no floor to move it); the remainder
+            # keeps its own days' lay (day-share, unclipped) rather than absorbing Tuesday's loss; and
+            # the missed TRIMP is genuinely gone from the projected curve, not made up.
+            L2 = {days[0]: 0.0, days[1]: 0.0}
+            w_miss = _gen(2, (0, 0.0), series=L2)
+            if abs(w_miss["intent_km"] - w_mon["intent_km"]) > 0.3:
+                fails.append(f"missed-day intent {w_miss['intent_km']} differs from Monday's {w_mon['intent_km']}")
+            miss_sum, mon_sum = 0.0, 0.0
+            for s in w_miss["sessions"]:
+                if s["date"] < days[2] or (s.get("kind") or "") == "rest":
+                    continue
+                mon_s = mon_sessions.get(s["date"])
+                if not mon_s:
+                    fails.append(f"the missed day was relocated — {s['date']} has no Monday-lay session to compare")
+                    continue
+                if (s.get("km") or 0.0) > (mon_s.get("km") or 0.0) + 0.3:
+                    fails.append(f"{s['date']} crammed: {s.get('km')}km vs Monday's {mon_s.get('km')}km")
+                miss_sum += s.get("km") or 0.0
+                mon_sum += mon_s.get("km") or 0.0
+            if mon_sum and miss_sum < 0.9 * mon_sum:
+                fails.append(f"the missed day's remainder shed too much: {round(miss_sum, 1)}km vs "
+                             f"Monday's {round(mon_sum, 1)}km (≥90% expected)")
+            if not (w_miss["proj_ctl"] < w_mon["proj_ctl"] - 1.0):
+                fails.append(f"missed-day proj_ctl {w_miss['proj_ctl']} is not below Monday's "
+                             f"{w_mon['proj_ctl']} - 1.0 — the missed load was made up")
+    finally:
+        E._DAY_PREF = saved          # restore the parsed pair as-is
+
+    return _st("det", "straddle-intent-anchor",
+               "§WKMEAN2 the straddling week's intent is the plan as the Monday regeneration computes it, "
+               "whichever day it is actually regenerated on; the straddling week publishes its chronic "
+               "axis; a missed day is neither charged nor made up",
+               passed=not fails,
+               expect="Tue/Wed intent == Mon (±0.3 km); proj_ctl equal (±0.3 / ±0.5); chronic published + "
+               "binds; no-series regen differs; a missed day's intent is unchanged, its remainder is kept "
+               "not crammed, and the missed load is not made up",
+               got={"mon": {"intent_km": w_mon["intent_km"], "proj_ctl": w_mon["proj_ctl"],
+                            "chronic": w_mon["limits"].get("chronic")},
+                    "tue": ({"intent_km": w_tue["intent_km"], "proj_ctl": w_tue["proj_ctl"],
+                             "chronic": w_tue["limits"].get("chronic")} if w_tue else None),
+                    "wed": ({"intent_km": w_wed["intent_km"], "proj_ctl": w_wed["proj_ctl"],
+                             "chronic": w_wed["limits"].get("chronic")} if w_wed else None),
+                    "miss": ({"intent_km": w_miss["intent_km"], "proj_ctl": w_miss["proj_ctl"]}
+                             if w_miss else None),
+                    "no_series_tue_intent": (no_series_tue["intent_km"] if no_series_tue else None),
+                    "failures": fails or "none"})
+
+
 def _stc_straddle_deload_invariant():
     """SH-02 / §WKMEAN (0.68.2) — THE DELOAD ROAD DOES NOT RE-PHASE WITH THE REGENERATION DAY. SH-02 held
     that regenerating the straddling week on different days moved the §PRO6 decision variable (proj_acwr,
@@ -12944,17 +13085,71 @@ def _stc_shape_response():
                     f"{round(settled, 1)} — the curve is not being read at a day boundary")
     if morning["factor"] != 1.0:
         fail.append(f"(g) fixture: on the bar exactly should read on-track/full, got {morning['factor']}")
+    # ── §PRO5c (h)-(k) — roll the projection to the SAME end-of-yesterday day boundary ─────────
+    # `projected` used to sit on the elapsed week's END-OF-SUNDAY value while `realized` sits on the
+    # end of YESTERDAY — on any day but Monday the two are on different boundaries, and after a rest
+    # day the measured side had decayed one EWMA step the projection never took. It eased the ride
+    # every Tuesday after a Monday rest. The fix rolls `projected` forward over the PRIOR PLAN'S OWN
+    # laid daily TRIMP (rest = 0), never over today's own lay.
+    hjk_db = _sq.connect(":memory:"); hjk_db.row_factory = _sq.Row
+    hjk_db.executescript(S.SCHEMA)
+    tue = date(2026, 6, 30)                            # a Tuesday
+    for i in range(70):                                 # 70 days of 50-TRIMP runs ending Sun 2026-06-28
+        d = tue - timedelta(days=72 - i)                # dates tue-72 .. tue-2 — NOTHING on Mon 2026-06-29
+        hjk_db.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) "
+                        "VALUES(?,?,?,?,?,?)", (d.isoformat(), d.isoformat() + "T18:00", S.RUNNING_SPORT,
+                                                 10.0, 3000, 50.0))
+    settled_sun = S.reconstruct_history(hjk_db, end="2026-06-28")[-1]["ctl"]
+
+    def prior_c(monday_trimp=None, tuesday_trimp=50.0):
+        sessions = ([{"date": "2026-06-29", "trimp": monday_trimp}] if monday_trimp is not None else [])
+        sessions += [{"date": "2026-06-30", "trimp": tuesday_trimp}, {"date": "2026-07-01", "trimp": 50.0}]
+        return {"base": {"weeks": [
+            {"start": "2026-06-22", "proj_ctl": round(settled_sun, 1)},
+            {"start": "2026-06-29", "proj_ctl": 999.0, "sessions": sessions}]}}
+
+    r_h = S.shape_response(hjk_db, tue, prior_c())                        # planned rest day
+    _h_expected = round(S._ewma_step(settled_sun, 0.0, S.TAU_CTL), 1)
+    if r_h["factor"] != 1.0:
+        fail.append(f"(h) the Monday rest the plan itself laid was read as under-response: "
+                    f"factor {r_h['factor']} (expected 1.0)")
+    if abs(r_h["projected"] - _h_expected) > 0.1 + 1e-9:   # +epsilon: float noise sits exactly on 0.1
+        fail.append(f"(h) rolled projection {r_h['projected']} is not within 0.1 of the settled Sunday "
+                    f"CTL rolled one rest day, {_h_expected}")
+    r_i = S.shape_response(hjk_db, tue, prior_c(monday_trimp=50.0))       # a laid day the athlete skipped
+    if not (r_i["factor"] < 1.0):
+        fail.append(f"(i) a laid Monday session the athlete skipped should still read behind: "
+                    f"factor {r_i['factor']} (expected < 1.0)")
+    r_j = S.shape_response(hjk_db, tue, prior_c(tuesday_trimp=500.0))     # today's own lay is never rolled
+    if r_j["factor"] != 1.0 or r_j["projected"] != r_h["projected"]:
+        fail.append(f"(j) today's own lay leaked into the roll: factor {r_j['factor']} (expected 1.0), "
+                    f"projected {r_j['projected']} (expected {r_h['projected']})")
+    mon = date(2026, 6, 29)
+    r_k = S.shape_response(hjk_db, mon,                                   # a Monday regen is unchanged
+                            {"base": {"weeks": [{"start": "2026-06-22", "proj_ctl": round(settled_sun, 1)}]}})
+    if r_k["factor"] != 1.0 or r_k["projected"] != round(settled_sun, 1):
+        fail.append(f"(k) a Monday regen should be byte-identical to today's behaviour: factor "
+                    f"{r_k['factor']} (expected 1.0), projected {r_k['projected']} (expected "
+                    f"{round(settled_sun, 1)})")
     return _st("det", "shape-response",
                "shape-response: ahead/on-track ⇒ full ceiling, behind ⇒ eased & floored, no projection ⇒ "
                "full; the eased ride_cap genuinely lowers volume & ACWR (never above the safety cap); "
                "§PRO5b realised fitness is measured at the settled END OF YESTERDAY, so the ride factor "
-               "is the same before and after today's run is logged (it used to follow the time of day)",
+               "is the same before and after today's run is logged (it used to follow the time of day); "
+               "§PRO5c the projection is rolled to the same end-of-yesterday boundary over the prior "
+               "plan's own laid load, so a rest day the plan laid is not read as under-response (it "
+               "used to ease the week every Tuesday)",
                passed=not fail, expect="factor 1.0 ahead/none; eased∈[0.6,1) behind; eased ride < full; "
-                                       "morning read == evening read",
+                                       "morning read == evening read; rest day laid ⇒ full; laid day "
+                                       "skipped ⇒ eased; today's lay never rolled; Monday unchanged",
                got={"realized": R["realized"], "ahead_f": ahead["factor"], "behind_f": behind["factor"],
                     "settled_yesterday": round(settled, 1),
                     "morning": {"realized": morning["realized"], "factor": morning["factor"]},
                     "evening": {"realized": evening["realized"], "factor": evening["factor"]},
+                    "r_h": {"factor": r_h["factor"], "projected": r_h["projected"]},
+                    "r_i": {"factor": r_i["factor"], "projected": r_i["projected"]},
+                    "r_j": {"factor": r_j["factor"], "projected": r_j["projected"]},
+                    "r_k": {"factor": r_k["factor"], "projected": r_k["projected"]},
                     "failures": fail or "none"})
 
 
@@ -18137,7 +18332,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),
