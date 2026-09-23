@@ -6981,8 +6981,10 @@ def _stc_multi_a_chain():
 
 
 def _stc_periodize_chain():
-    """§6q periodize_chain — REDUCES to periodize() for a single goal race; multi-A adds a bridge/peak/
-    taper segment per later race; a subordinate race gets a 1-wk sharpen + no full peak. Pure."""
+    """§6q/§CHAIN2 periodize_chain — REDUCES to periodize() for a single goal race; multi-A adds a
+    Recovery off the prior race, then either a full Base→Build→Peak→Taper cycle (runway allowing) or
+    the old short Bridge→Peak→Taper; a subordinate race gets a 1-wk sharpen + no full peak, and that
+    doesn't touch the NEXT segment's own recovery/cycle sizing. Pure."""
     today = S._date("2026-06-01")
     def race(i, wks, typ, label):
         return {"id": i, "date": (today + S.timedelta(weeks=wks)).isoformat(), "type": typ, "label": label}
@@ -6996,13 +6998,19 @@ def _stc_periodize_chain():
         fails.append(f"single-A not reducing to periodize: {red(ch)} vs {red(pz)}")
     if tw != S.weeks_until(goal["date"], today):
         fails.append("single-A total-weeks mismatch")
-    # (b) two co-equal A's → a Bridge→Peak→Taper segment for the 2nd race; rebase first, goal-taper last
-    co = [{**race(1, 12, "10k", "Spring 10k"), "role": "coequal"},
+    # (b) two co-equal A's, SHORT gap → Recovery then Bridge→Peak→Taper for the 2nd race (10k at 16wk,
+    # marathon at 24wk: gap 8, taper 2, recovery 1 (10k's own tuple has 1 entry), rem 5 < the 8wk full-
+    # cycle floor → bridge1 3wk + peak1 2wk). recovery1 must precede bridge1.
+    co = [{**race(1, 16, "10k", "Spring 10k"), "role": "coequal"},
           {**race(2, 24, "marathon", "Goal Marathon"), "role": "goal"}]
     ch2, _ = S.periodize_chain(today, co, rebase_weeks=6)
     keys2, kinds2 = [p["key"] for p in ch2], [p["kind"] for p in ch2]
     if "bridge1" not in keys2 or "bridge" not in kinds2:
         fails.append(f"co-equal chain missing bridge: {keys2}")
+    if "recovery1" not in keys2:
+        fails.append(f"co-equal chain missing recovery1: {keys2}")
+    elif keys2.index("recovery1") >= keys2.index("bridge1"):
+        fails.append(f"recovery1 must precede bridge1: {keys2}")
     if kinds2[0] != "rebase" or ch2[-1]["kind"] != "taper" or ch2[-1]["race"] != "Goal Marathon":
         fails.append(f"chain endpoints wrong: first={kinds2[0]} last={ch2[-1].get('key')}/{ch2[-1].get('race')}")
     # (c) subordinate first race → taper=1 (mini), no peak phase (peak weeks 0 → filtered)
@@ -7021,9 +7029,48 @@ def _stc_periodize_chain():
     seg_sum = sum(ph["weeks"] for ph in ch4)
     if seg_sum > tw4:
         fails.append(f"short-gap overrun: phase weeks {seg_sum} > runway {tw4}")
+    # (e) two marathons 22 weeks apart (first at 12wk, second at 34wk): the LONG gap earns a full
+    # second cycle — recovery1 (3wk, marathon's longest tuple), base1, build1, peak1, taper1 (3wk),
+    # no bridge1; segment weeks sum to exactly the 22wk gap; the cycle tapers off toward the peak.
+    two_mara = [{**race(1, 12, "marathon", "First Marathon"), "role": "coequal"},
+                {**race(2, 34, "marathon", "Second Marathon"), "role": "goal"}]
+    ch5, _ = S.periodize_chain(today, two_mara, rebase_weeks=6)
+    keys5 = [p["key"] for p in ch5]
+    seg1_keys = [k for k in keys5 if k.endswith("1")]
+    if seg1_keys != ["recovery1", "base1", "build1", "peak1", "taper1"]:
+        fails.append(f"(e) full-cycle segment order wrong: {seg1_keys}")
+    by_key5 = {p["key"]: p for p in ch5}
+    if by_key5.get("recovery1", {}).get("weeks") != 3:
+        fails.append(f"(e) recovery1 should be 3wk (marathon's own tuple): {by_key5.get('recovery1')}")
+    if by_key5.get("taper1", {}).get("weeks") != 3:
+        fails.append(f"(e) taper1 should be 3wk (long runway): {by_key5.get('taper1')}")
+    if "bridge1" in by_key5:
+        fails.append(f"(e) full cycle should not lay a bridge: {keys5}")
+    seg1_sum = sum(p["weeks"] for p in ch5 if p["key"] in seg1_keys)
+    if seg1_sum != 22:
+        fails.append(f"(e) segment-1 weeks {seg1_sum} != the 22wk gap")
+    b1, bu1, pk1 = (by_key5.get(k, {}).get("weeks") for k in ("base1", "build1", "peak1"))
+    if not (b1 and bu1 and pk1 and b1 >= bu1 >= pk1 >= 2):
+        fails.append(f"(e) base1 >= build1 >= peak1 >= 2 not held: {b1}/{bu1}/{pk1}")
+    # (f) a subordinate FIRST race never earns a full cycle for its OWN segment (taper=1, no peak) —
+    # and that role does NOT leak into the NEXT segment: with the same 22wk gap as (e), segment 1
+    # still earns a full cycle exactly as if the first race had been coequal.
+    sub_full = [{**race(1, 12, "marathon", "Tune-up Mara"), "role": "subordinate"},
+                {**race(2, 34, "marathon", "Goal Mara"), "role": "goal"}]
+    ch6, _ = S.periodize_chain(today, sub_full, rebase_weeks=6)
+    seg0_taper_f = next((p for p in ch6 if p["key"] == "taper"), None)
+    if not seg0_taper_f or seg0_taper_f["weeks"] != 1:
+        fails.append(f"(f) subordinate segment0 taper not 1wk: {seg0_taper_f}")
+    if next((p for p in ch6 if p["key"] == "peak"), None) is not None:
+        fails.append("(f) subordinate segment0 should have no full peak phase")
+    keys6 = {p["key"]: p["weeks"] for p in ch6}
+    if "base1" not in keys6 or "bridge1" in keys6:
+        fails.append(f"(f) next segment's full cycle should be unaffected by a subordinate segment0: {keys6}")
     return _st("det", "periodize-chain",
-               "periodize_chain ≡ periodize for single-A; multi-A adds bridge/peak/taper per race; subordinate → 1wk sharpen, no peak",
-               passed=not fails, expect="reduction + chain structure + subordinate sizing",
+               "periodize_chain ≡ periodize for single-A; multi-A adds a Recovery off the prior race, "
+               "then a full Base/Build/Peak/Taper cycle (runway allowing) or a short Bridge/Peak/Taper; "
+               "subordinate → 1wk sharpen, no peak, and never affects the NEXT segment's own sizing",
+               passed=not fails, expect="reduction + recovery + cycle-vs-bridge + subordinate sizing",
                got={"violations": fails or "none"})
 
 
@@ -8203,7 +8250,10 @@ def _stc_multi_a_plan():
     def add(label, wks, typ):
         mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
                     (typ, label, (today + S.timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming", S._now_iso()))
-    add("Tune 10k", 12, "10k")          # co-equal (gap to marathon 12wk ≫ 10k recovery 3wk)
+    # §CHAIN2 — 16wk, not the original 12wk: gap 8 keeps this a BRIDGE case (recovery 1 + rem 5 < the
+    # 8wk full-cycle floor); at 12wk the same gap now earns a full base/build/peak cycle instead (see
+    # det/periodize-chain (e)), which is a different fixture's job, not this one's.
+    add("Tune 10k", 16, "10k")          # co-equal (gap to marathon 8wk ≫ 10k recovery 1wk)
     add("Goal Marathon", 24, "marathon")
     mem.commit()
     p = S.generate_plan(mem)
@@ -8245,6 +8295,114 @@ def _stc_multi_a_plan():
     return _st("det", "multi-a-plan",
                "generate_plan over a 2-A chain: chain roles + bridge segment + per-race feasibility verdict + ACWR ≤1.25 on every week of every segment",
                passed=not fails, expect="chain + bridge + per-race verdict + ceiling held across all segments",
+               got={"violations": fails or "none"})
+
+
+def _stc_chain_recovery():
+    """§CHAIN2 INTEGRATION — generate_plan over a real 2-marathon chain, 22 weeks apart (the owner's
+    live shape: two full marathons, not a tune-up + a goal). The recovery after the FIRST race must be
+    laid as easy-only, well under the pre-taper peak, and the plan's first non-easy work must sit a
+    real fortnight past the race — never a Bridge, always a full base1/build1/peak1 cycle (see (e) in
+    det/periodize-chain for why this gap earns one). Self-contained: never touches the real DB.
+
+    Revert tooth: with `_is_taper` NOT reading "recovery" (E._is_taper monkeypatched back to its
+    pre-§CHAIN2 set), the assertive ride's `if assertive and not is_taper: ... target = allowed` (see
+    sh_engine.py ~4737) rides the recovery week straight to the ACWR ceiling instead of the shape's
+    reverse-taper intent — this is exactly the defect this whole change exists to close, so the broken
+    reading must actually fail the km check below, once, before the real `_is_taper` is restored."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    today = S.datetime.now().date()
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (today.isoformat(), 50.0, 30.0, 28.0))
+    def add(label, wks, typ):
+        mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (typ, label, (today + S.timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming", S._now_iso()))
+    add("First Marathon", 12, "marathon")     # 22wk gap → co-equal, both full marathons (§CHAIN2's own
+    add("Second Marathon", 34, "marathon")    # motivating case, not a short tune-up)
+    mem.commit()
+    fails = []
+
+    def _check(p, label):
+        f = []
+        if not p.get("ok") or p.get("mode") != "race":
+            f.append(f"{label}: plan not ok/race: ok={p.get('ok')} mode={p.get('mode')} err={p.get('error')}")
+            return f, None, None
+        recov = (p.get("recovery1") or {}).get("weeks") or []
+        peak0 = (p.get("peak") or {}).get("weeks") or []
+        if len(recov) != 3:
+            f.append(f"{label}: recovery1 should be 3wk (marathon's own tuple): {len(recov)}")
+        for w in recov:
+            for s in w.get("sessions", []):
+                if s.get("kind") not in ("easy", "long", "rest"):
+                    f.append(f"{label}: recovery1 laid a non-easy session: {w['start']} {s.get('kind')}")
+        return f, recov, peak0
+
+    p = S.generate_plan(mem, force_regime="assertive")
+    _f, recov, peak0 = _check(p, "fixed")
+    fails += _f
+    # (1)/(2) — the first recovery week is real training, but nowhere near the pre-taper peak
+    if recov and peak0:
+        r0_km = recov[0]["km"]
+        peak_max = max(w["km"] for w in peak0)
+        if not (r0_km < 0.5 * peak_max):
+            fails.append(f"recovery1 wk1 km {r0_km} not < half the peak's max {peak_max}")
+    else:
+        fails.append(f"missing recovery1/peak weeks to compare: recov={bool(recov)} peak0={bool(peak0)}")
+    # (3) — the first non-easy session anywhere after the first race sits a real fortnight clear of it
+    race_date = (p.get("chain") or [{}])[0].get("date")
+    all_sessions = [(s["date"], s.get("kind"))
+                     for key in ("recovery1", "base1", "build1", "peak1")
+                     for w in (p.get(key) or {}).get("weeks", [])
+                     for s in w.get("sessions", [])]
+    non_easy = sorted(s for s in all_sessions if s[1] not in ("easy", "long", "rest"))
+    if not race_date:
+        fails.append("no first-race date on the chain")
+    elif non_easy:
+        gap_days = (S._date(non_easy[0][0]) - S._date(race_date)).days
+        if gap_days < 14:
+            fails.append(f"first non-easy session only {gap_days}d after the first race: {non_easy[0]}")
+    # (4) — the long gap earns a full second cycle, never the old short bridge
+    for k in ("base1", "build1", "peak1"):
+        if not p.get(k):
+            fails.append(f"missing {k} — the 22wk gap should earn a full second cycle")
+    if p.get("bridge1") is not None:
+        fails.append(f"bridge1 present on a full-cycle gap: {p.get('bridge1')}")
+    # (5) — the phase list's own labels are right
+    ph_by_key = {ph["key"]: ph for ph in p.get("phases", [])}
+    rp = ph_by_key.get("recovery1")
+    if not rp or rp.get("after") != "First Marathon":
+        fails.append(f"recovery1's 'after' should be First Marathon: {rp}")
+    # Revert tooth — break `_is_taper` back to its pre-§CHAIN2 set (no "recovery") and confirm the
+    # km check above actually trips. `E._is_taper` (never `S._is_taper` — TECH-12, the engine reads
+    # its own globals, not the app's re-export).
+    orig_is_taper = E._is_taper
+    def _broken_is_taper(w):
+        return E._week_role(w) in ("taper", "race")   # the §CHAIN2 regression: recovery dropped
+    E._is_taper = _broken_is_taper
+    try:
+        pb = S.generate_plan(mem, force_regime="assertive")
+        recov_b = (pb.get("recovery1") or {}).get("weeks") or []
+        peak0_b = (pb.get("peak") or {}).get("weeks") or []
+        tripped = False
+        if recov_b and peak0_b:
+            r0b, peak_max_b = recov_b[0]["km"], max(w["km"] for w in peak0_b)
+            if not (r0b < 0.5 * peak_max_b):
+                tripped = True   # expected: an unfixed _is_taper rides the recovery week to the ceiling
+        if not tripped:
+            fails.append(f"revert tooth did not trip: recovery1 wk1 stayed under half the peak even "
+                         f"with _is_taper broken (recov={recov_b and recov_b[0]['km']}, "
+                         f"peak_max={peak0_b and max(w['km'] for w in peak0_b)}) — this det proves nothing")
+    finally:
+        E._is_taper = orig_is_taper   # restore before anything else runs
+    mem.close()
+    return _st("det", "chain-recovery",
+               "§CHAIN2 generate_plan over two full marathons 22wk apart: recovery1 is 3wk easy-only, "
+               "well under the pre-taper peak, ≥14d before the first non-easy session, a full "
+               "base1/build1/peak1 cycle (no bridge1) — and a broken _is_taper (recovery dropped) "
+               "demonstrably rides the recovery week to the ceiling instead",
+               passed=not fails, expect="easy-only recovery1 + full cycle + right labels + revert tooth trips",
                got={"violations": fails or "none"})
 
 
@@ -15812,6 +15970,63 @@ def _stc_api_validation(db):
                got={"violations": fails or "none", "rows_before": before, "rows_after": counts()})
 
 
+def _stc_objective_dedupe(db):
+    """§OBJ2 (0.71.x) — POST /api/objectives rejects an exact repeat (same date, same type, the same
+    label case-insensitively) with 409 before it ever reaches replan(): an unthrottled Add button once
+    queued 12 identical clicks — 12 duplicate objectives and 28 full re-plans in 8 minutes — because
+    nothing stopped a second click from landing while the first was still re-periodizing. Driven
+    through the real endpoint; the rows this det inserts are its own and are deleted afterwards.
+      (a) POST a race → 200 ok, the row lands.
+      (b) the identical label/type/date again → 409, ok False, "already on the calendar" names it.
+      (c) the same race moved to a different date is NOT the same objective → 200 ok, a second row
+          lands.
+      (d) the table carries exactly 2 upcoming rows for that label, not 3 — the 409 truly inserted
+          nothing."""
+    from datetime import timedelta
+    fails = []
+    label = "selftest-dedupe-probe"
+    date_a = (S.datetime.now().date() + timedelta(days=200)).isoformat()
+    date_b = (S.datetime.now().date() + timedelta(days=201)).isoformat()
+    saved_ro = S.READONLY
+    c = S.app.test_client()
+
+    def is_json(r):
+        return (r.headers.get("Content-Type") or "").startswith("application/json")
+    def upcoming_count():
+        return db.execute(
+            "SELECT COUNT(*) FROM objectives WHERE status='upcoming' AND lower(label)=lower(?)",
+            (label,)).fetchone()[0]
+    try:
+        S.READONLY = False             # the private write surface is what's under test
+        # (a) the first post lands
+        r = c.post("/api/objectives", json={"type": "marathon", "label": label, "date": date_a})
+        if r.status_code != 200 or not is_json(r) or not (r.get_json() or {}).get("ok"):
+            fails.append(f"(a) first post answered {r.status_code} — want 200 ok")
+        # (b) the exact repeat → 409, nothing inserted
+        r = c.post("/api/objectives", json={"type": "marathon", "label": label, "date": date_a})
+        d = r.get_json() or {}
+        if (r.status_code != 409 or not is_json(r) or d.get("ok") is not False
+                or "already on the calendar" not in (d.get("error") or "")):
+            fails.append(f"(b) exact repeat answered {r.status_code} {d} — want 409 + "
+                         f"'already on the calendar'")
+        # (c) same race, a different date, is not a duplicate
+        r = c.post("/api/objectives", json={"type": "marathon", "label": label, "date": date_b})
+        if r.status_code != 200 or not is_json(r) or not (r.get_json() or {}).get("ok"):
+            fails.append(f"(c) a different date answered {r.status_code} — want 200 ok (not a duplicate)")
+        # (d) exactly 2 rows landed, not 3
+        n = upcoming_count()
+        if n != 2:
+            fails.append(f"(d) {n} upcoming rows for {label!r} — want 2 (the 409 must insert nothing)")
+    finally:
+        db.execute("DELETE FROM objectives WHERE lower(label)=lower(?)", (label,)); db.commit()
+        S.READONLY = saved_ro
+    return _st("det", "objective-dedupe",
+               "POST /api/objectives rejects an exact repeat (same date/type/label, case-insensitive) "
+               "with 409 before it re-plans; the same race moved to a different date is not a duplicate",
+               passed=not fails, expect="200 ok, 409 + 'already on the calendar', 200 ok; 2 rows land, not 3",
+               got={"violations": fails or "none"})
+
+
 def _stc_copy_posture(db):
     """0.27.0 — the product's WORDS say what the engine does, and narrate nobody's history (plan B of the
     Codex/Luna reviews, log §70). Words, not governors: every tooth here is a string or a file mode; the
@@ -18398,7 +18613,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_cli_no_scheduler(), lambda: _stc_client_ip_trust(),
                  lambda: _stc_csrf_origin_ipv6(),
                  lambda: _stc_chain_drift(), lambda: _stc_goal_moved(),
-                 lambda: _stc_ctl_forecast_bias(), lambda: _stc_multi_a_plan(),
+                 lambda: _stc_ctl_forecast_bias(), lambda: _stc_multi_a_plan(), lambda: _stc_chain_recovery(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),
@@ -18457,7 +18672,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(), lambda: _stc_access_seen(),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_public_view_coverage_all(db), lambda: _stc_runtime_config(),
-                 lambda: _stc_api_validation(db),
+                 lambda: _stc_api_validation(db), lambda: _stc_objective_dedupe(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_checkin_stop(), lambda: _stc_medical_track(db),

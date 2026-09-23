@@ -10,6 +10,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.72.0] - 2026-09-23
+
+### Added
+
+- **A raced chain segment is followed by a recovery block, then — runway allowing — a full second
+  training cycle, not a straight re-build (§CHAIN2).** Verified on the athlete's live two-marathon
+  chain (6 Dec 2026 and 8 May 2027, 22 weeks apart, both A, plan 264): `periodize_chain` went
+  straight from the first race's taper into a 17-week "Bridge" held at an 88 km plateau, with a
+  33.5 km marathon-pace long run repeated for weeks, a 74 km week starting the day after the
+  marathon with VO₂ intervals two days post-race, and a 28 km marathon-pace long run that Sunday.
+  `RACE_RECOVERY_WEEKS` only ever decided a chain race's role (co-equal vs subordinate); nothing
+  laid recovery, and the engine's own §6q note already says the ACWR governor cannot see
+  connective-tissue recovery. Fixed with a reverse-taper `recovery_shape()` keyed on the race just
+  run (`RACE_RECOVERY_SHAPE`: marathon 3 weeks climbing 0.35/0.55/0.70 of the pre-taper peak, half
+  2 weeks, 10k/5k 1 week, easy only, no quality, run count climbing back toward normal) laid by
+  `periodize_chain` after every later race, before either a full re-build
+  Base → Build → Peak → Taper — when at least 8 weeks remain after recovery and taper
+  (`CHAIN_FULL_CYCLE_MIN_WEEKS`) — or the old short Bridge → Peak → Taper where they don't. A
+  recovery week is a deliberate drop exactly like a taper: `_is_taper` now reads it too, so the
+  assertive ride, the progression floor and the forced-deload streak all stand down for it and
+  load-integrity does not flag its short long run. The single-A case and segment 0 of a chain are
+  untouched (byte-identical; 9 of the 10 golden fixtures unchanged). Measured on the live plan
+  after the fix: phases base 7 / build 6 / peak 3 / taper 3 / recovery1 3 / base1 7 / build1 6 /
+  peak1 3 / taper1 3; the three recovery weeks 25.0, 39.1, 50.0 km against a 79.7 km pre-taper
+  peak, all easy, long runs 7.5 / 11.8 / 15.0 km; the first interval session sits 12 Jan 2027, 37
+  days after the first marathon. Known and not changed by this release: the second cycle's own
+  peak still reaches 38.8–39.4 km long runs at 88 km weeks, ridden by the ACWR ceiling at CTL 140+
+  — see PROJECT_LOG §168. New det/periodize-chain limbs for a full-cycle gap and for a subordinate
+  first race not leaking its sizing into the next segment's recovery; new det/chain-recovery,
+  generating a real plan over the two-marathon shape with a revert tooth; det/multi-a-plan's
+  fixture widened to keep its short-bridge case short. Golden `multi-a-chain` re-baked: the
+  half → marathon fixture's 8-week bridge became a 2-week recovery, 4-week base, 3-week build,
+  1-week peak; every other golden is byte-identical.
+
+### Fixed
+
+- **Adding a race could double- and triple-submit, each click costing a full re-plan (§OBJ2).**
+  `POST /api/objectives` runs `replan()`, which is two full plan generations plus a diff; on the
+  NAS's Celeron a two-marathon chain costs 10–20 seconds per click. The Add button never disabled
+  and showed nothing while it waited, the objective routes never took `_plan_lock` (only Generate
+  and the deload answer did), and nothing rejected an exact repeat. On 2026-09-23, 14:27–14:31
+  UTC, twelve clicks inserted twelve identical objectives and 28 plans. A non-ok answer was also
+  rendered as if it were the plan. Fixed: `replan()` now takes `_plan_lock` (all eight callers
+  checked; none re-enters it); `POST /api/objectives` answers 409 "already on the calendar" for an
+  upcoming row with the same date, type and label, case-insensitively; the Add button disables and
+  reads "Planning…" for the request, and the remove/priority/adjudication buttons disable with
+  `aria-busy` on their row; a non-ok answer now shows a notice instead of rendering. New
+  det/objective-dedupe: 409 on the exact repeat, 200 on a different date, and exactly two rows
+  land, not three.
+
 ## [0.71.0] - 2026-09-23
 
 ### Added

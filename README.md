@@ -35,8 +35,10 @@ everything.
   regeneration can be compared with the last. A week regenerated mid-week keeps the days still ahead
   at their own lay: a run over its prescription is not taken back from them, and a missed day is not
   folded into them.
-- **Several A-races in one build.** Chain them into one continuous road with intermediate peaks, tapers
-  and re-build bridges. Each race's role follows from how far apart they are.
+- **Several A-races in one build.** Chain them into one continuous road: an intermediate peak and taper
+  for each earlier race, followed by a recovery block, then either a full second training cycle or a
+  short re-build bridge, depending on how much runway is left before the next taper. Each race's role
+  follows from how far apart they are.
 - **Volume follows measured fitness.** The build rides the load ceiling and calibrates the ride to how
   your measured fitness tracks the projection. Down weeks and the taper are protected. There is nothing
   to switch on.

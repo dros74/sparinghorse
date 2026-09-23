@@ -183,6 +183,9 @@ Objectives have a **priority**:
 - **A** — a goal race. The engine periodizes a full Re-base → Base → Build → Peak → Taper toward it.
 - **B / C** — tune-up races. They appear as *tune-ups* before the peak; they do not get their own build.
 
+Adding the same race twice — the same date, type and name — is refused; edit or remove the existing
+row instead of adding it again.
+
 ### One A-race
 
 The standard case: one continuous build whose **final taper week lands on race day** (the calendar is exact
@@ -209,6 +212,13 @@ taper for the earlier race, a re-build *bridge* back up, then the peak and taper
 
 The **A | B | C** selector and the chain strip in the plan tile let you see and steer this. If you set two
 A-races impossibly close, the engine clamps the phases so they can't overrun a race date.
+
+After an earlier race in the chain, the engine first lays a **recovery block** — easy running only,
+climbing back from a fraction of the pre-taper peak, sized by the race just run (3 weeks for a
+marathon, 2 for a half, 1 for a 10k or 5k). What comes after recovery depends on how much runway is
+left before the next taper: with at least eight weeks free, the engine builds a full second
+Base → Build → Peak cycle toward the next race; with less, it falls back to the old short re-build
+bridge straight into a peak and taper.
 
 ### After the race — the lifecycle
 
@@ -288,7 +298,8 @@ therefore normal on a building week and does not mean a ceiling was broken — t
 published beside it if you want to check.
 
 ### The plan
-A phase bar (Re-base → Base → Build → Peak → Taper, plus any chain bridges) over a "weeks to race day" count.
+A phase bar (Re-base → Base → Build → Peak → Taper, plus any chain recovery, bridge and second-cycle
+phases) over a "weeks to race day" count.
 Tap a phase to open its weeks; tap a week to open its sessions. Each week shows planned km, run count, the
 projected end-of-week ACWR badge, and — once lived — what you actually ran. Watch for:
 

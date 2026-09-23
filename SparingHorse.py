@@ -7139,15 +7139,20 @@ def replan(db, mutate):
     over a half-applied change. Before this the write was committed FIRST: a malformed objective date
     landed, then poisoned every later regeneration (the nightly included — /api/plan kept serving the
     last saved plan while every generate raised) until the row was deleted by hand (Codex review,
-    2026-08-20; det/api-validation drives the raise for real)."""
-    try:
-        base = plan_baseline(db)
-        mutate()
-        out = regenerate(db, baseline=base)
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        return jsonify(ok=False, error=f"change not applied — re-planning failed: {e}"), 500
+    2026-08-20; det/api-validation drives the raise for real).
+
+    §OBJ2 (0.72.0) — serialised under `_plan_lock`, the same lock the Generate button takes: an
+    objective/adjustment write is just as much a full re-plan on the NAS's Celeron, and an unthrottled
+    Add button once fired 28 of them from 12 clicks in 8 minutes."""
+    with _plan_lock:
+        try:
+            base = plan_baseline(db)
+            mutate()
+            out = regenerate(db, baseline=base)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            return jsonify(ok=False, error=f"change not applied — re-planning failed: {e}"), 500
     return jsonify(out)
 
 
@@ -8336,11 +8341,19 @@ def api_objectives_add():
         return jsonify(ok=False, error="date must be YYYY-MM-DD"), 400
     if d.get("priority", "A") not in ("A", "B", "C"):
         return jsonify(ok=False, error="priority must be A, B or C"), 400
+    label = d.get("label", "Race")
     db = get_db()
+    # §OBJ2 — an unthrottled Add button once queued 12 identical clicks before the first re-plan
+    # returned; reject the exact repeat here rather than let it ride a second full regeneration.
+    if db.execute(
+        "SELECT 1 FROM objectives WHERE status='upcoming' AND date=? AND type=? AND lower(label)=lower(?)",
+        (str(d["date"]), d.get("type", "custom"), label),
+    ).fetchone():
+        return jsonify(ok=False, error=f"already on the calendar: {label} on {d['date']}"), 409
     return replan(db, lambda: db.execute(
         "INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
         "VALUES (?,?,?,?,?,?,?)",
-        (d.get("type", "custom"), d.get("label", "Race"), str(d["date"]),
+        (d.get("type", "custom"), label, str(d["date"]),
          d.get("target", "finish"), d.get("priority", "A"), "upcoming", _now_iso()),
     ))
 

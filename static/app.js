@@ -907,7 +907,7 @@ function statusCard(a, foot){
 const PHASE_NAMES={rebase:"Re-base",base:"Base",build:"Build",peak:"Peak",taper:"Taper",race:"Race week",maintenance:"Maintenance"};
 function whyLine(s){
   if(!s) return `<div class="whyline"><b>Why nothing:</b> no plan covers today — add a race in the Objectives panel and generate a plan.</div>`;
-  const pk=String(s.pk||""), phase=PHASE_NAMES[pk] || (pk.startsWith("bridge")?"Bridge":pk.startsWith("peak")?"Peak":pk.startsWith("taper")?"Taper":pk?pk:"");
+  const pk=String(s.pk||""), phase=PHASE_NAMES[pk] || (pk.startsWith("bridge")?"Bridge":pk.startsWith("peak")?"Peak":pk.startsWith("taper")?"Taper":pk.startsWith("recovery")?"Recovery":pk.startsWith("base")?"Base":pk.startsWith("build")?"Build":pk?pk:"");  // §CHAIN2 — chain-segment recovery/base/build keys (recovery1, base1, build1…) fall to their phase name too
   const where = phase ? `${phase}${s.week?`, week ${esc(String(s.week))}`:""}` : "";
   const what = s.kind==="rest" ? "a rest day" : `${esc(String(s.kind||"run").replace(/_/g," "))}${s.km?` · ${esc(String(U.d(s.km)))} ${U.unit}`:""}${s.pace_zone?` at ${esc(U.t(String(s.pace_zone)))}`:""}`;
   const comp = s.component && COMPT[s.component] ? COMPT[s.component].split(/(?<=\.)\s/)[0] : (s.kind==="rest" ? "Recovery is part of the plan — adaptation happens between the sessions." : "");
@@ -1389,9 +1389,16 @@ function renderAdjudicate(d){
     <div class="exfoot">Claude advises; the engine periodizes from the priorities you keep.</div>
   </div>`;
   host.querySelectorAll(".applyrec").forEach(b=>b.addEventListener("click", async ()=>{
-    const r=await fetch(`/api/objectives/${b.dataset.id}/priority`,{method:"POST",
-      headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:b.dataset.pri})});
-    const p=await r.json(); LASTDIFF=p.diff; await refreshPlan(p);
+    if(b.disabled) return;   // §OBJ2
+    const row=b.closest(".obj");   // the adjudication list isn't .obj rows — no-op when absent
+    b.disabled=true; if(row) row.setAttribute("aria-busy","true");
+    try{
+      const r=await fetch(`/api/objectives/${b.dataset.id}/priority`,{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:b.dataset.pri})});
+      const p=await r.json();
+      if(!p.ok){ await notice({title:"Could not set priority", intro:p.error||"unknown", tone:"danger"}); return; }
+      LASTDIFF=p.diff; await refreshPlan(p);
+    } finally{ b.disabled=false; if(row) row.removeAttribute("aria-busy"); }
   }));
 }
 function wireObjActions(){
@@ -1424,11 +1431,17 @@ function wireObjActions(){
   });
   const add=$("#ao_add");
   if(add) add.addEventListener("click", async ()=>{
+    if(add.disabled) return;   // §OBJ2 — a second click while a re-plan is in flight is a no-op
     const body={label:$("#ao_label").value||"Race", type:$("#ao_type").value,
       date:$("#ao_date").value, priority:$("#ao_pri").value, target:$("#ao_target").value||"finish"};
     if(!body.date){ await notice({title:"Pick a date", intro:"A race needs a day before it can be planned for."}); return; }
-    const r=await fetch("/api/objectives",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    const p=await r.json(); LASTDIFF=p.diff; await refreshPlan(p);
+    const t=add.textContent; add.disabled=true; add.textContent="Planning…";
+    try{
+      const r=await fetch("/api/objectives",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      const p=await r.json();
+      if(!p.ok){ await notice({title:"Could not add the race", intro:p.error||"unknown", tone:"danger"}); return; }
+      LASTDIFF=p.diff; await refreshPlan(p);
+    } finally{ add.disabled=false; add.textContent=t; }
   });
   // §GM — move a race to a new day. This is an EDIT, not add-then-remove: the objective keeps its
   // row (and with it its id, its history and, once run, its result), and the banked plans keep
@@ -1447,17 +1460,28 @@ function wireObjActions(){
     });
   });
   document.querySelectorAll(".obj .x").forEach(btn=>btn.addEventListener("click", async ()=>{
-    const r=await fetch(`/api/objectives/${btn.dataset.oid}/remove`,{method:"POST"});
-    const p=await r.json(); LASTDIFF=p.diff; await refreshPlan(p);
+    if(btn.disabled) return;   // §OBJ2
+    const row=btn.closest(".obj");
+    btn.disabled=true; if(row) row.setAttribute("aria-busy","true");
+    try{
+      const r=await fetch(`/api/objectives/${btn.dataset.oid}/remove`,{method:"POST"});
+      const p=await r.json();
+      if(!p.ok){ await notice({title:"Could not remove the race", intro:p.error||"unknown", tone:"danger"}); return; }
+      LASTDIFF=p.diff; await refreshPlan(p);
+    } finally{ btn.disabled=false; if(row) row.removeAttribute("aria-busy"); }
   }));
   // inline A|B|C priority selector — set a priority and re-periodize (no-op if already that letter)
   document.querySelectorAll(".obj .prseg").forEach(b=>b.addEventListener("click", async ()=>{
-    if(b.classList.contains("on")) return;
-    const r=await fetch(`/api/objectives/${b.dataset.oid}/priority`,{method:"POST",
-      headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:b.dataset.pri})});
-    const p=await r.json();
-    if(!p.ok){ await notice({title:"Could not set priority", intro:p.error||"unknown", tone:"danger"}); return; }
-    LASTDIFF=p.diff; await refreshPlan(p);
+    if(b.classList.contains("on") || b.disabled) return;   // §OBJ2
+    const row=b.closest(".obj");
+    b.disabled=true; if(row) row.setAttribute("aria-busy","true");
+    try{
+      const r=await fetch(`/api/objectives/${b.dataset.oid}/priority`,{method:"POST",
+        headers:{"Content-Type":"application/json"},body:JSON.stringify({priority:b.dataset.pri})});
+      const p=await r.json();
+      if(!p.ok){ await notice({title:"Could not set priority", intro:p.error||"unknown", tone:"danger"}); return; }
+      LASTDIFF=p.diff; await refreshPlan(p);
+    } finally{ b.disabled=false; if(row) row.removeAttribute("aria-busy"); }
   }));
 }
 // ── Qualitative adjustment (§6c) — LLM proposes, engine clamps ───────────────

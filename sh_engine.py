@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.71.0"
+ENGINE_VERSION = "0.72.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -778,10 +778,14 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
     """§6q — reverse-periodize the whole A-race CHAIN into a flat phase list. Each phase carries a
     unique `key` (what generate_plan stores its block under + the UI selects), a `kind` (which shaper
     builds it), and the `race`/`role` it serves. Segment 0 is the full Re-base→Base→Build→Peak→Taper
-    toward the first race; each later race adds a re-build BRIDGE→Peak→Taper off the prior race. A
-    subordinate race gets peak=0 + a 1-week sharpen instead of a full peak. Returns (phases,
-    total_weeks). For a single goal race this REDUCES to periodize() (same kinds + same week counts;
-    the Peak/Taper names just gain the race label). `chain` is select_chain()'s first return.
+    toward the first race; each later race first adds a §CHAIN2 RECOVERY off the prior race (easy
+    only, `_recovery_shape_for` keyed on the race just run), then — runway allowing
+    (`CHAIN_FULL_CYCLE_MIN_WEEKS`) — a full re-build Base→Build→Peak→Taper, or else the old short
+    Bridge→Peak→Taper. A subordinate race gets peak=0 + a 1-week sharpen instead of a full peak (this
+    governs THIS race's own segment; the recovery laid after it, for the NEXT segment, is unaffected —
+    it depends only on the race's TYPE). Returns (phases, total_weeks). For a single goal race this
+    REDUCES to periodize() (same kinds + same week counts; the Peak/Taper names just gain the race
+    label). `chain` is select_chain()'s first return.
 
     When `block_start` (a date) is given, each segment's week count is anchored to that Monday grid and
     is INCLUSIVE of the race's own week (`_plan_span` / cumulative deltas), so the plan laid contiguously
@@ -821,19 +825,45 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
     for k in range(1, len(chain)):
         rk, prev = chain[k], chain[k - 1]
         lblk, rolek = rk.get("label", "race"), rk["role"]
+        prevlbl, prevtype = prev.get("label", "race"), prev.get("type")
         fullk = _full_peak(rolek)
         totalk = max(0, cum(rk["date"]) - cum(prev["date"])) if cum else weeks_until(rk["date"], _date(prev["date"]))
         taperk = _seg_taper(totalk, fullk)        # clamped ≤ totalk → segment never overruns the race
-        remk = max(0, totalk - taperk)
-        peakk = min(2, remk) if fullk else 0      # short inter-race sharpen; fitness is held, no new base
-        bridgek = max(0, remk - peakk)            # taperk + peakk + bridgek == totalk (no calendar drift)
-        phases += [
-            {"phase": f"Bridge → {lblk}", "weeks": bridgek, "kind": "bridge", "key": f"bridge{k}", "race": lblk, "role": rolek},
-            {"phase": f"Peak → {lblk}", "weeks": peakk, "kind": "peak", "key": f"peak{k}", "race": lblk, "role": rolek},
-            {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek,
-             "type": rk.get("type"), "date": rk.get("date")},   # §TT/§RACE — per-segment: each
-             # taper sharpens at ITS race's pace, and lays ITS race on ITS day
-        ]
+        # §CHAIN2 — the recovery off the PRIOR race comes first, sized (and capped) by that race's own
+        # type, never by rolek/fullk (a subordinate race still did the damage it did). What's left after
+        # recovery + this segment's taper either supports a full second cycle or falls back to the old
+        # short bridge.
+        recovk = min(len(_recovery_shape_for(prevtype)), max(0, totalk - taperk))
+        remk = max(0, totalk - taperk - recovk)
+        recovery_ph = {"phase": f"Recovery — after {prevlbl}", "weeks": recovk, "kind": "recovery",
+                       "key": f"recovery{k}", "race": lblk, "role": rolek,
+                       "after": prevlbl, "after_type": prevtype}
+        if fullk and remk >= CHAIN_FULL_CYCLE_MIN_WEEKS:
+            # §CHAIN2 — enough runway left after recovery + taper for a real second cycle: the same
+            # base/build/peak split seg0_split uses, minus the rebase (only segment 0 re-bases).
+            basek = round(remk * 0.45)
+            buildk = round(remk * 0.40)
+            peakk = remk - basek - buildk
+            phases += [
+                recovery_ph,
+                {"phase": f"Base → {lblk}", "weeks": basek, "kind": "base", "key": f"base{k}", "race": lblk, "role": rolek},
+                {"phase": f"Build → {lblk}", "weeks": buildk, "kind": "build", "key": f"build{k}", "race": lblk, "role": rolek},
+                {"phase": f"Peak → {lblk}", "weeks": peakk, "kind": "peak", "key": f"peak{k}", "race": lblk, "role": rolek},
+                {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek,
+                 "type": rk.get("type"), "date": rk.get("date")},   # §TT/§RACE — per-segment: each
+                 # taper sharpens at ITS race's pace, and lays ITS race on ITS day
+            ]
+        else:
+            peakk = min(2, remk) if fullk else 0      # short inter-race sharpen; fitness is held, no new base
+            bridgek = max(0, remk - peakk)            # recovk + bridgek + peakk + taperk == totalk (no calendar drift)
+            phases += [
+                recovery_ph,
+                {"phase": f"Bridge → {lblk}", "weeks": bridgek, "kind": "bridge", "key": f"bridge{k}", "race": lblk, "role": rolek},
+                {"phase": f"Peak → {lblk}", "weeks": peakk, "kind": "peak", "key": f"peak{k}", "race": lblk, "role": rolek},
+                {"phase": f"Taper → {lblk}", "weeks": taperk, "kind": "taper", "key": f"taper{k}", "race": lblk, "role": rolek,
+                 "type": rk.get("type"), "date": rk.get("date")},   # §TT/§RACE — per-segment: each
+                 # taper sharpens at ITS race's pace, and lays ITS race on ITS day
+            ]
     return [p for p in phases if p["weeks"] > 0], weeks_until(chain[-1]["date"], today)
 
 
@@ -1891,6 +1921,35 @@ def taper_shape(n_weeks, start_km, runs=BASE_RUNS, race_zone="threshold"):
                       "phase": "taper", "role": "race" if race_week else "taper",   # §P1
                       "intent": "Race week — freshen up, stay loose" if race_week
                       else "Taper — drop volume, keep sharpness"})
+    return shape
+
+
+def recovery_shape(n_weeks, peak_km, race_type, runs=BASE_RUNS):
+    """§CHAIN2 — the reverse-taper laid right after a chain race, before the next block's Base picks
+    up: easy only, no structured quality, climbing back from a fraction of the PRE-TAPER peak (never
+    the taper's own shrunk volume — a marathon's connective-tissue damage is invisible to ACWR, the
+    same gap the §6q note above names, so nothing else in the ride would slow for it). A recovery week
+    is a deliberate drop exactly like a taper week: `_is_taper` reads it too, so the assertive ride
+    never lifts it back toward the ceiling (see `_is_taper`'s docstring for the full list of what else
+    stands down for it). `peak_km` is the caller's job to supply as the PRE-taper number — see
+    `generate_plan`'s `pre_taper_km` tracking.
+
+    Fractions + run counts both climb from `_recovery_shape_for(race_type)`, keyed on the race just
+    run (a marathon needs longer and gentler than a 10k): the LAST entry of the tuple is nearest a
+    normal build week's run count, the first is furthest from it. `n_weeks` beyond the tuple's own
+    length repeats its last (highest) fraction rather than inventing a further climb."""
+    frac_tuple = _recovery_shape_for(race_type)
+    n_frac = len(frac_tuple)
+    shape = []
+    for i in range(n_weeks):
+        wk = i + 1
+        frac = frac_tuple[min(i, n_frac - 1)]
+        km = max(1, round(peak_km * frac))
+        runs_i = max(3, runs - (n_frac - 1 - i))
+        shape.append({"wk": wk, "km": km, "runs": runs_i,
+                      "long": round(km * RECOVERY_LONG_FRAC), "strides": 0, "quality": [],
+                      "phase": "recovery", "role": "recovery",
+                      "intent": "Recovery — easy only, absorbing the race before the next block"})
     return shape
 
 
@@ -3016,7 +3075,8 @@ def _week_role(w):
 
 
 def _week_phase(w):
-    """§P1 — a week's PHASE (rebase/base/build/peak/taper), read from the field the shapers stamp.
+    """§P1 — a week's PHASE (rebase/base/build/peak/taper/recovery — §CHAIN2 added the last), read
+    from the field the shapers stamp.
     Falls back to the "Peak"-prefix sniff the §PRO6 deload exemption used before the field existed,
     so a plan JSON saved before §P1 still exempts its peak weeks."""
     if isinstance(w, dict):
@@ -3045,9 +3105,13 @@ def _is_down(w):
 
 
 def _is_taper(w):
-    """A taper or race week — deliberately low-volume by design. Its short long run is the plan
-    working, not a fatigue cap, so the load-integrity honesty pass must NOT relabel/flag it."""
-    return _week_role(w) in ("taper", "race")
+    """§CHAIN2 — a taper, race, OR RECOVERY week: each is a deliberate drop by design, not a fatigue
+    cap. The assertive ride keeps `min(intent, ceiling)` rather than riding it up; the progression
+    floor and the forced-deload streak both skip it (a recovery week resets `consec_hard` the same
+    way a taper does — it's the recovery, not a near-ceiling week to count against the next one); and
+    the load-integrity honesty pass must NOT relabel/flag its short long run — that's the plan
+    working, not a cap."""
+    return _week_role(w) in ("taper", "race", "recovery")
 
 
 def _run_logged_on(db, day):
@@ -6027,6 +6091,25 @@ def _prior_road_anchor(db, stored):
 RACE_RECOVERY_WEEKS = {"5k": 3, "10k": 3, "half": 4, "marathon": 6, "custom": 4}
 RACE_RECOVERY_DEFAULT = 4
 
+# §CHAIN2 — RACE_RECOVERY_WEEKS above decides a chain race's ROLE (co-equal vs subordinate); it was
+# never used to LAY recovery, so a chained plan went straight from the marathon's own taper into a
+# 17-week bridge built by `build_shape` off the race's realised km — the day-after-the-marathon week
+# read like a normal build week (VO₂ intervals two days post-race, a 28 km long_mp that Sunday). A
+# marathon's connective-tissue damage is invisible to ACWR (see the §6q note above: "the ACWR governor
+# can't see connective-tissue recovery"), so nothing in the ride ever slowed for it. RACE_RECOVERY_SHAPE
+# below is what actually gets laid: easy-only weeks climbing back from a fraction of the PRE-TAPER peak
+# (a reverse taper), keyed on the race just RUN, not the race ahead.
+RACE_RECOVERY_SHAPE = {"marathon": (0.35, 0.55, 0.70), "half": (0.45, 0.70), "10k": (0.60,), "5k": (0.60,), "custom": (0.45, 0.70)}
+#   the weeks right after a raced chain race: easy only, weekly km as a fraction of the PRE-TAPER peak, climbing back (a reverse taper); keyed on the race just run
+RECOVERY_LONG_FRAC = 0.30        # the recovery long run as a share of that week
+CHAIN_FULL_CYCLE_MIN_WEEKS = 8   # base+build+peak weeks left after recovery and taper: at least this many → a full second cycle; fewer → the short bridge
+
+
+def _recovery_shape_for(race_type):
+    """§CHAIN2 — the reverse-taper fraction tuple for the race just run; unknown/missing types fall
+    back to `custom`'s (same fallback shape RACE_RECOVERY_WEEKS uses via `_recovery_weeks`)."""
+    return RACE_RECOVERY_SHAPE.get((race_type or "").lower(), RACE_RECOVERY_SHAPE["custom"])
+
 
 def _fmt_hms(seconds):
     """Seconds → 'H:MM:SS' (drop the hour when 0).
@@ -6600,10 +6683,16 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         # taper as pure detraining and hid the build's payoff. This is what feasibility/finish-time use.
         peak_ctl = rb["end_ctl"]
         race_proj = {}   # §6q — projected end-CTL at each race (end of its taper), for the surfaces
+        pre_taper_km = cur_km   # §CHAIN2 — the last building/peak block's chained volume, held across
+        #                          a taper (and then a recovery) so recovery_shape's fractions key off
+        #                          the PRE-taper peak, never the taper's own shrunk cur_km
         for ph in phases:
             kind, key, n_wk = ph["kind"], ph["key"], ph["weeks"]
             if kind == "rebase" or n_wk <= 0:
                 continue   # the re-base block is already generated above as `rb`
+            if kind not in ("taper", "recovery"):
+                pre_taper_km = cur_km   # §CHAIN2 — refreshed on every building/peak/bridge phase;
+                #                          left untouched through a taper and the recovery after it
             # §T2 — the Davis component periodization rides the ASSERTIVE regime only (earned, like
             # every other assertive lever); caution keeps the legacy shapes byte-identical. Taper is
             # regime-agnostic (freshening is freshening).
@@ -6616,6 +6705,9 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
             sh = (SHAPERS[kind](n_wk, cur_km,
                                 race_zone=("marathon" if (ph.get("type") or "").lower() == "marathon"
                                            else "threshold")) if kind == "taper"
+                  # §CHAIN2 — recovery isn't in SHAPERS: it's laid off the PRE-taper peak, not cur_km
+                  # (which the taper just shrank), and keyed on the race just run, not the race ahead.
+                  else recovery_shape(n_wk, pre_taper_km, ph.get("after_type")) if kind == "recovery"
                   else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive")))
             # §C (0.59.0) — "this deload isn't owed". The shape has laid its positional down weeks;
             # the governor judges the ONE that contains today (its block has fully elapsed, so
