@@ -38,7 +38,8 @@ everything.
 - **Several A-races in one build.** Chain them into one continuous road: an intermediate peak and taper
   for each earlier race, followed by a recovery block, then either a full second training cycle or a
   short re-build bridge, depending on how much runway is left before the next taper. Each race's role
-  follows from how far apart they are.
+  follows from how far apart they are, each race carries its own projected finish, and the console can
+  be switched between them.
 - **Volume follows measured fitness.** The build rides the load ceiling and calibrates the ride to how
   your measured fitness tracks the projection. Down weeks and the taper are protected. There is nothing
   to switch on.

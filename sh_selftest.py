@@ -8406,6 +8406,211 @@ def _stc_chain_recovery():
                got={"violations": fails or "none"})
 
 
+def _stc_chain_finish_time():
+    """§CHAIN3 — generate_plan over the same two-marathon chain det/chain-recovery uses (First
+    Marathon 12wk out, Second Marathon 34wk out — a real 22wk-apart co-equal pair, not a tune-up).
+    With more than one race in the chain, EVERY leg now carries its OWN finish-time band (not just
+    the plan's headline/final race): `finish_time.seconds`/`hms`, a band that actually brackets the
+    median, and `weeks_away` matching `weeks_until(date, today)` — the numbers the UI's race
+    selector reads for a leg that isn't the headline. The two races' own medians differ (each reads
+    its own runway/projected fitness, not a shared number copy-pasted onto both). A SINGLE-A build
+    carries none of this at all — `finish_time`/`weeks_away` only exist where there's a race to pick
+    BETWEEN (chain[0] on a one-race chain has neither key).
+
+    Revert tooth: with `_project_finish_time` (the engine call every finish-time band is built from)
+    disabled, no chain entry can carry a real finish_time — confirming the per-leg checks above
+    actually exercise real numbers rather than passing on absent/None fields by accident."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    today = S.datetime.now().date()
+
+    def seed(m):
+        m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                  (today.isoformat(), 50.0, 30.0, 28.0))
+
+    def add(m, label, wks, typ):
+        m.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                  (typ, label, (today + S.timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming", S._now_iso()))
+
+    seed(mem)
+    add(mem, "First Marathon", 12, "marathon")     # 22wk gap → co-equal, both full marathons — the
+    add(mem, "Second Marathon", 34, "marathon")    # same fixture det/chain-recovery already banks
+    mem.commit()
+    fails = []
+
+    def _check_chain(p, label):
+        f = []
+        if not p.get("ok") or p.get("mode") != "race":
+            f.append(f"{label}: plan not ok/race: ok={p.get('ok')} mode={p.get('mode')} err={p.get('error')}")
+            return f, []
+        chain = p.get("chain") or []
+        medians = []
+        for c in chain:
+            ft = c.get("finish_time")
+            if not ft or not ft.get("seconds"):
+                f.append(f"{label}: {c.get('label')} carries no finish_time.seconds: {ft}")
+                continue
+            medians.append(ft["seconds"])
+            if not ft.get("hms"):
+                f.append(f"{label}: {c.get('label')} finish_time missing hms: {ft}")
+            band = ft.get("band") or {}
+            lo, hi = band.get("lo_seconds"), band.get("hi_seconds")
+            if not (lo is not None and hi is not None and lo < ft["seconds"] < hi):
+                f.append(f"{label}: {c.get('label')} band {lo}–{hi} doesn't bracket median {ft['seconds']}")
+            want_wa = S.weeks_until(c["date"], today)
+            if c.get("weeks_away") != want_wa:
+                f.append(f"{label}: {c.get('label')} weeks_away {c.get('weeks_away')} != "
+                         f"weeks_until {want_wa}")
+        return f, medians
+
+    p = S.generate_plan(mem, force_regime="assertive")
+    f, medians = _check_chain(p, "fixed")
+    fails += f
+    if len(medians) == 2 and medians[0] == medians[1]:
+        fails.append(f"both races' finish-time medians are identical ({medians[0]}) — each leg should "
+                     f"read its OWN runway/projected fitness, not a shared number")
+
+    # — single-A control: the ONLY chain entry carries neither key at all (not None — ABSENT) —
+    mem1 = _sq.connect(":memory:"); mem1.row_factory = _sq.Row
+    mem1.executescript(S.SCHEMA)
+    seed(mem1)
+    add(mem1, "Only Marathon", 16, "marathon")
+    mem1.commit()
+    p1 = S.generate_plan(mem1, force_regime="assertive")
+    c0 = (p1.get("chain") or [{}])[0]
+    if "finish_time" in c0 or "weeks_away" in c0:
+        fails.append(f"single-A chain[0] carries finish_time/weeks_away it shouldn't: {c0}")
+    mem1.close()
+
+    # Revert tooth — disable the engine call every finish-time band is built from
+    # (`_project_finish_time`, sh_engine.py) and confirm the per-leg check above actually trips.
+    orig_pft = E._project_finish_time
+    E._project_finish_time = lambda *a, **kw: None
+    try:
+        pb = S.generate_plan(mem, force_regime="assertive")
+        fb, _ = _check_chain(pb, "broken")
+        if not fb:
+            fails.append("revert tooth did not trip: chain entries still carried a real finish_time "
+                         "with _project_finish_time disabled — this det proves nothing")
+    finally:
+        E._project_finish_time = orig_pft
+    mem.close()
+    return _st("det", "chain-finish-time",
+               "§CHAIN3 — every leg of a 2-race chain carries its own finish-time band (seconds/hms, "
+               "a band bracketing the median, weeks_away matching weeks_until) with differing medians "
+               "between the two races; a single-A chain's only entry carries neither key; a disabled "
+               "finish-time engine demonstrably drops it from every leg",
+               passed=not fails,
+               expect="finish_time+weeks_away per leg (multi-A), absent (single-A), revert tooth trips",
+               got={"violations": fails or "none"})
+
+
+def _stc_plandrift_race():
+    """§CHAIN3 — `GET /api/plandrift?race=<date>` lets the athlete look at ANY leg of a multi-A
+    chain, not just the plan's own headline (final) race. Fixture: the same two-marathon chain
+    det/chain-recovery and det/chain-finish-time bank, generated for real and saved through
+    `S.save_plan` exactly like a live regen — so `plan['objective']` is the SECOND race (the
+    headline) while `plan['chain']` holds both, the shape every multi-A plan actually has.
+
+    `?race=<first race's date>` must describe the FIRST race in the `race` field and pull its own
+    numbers into the outcome/§FT4-ledger series (via `_plan_goal_view`) even though the plan's own
+    `objective` is the SECOND race — the exact case `_plan_goal_view`'s chain-entry branch exists
+    for. No `race` param, or an unknown date, both fall back to the headline with no error — a
+    stale/foreign selection never breaks the view.
+
+    Runs through `S.app.test_client()` (det/api-validation's pattern) against an isolated in-memory
+    DB via a rebound `get_db` (the plandrift no-plan probe's own pattern in this file) — nothing
+    touches the battery's shared DB.
+
+    Revert tooth: with `_plan_goal_view` disabled (always None, as if §CHAIN3 never taught the
+    outcome/ledger series to read a chain leg), the selected race's own series contribution
+    disappears — confirming the point-match check below is not vacuously true."""
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    today = S.datetime.now().date()
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (today.isoformat(), 50.0, 30.0, 28.0))
+
+    def add(label, wks, typ):
+        mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (typ, label, (today + S.timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming", S._now_iso()))
+    add("First Marathon", 12, "marathon")
+    add("Second Marathon", 34, "marathon")
+    mem.commit()
+    fails = []
+
+    p = S.generate_plan(mem, force_regime="assertive")
+    if not p.get("ok") or p.get("mode") != "race" or len(p.get("chain") or []) != 2:
+        fails.append(f"fixture plan not a 2-race chain: ok={p.get('ok')} mode={p.get('mode')} "
+                     f"chain={len(p.get('chain') or [])}")
+        return _st("det", "plandrift-race", "§CHAIN3 GET /api/plandrift?race=<date>",
+                   passed=False, expect="fixture generates a 2-race chain", got=fails)
+    S.save_plan(mem, p)
+    first, second = p["chain"][0], p["chain"][1]
+    if p.get("objective", {}).get("label") != second["label"]:
+        fails.append(f"fixture's own objective isn't the second race: {p.get('objective')}")
+
+    def _contributes(d, race):
+        """A series point that could only have come from THIS race's own numbers."""
+        ft = race.get("finish_time") or {}
+        oc_hit = any(pt.get("ctl") == race.get("proj_ctl") for pt in (d.get("outcome") or []))
+        fd_hit = any(pt.get("p50") == ft.get("seconds") for pt in (d.get("finish_drift") or []))
+        return oc_hit or fd_hit
+
+    undo = _patch_globals(get_db=(lambda: mem))
+    try:
+        c = S.app.test_client()
+        d1 = (c.get(f"/api/plandrift?race={first['date']}").get_json() or {})
+        d2 = (c.get("/api/plandrift").get_json() or {})
+        d3 = (c.get("/api/plandrift?race=1999-01-01").get_json() or {})
+    finally:
+        undo()
+
+    if not d1.get("ok"):
+        fails.append(f"?race={first['date']} answered not-ok: {d1.get('error')}")
+    elif d1.get("race", {}).get("label") != first["label"]:
+        fails.append(f"?race={first['date']} answered race={d1.get('race')}, want {first['label']}")
+    elif not _contributes(d1, first):
+        fails.append(f"?race={first['date']}: no outcome/finish_drift point carries {first['label']}'s "
+                     f"own numbers (proj_ctl={first.get('proj_ctl')}, "
+                     f"finish_seconds={(first.get('finish_time') or {}).get('seconds')}) — "
+                     f"outcome={d1.get('outcome')} finish_drift={d1.get('finish_drift')}")
+    if not d2.get("ok") or d2.get("race", {}).get("label") != second["label"]:
+        fails.append(f"no ?race= answered {d2.get('race')}, want the headline {second['label']}")
+    if not d3.get("ok"):
+        fails.append(f"an unknown ?race= errored instead of falling back: {d3.get('error')}")
+    elif d3.get("race", {}).get("label") != second["label"]:
+        fails.append(f"an unknown ?race= answered {d3.get('race')}, want the headline {second['label']}")
+
+    # Revert tooth — disable `_plan_goal_view` (always None) and confirm the selected race's own
+    # series contribution disappears.
+    orig_pgv = S._plan_goal_view
+    S._plan_goal_view = lambda pl, goal: None
+    try:
+        undo = _patch_globals(get_db=(lambda: mem))
+        try:
+            c = S.app.test_client()
+            db1 = (c.get(f"/api/plandrift?race={first['date']}").get_json() or {})
+        finally:
+            undo()
+        if db1.get("ok") and _contributes(db1, first):
+            fails.append("revert tooth did not trip: the first race's own numbers still showed up "
+                         "with _plan_goal_view disabled — this det proves nothing")
+    finally:
+        S._plan_goal_view = orig_pgv
+    mem.close()
+    return _st("det", "plandrift-race",
+               "§CHAIN3 GET /api/plandrift?race=<date> answers with that race's own headline and "
+               "pulls its own numbers into the outcome/§FT4-ledger series even when the plan's own "
+               "objective is a LATER race in the chain; no race= or an unknown date both fall back "
+               "to the headline with no error",
+               passed=not fails,
+               expect="race field + series describe the SELECTED race; unknown/absent → headline; revert tooth trips",
+               got={"violations": fails or "none"})
+
+
 def _stc_latest_running():
     """latest_running_activity — the tile filters to RUNNING-family (trail/treadmill count) and notes a
     non-run only when it's the most-recent activity. Pure/in-memory."""
@@ -18614,6 +18819,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_csrf_origin_ipv6(),
                  lambda: _stc_chain_drift(), lambda: _stc_goal_moved(),
                  lambda: _stc_ctl_forecast_bias(), lambda: _stc_multi_a_plan(), lambda: _stc_chain_recovery(),
+                 lambda: _stc_chain_finish_time(), lambda: _stc_plandrift_race(),
                  lambda: _stc_latest_running(), lambda: _stc_run_family(),
                  lambda: _stc_lthr(), lambda: _stc_lthr_manual(), lambda: _stc_zones(),
                  lambda: _stc_hr_zones(), lambda: _stc_pace_hr_coherence(),

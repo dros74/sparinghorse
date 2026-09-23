@@ -220,6 +220,11 @@ left before the next taper: with at least eight weeks free, the engine builds a 
 Base → Build → Peak cycle toward the next race; with less, it falls back to the old short re-build
 bridge straight into a peak and taper.
 
+The chain strip lists each race with its own projected finish. Click a race to read the plan
+header, the projected finish and the drift view for it instead of the headline race — the choice
+is remembered in your browser and carries across visits, until the chain changes and it no longer
+names a race that's still in it.
+
 ### After the race — the lifecycle
 
 Once a race date passes, the engine settles it on the next re-plan (or the next look at the
@@ -370,7 +375,8 @@ A-race omits the strip; the headline verdict already covers it.)
 *The road vs. the road as it stands.* Five charts (distance, effort/TRIMP, CTL, race-outcome, and the
 **prediction ledger**) compare your **founding road** (the first plan saved for this goal) to where it
 stands now, plus a one-line verdict on three axes: **volume**, **fitness**, and the **race-day
-projection**.
+projection**. On a chain, this view follows whichever race is selected in the chain strip, not always
+the headline.
 
 - The **prediction ledger** plots every finish prediction the engine has ever made for this goal —
   median plus the 80 % envelope — against the day it was made. Steps in the line are model upgrades or

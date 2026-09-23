@@ -1252,6 +1252,12 @@ let AI={narration:true,parsing:true,judgment:false};   // 0.56.0 §S5 — the sw
 let OBJECTIVES=[], LASTDIFF=null, LLM_OK=false, LOG=null, RDY=null,
     ZONESD=null;   // §W1 — current training_zones payload (rides /api/readiness + /api/zones); null on public
 let TOKEN_OK=false, HAS_SHAPE=false;   // first-run signals (from /healthz + /api/shape)
+let LAST_PLAN=null;   // §CHAIN3 — the last /api/plan payload, so a race-selector click can re-render
+                      // the header locally instead of re-fetching the plan
+let RACE_SEL = (()=>{ try{ return localStorage.getItem("sh.raceSel"); }catch(e){ return null; } })();
+// (§CHAIN3 — a date, or null for the headline. Validity against the CURRENT plan's own chain is
+// checked at render time (renderPlan), never here: a selection from a since-regenerated plan whose
+// chain moved on must fall back to the headline, not dangle.)
 const _frSeen={tok:false, shape:false, obj:false};   // gate the card until all 3 report once
 // First-run guided setup: walks a brand-new instance from nothing to a first plan. Three
 // signals decide the active step — token connected, history pulled, a race added — and the
@@ -1874,6 +1880,7 @@ function renderPlan(p){
   if(!p){ host.innerHTML=`<div class="empty">${SH_READONLY
       ? "No plan published yet."
       : `No plan yet — hit <b>Generate plan</b>.`}</div>`; return; }
+  LAST_PLAN=p;   // §CHAIN3 — the race selector re-renders off this without re-fetching /api/plan
   const o=p.objective, rb=p.rebase;
   // A-race pill bar at the top of the page (mockup Almanac) — driven by the plan's objective
   const ob=$("#objbar");
@@ -1966,26 +1973,48 @@ function renderPlan(p){
   const verdTone = v => v==="too soon" ? "warn" : (v==="finish"||v==="maintain") ? "ok" : "muted";
   const roleName = r => r==="goal" ? "Goal" : r==="coequal" ? "Co-equal" : r==="subordinate" ? "Tune-up" : (r||"");
   const chainRaces = p.chain||[];
+  // §CHAIN3 — which race the athlete is LOOKING AT. RACE_SEL (persisted) names a chain leg by date;
+  // it's only ever honoured when it still names an entry of THIS plan's own chain (a stale selection
+  // from a since-regenerated plan just falls back to the headline — no dangling reference). "Not the
+  // headline" = a leg other than the plan's own objective (the final race); selecting the headline
+  // itself, or nothing, leaves every downstream read exactly as it was pre-§CHAIN3.
+  const selRace = chainRaces.find(c=>c.date===RACE_SEL) || null;
+  const selOverride = !!(selRace && !(o && selRace.date===o.date));
   const chainStrip = chainRaces.length>1
     ? `<div class="chainstrip">
-        <div class="legend" style="margin-bottom:5px">Race chain — projected fitness &amp; verdict at each A-race${qhint("Each A-race in the build, with the chronic load (CTL — your fitness) the engine projects you'll carry into it at the end of that race's taper, and whether that supports a healthy finish on its runway. Re-read every block as real fitness returns.")}</div>
+        <div class="legend" style="margin-bottom:5px">Race chain — projected fitness &amp; verdict at each A-race${qhint("Each A-race in the build, with the chronic load (CTL — your fitness) the engine projects you'll carry into it at the end of that race's taper, and whether that supports a healthy finish on its runway. Re-read every block as real fitness returns. Tap a race to view its own headline and drift below.")}</div>
         ${chainRaces.map(c=>{
           const ctl = (c.proj_ctl!=null) ? `CTL ≈ ${Math.round(c.proj_ctl)}` : "—";
           const v = c.feasibility;
-          return `<div class="chainrace">
+          const ft = c.finish_time;
+          const ftTxt = ft ? (ft.band ? `${esc(ft.band.lo_hms)}–${esc(ft.band.hi_hms)}` : esc(ft.hms)) : "";
+          const on = selRace ? selRace.date===c.date : !!(o && c.date===o.date);   // CI axe: never "null" — the headline reads pressed by default
+          return `<div class="chainrace${on?' on':''}" role="button" tabindex="0" aria-pressed="${on?'true':'false'}" data-race="${esc(c.date)}">
             <span class="crole">${esc(roleName(c.role))}</span>
             <span class="cname">${esc(c.label)}</span>
             <span class="cwhen">${esc(c.date)}</span>
             <span class="cctl" title="Projected race fitness — peak CTL carried into the taper (ACWR-capped)">${ctl}</span>
+            ${ftTxt?`<span class="cft" title="Projected finish">${ftTxt}</span>`:""}
             ${v?`<span class="cverd ${verdTone(v)}">${esc(v)}</span>`:""}
           </div>`;
         }).join("")}
       </div>` : "";
-  const header = o
+  // §CHAIN3 — when a non-headline leg is selected, the objective line describes THAT race: its own
+  // target/priority (looked up in OBJECTIVES by label+date — chain entries don't carry them) when
+  // the athlete still has it as a live objective row, else blank (an earlier leg that's since been
+  // dropped from `objectives` still shows the race itself, just no target/priority).
+  const selObj = selOverride
+    ? OBJECTIVES.find(x=>x.label===selRace.label && x.date===selRace.date) || {}
+    : null;
+  const headObj = selOverride
+    ? {label: selRace.label, date: selRace.date, weeks_away: selRace.weeks_away,
+       target: selObj.target, priority: selObj.priority}
+    : o;
+  const header = headObj
     ? `<div class="objline">
-        <span class="race">${esc(o.label)}</span>
-        <span class="away">${o.weeks_away} weeks away · ${esc(o.date)}</span>
-        <span class="away" style="color:var(--muted)">goal: ${esc(o.target)} · priority ${esc(o.priority||'A')}</span>
+        <span class="race">${esc(headObj.label)}</span>
+        <span class="away">${headObj.weeks_away} weeks away · ${esc(headObj.date)}</span>
+        <span class="away" style="color:var(--muted)">goal: ${esc(selOverride ? selObj.target : o.target)} · priority ${esc(headObj.priority||'A')}</span>
       </div>`
     : `<div class="objline"><span class="race">Maintenance</span>
         <span class="away" style="color:var(--muted)">no objective — holding fitness</span></div>`;
@@ -1994,7 +2023,10 @@ function renderPlan(p){
   // next 8 weeks?"). It now answers the question a runner actually has: what does this BLOCK buy?
   // Today's measured shape → the race-day projection, with the gain named. The runway curve is not
   // lost — it moves into the hover, labelled as the what-if it always was.
-  const FT = p.feasibility && p.feasibility.finish_time;
+  // §CHAIN3 — the picked race's own finish-time band, falling back to the plan's headline one only
+  // when the selected leg carries none of its own (a pre-§CHAIN3 plan, or a leg too far out to price).
+  const FT = selOverride ? (selRace.finish_time || (p.feasibility && p.feasibility.finish_time))
+                        : (p.feasibility && p.feasibility.finish_time);
   // §FT3 — the RANGE is the headline (my decision: a point invites anchoring on false precision);
   // the median rides as the trend detail.
   const FTB = FT && FT.band, FTT = FT && FT.today;
@@ -2034,6 +2066,15 @@ function renderPlan(p){
     : gain<-60 ? `this runway costs ${fcMin(gain)}` : "holds today's shape";
   const runway = ftFrozen ? "" : (FT&&FT.curve||[]).filter(c=>c.plus_weeks>0)
     .map(c=>`+${c.plus_weeks}w → ${c.hms}`).join(" · ");
+  // §CHAIN3 — the narrative verdict paragraph is written per-race inside `feasibility()`, but a
+  // chain LEG only carries its own verdict WORD (§CHAIN3's `c["feasibility"]`) — the prose doesn't
+  // ride per leg. A selected non-headline race shows that word as a badge instead of the plan's own
+  // (wrong-race) write-up.
+  const feasNote = selOverride
+    ? (selRace.feasibility_note
+        ? esc(selRace.feasibility_note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
+        : `<span class="cverd ${verdTone(selRace.feasibility)}">${esc(selRace.feasibility||'—')}</span> — projected verdict for ${esc(selRace.label)}.`)
+    : esc(p.feasibility.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
   const fcHint = !FT ? "" : (FT.note||"")
     + (runway?` If the race were later (same training): ${runway}.`:"")
     + (ftStale?" This prediction was saved by an earlier version of the engine — regenerate the plan to re-read it on the current model.":"")
@@ -2098,7 +2139,7 @@ function renderPlan(p){
       <button id="explainBtn" ${(LLM_OK&&AI.narration)?'':'disabled'}>📖 Explain this plan${LLM_OK?(AI.narration?'':' — switched off in Settings → AI'):' — add a Claude API key in Settings'}</button>
     </div>
     <div id="planExplain"></div>`}
-    <p class="feas">${esc(p.feasibility.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')}</p>
+    <p class="feas">${feasNote}</p>
     ${finishCurve}
     ${regimeNote}
     <div class="phases">${phaseBar}</div>
@@ -2149,6 +2190,14 @@ function renderPlan(p){
     ev.stopPropagation();
     loadActivity(+el.dataset.actId);
     scrollToEl(document.getElementById("recent"));
+  }));
+  // §CHAIN3 — the chain strip doubles as the race selector: tap a leg to view ITS OWN headline
+  // (objline/FT/verdict above) and its own drift below, persisted across visits.
+  host.querySelectorAll(".chainrace[data-race]").forEach(el=>el.addEventListener("click",()=>{
+    RACE_SEL = el.dataset.race;
+    try{ localStorage.setItem("sh.raceSel", RACE_SEL); }catch(e){}
+    renderPlan(LAST_PLAN);
+    loadDrift();
   }));
   wireObjActions();
   wireAdjust();
@@ -2596,7 +2645,10 @@ async function loadTrack(){
 
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
-  let d; try{ d=await getJSON("/api/plandrift"); }catch(e){ tileFail(host, "Plan drift", loadDrift, e); return; }
+  // §CHAIN3 — the selected race (a chain leg, or null for the headline) rides along; the server
+  // ignores a date that isn't in the CURRENT plan's own chain and falls back to the headline itself.
+  const driftUrl = "/api/plandrift" + (RACE_SEL ? `?race=${encodeURIComponent(RACE_SEL)}` : "");
+  let d; try{ d=await getJSON(driftUrl); }catch(e){ tileFail(host, "Plan drift", loadDrift, e); return; }
   if(!d || !d.ok){ host.innerHTML=`<div class="empty">${esc((d&&d.error)||"No plan history yet.")}</div>`; return; }
   const MUTED="var(--muted)", ACC="var(--accent)";
   // 1 — cumulative distance
@@ -2637,6 +2689,9 @@ async function loadDrift(){
     ` · ${a.versions} version${a.versions>1?"s":""} on record`+
     (r.label?` · ${esc(r.label)}${r.weeks_away!=null?` (${r.weeks_away}w out)`:""}`:"");
   if(d.duplicate_count>0) cap+=`<br><span class="warn">⚠ ${d.duplicate_count} duplicate activity is inflating the snapshot the plan seeds from — fix it in Runalyze to clean the projection (actuals here already ignore it; if you already removed it on Runalyze, use 🗑 Delete from local copy to drop the leftover row).</span>`;
+  // §CHAIN3 — a multi-A build can read any of its own legs; point at the selector when there's a
+  // choice to make (single-A never shows this — `races` comes back empty).
+  if((d.races||[]).length>1) cap+=`<div class="note" style="margin-top:2px">Showing ${esc(r.label||'the headline race')} — pick a race in the chain strip above to switch.</div>`;
   host.innerHTML=`${scorecardHTML(d.scorecard, r)}<div class="driftcap">${cap}</div>
     <div class="driftseg" role="group" aria-label="Drift comparison">
       <button type="button" data-dm="founding" class="on" aria-pressed="true" title="Your original plan for this goal vs where it stands now — how the road has moved over time">Original → Now</button>
@@ -2677,7 +2732,7 @@ async function loadDrift(){
   const REGNAME={caution:"Conservative",assertive:"Assertive"};   // one word per regime, matches the plan badge
   const rn=s=>REGNAME[s]||(s?s.charAt(0).toUpperCase()+s.slice(1):s);
   const drawCompare=async()=>{
-    if(!cfTried){ cfTried=true; try{ cfData=(await getJSON("/api/plandrift?compare=1")).counterfactual; }catch(e){} }
+    if(!cfTried){ cfTried=true; try{ cfData=(await getJSON(driftUrl+(RACE_SEL?"&":"?")+"compare=1")).counterfactual; }catch(e){} }
     const cf=cfData, cav=$("#drift-caveat");
     if(!cf){ if(cav){ cav.textContent="Comparison needs an objective set."; cav.style.display=""; } return; }
     const ACC2="var(--accent2, var(--accent))", ACC="var(--accent)";

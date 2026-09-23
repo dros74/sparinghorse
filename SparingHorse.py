@@ -7270,8 +7270,9 @@ _PV_FEASIBILITY = {"estimate_ctl": True, "finish_time": _PV_FINISH, "note": True
 # NOT `adjustment` (free-text/medical context) and NOT `cold_start` (§33f-5 — the seeds carry AGE
 # and an HRmax prior in bpm, H7-class). The phase blocks are matched STRUCTURALLY below, so a chain
 # segment (bridge1 / peak1 / taper2 …) is allowlisted like any other phase without being named.
-_PV_PLAN = {"chain": {"date": True, "feasibility": True, "label": True, "proj_ctl": True,
-                      "role": True, "type": True},
+_PV_PLAN = {"chain": {"date": True, "feasibility": True, "feasibility_note": True,
+                      "finish_time": _PV_FINISH, "label": True,
+                      "proj_ctl": True, "role": True, "type": True, "weeks_away": True},
             "engine_running": True, "engine_version": True, "feasibility": _PV_FEASIBILITY,
             "generated_at": True, "mode": True, "note": True,
             "objective": {"date": True, "label": True, "priority": True, "target": True,
@@ -7367,6 +7368,7 @@ _PV_DRIFT = {"anchor": {"created_at": True, "for_date": True, "is_current": True
                                    "lead_span": True, "median_err": True, "median_err_pct": True,
                                    "n": True},
              "race": {"date": True, "label": True, "weeks_away": True},
+             "races": {"date": True, "label": True},   # §CHAIN3 — the chain-leg selector's own list
              "scorecard": {"chain": True, "fitness": {"founding": True, "gap": True, "now": True,
                                                       "state": True},
                            "headline": True, "open": True,
@@ -7930,6 +7932,26 @@ def _chain_drift(anchor, current, today, race_date, dup_count):
     return drift, next_peak
 
 
+def _plan_goal_view(p, goal):
+    """§CHAIN3 — the feasibility-like dict plan `p` carries for `goal` (a race dict: label/date/
+    type): the plan's own objective's feasibility when `goal` IS that objective (unchanged from
+    before §CHAIN3 — the headline race, on the plan's own `feasibility`), or, when `goal` is an
+    EARLIER leg riding that plan's own chain (a plan headlining race 2 still built race 1's own
+    segment), that leg's own per-race numbers off the chain entry (§CHAIN3's `finish_time`/
+    `proj_ctl`/`feasibility` on a multi-A build). None when this plan says nothing about that race
+    at all — the caller (the outcome series, the §FT4 ledger) skips it, same as a missing verdict
+    always has."""
+    if not goal:
+        return None
+    if _same_race(p.get("objective") or {}, goal):
+        return p.get("feasibility") or {}
+    for c in (p.get("chain") or []):
+        if _same_race(c, goal):
+            return {"projected_ctl": c.get("proj_ctl"), "verdict": c.get("feasibility"),
+                    "finish_time": c.get("finish_time")}
+    return None
+
+
 @app.get("/api/plandrift")
 def api_plandrift():
     """The plan's drift from its founding statement (§6b, visible). Three slow-moving, weekly
@@ -7961,6 +7983,16 @@ def api_plandrift():
     # persisted only the active block's weeks, so they can't anchor a cumulative road; the runway
     # span filters those out.) Race date bounds "full"; fall back to the current plan.
     obj = current.get("objective") or {}
+    # §CHAIN3 — `race=<date>` lets the athlete pick which leg of a multi-A chain to look at. Only a
+    # date matching an entry of the CURRENT plan's own chain is honoured — anything else is ignored
+    # and the headline (the plan's own objective) stands, as before. A match replaces `obj` outright,
+    # so the re-anchor branch below (which only fires when there's NO objective at all) never runs
+    # for a selected race: picking a leg already tells us the goal.
+    sel_race = request.args.get("race")
+    if sel_race:
+        _sel = next((c for c in (current.get("chain") or []) if c.get("date") == sel_race), None)
+        if _sel:
+            obj = {"label": _sel.get("label"), "date": _sel.get("date"), "type": _sel.get("type")}
     today = datetime.now().date()
     # §6s — the engine drops a race the day after it passes (select_chain is future-only), so a just-run
     # race no longer rides the current plan. To keep RECKONING it (the honest endgame), re-anchor the
@@ -7982,8 +8014,12 @@ def api_plandrift():
     goal = obj if obj.get("date") else None          # tie the founding road to THIS race (None = no race)
 
     def _this_goal(p):                               # §GM — the race, not the calendar cell it sits on
+        if goal:
+            # §CHAIN3 — a plan is this race's road when the race is its OWN objective (as before) OR
+            # sits somewhere in its chain (a plan headlining race 2 still carries race 1's own leg).
+            return _plan_goal_view(p, goal) is not None
         po = p.get("objective") or {}
-        return _same_race(po, goal) if goal else not po.get("date")   # race-less: the race-less plans
+        return not po.get("date")   # race-less: the race-less plans
 
     anchor_row, anchor = rows[-1], current
     for r in rows:
@@ -8051,28 +8087,33 @@ def api_plandrift():
     if actual_eff:                                       # stitch so the prescription line meets actuals
         cur_eff = [actual_eff[-1]] + cur_eff
 
-    # — outcome: projected race-day CTL recorded by each version, one per ISO week (last wins) —
+    # — outcome: projected race-day CTL recorded by each version, one per ISO week (last wins).
+    #   §CHAIN3 — read through `_plan_goal_view` so a picked leg of the chain reads that leg's OWN
+    #   projected_ctl, not the plan's headline one; a plan that never mentions this race contributes
+    #   nothing (same shape as before for a single-A build, whose only leg IS the headline) —
     byweek = {}
     for r in rows:
         p = json.loads(r["plan"])
-        pc = (p.get("feasibility") or {}).get("projected_ctl")
+        gv = _plan_goal_view(p, goal)
+        pc = (gv or {}).get("projected_ctl")
         if pc is None:
             continue
         fd = _date(r["for_date"])
         byweek[_monday(fd)] = {"date": _monday(fd).isoformat(), "ctl": pc,
-                               "verdict": (p.get("feasibility") or {}).get("verdict")}
+                               "verdict": (gv or {}).get("verdict")}
     outcome = [byweek[k] for k in sorted(byweek)]
 
     # — §FT4 ledger: predicted finish over time, one point per regen DAY (last wins) — the product
     #   watching itself. Same-goal filter as the founding road (a different race's time isn't this
     #   series). Pre-§FT3 rows carry no band (lo/hi None) — the P50 line still plots; the day the
-    #   band shipped, the envelope appears. Seeded day one by the whole banked plans history. —
+    #   band shipped, the envelope appears. Seeded day one by the whole banked plans history.
+    #   §CHAIN3 — `_plan_goal_view` reads the FINISH TIME for the picked race, headline or leg. —
     fin_byday = {}
     for r in rows:
         p = json.loads(r["plan"])
         if not _this_goal(p):
             continue
-        ft = (p.get("feasibility") or {}).get("finish_time") or {}
+        ft = (_plan_goal_view(p, goal) or {}).get("finish_time") or {}
         if not ft.get("seconds"):
             continue
         band = ft.get("band") or {}
@@ -8286,13 +8327,22 @@ def api_plandrift():
                         "now_finish": (current.get("feasibility") or {}).get("finish_time", {}).get("hms")},
         }
 
+    # §CHAIN3 — `race` describes whichever race is SELECTED (the headline objective, or a chain leg
+    # named by `?race=`); `obj` no longer carries `weeks_away` once overridden by a leg, so recompute
+    # it off today rather than trust a field a selected leg dict never had. `races` lists every leg
+    # of the CURRENT plan's own chain, for the UI's selector — empty on a single-A build (nothing to
+    # pick between).
+    _chain_now = current.get("chain") or []
     out = dict(
         ok=True,
         today=today.isoformat(),
         anchor={"for_date": anchor_row["for_date"], "created_at": anchor_row["created_at"],
                 "versions": len(rows), "is_current": is_current},
         race={"label": obj.get("label"), "date": obj.get("date"),
-              "weeks_away": obj.get("weeks_away")},
+              "weeks_away": (weeks_until(obj["date"], today) if obj.get("date")
+                             else obj.get("weeks_away"))},
+        races=([{"label": c.get("label"), "date": c.get("date")} for c in _chain_now]
+               if len(_chain_now) > 1 else []),
         distance={"initial": init_dist, "current": cur_dist},
         ctl={"initial": init_ctl, "actual": actual_ctl, "current": cur_ctl},
         effort={"initial": init_eff, "actual": actual_eff, "current": cur_eff},

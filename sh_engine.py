@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.72.1"
+ENGINE_VERSION = "0.73.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -6794,29 +6794,40 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         # regen — never last regen's projection), projected through the laid weeks' TRIMPs to race
         # day; the +4/+8-week curve points keep training at the build's peak weekly load. Falls back
         # to the frozen effective value only when the corpus is empty (fresh/synthetic db).
-        race_long = _ft_plan_race_long(plan, anchor.get("date"))
         _, _, long_now = _ft_state_at(db, today.isoformat())   # §FT6 — the ladder already behind me
-        ft_corr, ft_sigma, ft_n, ft_tilt = _ft_correction(db)
-        # §33e — carry the correction onto THIS race's distance. Neutral (byte-identical) when the
-        # corpus is the same distance as the objective, which is the established path.
-        ft_corr = _ft_transfer_correction(ft_corr, ft_tilt, (anchor.get("type") or "").lower())
+        ft_corr_base, ft_sigma, ft_n, ft_tilt = _ft_correction(db)
         v0, v_ceil, v_resp, v_asof = _ft_speed_state(db)
         # §FT9 — how old the anchor is, in the same window the ladder axis already uses
         v0_age = (today - _date(v_asof)).days if v_asof else None
-        vo2_star, vo2_curve = None, None
-        if v0:
-            wk_trimps = _ft_plan_weekly_trimps(plan, today, anchor.get("date"))
-            ext = max(wk_trimps, default=0.0)     # "+n weeks" = keep training at the peak laid load
-            vo2_star = _ft_project_evo2(v0, wk_trimps, v_ceil, v_resp)
-            vo2_curve = {n: _ft_project_evo2(v0, wk_trimps + [ext] * n, v_ceil, v_resp)
-                         for n in (0, 4, 8)}
-        plan["feasibility"] = feasibility(anchor, ctl0, vo2, total_weeks, projected_ctl=peak_ctl,
-                                          race_long_km=race_long, correction=ft_corr,
-                                          projected_vo2max=vo2_star, vo2_curve=vo2_curve,
-                                          band_inputs={"sigma_race": ft_sigma, "n_races": ft_n,
-                                                       "v0": v0, "long_km_now": long_now,
-                                                       "v0_age_days": v0_age, "v0_as_of": v_asof,
-                                                       "disp_a": _ft_dispersion(db)})
+        disp_a = _ft_dispersion(db)
+
+        # §CHAIN3 — feasibility() re-read for ONE race in the chain. The per-runner axes above (the
+        # correction's un-transferred base, the speed anchor, the ladder-at-today, the dispersion)
+        # are corpus-wide and computed ONCE; only the race-specific inputs (its own long-run ladder
+        # reading, its own weekly-TRIMP runway to its own date, its own distance's correction
+        # transfer) are re-derived per race. The anchor's call below is byte-identical to before
+        # §CHAIN3 — same formula, just factored so a second race can reuse it.
+        def _ft_for(race, race_peak_ctl, weeks_away):
+            race_long = _ft_plan_race_long(plan, race.get("date"))
+            # §33e — carry the correction onto THIS race's distance. Neutral (byte-identical) when the
+            # corpus is the same distance as the objective, which is the established path.
+            ft_corr = _ft_transfer_correction(ft_corr_base, ft_tilt, (race.get("type") or "").lower())
+            vo2_star, vo2_curve = None, None
+            if v0:
+                wk_trimps = _ft_plan_weekly_trimps(plan, today, race.get("date"))
+                ext = max(wk_trimps, default=0.0)  # "+n weeks" = keep training at the peak laid load
+                vo2_star = _ft_project_evo2(v0, wk_trimps, v_ceil, v_resp)
+                vo2_curve = {n: _ft_project_evo2(v0, wk_trimps + [ext] * n, v_ceil, v_resp)
+                             for n in (0, 4, 8)}
+            return feasibility(race, ctl0, vo2, weeks_away, projected_ctl=race_peak_ctl,
+                               race_long_km=race_long, correction=ft_corr,
+                               projected_vo2max=vo2_star, vo2_curve=vo2_curve,
+                               band_inputs={"sigma_race": ft_sigma, "n_races": ft_n,
+                                            "v0": v0, "long_km_now": long_now,
+                                            "v0_age_days": v0_age, "v0_as_of": v_asof,
+                                            "disp_a": disp_a})
+
+        plan["feasibility"] = _ft_for(anchor, peak_ctl, total_weeks)
         # §6q/§PRO7b — annotate each chain race with its own projected race fitness (the PEAK CTL carried
         # into that race's taper). Map by the segment's taper KEY (chain index i → "taper"/"taper{i}"),
         # not the human label, since two races can share a label.
@@ -6827,8 +6838,15 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
                 # #2 — a per-race feasibility verdict on each chain segment, so a multi-A build surfaces
                 # WHERE each race lands (not just the final peak). Same feasibility() as the final anchor,
                 # re-read on that race's own runway + its projected race fitness (peak into the taper).
-                c["feasibility"] = feasibility(c, ctl0, vo2, weeks_until(c["date"], today),
-                                               projected_ctl=race_proj[tk]).get("verdict")
+                # §CHAIN3 — a multi-A chain also carries the full finish-time band per race (feasibility()
+                # runs once per race — `full` serves both the verdict string and, when there is more than
+                # one race to choose between, the finish_time the drift/plan-header race selector reads).
+                full = _ft_for(c, race_proj[tk], weeks_until(c["date"], today))
+                c["feasibility"] = full["verdict"]
+                if len(plan["chain"]) > 1:
+                    c["finish_time"] = full.get("finish_time")
+                    c["feasibility_note"] = full.get("note")   # the write-up the header shows when selected
+                    c["weeks_away"] = weeks_until(c["date"], today)
         # §PER1 — drop any prescribed session dated strictly AFTER a race within that race's own
         # Monday-week (the race-week-inclusive span means the final taper week now spans race day; we
         # don't prescribe training in the days between the race and that Sunday). Display-only: the CTL

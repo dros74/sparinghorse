@@ -536,12 +536,16 @@
   /* §6q/#2 — multi-A race-chain strip: one row per A-race, projected CTL + per-race verdict */
   .chainstrip{margin:10px 0 2px}
   .chainrace{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;padding:7px 0;
-    border-top:1px solid var(--line)}
+    border-top:1px solid var(--line);cursor:pointer}
+  /* §CHAIN3 — the strip doubles as the race selector; `.on` marks the currently-viewed leg the same
+     way `.phaseseg.active` marks the open phase segment */
+  .chainrace.on{box-shadow:inset 0 0 0 2px var(--accent)}
   .chainrace .crole{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
     color:var(--accent);border:1px solid var(--line);border-radius:6px;padding:2px 6px}
   .chainrace .cname{font-family:var(--serif);font-weight:600;font-size:15px}
   .chainrace .cwhen{font-family:var(--mono);font-size:12px;color:var(--muted)}
   .chainrace .cctl{font-family:var(--mono);font-size:12px;color:var(--text);margin-left:auto}
+  .chainrace .cft{font-family:var(--mono);font-size:12px;color:var(--muted)}
   .chainrace .cverd{font-family:var(--mono);font-size:11px;border-radius:6px;padding:2px 7px;
     border:1px solid var(--line);color:var(--muted)}
   .chainrace .cverd.ok{color:var(--ok);border-color:var(--ok)}

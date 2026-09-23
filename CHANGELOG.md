@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.73.0] - 2026-09-23
+
+### Added
+
+- **Every race in a chain now carries its own projected finish, and the console can be switched
+  between them (§CHAIN3).** With two A-marathons chained, adding the second race made the first
+  race's projected finish disappear — the engine only ever priced the headline (final) race, and
+  the plan drift view and prediction ledger followed the headline too, so the ledger for a race
+  that had just lost the headline read blank. `generate_plan` now prices each chain entry off its
+  own runway and its own distance, so a multi-A plan's chain carries a `finish_time` band per race
+  alongside its verdict (a single-A chain is unaffected — its one entry, and the headline
+  computation, are unchanged). `GET /api/plandrift?race=<date>` accepts any race in the plan's own
+  chain and reads the founding road, the outcome series and the prediction ledger for that race
+  instead of the headline. The race-chain strip in the plan tile is now a selector: tap a race to
+  read the plan header, the projected finish and the drift view for it; the choice is remembered
+  in the browser and falls back to the headline when it no longer names a race in the current
+  chain.
+
 ## [0.72.1] - 2026-09-23
 
 ### Fixed

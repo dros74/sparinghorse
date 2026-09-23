@@ -3933,18 +3933,128 @@
     {
       "date": "2026-09-09",
       "feasibility": "finish",
+      "feasibility_note": "Projected fitness by race day \u2248 CTL 92 (from 66 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 35 a healthy half finish needs. That supports **finishing Golden Half (A1) healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **1:01:03\u20131:19:28** (median 1:09:39) \u2014 the range narrows as runs land.",
+      "finish_time": {
+        "anchor_stale": null,
+        "at_ctl": 92,
+        "at_evo2": 56.2,
+        "band": {
+          "components": {
+            "calibration": 0.0566,
+            "disp_a": 1.12,
+            "horizon": 0.0312,
+            "race": 0.08
+          },
+          "hi_hms": "1:19:28",
+          "hi_seconds": 4768,
+          "level": 80,
+          "lo_hms": "1:01:03",
+          "lo_seconds": 3663,
+          "sigma_log": 0.1028
+        },
+        "correction": 1.0,
+        "curve": [
+          {
+            "ctl": 92,
+            "evo2": 56.2,
+            "hms": "1:09:39",
+            "plus_weeks": 0
+          },
+          {
+            "ctl": 105,
+            "evo2": 57.1,
+            "hms": "1:08:21",
+            "plus_weeks": 4
+          },
+          {
+            "ctl": 120,
+            "evo2": 57.9,
+            "hms": "1:07:22",
+            "plus_weeks": 8
+          }
+        ],
+        "distance": "half",
+        "hms": "1:09:39",
+        "long_km": 30.6,
+        "note": "a range, not a promise: it assumes the laid build completes, and race day rides fuelling, pacing, weather and the day's legs. The median is the trend signal \u2014 more runway \u2192 higher fitness \u2192 faster \u2014 and the band narrows as runs land and raced results calibrate it.",
+        "seconds": 4179,
+        "today": {
+          "at_ctl": 66,
+          "at_evo2": 54.0,
+          "gain_seconds": 428,
+          "hms": "1:16:47",
+          "long_km": 15.8,
+          "seconds": 4607
+        }
+      },
       "label": "Golden Half (A1)",
       "proj_ctl": 91.8,
       "role": "coequal",
-      "type": "half"
+      "type": "half",
+      "weeks_away": 10
     },
     {
       "date": "2026-12-02",
       "feasibility": "finish",
+      "feasibility_note": "Projected fitness by race day \u2248 CTL 103 (from 66 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 45 a healthy marathon finish needs. That supports **finishing Golden Marathon (A2) healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **2:09:54\u20132:49:23** (median 2:28:20) \u2014 the range narrows as runs land.",
+      "finish_time": {
+        "anchor_stale": null,
+        "at_ctl": 103,
+        "at_evo2": 58.2,
+        "band": {
+          "components": {
+            "calibration": 0.0566,
+            "disp_a": 1.12,
+            "horizon": 0.0335,
+            "race": 0.08
+          },
+          "hi_hms": "2:49:23",
+          "hi_seconds": 10163,
+          "level": 80,
+          "lo_hms": "2:09:54",
+          "lo_seconds": 7794,
+          "sigma_log": 0.1035
+        },
+        "correction": 1.0,
+        "curve": [
+          {
+            "ctl": 103,
+            "evo2": 58.2,
+            "hms": "2:28:20",
+            "plus_weeks": 0
+          },
+          {
+            "ctl": 118,
+            "evo2": 58.8,
+            "hms": "2:26:14",
+            "plus_weeks": 4
+          },
+          {
+            "ctl": 135,
+            "evo2": 59.4,
+            "hms": "2:24:46",
+            "plus_weeks": 8
+          }
+        ],
+        "distance": "marathon",
+        "hms": "2:28:20",
+        "long_km": 34.2,
+        "note": "a range, not a promise: it assumes the laid build completes, and race day rides fuelling, pacing, weather and the day's legs. The median is the trend signal \u2014 more runway \u2192 higher fitness \u2192 faster \u2014 and the band narrows as runs land and raced results calibrate it.",
+        "seconds": 8900,
+        "today": {
+          "at_ctl": 66,
+          "at_evo2": 54.0,
+          "gain_seconds": 1747,
+          "hms": "2:57:27",
+          "long_km": 15.8,
+          "seconds": 10647
+        }
+      },
       "label": "Golden Marathon (A2)",
       "proj_ctl": 103.2,
       "role": "goal",
-      "type": "marathon"
+      "type": "marathon",
+      "weeks_away": 22
     }
   ],
   "feasibility": {
