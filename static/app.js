@@ -1258,6 +1258,15 @@ let RACE_SEL = (()=>{ try{ return localStorage.getItem("sh.raceSel"); }catch(e){
 // (§CHAIN3 — a date, or null for the headline. Validity against the CURRENT plan's own chain is
 // checked at render time (renderPlan), never here: a selection from a since-regenerated plan whose
 // chain moved on must fall back to the headline, not dangle.)
+// §CHAIN4 — which chain leg the console shows: the stored selection when it names a leg of THIS
+// plan's chain, else the NEXT leg still ahead, else null (= the plan's own headline objective).
+// The engine's headline is the chain's terminal race — the periodization's anchor; the athlete is
+// training for the race that comes first. Single-race plans always answer null: untouched.
+function viewRaceOf(p, today){
+  const chain = (p && p.chain) || [];
+  if(chain.length < 2) return null;
+  return chain.find(c=>c.date===RACE_SEL) || chain.find(c=>c.date>=today) || null;
+}
 const _frSeen={tok:false, shape:false, obj:false};   // gate the card until all 3 report once
 // First-run guided setup: walks a brand-new instance from nothing to a first plan. Three
 // signals decide the active step — token connected, history pulled, a race added — and the
@@ -1910,9 +1919,19 @@ function renderPlan(p){
       : `No plan yet — hit <b>Generate plan</b>.`}</div>`; return; }
   LAST_PLAN=p;   // §CHAIN3 — the race selector re-renders off this without re-fetching /api/plan
   const o=p.objective, rb=p.rebase;
-  // A-race pill bar at the top of the page (mockup Almanac) — driven by the plan's objective
+  const today0 = (LOG&&LOG.today) || new Date().toISOString().slice(0,10);
+  const vr = viewRaceOf(p, today0);                       // §CHAIN4
+  const vrOverride = !!(vr && !(o && vr.date===o.date));  // looking at a leg other than the headline
+  const vrObj = vrOverride ? (OBJECTIVES.find(x=>x.label===vr.label && x.date===vr.date) || {}) : null;
+  // A-race pill bar at the top of the page (mockup Almanac) — driven by the plan's objective, or by
+  // §CHAIN4's view race (the next leg still ahead) when the chain has more than one A-race.
   const ob=$("#objbar");
-  if(ob) ob.innerHTML = o ? `<span class="objlabel">Current main objective</span>`+
+  if(ob) ob.innerHTML = vrOverride ? `<span class="objlabel">Current main objective</span>`+
+      `<span class="arace">${esc(vrObj.priority||'A')}-race</span>`+
+      `<span class="oname">${esc(vr.label)}</span>`+
+      `<span class="owhen">${esc(vr.date)} · ${vr.weeks_away} weeks out</span>`+
+      ((vr.feasibility||vrObj.target)?`<span class="overdict">Verdict — <b style="color:var(--text)">${esc(vr.feasibility||vrObj.target)}</b></span>`:"")
+    : o ? `<span class="objlabel">Current main objective</span>`+
       `<span class="arace">${esc(o.priority||'A')}-race</span>`+
       `<span class="oname">${esc(o.label)}</span>`+
       `<span class="owhen">${esc(o.date)} · ${o.weeks_away} weeks out</span>`+
@@ -2001,12 +2020,14 @@ function renderPlan(p){
   const verdTone = v => v==="too soon" ? "warn" : (v==="finish"||v==="maintain") ? "ok" : "muted";
   const roleName = r => r==="goal" ? "Goal" : r==="coequal" ? "Co-equal" : r==="subordinate" ? "Tune-up" : (r||"");
   const chainRaces = p.chain||[];
-  // §CHAIN3 — which race the athlete is LOOKING AT. RACE_SEL (persisted) names a chain leg by date;
-  // it's only ever honoured when it still names an entry of THIS plan's own chain (a stale selection
-  // from a since-regenerated plan just falls back to the headline — no dangling reference). "Not the
-  // headline" = a leg other than the plan's own objective (the final race); selecting the headline
-  // itself, or nothing, leaves every downstream read exactly as it was pre-§CHAIN3.
-  const selRace = chainRaces.find(c=>c.date===RACE_SEL) || null;
+  // §CHAIN4 — which race the athlete is LOOKING AT. The default is the NEXT race still ahead, not
+  // the plan's own headline (the chain's terminal race): the resolver above (viewRaceOf) applies
+  // RACE_SEL when it still names an entry of THIS plan's own chain (a stale selection from a
+  // since-regenerated plan just falls back to the next race ahead — no dangling reference), then
+  // falls back to the next leg whose date hasn't passed. "Override" = a leg other than the plan's
+  // own objective (the final race); landing on the headline itself, or a single-race plan (where
+  // the resolver always answers null), leaves every downstream read exactly as it was pre-§CHAIN3.
+  const selRace = vr;   // §CHAIN4 — the resolver above already applies RACE_SEL, then the next race ahead
   const selOverride = !!(selRace && !(o && selRace.date===o.date));
   const chainStrip = chainRaces.length>1
     ? `<div class="chainstrip">
@@ -2673,9 +2694,11 @@ async function loadTrack(){
 
 async function loadDrift(){
   const host=$("#drift"); if(!host) return;
-  // §CHAIN3 — the selected race (a chain leg, or null for the headline) rides along; the server
-  // ignores a date that isn't in the CURRENT plan's own chain and falls back to the headline itself.
-  const driftUrl = "/api/plandrift" + (RACE_SEL ? `?race=${encodeURIComponent(RACE_SEL)}` : "");
+  // §CHAIN4 — the viewed race (RACE_SEL when it names a leg of THIS chain, else the next race ahead,
+  // else null for the headline) rides along; the server ignores a date that isn't in the CURRENT
+  // plan's own chain and falls back to the headline itself.
+  const vr = viewRaceOf(LAST_PLAN, (LOG&&LOG.today) || new Date().toISOString().slice(0,10));   // §CHAIN4
+  const driftUrl = "/api/plandrift" + (vr ? `?race=${encodeURIComponent(vr.date)}` : "");
   let d; try{ d=await getJSON(driftUrl); }catch(e){ tileFail(host, "Plan drift", loadDrift, e); return; }
   if(!d || !d.ok){ host.innerHTML=`<div class="empty">${esc((d&&d.error)||"No plan history yet.")}</div>`; return; }
   const MUTED="var(--muted)", ACC="var(--accent)";

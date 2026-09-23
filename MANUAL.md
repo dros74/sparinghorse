@@ -228,10 +228,12 @@ left before the next taper: with at least eight weeks free, the engine builds a 
 Base → Build → Peak cycle toward the next race; with less, it falls back to the old short re-build
 bridge straight into a peak and taper.
 
-The chain strip lists each race with its own projected finish. Click a race to read the plan
-header, the projected finish and the drift view for it instead of the headline race — the choice
-is remembered in your browser and carries across visits, until the chain changes and it no longer
-names a race that's still in it.
+The chain strip lists each race with its own projected finish. By default the objective bar, the
+plan header, the projected finish and the drift view describe the **next race still ahead** — the
+engine's own anchor is the last race in the chain, but the one you are training for comes first.
+Click any race in the strip to read them for that race instead; the choice is remembered in your
+browser and carries across visits, until the chain changes and it no longer names a race that's
+still in it, when the view returns to the next race ahead.
 
 ### After the race — the lifecycle
 

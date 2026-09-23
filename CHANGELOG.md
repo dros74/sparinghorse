@@ -10,6 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.74.1] - 2026-09-23
+
+### Fixed
+
+- **A multi-race chain's console defaulted to the chain's terminal race, not the race being
+  trained for (§CHAIN4).** The engine's `plan.objective` is always the last A-race in a chain —
+  the periodization's anchor — and §CHAIN3 (0.73.0) made the console follow that headline until a
+  leg was tapped in the chain strip. On a live plan chaining a December marathon (co-equal, ten
+  weeks out) before a May marathon (goal, 32 weeks out), the objective bar read "Current main
+  objective" with the May race, and the plan header, the projected-finish band and the drift view
+  all described that race, while the marathon ten weeks away went unmentioned. Reported right
+  after the 0.74.0 deploy and a regeneration.
+  `static/app.js` only — the engine is unchanged. A new resolver, `viewRaceOf`, picks the leg the
+  console shows: the stored selection (`sh.raceSel`) when it still names a leg of the current
+  plan's chain, else the next leg whose date hasn't passed, else the headline. The objective bar,
+  the plan header, the projected-finish band, the chain strip's pressed leg and
+  `/api/plandrift?race=` all read off it. Tapping a leg still switches the console to it and still
+  persists the choice; a stored choice that no longer names a leg falls back to the next race
+  ahead, not the headline. Single-race plans are untouched — the resolver answers null and every
+  pre-§CHAIN3 read stays exactly as it was. `plan.objective` itself is unchanged: the engine's
+  headline is still the terminal race, the drift scorecard already named "the next peak still
+  ahead", and the console now agrees with it. `test/drive_local.mjs` adds a §CHAIN4 step driving
+  the flow end to end; MANUAL.md's chain paragraph now says the default is the next race ahead.
+
 ## [0.74.0] - 2026-09-23
 
 ### Added

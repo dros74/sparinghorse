@@ -760,6 +760,97 @@ async function runFull() {
   ok('put-back restores the upcoming count',
      objAfterRestore.filter(o => o.status === 'upcoming').length === upcomingBefore.length);
 
+  // ── §CHAIN4 — the console defaults to the NEXT race ahead, not the chain's terminal anchor ──
+  // near = the earliest upcoming A-race (only an A-race ever chains — a B/C tune-up can't be the
+  // "next race ahead" the resolver would land on once another A-race is added below). By this
+  // point in the run the §62 priority-selector step above has already promoted the seeded B
+  // tune-up to A, so near may already sit in a pre-existing 2-race chain with the seeded A-race —
+  // the baseline captured below (not a hardcoded "single race") is what cleanup is checked against.
+  const objForChain = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
+  const near = objForChain.filter(o => o.status === 'upcoming' && o.priority === 'A')
+    .sort((a, b) => a.date.localeCompare(b.date))[0];
+  ok('an upcoming A-race exists to drive the §CHAIN4 flow', !!near);
+  const baseChain = await page.evaluate(() => ({
+    chainstrip: !!document.querySelector('.chainstrip'),
+    n: document.querySelectorAll('.chainrace').length,
+  }));
+  const far = new Date(new Date(near.date + 'T00:00:00Z').getTime() + 200 * 86400000)
+    .toISOString().slice(0, 10);
+  // adding another A-race chains the build (or extends the chain) and re-periodizes — a full re-plan
+  const chainAdd = await page.evaluate(far => fetch('/api/objectives', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label: 'Chain probe marathon', type: 'marathon', date: far,
+                            priority: 'A', target: 'finish' }),
+  }).then(r => r.json()), far);
+  ok(`§CHAIN4 probe race added, chaining the build (${JSON.stringify(chainAdd).slice(0, 120)})`,
+     chainAdd.ok !== false);
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#tiles .tile', { timeout: 60000 });
+  await page.waitForSelector('.chainstrip .chainrace', { timeout: 60000 });
+  const chainState1 = await page.evaluate(() => {
+    const pressed = [...document.querySelectorAll('.chainrace[aria-pressed="true"]')];
+    return {
+      oname: document.querySelector('#objbar .oname')?.textContent || '',
+      pressedN: pressed.length,
+      pressedRace: pressed[0]?.dataset.race || null,
+      objlineRace: document.querySelector('.objline .race')?.textContent || '',
+    };
+  });
+  const planWithChain = await page.evaluate(() => fetch('/api/plan').then(r => r.json()));
+  ok(`§CHAIN4 objbar names the next race ahead by default, not the probe ("${chainState1.oname}" === "${near.label}")`,
+     chainState1.oname === near.label);
+  ok(`§CHAIN4 exactly one chain leg reads pressed, and it's the next race ahead (${chainState1.pressedN} pressed, data-race=${chainState1.pressedRace})`,
+     chainState1.pressedN === 1 && chainState1.pressedRace === near.date);
+  ok(`§CHAIN4 the plan header names the next race ahead too ("${chainState1.objlineRace}" === "${near.label}")`,
+     chainState1.objlineRace === near.label);
+  ok(`§CHAIN4 the engine's own headline objective is still the chain's terminal race ("${planWithChain.objective && planWithChain.objective.label}")`,
+     !!planWithChain.objective && planWithChain.objective.label === 'Chain probe marathon');
+
+  // tapping a leg still switches the console to it (§CHAIN3 behaviour unchanged)
+  await page.locator(`.chainrace[data-race="${far}"]`).click();
+  await page.waitForFunction(
+    () => document.querySelector('#objbar .oname')?.textContent === 'Chain probe marathon',
+    { timeout: 15000 });
+  const chainState2 = await page.evaluate(() => {
+    const pressed = [...document.querySelectorAll('.chainrace[aria-pressed="true"]')];
+    return { pressedN: pressed.length, pressedRace: pressed[0]?.dataset.race || null };
+  });
+  ok(`§CHAIN4 tapping a leg in the strip still switches the console to it (pressed data-race=${chainState2.pressedRace})`,
+     chainState2.pressedN === 1 && chainState2.pressedRace === far);
+
+  // clearing the stored choice returns the default to the next race ahead, not the tapped leg
+  await page.evaluate(() => { try { localStorage.removeItem('sh.raceSel'); } catch (e) {} });
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.chainstrip .chainrace', { timeout: 60000 });
+  const onameAfterClear = await page.evaluate(() => document.querySelector('#objbar .oname')?.textContent || '');
+  ok(`§CHAIN4 with no stored choice the default returns to the next race ahead ("${onameAfterClear}" === "${near.label}")`,
+     onameAfterClear === near.label);
+
+  // cleanup: drop the probe race, back to the pre-probe chain shape (captured as `baseChain` above —
+  // not necessarily single-race: the §62 promotion earlier in this run may already have left near
+  // sharing a chain with the seeded A-race, and removing only the probe must not disturb that)
+  const objForCleanup = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
+  const probeObj = objForCleanup.find(o => o.label === 'Chain probe marathon' && o.status === 'upcoming');
+  ok('§CHAIN4 probe race found for cleanup', !!probeObj);
+  await page.evaluate(id => fetch('/api/objectives/' + id + '/remove', { method: 'POST' }), probeObj.id);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#tiles .tile', { timeout: 60000 });
+  // the plan panel's own async fetch can still be in flight once #tiles is up — wait for renderPlan
+  // to have actually run (objbar settled on the post-cleanup race) before reading the DOM below
+  await page.waitForFunction(
+    label => document.querySelector('#objbar .oname')?.textContent === label,
+    near.label, { timeout: 60000 });
+  const cleanupState = await page.evaluate(() => ({
+    chainstrip: !!document.querySelector('.chainstrip'),
+    n: document.querySelectorAll('.chainrace').length,
+    oname: document.querySelector('#objbar .oname')?.textContent || '',
+  }));
+  ok(`§CHAIN4 cleanup: the chain strip returns to its pre-probe shape (chainstrip ${cleanupState.chainstrip}, ${cleanupState.n} legs — was ${baseChain.chainstrip}, ${baseChain.n})`,
+     cleanupState.chainstrip === baseChain.chainstrip && cleanupState.n === baseChain.n);
+  ok(`§CHAIN4 cleanup: objbar still names the next race ahead ("${cleanupState.oname}" === "${near.label}")`,
+     cleanupState.oname === near.label);
+
   // ── First-run step ③: with data but no objective, the card surfaces "Add a race" ──
   const objs = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
   for (const o of objs)
