@@ -573,6 +573,11 @@ screen you happen to be looking at is the short **popup at each step boundary**,
 the app puts the step's essentials. If you glance down at a beep and see nothing useful, you are on
 a different screen, not looking at a broken guide.
 
+On an intervals day the rep counter shows in two places on that SuuntoPlus screen: the step title
+("Work 3/10") and, above the countdown, its own small label ("3/10 left" on a work rep; a recovery
+step shows "next 4/10"). The watch draws no free text on that screen at all, so the rep's pace and
+HR detail still only arrives in the boundary popup at each step change.
+
 ---
 
 ## 9. Cadence playlists (optional)

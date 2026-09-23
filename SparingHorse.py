@@ -2397,7 +2397,8 @@ def _pace_zone_sec(pace_zones, zone):
     return int(m.group(1)) * 60 + int(m.group(2)) if m else None
 
 
-def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False, layout="easy"):
+def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False, layout="easy",
+                 cd_title="left"):
     """One fields step: countdown + optional pace/HR targets + a detail text line + the boundary
     popup (§SG3), advancing on its own duration (or distance, for the distance-framed simple runs).
     `text` arrives already composed (the rep counter and the "next" hand-over on a reps day are
@@ -2426,14 +2427,22 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
     element" — so the static midpoint cannot be dropped without losing the gauge, only demoted.
     Easy-class steps with an HR band now send: live `heartRate`, live `pace`, the countdown,
     `targetHeartRate` (gauge), text. Work steps and the no-grid fallback keep their order
-    (countdown, `targetPace`, live HR): a rep's target pace is a number worth the big slot."""
+    (countdown, `targetPace`, live HR): a rep's target pace is a number worth the big slot.
+
+    §SG7 — the athlete asked, after the 22 Sep 10×3, for the x/xx rep counter on screen
+    DURING the reps; it was already in the step title and text (§SG4), but the Race S was measured
+    on 23 Sep with two test guides to draw no `text` field at all, in any array position, while it
+    does draw each value field's own small `title` label, up to ~10 characters before an ellipsis
+    eats the middle. So the counter now rides the countdown field's `title` too — `cd_title`, passed
+    in by `session_to_guide` on a multi-rep reps day ("3/9 left" on a work rep, "next 4/9" on the
+    recovery before one) — while field order and everything else here is unchanged."""
     fields, cond, dur, cd = [], None, None, None
     if minutes:
-        cd = {"type": "stepDurationCountdown", "title": "left", "value": round(minutes * 60.0, 1)}
+        cd = {"type": "stepDurationCountdown", "title": cd_title, "value": round(minutes * 60.0, 1)}
         cond = {"type": "stepDuration", "value": round(minutes * 60.0, 1)}
         dur = f"{minutes:g}min"
     elif km:
-        cd = {"type": "stepDistanceCountdown", "title": "left", "value": round(km * 1000.0, 1)}
+        cd = {"type": "stepDistanceCountdown", "title": cd_title, "value": round(km * 1000.0, 1)}
         cond = {"type": "stepDistance", "value": round(km * 1000.0, 1)}
         dur = f"{km:g}km"
     pt = _pace_target(pace_sec)
@@ -2511,7 +2520,15 @@ def session_to_guide(session, hrz=None, pace_zones=None):
     and `pace` metrics, because an easy effort is watching HR, not chasing a pace; a work rep keeps
     `targetPace` as the gauge (a work rep is paced by definition) and adds a live `heartRate` metric
     beside it, dropping the static `targetHeartRate` field — the boundary popup still carries the
-    HR band on a work step, unchanged."""
+    HR band on a work step, unchanged.
+
+    §SG7 — the athlete asked, after the 22 Sep 10×3, for the x/xx rep counter on screen DURING the
+    reps. §SG4 already put it in the step title and the text, but the Race S was measured on 23 Sep
+    with two test guides to draw no `text` field at all, in any array position, while it does draw
+    each value field's own small `title` label, up to ~10 characters before a middle-ellipsis eats
+    it. So a multi-rep work step now also carries the counter in the countdown field's `title`
+    ("3/9 left"), and a recovery step ahead of a work rep carries the hand-over there too
+    ("next 4/9"); the title and text stay exactly as §SG4 left them."""
     kind = session.get("kind", "run")
     km = session.get("km") or 0
     if km <= 0:
@@ -2541,9 +2558,15 @@ def session_to_guide(session, hrz=None, pace_zones=None):
                 pace_sec = _pace_zone_sec(pace_zones, r["zone"])
             if pace_sec is None:
                 pace_sec = _rep_pace_sec(r)
+            if work and n_work > 1:
+                cd_title = f"{wi}/{n_work} left"
+            elif r["effort"] == "recovery" and next_work:
+                cd_title = f"next {wi + 1}/{n_work}"
+            else:
+                cd_title = "left"
             steps.append(_guide_step(
                 title, text, minutes=r["minutes"], pace_sec=pace_sec, hr=_hr_target(r["zone"], hrz),
-                lap=work, layout="work" if work else "easy"))
+                lap=work, layout="work" if work else "easy", cd_title=cd_title))
     else:
         pace_sec = session["minutes"] * 60.0 / km if session.get("minutes") else None
         steps.append(_guide_step("Run", session.get("note", ""), km=km,

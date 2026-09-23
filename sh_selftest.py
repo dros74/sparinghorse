@@ -9887,7 +9887,8 @@ def _stc_guide_notify():
 
 def _stc_guide_reps_text():
     """§SG4 (0.68.8) — a reps-day guide carries the rep counter in the step text, the recovery names
-    the next rep, and the rep pace is the zone's, not the rounded km's."""
+    the next rep, and the rep pace is the zone's, not the rounded km's. §SG7 — the counter also rides
+    the countdown field's own title, because the Race S was measured to never draw the text field."""
     import inspect
     from datetime import date as _d
     fails = []
@@ -9984,18 +9985,68 @@ def _stc_guide_reps_text():
     if "pace_zones=" not in inspect.getsource(S.push_guides):
         fails.append("push_guides no longer passes pace_zones to session_to_guide")
 
+    # (g) §SG7 — measured on the Race S: it never draws a `text` field, in any array position, but
+    # does draw each value field's own small `title` label. So the counter also rides the countdown
+    # field's title now: a work step's is "wi/n_work left" (≤10 chars), a recovery ahead of a work
+    # rep is "next wi+1/n_work", and every other step (warm-up, cool-down, the tail's recovery before
+    # a cool-down) keeps "left".
+    def _cd_title(st_):
+        f = next((f for f in st_["fields"]
+                   if f["type"] in ("stepDurationCountdown", "stepDistanceCountdown")), None)
+        return f["title"] if f else None
+
+    wi = 0
+    for st_, r in zip(steps, reps):
+        if r["effort"] != "work":
+            continue
+        wi += 1
+        want = f"{wi}/{n_work} left"
+        got = _cd_title(st_)
+        if got != want:
+            fails.append(f"work countdown title != {want!r}: {got!r}")
+        if len(want) > 10:
+            fails.append(f"work countdown title >10 chars: {want!r}")
+
+    for i, (st_, r) in enumerate(zip(steps, reps)):
+        if r["effort"] == "recovery":
+            wi_at_r = sum(1 for x in reps[:i] if x["effort"] == "work")
+            next_work = i + 1 < len(reps) and reps[i + 1]["effort"] == "work"
+            got = _cd_title(st_)
+            want = f"next {wi_at_r + 1}/{n_work}" if next_work else "left"
+            if got != want:
+                fails.append(f"recovery countdown title != {want!r}: {got!r}")
+        elif r["effort"] in ("warmup", "cooldown"):
+            got = _cd_title(st_)
+            if got != "left":
+                fails.append(f"{r['effort']} countdown title != 'left': {got!r}")
+
+    tail_rec_cd = _cd_title(g_tail["steps"][1])
+    if tail_rec_cd != "left":
+        fails.append(f"tail recovery-before-cool-down countdown title != 'left': {tail_rec_cd!r}")
+
+    # (h) a simple run (no reps array) has no counter to carry — its distance countdown keeps "left"
+    simple_g, _sb = S.session_to_guide(
+        {"date": "2026-07-17", "kind": "easy", "km": 8.0, "minutes": 50, "note": "easy run"}, None)
+    simple_cd = _cd_title(simple_g["steps"][0])
+    if simple_cd != "left":
+        fails.append(f"simple-run distance countdown title != 'left': {simple_cd!r}")
+
     return _st("det", "guide-reps-text",
-               "§SG4 (0.68.8) — a reps-day guide carries the rep counter in the step text, the "
-               "recovery names the next rep, and the rep pace is the zone's, not the rounded km's",
+               "§SG4 (0.68.8) + §SG7 — a reps-day guide carries the rep counter in the step text AND "
+               "the countdown field's own title (the Race S never draws text, any position), the "
+               "recovery names the next rep in both places, and the rep pace is the zone's, not the "
+               "rounded km's",
                passed=not fails,
-               expect="counter in every work step's text (≤40 chars), a recovery names its next work "
-               "rep (and stays plain before a cool-down), targetPace reads pace_zones over the "
-               "rounded-km re-derivation, the old fallback holds without a table, push_guides wired",
+               expect="counter in every work step's text (≤40 chars) and countdown title (≤10 chars), "
+               "a recovery names its next work rep in both (and stays plain before a cool-down), "
+               "targetPace reads pace_zones over the rounded-km re-derivation, the old fallback holds "
+               "without a table, push_guides wired, a simple run's countdown keeps 'left'",
                got={"failures": fails or "none",
                     "sample_work_text": next((f["value"] for f in work0_step["fields"]
                                               if f["type"] == "text"), None),
                     "sample_recovery_text": next((f["value"] for f in steps[2]["fields"]
                                                   if f["type"] == "text"), None),
+                    "sample_work_cd_title": _cd_title(work0_step),
                     "targetPace": tp["value"], "zone_pace_v": round(zone_v, 4),
                     "rounded_km_pace_v": round(rounded_v, 4)})
 

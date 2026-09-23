@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.71.0] - 2026-09-23
+
+### Added
+
+- **The rep counter shows on the watch screen during the reps, not only at the boundary (§SG7).**
+  The athlete asked for it after the 22 Sep 10×3 min session: "Work 3/10" already lived in the step
+  title (drawn small at the top) and "Rep 3/10 - 3min @ interval" in the step text (§SG4, 0.68.8),
+  yet on the Race S the text never drew — two test guides pushed to the watch and photographed step
+  by step showed the same three value fields on every screen (countdown, pace target, heart rate)
+  and no free text at all, whatever the field's array position or the field list's length. A second guide put the counter in
+  a value field's own label instead: a countdown labelled "1/4 left" drew in full, and a 12-character
+  label was middle-ellipsised, so the rule became ten characters or fewer. `_guide_step` now takes a
+  `cd_title`, the label on the countdown field, and `session_to_guide` sets it to "3/10 left" on a
+  work rep of a multi-rep session ("10/10 left" is exactly ten characters) and "next 4/10" on a
+  recovery step ahead of a work rep; the warm-up, the cool-down, a single-work session (the long
+  run's marathon-pace step, a tempo) and the simple run keep "left". Field order, the step title, the
+  step text and the boundary popup are unchanged.
+
 ## [0.70.3] - 2026-09-23
 
 ### Fixed
