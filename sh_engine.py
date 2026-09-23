@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.74.2"
+ENGINE_VERSION = "0.74.3"
 
 
 def _zones_asof(db, date_iso=None):
@@ -395,8 +395,8 @@ def plan_seed(db, today):
     # compared with the last trusted row rolled forward over the measured days between them; one
     # that sits further than SEED_TAINT_TOL away on either axis is skipped, and the seed is the
     # last trusted row bridged to yesterday exactly as a missing day is. A row without a load
-    # reading is adopted as it stands — there is nothing to compare. The oldest row in the window
-    # is trusted by assumption; a duplicate older than the window is the readiness banner's job.
+    # reading is adopted as it stands — there is nothing to compare. The base is chosen among the
+    # window's oldest rows (§SEED5 below); a duplicate older than the window is the readiness banner's job.
     # §SEED4 (0.68.1) — when EVERY row in the window is stale the walk runs over the stale rows
     # instead of the newest one being adopted unchecked. The live case, 2026-09-11 20:24 UTC: a
     # Runalyze route refresh re-synced eleven old runs, the stale test (then keyed on our own sync
@@ -404,26 +404,29 @@ def plan_seed(db, today):
     # this same walk had skipped that morning (plans 199/200 → 79.7 / 99.3; plan 201 → 88 / 143, no
     # Saturday, no long run). A stale row that is in fact complete passes the walk; one missing a run
     # fails it by that run's load and is bridged, which is what the stale rule would have done.
+    # §SEED5 (0.74.3) — the window's oldest row is no longer trusted by assumption. §SEED3 anchored
+    # the walk on it, which is right while the taint sits INSIDE the window: the row before it exposes
+    # it. On 2026-09-24 the doubled 09-10 row (CTL 88 / ATL 143 for a true 80 / 99) turned fourteen
+    # days old and became the window's oldest row itself; the walk rolled forward from the doubled
+    # state, every later row sat further than the tolerance from that roll, thirteen of thirteen were
+    # skipped, and plan 273 seeded from 09-10 bridged thirteen days: CTL 96.3 / ATL 113.3 for a true
+    # 92 / 112, and the week grew (Thu 10.8 → 11.6 km, Sat 9.5 → 10.1). A day later the row left the
+    # window and the seed healed by itself; every regeneration on the trap day repeated it.
+    # Now the base is whichever of the window's SEED_ANCHOR_CANDIDATES oldest rows the rest of the
+    # window agrees with best: the walk is run from each, the rows every candidate judges (from the
+    # fourth on) are counted, the fewest tainted wins, ties go to the oldest — so a clean window and a
+    # short one behave exactly as before, and a tainted edge row (or two) is rejected as the base and
+    # counted among the skipped rows. Three tainted rows at the edge still trap for a day (the log
+    # says so). Measured on the live copy: 22 and 23 Sep unchanged (the oldest row, 1 tainted);
+    # 24 Sep anchors on 09-11, seeds 09-23 verbatim, 1 tainted.
     chain = list(reversed(live if live else rows))
-    tainted, daily = 0, None
-    trusted = chain[0]
-    for r in chain[1:]:
-        if (trusted["fitness"] is None or trusted["fatigue"] is None
-                or r["fitness"] is None or r["fatigue"] is None):
-            trusted = r
-            continue
-        daily = daily if daily is not None else daily_trimp_series(db)
-        ctl, atl = trusted["fitness"], trusted["fatigue"]
-        cur, rd = _date(trusted["snapshot_date"]) + timedelta(days=1), _date(r["snapshot_date"])
-        while cur <= rd:
-            t = daily.get(cur.isoformat(), 0.0)
-            ctl, atl = _ewma_step(ctl, t, TAU_CTL), _ewma_step(atl, t, TAU_ATL)
-            cur += timedelta(days=1)
-        if abs(r["fitness"] - ctl) <= SEED_TAINT_TOL and abs(r["fatigue"] - atl) <= SEED_TAINT_TOL:
-            trusted = r
-        else:
-            tainted += 1
-    prior = trusted
+    daily = daily_trimp_series(db) if len(chain) > 1 else None
+    best = None
+    for k in range(min(SEED_ANCHOR_CANDIDATES, len(chain))):
+        trusted, tainted, contested = _seed_walk(chain, k, daily)
+        if best is None or contested < best[2]:
+            best = (trusted, tainted + k, contested)
+    prior, tainted = best[0], best[1]
     ctl, atl = prior["fitness"] or 0.0, prior["fatigue"] or 0.0
     seeded_from, yday = _date(prior["snapshot_date"]), today - timedelta(days=1)
     bridged = 0
@@ -440,9 +443,39 @@ def plan_seed(db, today):
              **({"stale_unresolved": True} if unresolved and skipped else {})})
 
 
+def _seed_walk(chain, start, daily):
+    """§SEED3's walk from `chain[start]`: each later row is compared with the last trusted row rolled
+    forward over the measured daily TRIMP between them and skipped when it sits further than
+    SEED_TAINT_TOL away on either axis; a row without a load reading is adopted as it stands.
+    Returns (last trusted row, rows skipped, rows skipped among those every anchor candidate judges —
+    chain index SEED_ANCHOR_CANDIDATES onward — which is what §SEED5 compares the candidates on)."""
+    trusted, tainted, contested = chain[start], 0, 0
+    for i in range(start + 1, len(chain)):
+        r = chain[i]
+        if (trusted["fitness"] is None or trusted["fatigue"] is None
+                or r["fitness"] is None or r["fatigue"] is None):
+            trusted = r
+            continue
+        ctl, atl = trusted["fitness"], trusted["fatigue"]
+        cur, rd = _date(trusted["snapshot_date"]) + timedelta(days=1), _date(r["snapshot_date"])
+        while cur <= rd:
+            t = daily.get(cur.isoformat(), 0.0)
+            ctl, atl = _ewma_step(ctl, t, TAU_CTL), _ewma_step(atl, t, TAU_ATL)
+            cur += timedelta(days=1)
+        if abs(r["fitness"] - ctl) <= SEED_TAINT_TOL and abs(r["fatigue"] - atl) <= SEED_TAINT_TOL:
+            trusted = r
+        else:
+            tainted += 1
+            if i >= SEED_ANCHOR_CANDIDATES:
+                contested += 1
+    return trusted, tainted, contested
+
+
 SEED_STALE_LOOKBACK_DAYS = 14   # §SEED2 — how far back a trustworthy snapshot is looked for
 SEED_TAINT_TOL = 3.0            # §SEED3 — a snapshot further than this from the engine's own roll of the last
 #                                 trusted row, on CTL or ATL, is tainted and skipped (Runalyze rounds both to integers)
+SEED_ANCHOR_CANDIDATES = 3      # §SEED5 — how many of the window's oldest rows are tried as the walk's base; the one
+#                                 the rest of the window agrees with best wins (fewest skipped rows), ties to the oldest
 
 
 def _snapshot_stale(db, snapshot_date, captured_at):

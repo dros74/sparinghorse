@@ -18972,7 +18972,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_rebase_anchor_derive(),
                  lambda: _stc_projector(db), lambda: _stc_acwr_ceiling(db),
                  lambda: _stc_peak_acwr_floor(), lambda: _stc_plannable_peak(), lambda: _stc_building_load_integrity(),
-                 lambda: _stc_plan_seed(), lambda: _stc_seed_late_upload(), lambda: _stc_seed_tainted(), lambda: _stc_seed_resync(),
+                 lambda: _stc_plan_seed(), lambda: _stc_seed_late_upload(), lambda: _stc_seed_tainted(),
+                 lambda: _stc_seed_anchor(), lambda: _stc_seed_resync(),
                  lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
                  lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),
@@ -21143,7 +21144,8 @@ def _stc_music_ramp():
     target is monotone in the fraction and never over the rung; (h) a read-back with no playlist
     proves nothing and the older one counts; (i) a small fraction never asks under the step; (j) the
     comfort ceiling still wins; (k) `ramp_state` reads the rung from a stored read-back row and is
-    None on a plan without an objective; (l) a read-back without minutes is skipped."""
+    None on a plan without an objective; (l) a read-back without minutes is skipped; (o) §BEAT17 —
+    the ramp climbs to the next race ahead on a chain, not the terminal one."""
     if M is None:
         return _music_skip("music-ramp", "§BEAT4 — the race-anchored cadence ramp")
     import json as _json
@@ -21259,13 +21261,50 @@ def _stc_music_ramp():
     ro = M.held_rung(rb_off, cv)
     if not (ro and ro["date"] == "2026-09-05"):
         fails.append(f"(n) an all-off-playlist read-back must be skipped for the older one: {ro}")
+    # (o) §BEAT17 — the ramp climbs to the NEXT race ahead on a chain, not the chain's terminal race.
+    # Race A 73 days out, Race B (the chain's terminal / plan objective) 226 days out.
+    leg = lambda days, label: {"label": label, "date": (today + _td(days=days)).isoformat(), "type": "marathon", "role": "coequal"}
+    A, B = leg(73, "Race A"), leg(226, "Race B")
+    objB = dict(obj(226), label="Race B")
+    if M.road_race(None, today) is not None:
+        fails.append("(o) no plan must give no road race")
+    if M.road_race({"objective": objB}, today) != objB:
+        fails.append("(o) no chain must fall back to the plan's own objective")
+    if M.road_race({"objective": objB, "chain": [A, B]}, today) != A:
+        fails.append("(o) the earliest leg ahead must win")
+    if M.road_race({"objective": objB, "chain": [B, A]}, today) != A:
+        fails.append("(o) an out-of-order chain must still find the earliest leg ahead")
+    if M.road_race({"objective": objB, "chain": [A, B]}, today + _td(days=74)) != B:
+        fails.append("(o) once Race A is behind the road must move to Race B")
+    if M.road_race({"objective": objB, "chain": [A, B]}, today + _td(days=227)) != objB:
+        fails.append("(o) with every leg run the road must fall back to the plan's own objective")
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.execute("CREATE TABLE readback(run_id INTEGER PRIMARY KEY, date TEXT, computed_at TEXT, payload TEXT)")
+    try:
+        if M.ramp_state({"objective": objB, "chain": [A, B]}, cv, today + _td(days=227), m) is not None:
+            fails.append("(o) with the whole chain behind, ramp_state must give nothing")
+        st = M.ramp_state({"objective": objB, "chain": [A, B]}, cv, today, m)
+        cA = M.ramp_clock(A, today)
+        got["chain_ramp"] = st
+        if not (st and st["race"] == A["date"] and st["label"] == "Race A" and st["phase"] == "ramp"
+                and abs(st["fraction"] - cA["fraction"]) < 1e-9 and st["fraction"] > 0.3):
+            fails.append(f"(o) the ramp must climb to the next race ahead on the chain, not the terminal one: {st}")
+        # anti-vacuity — the same plan WITHOUT the chain key reads the terminal objective as before
+        st2 = M.ramp_state({"objective": objB}, cv, today, m)
+        if not (st2 and st2["phase"] == "before" and st2["fraction"] == 0):
+            fails.append(f"(o) anti-vacuity: without a chain the plan's own (terminal) objective must "
+                         f"still govern the clock: {st2}")
+    finally:
+        m.close()
     return _st("det", "music-ramp",
                "§BEAT4 — with a race on the road the target climbs from the recent line to the trained "
                "line on a twelve-week ramp landing three weeks out, never under the step, never more than "
                "one entrainment step over the last read-back's cadence, held where a rung was run under, "
-               "and every target names what set it",
+               "every target names what set it, and (§BEAT17) the ramp climbs to the next race ahead on "
+               "a chain, not the terminal one",
                passed=not fails, expect="before/half/landed clock; 168.9 plain / 170.45 ramp / 171.4 rung / "
-               "174.5 trained after a held rung / 170.0 after a missed one; monotone; ceiling wins",
+               "174.5 trained after a held rung / 170.0 after a missed one; monotone; ceiling wins; "
+               "next race ahead, not the terminal one",
                got={"violations": fails or "none", **got})
 
 
@@ -21452,6 +21491,141 @@ def _stc_seed_tainted():
                "bridged by measurement; a matching row seeds verbatim; a persisting doubled row stays skipped; "
                "a row without a reading is adopted; the rule disarmed seeds the doubled row",
                passed=not fails, expect="skip the doubled row, seed the roll; verbatim when matching; disarmed → doubled",
+               got={"violations": fails or "none"})
+
+def _stc_seed_anchor():
+    """§SEED5 (0.74.3) — the window's oldest row is no longer trusted by assumption; the base is
+    chosen among the window's oldest SEED_ANCHOR_CANDIDATES rows, the fewest-tainted wins, ties go to
+    the oldest. Live case: on 2026-09-24 the doubled 09-10 row turned fourteen days old and became the
+    window's own oldest row, and plan 273 bridged from it (CTL 96.3 / ATL 113.3 for a true 92 / 112)
+    instead of the row before it, which the walk would have exposed it against. Fixture: a rollable
+    D-15..D0 history rooted at CTL 75.0 / ATL 74.0 (D-16), D-14 corrupted by a doubled-TRIMP row as at
+    the live case. (a) the doubled row sits at the window's own oldest edge → the walk anchors past
+    it, from == D-1, tainted_skipped 1, seeded near the genuine D-1 row and NOT near the doubled-base
+    bridge (checked, to prove the limb discriminates); (b) the same rows a day earlier, the doubled
+    row second in the window → from == D-2, tainted_skipped 1 (unchanged: the taint sits inside the
+    window, the pre-§SEED5 case); (c) a day later, the doubled row has aged out of the window →
+    from == D0, tainted_skipped 0; (d) two tainted edge rows (the duplicate persists into a second
+    day's row) → from == D-1, tainted_skipped 2; (e) a tie between two anchor candidates goes to the
+    oldest (seed-tainted (a) restated under §SEED5); (f) ANTI-VACUITY — SEED_ANCHOR_CANDIDATES=1
+    reproduces the pre-fix trap on fixture (a): from == D-14, bridged 13, tainted 13, seeded near the
+    doubled-base bridge."""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    today = _d(2026, 9, 24)
+    trimp = [100, 160, 120, 90, 0, 150, 80, 110, 0, 130, 95, 0, 140, 85, 105, 0]   # D-15..D0
+
+    def date_at(i):             # i=0..16 → D-16..D0
+        return today - _td(days=16 - i)
+
+    state = [(75.0, 74.0)]      # state[0] = D-16 (the base); state[i] = D-(16-i)'s genuine roll
+    for t in trimp:
+        pctl, patl = state[-1]
+        state.append((E._ewma_step(pctl, t, E.TAU_CTL), E._ewma_step(patl, t, E.TAU_ATL)))
+
+    def doubled(i):              # day i's row as Runalyze read it with that day's run counted twice
+        pctl, patl = state[i - 1]
+        t = trimp[i - 1]
+        return E._ewma_step(pctl, 2 * t, E.TAU_CTL), E._ewma_step(patl, 2 * t, E.TAU_ATL)
+
+    def doubled_next(i):         # the day after a doubled row, rolled from the doubled state over
+        dctl, datl = doubled(i)  # ITS OWN genuine TRIMP (the duplicate persisting a second day)
+        t = trimp[i]
+        return E._ewma_step(dctl, t, E.TAU_CTL), E._ewma_step(datl, t, E.TAU_ATL)
+
+    def rows_range(i_lo, i_hi, dbl=frozenset()):
+        return [(date_at(i).isoformat(), *(doubled(i) if i in dbl else state[i])) for i in range(i_lo, i_hi + 1)]
+
+    def runs_range(i_lo, i_hi):
+        return [(date_at(i).isoformat(), trimp[i - 1]) for i in range(i_lo, i_hi + 1) if trimp[i - 1]]
+
+    def mk(rows, runs):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)
+        for d, ctl, atl in rows:                        # captured 20:30:04, the run synced 20:30:02 — not stale
+            m.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,fitness,fatigue) "
+                      "VALUES(?,?,?,?,?)", (d, d + "T20:30:04+00:00", 38.0, ctl, atl))
+        for d, tr in runs:
+            m.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp,synced_at) VALUES(?,?,?,?,?,?,?)",
+                      (d, d + "T19:41:46+02:00", S.RUNNING_SPORT, 13.0, 4553, tr, d + "T20:30:02+00:00"))
+        m.commit()
+        return m
+
+    def near(a, b):
+        return abs(a[0] - b[0]) < 0.01 and abs(a[1] - b[1]) < 0.01
+
+    # fixture validity: the doubled D-14 row must sit well outside the tolerance from the genuine one
+    d14_doubled, d14_genuine = doubled(2), state[2]
+    if abs(d14_doubled[1] - d14_genuine[1]) <= 4 * E.SEED_TAINT_TOL:
+        fails.append(f"fixture invalid: doubled D-14 sits {d14_doubled[1] - d14_genuine[1]:.1f} ATL from "
+                      f"genuine, inside four tolerances")
+
+    # (a) the live shape: the doubled row is the window's own oldest edge
+    rows_a, runs_a = rows_range(1, 15, dbl={2}), runs_range(1, 15)
+    vo2, ctl, atl, meta = E.plan_seed(mk(rows_a, runs_a), today)
+    d1_iso, d14_iso = date_at(15).isoformat(), date_at(2).isoformat()
+    if (meta.get("from") != d1_iso or meta.get("bridged_days") != 0
+            or meta.get("tainted_skipped") != 1 or meta.get("stale_skipped") != 0):
+        fails.append(f"(a) meta: {meta}")
+    if not near((ctl, atl), state[15]):
+        fails.append(f"(a) seed {ctl:.2f}/{atl:.2f}, want the genuine D-1 row {state[15][0]:.2f}/{state[15][1]:.2f}")
+    dctl, datl = d14_doubled
+    for i in range(3, 16):
+        dctl, datl = E._ewma_step(dctl, trimp[i - 1], E.TAU_CTL), E._ewma_step(datl, trimp[i - 1], E.TAU_ATL)
+    if abs(ctl - dctl) <= E.SEED_TAINT_TOL:
+        fails.append(f"(a) anti-vacuity: the seed ({ctl:.2f}) must clear the doubled-base bridge ({dctl:.2f})")
+
+    # (b) the same rows a day earlier: the taint sits inside the window (pre-§SEED5 case, unchanged)
+    vo2, ctl, atl, meta = E.plan_seed(mk(rows_a, runs_a), today - _td(days=1))
+    d2_iso = date_at(14).isoformat()
+    if meta.get("from") != d2_iso or meta.get("tainted_skipped") != 1:
+        fails.append(f"(b) the taint inside the window must still cost one row: {meta}")
+
+    # (c) a day later: the doubled row has aged out of the window
+    rows_c, runs_c = rows_range(1, 16, dbl={2}), runs_range(1, 16)
+    vo2, ctl, atl, meta = E.plan_seed(mk(rows_c, runs_c), today + _td(days=1))
+    d0_iso = date_at(16).isoformat()
+    if meta.get("from") != d0_iso or meta.get("tainted_skipped") != 0:
+        fails.append(f"(c) an aged-out taint must cost nothing: {meta}")
+
+    # (d) two tainted edge rows: the duplicate persists into D-13's row too
+    rows_d = [(date_at(i).isoformat(), *(doubled(2) if i == 2 else doubled_next(2) if i == 3 else state[i]))
+              for i in range(1, 16)]
+    vo2, ctl, atl, meta = E.plan_seed(mk(rows_d, runs_range(1, 15)), today)
+    if meta.get("from") != d1_iso or meta.get("tainted_skipped") != 2:
+        fails.append(f"(d) two tainted edge rows must both be rejected as the base: {meta}")
+
+    # (e) a tie between two anchor candidates goes to the oldest (seed-tainted (a) restated)
+    RUN_E = 175.0
+    e_d2, e_d1 = today - _td(days=2), today - _td(days=1)
+    one_e = (E._ewma_step(75.0, RUN_E, E.TAU_CTL), E._ewma_step(74.0, RUN_E, E.TAU_ATL))
+    two_e = (E._ewma_step(75.0, 2 * RUN_E, E.TAU_CTL), E._ewma_step(74.0, 2 * RUN_E, E.TAU_ATL))
+    vo2, ctl, atl, meta = E.plan_seed(
+        mk([(e_d2.isoformat(), 75.0, 74.0), (e_d1.isoformat(), two_e[0], two_e[1])], [(e_d1.isoformat(), RUN_E)]), today)
+    if meta.get("from") != e_d2.isoformat() or meta.get("bridged_days") != 1 or meta.get("tainted_skipped") != 1:
+        fails.append(f"(e) a tie between candidates must go to the oldest: {meta}")
+    if not near((ctl, atl), one_e):
+        fails.append(f"(e) seed {ctl:.2f}/{atl:.2f}, want the D-2 row rolled over the one run {one_e[0]:.2f}/{one_e[1]:.2f}")
+
+    # (f) ANTI-VACUITY — a single candidate reproduces the pre-§SEED5 trap on fixture (a)
+    keep = E.SEED_ANCHOR_CANDIDATES
+    try:
+        E.SEED_ANCHOR_CANDIDATES = 1
+        vo2, ctl, atl, meta = E.plan_seed(mk(rows_a, runs_a), today)
+    finally:
+        E.SEED_ANCHOR_CANDIDATES = keep
+    if meta.get("from") != d14_iso or meta.get("bridged_days") != 13 or meta.get("tainted_skipped") != 13:
+        fails.append(f"(f) a single candidate must trap on the doubled row as before: {meta}")
+    if not near((ctl, atl), (dctl, datl)):
+        fails.append(f"(f) seed {ctl:.2f}/{atl:.2f}, want the doubled-base bridge {dctl:.2f}/{datl:.2f}")
+
+    return _st("det", "seed-window-anchor",
+               "§SEED5 — the walk's base is chosen among the window's oldest anchor candidates, the "
+               "fewest-tainted wins and ties go to the oldest, so a doubled row that ages into the "
+               "window's own oldest edge no longer traps the seed on it",
+               passed=not fails,
+               expect="anchor past an edge taint; unchanged when the taint sits inside the window; ties to the oldest",
                got={"violations": fails or "none"})
 
 def _stc_seed_resync():

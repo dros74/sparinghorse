@@ -10,6 +10,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.74.3] - 2026-09-24
+
+### Fixed
+
+- **The plan's seed trusted its snapshot window's oldest row as the anchor by assumption, and
+  the day a duplicate-upload row turned fourteen days old it became that anchor, lifting the seed
+  four CTL above the truth (§SEED5).**
+  `plan_seed` walks the newest 14 days of snapshot rows oldest to newest, rolling each one
+  forward over the engine's own de-duplicated daily TRIMP (§SEED3, 0.65.2), and always anchored
+  that walk on the window's oldest row — on the reasoning that a duplicate that old was the
+  readiness banner's job, not the seed's. A manual sync run just after the 0.74.2 rebuild (22:12
+  UTC, 23 September) pulled a fresh snapshot and regenerated the plan for 24 September; the
+  window's oldest row that day was the very duplicate-upload row §SEED3 exists to catch — CTL 88
+  / ATL 143 against a true 80 / 99 — so every later row in the 14-day window read as tainted
+  against it, and the seed bridged all 13 days from the doubled base: CTL 96.3 / ATL 113.3, for a
+  true 92 / 112, where every earlier regeneration that day had seeded correctly from the day
+  before with a single tainted row. The week sheet grew on chronic load the athlete never carried — 66.6
+  to 68.1 km, the down week 54.2 to 55.5 — and every regeneration dated the same day would have
+  repeated it; the shape recurs whenever a duplicate row turns exactly 14 days old.
+  The change: a new `_seed_walk` helper holds §SEED3's roll, and `plan_seed` now runs it from each
+  of the window's three oldest rows, keeping whichever anchor leaves the fewest tainted rows among
+  those every candidate can judge, ties going to the oldest; rejected anchors are counted in the existing
+  `tainted_skipped` meta count, and no meta key is added. A clean window, or one shorter than four rows, behaves exactly as
+  before; three tainted rows sitting at the window's edge can still trap for a day.
+  Tests: new `det/seed-window-anchor` covers the duplicate row at the window's oldest edge, a day
+  earlier (inside the window), a day later (aged out of it), two tainted edge rows, a tie, and an
+  anti-vacuity limb pinning the candidate count at one to reproduce the trap; a revert to a
+  single-anchor walk fails two of the six limbs.
+
+- **The twelve-week cadence ramp climbed toward the chain's terminal race instead of the next
+  race ahead, and read week 0 from the day the chain landed (§BEAT17).** Since the
+  race chain landed (0.71.0, 23 September) `plan["objective"]` is always the chain's terminal
+  race — a May marathon here, 32 weeks out — and `ramp_state` handed that same objective straight
+  to `ramp_clock`. Built against a December marathon ten weeks out, the ramp on the 23 September
+  easy list read "before · week 0 · fraction 0.0" where the 22 September list, built the day
+  before the chain existed, had read "week 5 of 12, fraction 0.357"; the console's own default had
+  already moved to the next race ahead when §CHAIN4 shipped in 0.74.1, but the ramp never
+  followed. That night's easy target held at 169.9 spm either way — the list's own rung capped
+  both readings — so no leg lost cadence yet, but the climb toward the athlete's trained curve had
+  stopped, and within about a week it would have started holding the marathon-pace and interval
+  targets back through the build and the peak.
+  The change: a new pure `road_race(plan, today)` in `sh_music.py` picks the earliest chain leg
+  dated today or later, falling back to the plan's own objective only for a single-race plan, an
+  old payload with no chain, or a chain with every leg already run; `ramp_state` now calls
+  `ramp_clock(road_race(plan, today), today)` — the same race the console defaults to, minus the
+  tap. Measured patched on the same date: week 5 of 12, fraction 0.381, easy target 170.4 spm.
+  Tests: `det/music-ramp` gains a limb covering `road_race` with no plan, no chain, a two-leg chain
+  in and out of order, and after one or both legs have passed, plus `ramp_state` reading the
+  correct fraction off the near leg and falling back to the terminal objective once no chain is
+  present; a revert to reading `plan["objective"]` directly fails only this limb.
+
 ## [0.74.2] - 2026-09-23
 
 ### Fixed

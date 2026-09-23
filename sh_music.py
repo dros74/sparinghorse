@@ -467,7 +467,8 @@ def ramp_clock(objective, today):
     """PURE — where today stands on the ramp to the road's race, or None when no race is ahead.
     The ramp lands MUSIC_RAMP_LEAD_DAYS before the race and runs MUSIC_RAMP_DAYS up to that day:
     fraction 0 before it starts (the plain ladder), 1 once it has landed (the trained line, as far as
-    the rungs allow). The objective is the plan's own — the A-race the road is laid to."""
+    the rungs allow). The objective is the race `road_race` names — the next leg ahead on a chain,
+    the plan's own on a single race."""
     if not objective or not objective.get("date"):
         return None
     try:
@@ -487,6 +488,19 @@ def ramp_clock(objective, today):
             "fraction": round(f, 3), "phase": phase, "weeks": weeks,
             "week": 0 if elapsed < 0 else min(weeks, elapsed // 7 + 1),
             "days_to_race": (race - today).days, "rung": None}
+
+
+def road_race(plan, today):
+    """PURE — the race the road is on today: the earliest chain leg dated today or later (§CHAIN4's
+    next-race-ahead rule, the console's default view), else the plan's own objective — a single-race
+    plan, an old payload without a chain, or a road with every leg run. §BEAT17 — the ramp climbs to
+    THIS race: since the chain (0.71.0) `plan["objective"]` is the chain's terminal race, and a ramp
+    read off it sat at `before · week 0` for a race twelve weeks out."""
+    t = today.isoformat()
+    legs = [c for c in ((plan or {}).get("chain") or []) if str(c.get("date") or "")[:10] >= t]
+    if legs:
+        return min(legs, key=lambda c: str(c.get("date"))[:10])
+    return (plan or {}).get("objective")
 
 
 def held_rung(readbacks, curve):
@@ -541,9 +555,9 @@ def held_rung(readbacks, curve):
 
 
 def ramp_state(plan, curve, today, conn=None):
-    """The ramp clock for the road's race with the last rung read from the stored read-backs, or
-    None when there is no race ahead or no curve to climb."""
-    clock = ramp_clock((plan or {}).get("objective"), today)
+    """The ramp clock for the road's race (`road_race` — the next leg ahead on a chain) with the last
+    rung read from the stored read-backs, or None when there is no race ahead or no curve to climb."""
+    clock = ramp_clock(road_race(plan, today), today)
     if not clock or not curve:
         return None
     own = conn is None
