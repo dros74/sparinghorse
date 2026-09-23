@@ -1106,11 +1106,14 @@
      always terracotta). Chain segments (peak2/taper2/bridge2…) match by prefix. rebase = the terracotta
      we started with; taper cycles back to terracotta (4 hues, 5 phases — the two low-volume bookends). */
   .phaseseg[data-pk="rebase"],  .phasepanel[data-pk="rebase"] { --accent: var(--accent1); }
-  .phaseseg[data-pk="base"],    .phasepanel[data-pk="base"]   { --accent: var(--accent2); }
-  .phaseseg[data-pk="build"],   .phasepanel[data-pk="build"],
+  /* §CHAIN2b (0.72.1): base/build match by PREFIX too — a second cycle's base1/build1 read as their
+     phase, not as the default terracotta; a recovery block is a low-volume bookend like the taper. */
+  .phaseseg[data-pk^="base"],   .phasepanel[data-pk^="base"]  { --accent: var(--accent2); }
+  .phaseseg[data-pk^="build"],  .phasepanel[data-pk^="build"],
   .phaseseg[data-pk^="bridge"], .phasepanel[data-pk^="bridge"]{ --accent: var(--accent3); }
   .phaseseg[data-pk^="peak"],   .phasepanel[data-pk^="peak"]  { --accent: var(--accent4); }
-  .phaseseg[data-pk^="taper"],  .phasepanel[data-pk^="taper"] { --accent: var(--accent1); }
+  .phaseseg[data-pk^="taper"],  .phasepanel[data-pk^="taper"],
+  .phaseseg[data-pk^="recovery"],.phasepanel[data-pk^="recovery"]{ --accent: var(--accent1); }
   /* (0.56.1: the opacity dimming that lived here moved to a desaturated fill — see .phaseseg above) */
   /* Health markers: cycle four hues */
   .hgrid .hcard:nth-child(4n+1){ --accent: var(--accent1); }

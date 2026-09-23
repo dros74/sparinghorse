@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.72.1] - 2026-09-23
+
+### Fixed
+
+- **A second cycle's Base and Build segments, and the week strip and week cards under them, carried
+  the default terracotta instead of their own phase colour (§CHAIN2b).** `static/app.css` keyed the
+  base and build hues to an EXACT `data-pk` match (`"base"`, `"build"`), while peak, taper and the
+  chain's bridge segments already matched by prefix — so a chain's second cycle, `base1` and
+  `build1`, fell through to the accent default, and the new `recovery1` phase from 0.72.0 had no
+  rule at all and fell through the same way. `base`/`build` now match by prefix
+  (`[data-pk^="base"]`, `[data-pk^="build"]`) like the other phases, and recovery takes the taper's
+  hue (`accent1`) — a low-volume bookend like the taper it sits opposite. CSS only, plus det/accent2-fallback's phase-keying check now reads the prefix selector; the page's
+  `?v=` cache-buster carries the version, so the fix reaches the athlete on the next load after deploy.
+
 ## [0.72.0] - 2026-09-23
 
 ### Added

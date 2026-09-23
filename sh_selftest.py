@@ -15862,7 +15862,7 @@ def _stc_accent2_fallback():
     if S.re.search(r"#tiles \.tile:nth-child", S.APP_CSS):
         fails.append("(c) the shape tiles are still hue-keyed by position (:nth-child) — a reorder "
                      "silently repaints every tile")
-    if '.phaseseg[data-pk="build"]' not in S.APP_CSS:   # grouped selector — substring, not rule match
+    if '.phaseseg[data-pk^="build"]' not in S.APP_CSS:  # §CHAIN2b: prefix match (build1 too); grouped selector — substring, not rule match
         fails.append("(d) the plan phases lost their data-pk hue keying")
     return _st("det", "accent2-fallback",
                "the ratified square-polychrome palette: no bare var(--accentN) anywhere, all four "
