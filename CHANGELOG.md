@@ -10,9 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
-## [0.70.2] - 2026-09-22
+## [0.70.3] - 2026-09-23
 
 ### Fixed
+
+- **The Build phase's week strip greyed a building week by its position in the block, not by its
+  role (§DOWNWK).** `weekStrip()` decided the recovery shade with `w.wk===4` — a hard-coded
+  "the fourth week is the down week" rule from the era when every block ran three up, one down,
+  and still there after the code split (`f5e7e1b`, 2026-08-22) only moved the SPA into
+  `static/app.js`. Once a deload became movable (§C 0.59.0: a block's down week can sit in another
+  slot, or be retired), the position stopped meaning anything: a block with its down week at W3
+  (28 Sep, 54.2 km, role "down") greyed W4 (5 Oct, 66.2 km, a building week) instead, as the
+  athlete saw right after regenerating plan 231 on 23 Sep. The week-row detail card already read
+  the intent text and was right; the strip and the re-base block's own week card (the same
+  `w.wk===4`, harmless only while the re-base ladder's down week sat at W4) carried the position
+  rule. All three now call one `isDownWeek(w)` — `w.role==='down'` (every week is roled by §P1; a retired deload reads back
+  `role: "build"`, intent "Level week — the deload is not owed") with the old intent-text regex as
+  the fallback for plans saved before weeks carried a role. Verified in node against a six-week
+  fixture (build/build/down/build/old-plan-no-role-"Down week"/level): W3 and W5 grey, W1/W2/W4/W6
+  blue.
 
 - **The week in progress bounded its plan from a seed that kept moving, cutting three of the days
   ahead for load the athlete never laid (§WKMEAN2).** `generate_block`'s straddle branch (§6o)

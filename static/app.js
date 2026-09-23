@@ -1719,7 +1719,7 @@ function limitsHtml(L){
     <div class="help">ceiling / laid / headroom · basis: L literature, A fitted to this athlete, S structural</div></details>`;
 }
 function weekHtml(w,p,today){
-  const down=/down/i.test(w.intent||'');
+  const down=isDownWeek(w);
   let cur=false;
   if(w.start) cur = !w.frozen && w.start<=today && today<=weekEndIso(w.start);
   // LOG-enriched sessions (merged in by renderPlan for elapsed/current weeks) get the journal line
@@ -1801,6 +1801,11 @@ function weekHoldsToday(w,today){
   if(!w||!w.start) return false;
   return w.start<=today && today<=weekEndIso(w.start);
 }
+// A recovery (down) week is the one the engine ROLED so — never a fixed position. Until §C
+// (0.59.0) the down week was always the block's fourth, and the strip still greyed W4 by number;
+// once the deload moved (a build block whose down week is its third), W4 greyed as a building
+// week. The intent text is the fallback for plans saved before weeks carried a role.
+function isDownWeek(w){ return w.role==='down' || /^down/i.test(w.intent||''); }
 // Which week is open by default in a phase's strip: the one holding `today`, else the first.
 function defaultWeek(weeks,today){ return ((weeks.find(w=>weekHoldsToday(w,today))||weeks[0]||{}).wk); }
 // A second-level selector that echoes the phase bar: one segment per week, the selected one active.
@@ -1808,7 +1813,7 @@ function defaultWeek(weeks,today){ return ((weeks.find(w=>weekHoldsToday(w,today
 // LOG-enriched vs plain week renderers stay untouched (we wrap their output, never merge them).
 function weekStrip(weeks,pk,sel){
   return `<div class="weekstrip" data-pk="${pk}">`+weeks.map(w=>{
-    const down=/down/i.test(w.intent||'')||w.wk===4;
+    const down=isDownWeek(w);
     return `<div class="weekseg${w.wk===sel?' active':''}${down?' wsdown':''}" data-pk="${pk}" data-wk="${w.wk}"
        role="button" tabindex="0" aria-pressed="${w.wk===sel}"
        aria-label="W${w.wk}: ${U.d(w.km)} ${U.unit}, ${w.runs} runs${w.frozen?', done':''}"
@@ -1913,7 +1918,7 @@ function renderPlan(p){
     const hasLog = w.sessions.some(s=>'done' in s);
     const sess = hasLog ? `<div class="wsesslog">${w.sessions.map(sessHtml).join("")}</div>`
       : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${sessSummary(s)}</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">@ easy ${p.pace_zones.easy_top}</div></div>`;
-    const inner = `<div class="wk ${w.wk===4?'wdown':''}">
+    const inner = `<div class="wk ${isDownWeek(w)?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
         <div><span class="wkm">${U.d(w.km)} ${U.unit}</span> · ${w.runs} runs${w.clipped?' · <span class="down">clipped to fit ACWR</span>':''}${w.adjusted?' · <span class="eased">eased</span>':''}</div>
