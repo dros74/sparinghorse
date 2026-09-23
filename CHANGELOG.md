@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.74.0] - 2026-09-23
+
+### Added
+
+- **Removing a race now asks first, and the removal can be undone (§OBJ3).** The remove control
+  posted `/api/objectives/<id>/remove` on the tap itself — no confirmation — and the row was then
+  gone for good: the server set `status='removed'` and ran a full re-plan, and nothing in the
+  console could reverse it. One slip on a phone took a marathon off a live plan (the plan
+  re-anchored around the remaining race) and the row had to be put back by hand in the database. Remove
+  now opens the house confirm dialog first — title "Remove \<race\>?", the race's date · type ·
+  target, the confirm button reads "Remove", Cancel holds the default focus, Esc and a backdrop tap
+  cancel — and a cancelled remove re-plans nothing. New `POST /api/objectives/<id>/restore` is the
+  undo: it puts the SAME row back on the calendar (its id, `created_at`, founding road and
+  prediction ledger stay attached — adding the race again would stand a new race in its place, the
+  §GM argument) and re-anchors the plan around it. Guarded by 404 for an unknown id; 409 when the
+  race is not `removed` (an upcoming one is already on the calendar, a done/lapsed one's result is
+  pinned to the day it was run); 409 when its date has passed ("add the next edition as a new
+  race"); and 409 when an identical upcoming race (same date, type, label case-insensitively) was
+  added in the meantime — the §OBJ2 duplicate rule. A race removed in the last 24 hours, whose day
+  has not passed, stays listed under the upcoming races with a put-back control (a muted row, a
+  plain priority badge, no other controls); past that window it drops off the list and a re-add
+  starts a new race. A new `objectives.removed_at` column carries the stamp (an idempotent
+  migration in `init_db`) and is registered in `_PV_WITHHELD`, so it never reaches the public box.
+
+### Changed
+
+- **`POST /api/objectives/<id>/remove` now answers 404 for an unknown id and 409 for a race that
+  isn't upcoming** (already off the calendar, or run), instead of riding a pointless full re-plan.
+
 ## [0.73.0] - 2026-09-23
 
 ### Added

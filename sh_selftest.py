@@ -16232,6 +16232,144 @@ def _stc_objective_dedupe(db):
                got={"violations": fails or "none"})
 
 
+def _stc_objective_restore(db):
+    """§OBJ3 (0.74.0) — the undo of remove: POST /api/objectives/<id>/restore puts the SAME row back
+    on the calendar (its id, created_at, founding road and prediction ledger all survive — the §GM
+    argument against add-then-remove standing a new race in its place). Driven through the real
+    add/remove/restore endpoints so the guards and the re-plan are exercised for real; every 409/404
+    case that doesn't need its own live re-plan is set up by direct SQL so the det stays cheap. The
+    probe's own rows are its own and are deleted afterwards.
+      (a) POST /api/objectives lands the probe race → 200 ok.
+      (b) POST …/remove → 200 ok; the row reads status 'removed' with a non-empty removed_at; the
+          private GET /api/objectives carries removed_at on that row.
+      (c) POST …/remove again → 409, "already off the calendar" — and no second re-plan runs (the
+          plans table is untouched).
+      (d) POST …/restore → 200 ok with a diff; the row reads status 'upcoming', removed_at NULL; the
+          regenerated plan's chain (or, failing that, its single objective) names the probe label.
+      (e) POST …/restore again (now upcoming) → 409 "already on the calendar"; restoring a
+          non-existent id → 404.
+      (f) the §OBJ2 duplicate rule reaches restore too: with the probe removed again by SQL and a
+          second upcoming row sharing its label/type/date, restore on the probe → 409 "already on the
+          calendar" and the probe row stays 'removed'.
+      (g) a removed race whose day has passed can't be put back → 409 "day has passed" (a separate
+          row, inserted removed by SQL, so the probe's own history stays clean for the log above).
+      (h) removed_at never reaches the public box — it's registered in _PV_WITHHELD, not the
+          objectives allowlist."""
+    from datetime import timedelta
+    fails = []
+    label = "selftest-restore-probe"
+    date_probe = (S.datetime.now().date() + timedelta(days=200)).isoformat()
+    date_past = (S.datetime.now().date() - timedelta(days=1)).isoformat()
+    saved_ro = S.READONLY
+    c = S.app.test_client()
+
+    def is_json(r):
+        return (r.headers.get("Content-Type") or "").startswith("application/json")
+
+    try:
+        S.READONLY = False
+        # (a) the probe race lands
+        r = c.post("/api/objectives", json={"type": "marathon", "label": label, "date": date_probe})
+        d = r.get_json() or {}
+        if r.status_code != 200 or not is_json(r) or not d.get("ok"):
+            fails.append(f"(a) add answered {r.status_code} {d} — want 200 ok")
+        row = db.execute(
+            "SELECT id FROM objectives WHERE lower(label)=lower(?) AND status='upcoming'",
+            (label,)).fetchone()
+        oid = row["id"] if row else None
+        if oid is None:
+            fails.append("(a) probe row never landed — the rest of the det has nothing to drive")
+        else:
+            # (b) remove it
+            r = c.post(f"/api/objectives/{oid}/remove")
+            d = r.get_json() or {}
+            if r.status_code != 200 or not is_json(r) or not d.get("ok"):
+                fails.append(f"(b) remove answered {r.status_code} {d} — want 200 ok")
+            row = db.execute("SELECT status, removed_at FROM objectives WHERE id=?", (oid,)).fetchone()
+            if row["status"] != "removed" or not row["removed_at"]:
+                fails.append(f"(b) row reads status={row['status']!r} removed_at={row['removed_at']!r} "
+                             f"— want 'removed' + a stamp")
+            got = next((o for o in (c.get("/api/objectives").get_json() or []) if o.get("id") == oid), None)
+            if not got or not got.get("removed_at"):
+                fails.append(f"(b) private GET /api/objectives doesn't carry removed_at on the row: {got}")
+            # (c) removing an already-removed race is a 409, not a second re-plan
+            plans_before = db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+            r = c.post(f"/api/objectives/{oid}/remove")
+            d = r.get_json() or {}
+            if (r.status_code != 409 or not is_json(r) or d.get("ok") is not False
+                    or "already off the calendar" not in (d.get("error") or "")):
+                fails.append(f"(c) second remove answered {r.status_code} {d} — want 409 + "
+                             f"'already off the calendar'")
+            plans_after = db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+            if plans_after != plans_before:
+                fails.append(f"(c) a 409'd remove still re-planned ({plans_before} → {plans_after} rows)")
+            # (d) put it back
+            r = c.post(f"/api/objectives/{oid}/restore")
+            d = r.get_json() or {}
+            if r.status_code != 200 or not is_json(r) or not d.get("ok") or "diff" not in d:
+                fails.append(f"(d) restore answered {r.status_code} {d} — want 200 ok + a diff")
+            row = db.execute("SELECT status, removed_at FROM objectives WHERE id=?", (oid,)).fetchone()
+            if row["status"] != "upcoming" or row["removed_at"] is not None:
+                fails.append(f"(d) row reads status={row['status']!r} removed_at={row['removed_at']!r} "
+                             f"— want 'upcoming' + NULL")
+            named = (any(o.get("label") == label for o in (d.get("chain") or []))
+                     or (d.get("objective") or {}).get("label") == label)
+            if not named:
+                fails.append(f"(d) the regenerated plan names neither chain nor objective as {label!r}")
+            # (e) restoring an upcoming race, or one that never existed
+            r = c.post(f"/api/objectives/{oid}/restore")
+            d = r.get_json() or {}
+            if (r.status_code != 409 or not is_json(r) or d.get("ok") is not False
+                    or "already on the calendar" not in (d.get("error") or "")):
+                fails.append(f"(e) restoring an upcoming race answered {r.status_code} {d} — want 409 + "
+                             f"'already on the calendar'")
+            r = c.post("/api/objectives/999999/restore")
+            d = r.get_json() or {}
+            if r.status_code != 404 or not is_json(r) or d.get("ok") is not False:
+                fails.append(f"(e) restoring a missing id answered {r.status_code} {d} — want 404")
+            # (f) the §OBJ2 duplicate rule reaches restore too
+            now = S._now_iso()
+            db.execute("UPDATE objectives SET status='removed', removed_at=? WHERE id=?", (now, oid))
+            db.execute(
+                "INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("marathon", label, date_probe, "finish", "A", "upcoming", now))
+            db.commit()
+            r = c.post(f"/api/objectives/{oid}/restore")
+            d = r.get_json() or {}
+            if (r.status_code != 409 or not is_json(r) or d.get("ok") is not False
+                    or "already on the calendar" not in (d.get("error") or "")):
+                fails.append(f"(f) restore-into-a-duplicate answered {r.status_code} {d} — want 409 + "
+                             f"'already on the calendar'")
+            row = db.execute("SELECT status FROM objectives WHERE id=?", (oid,)).fetchone()
+            if row["status"] != "removed":
+                fails.append(f"(f) probe row reads status={row['status']!r} — want still 'removed'")
+            # (g) a removed race whose day has passed can't be put back — a fresh row, own id
+            past_id = db.execute(
+                "INSERT INTO objectives (type,label,date,target,priority,status,created_at,removed_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                ("marathon", label, date_past, "finish", "A", "removed", now, now)).lastrowid
+            db.commit()
+            r = c.post(f"/api/objectives/{past_id}/restore")
+            d = r.get_json() or {}
+            if (r.status_code != 409 or not is_json(r) or d.get("ok") is not False
+                    or "day has passed" not in (d.get("error") or "")):
+                fails.append(f"(g) restoring a passed race answered {r.status_code} {d} — want 409 + "
+                             f"'day has passed'")
+        # (h) removed_at never reaches the public box
+        if "objectives[].removed_at" not in S._PV_WITHHELD:
+            fails.append("(h) objectives[].removed_at is not registered in _PV_WITHHELD")
+    finally:
+        db.execute("DELETE FROM objectives WHERE lower(label)=lower(?)", (label,)); db.commit()
+        S.READONLY = saved_ro
+    return _st("det", "objective-restore",
+               "POST /api/objectives/<id>/restore puts the SAME removed row back on the calendar, "
+               "guarded by status, the §OBJ2 duplicate rule and a passed date; removed_at never "
+               "reaches the public box",
+               passed=not fails, expect="see docstring (a)-(h)",
+               got={"violations": fails or "none"})
+
+
 def _stc_copy_posture(db):
     """0.27.0 — the product's WORDS say what the engine does, and narrate nobody's history (plan B of the
     Codex/Luna reviews, log §70). Words, not governors: every tooth here is a string or a file mode; the
@@ -18879,6 +19017,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_public_view_coverage_all(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db), lambda: _stc_objective_dedupe(db),
+                 lambda: _stc_objective_restore(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_checkin_stop(), lambda: _stc_medical_track(db),

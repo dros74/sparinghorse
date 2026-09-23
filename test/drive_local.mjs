@@ -716,6 +716,49 @@ async function runFull() {
   ok(`offline termini date the data from the stored stamp (${offline.dated}/${offline.n} — "${offline.sample}…")`,
      offline.n >= 5 && offline.dated === offline.n);
   await page.unroute('**/api/**'); await page.unroute('**/healthz');
+  // the offline reload above left every tile on its failure terminus (routes aborted, never
+  // redrawn) — reload for real now that the API answers again, so the §OBJ3 flow below has an
+  // actual rendered .obj row to click, not a stranded offline shell.
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#tiles .tile', { timeout: 15000 });
+  await page.waitForSelector('.obj .x', { timeout: 15000 });
+
+  // ── §OBJ3 — remove asks first, and a removed race can be put back within 24h ──────
+  const objBefore = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
+  const upcomingBefore = objBefore.filter(o => o.status === 'upcoming');
+  const removeTarget = upcomingBefore[0];
+  ok('an upcoming objective exists to drive the §OBJ3 flow', !!removeTarget);
+  const genBefore = (await page.evaluate(() => fetch('/api/plan').then(r => r.json()))).generated_at;
+  await page.locator('.obj .x').first().click();
+  await page.waitForSelector('#confirmDialog[open]', { timeout: 15000 });
+  const cf = await page.evaluate(() => ({ ok: document.getElementById('cfOk').textContent.trim(),
+                                          title: document.getElementById('cfTitle').textContent }));
+  ok(`remove asks first (confirm button "${cf.ok}", title "${cf.title}")`,
+     cf.ok === 'Remove' && cf.title.includes(removeTarget.label));
+  await page.locator('#cfCancel').click();
+  await page.waitForFunction(() => !document.getElementById('confirmDialog').open, { timeout: 5000 });
+  const objAfterCancel = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
+  const genAfterCancel = (await page.evaluate(() => fetch('/api/plan').then(r => r.json()))).generated_at;
+  ok('a cancelled remove leaves the upcoming count unchanged',
+     objAfterCancel.filter(o => o.status === 'upcoming').length === upcomingBefore.length);
+  ok('a cancelled remove re-plans nothing (generated_at unchanged)', genAfterCancel === genBefore);
+
+  await page.locator('.obj .x').first().click();
+  await page.waitForSelector('#confirmDialog[open]', { timeout: 15000 });
+  await page.locator('#cfOk').click();
+  await page.waitForSelector('.obj.removed .putback', { timeout: 90000 });   // a full re-plan
+  const objAfterRemove = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
+  ok('remove drops the upcoming count by one',
+     objAfterRemove.filter(o => o.status === 'upcoming').length === upcomingBefore.length - 1);
+
+  await page.locator('.obj.removed .putback').click();
+  await page.waitForFunction(() => document.querySelectorAll('.obj.removed').length === 0, { timeout: 90000 });
+  await page.waitForFunction(
+    label => [...document.querySelectorAll('.obj')].some(el => el.innerText.includes(label)),
+    removeTarget.label, { timeout: 90000 });
+  const objAfterRestore = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
+  ok('put-back restores the upcoming count',
+     objAfterRestore.filter(o => o.status === 'upcoming').length === upcomingBefore.length);
 
   // ── First-run step ③: with data but no objective, the card surfaces "Add a race" ──
   const objs = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));

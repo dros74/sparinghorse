@@ -1306,7 +1306,8 @@ CREATE TABLE IF NOT EXISTS objectives (
     status     TEXT DEFAULT 'upcoming',  -- upcoming | done | removed | lapsed
     created_at TEXT,
     outcome    TEXT,                 -- §RL: JSON result once resolved (finished/dnf/unrun/unverified)
-    resolved_at TEXT                 -- §RL: when resolve_passed_races settled it
+    resolved_at TEXT,                -- §RL: when resolve_passed_races settled it
+    removed_at  TEXT                 -- §OBJ3: when remove took it off the calendar (NULL once put back)
 );
 
 -- Versioned training plans. Each generation is a new row → diff-able history (§4).
@@ -1576,6 +1577,10 @@ def init_db():
         db.execute("ALTER TABLE objectives ADD COLUMN outcome TEXT")
     if "resolved_at" not in ocols:
         db.execute("ALTER TABLE objectives ADD COLUMN resolved_at TEXT")
+    # §OBJ3 migration: `removed_at` — when remove took the row off the calendar, so a "put back"
+    # control can be offered for 24 hours and then retired.
+    if "removed_at" not in ocols:
+        db.execute("ALTER TABLE objectives ADD COLUMN removed_at TEXT")
     # Self-healing migration: deactivate any legacy *active* no-op adjustment (multiplier ≥ 1,
     # no easy-only, no medical) saved before the §6c routing fix — those were reflections that
     # got stored as an "Active adjustment" and still render a pointless banner. New no-ops are
@@ -7481,6 +7486,7 @@ _PV_WITHHELD = {
     "shape.latest.monotony", "shape.latest.training_strain",   # §DIR-3 legacy: no longer ingested
     "objectives[].created_at",               # when the athlete planned their season
     "objectives[].outcome", "objectives[].resolved_at",      # §RL — a race RESULT is personal
+    "objectives[].removed_at",                                # §OBJ3 — when a race came off the calendar
     "activity.hr_avg", "activity.hr_max", "activity.cross_training",
     "activity.date_time",                    # 0.55.1 (review S3) — the TIME of day is the household
     #                                          routine /healthz already keeps private; the date stays
@@ -8477,10 +8483,45 @@ def api_objectives_date(oid):
 @app.post("/api/objectives/<int:oid>/remove")
 def api_objectives_remove(oid):
     """Explicit removal (§6b) — drop the race and re-anchor the plan to what remains
-    (or fall back to a maintenance block), returning the change."""
+    (or fall back to a maintenance block), returning the change.
+
+    §OBJ3 — the stamp is what lets the console offer "put back" for 24 h; a race already off the
+    calendar answers 409 instead of riding a pointless full re-plan."""
     db = get_db()
+    o = db.execute("SELECT status FROM objectives WHERE id=?", (oid,)).fetchone()
+    if o is None:
+        return jsonify(ok=False, error="no such objective"), 404
+    if o["status"] != "upcoming":
+        why = ("it is already off the calendar" if o["status"] == "removed" else
+               "its result is pinned to the day it was run")
+        return jsonify(ok=False, error=f"a {o['status']} race cannot be removed — {why}"), 409
     return replan(db, lambda: db.execute(
-        "UPDATE objectives SET status='removed' WHERE id=?", (oid,)))
+        "UPDATE objectives SET status='removed', removed_at=? WHERE id=?", (_now_iso(), oid)))
+
+
+@app.post("/api/objectives/<int:oid>/restore")
+def api_objectives_restore(oid):
+    """§OBJ3 — the undo of remove. Puts the SAME row back on the calendar (its id, created_at,
+    founding road and prediction ledger stay attached — adding it again would stand a new race in
+    its place, the §GM argument) and re-anchors the plan around it."""
+    db = get_db()
+    o = db.execute("SELECT status, date, type, label FROM objectives WHERE id=?", (oid,)).fetchone()
+    if o is None:
+        return jsonify(ok=False, error="no such objective"), 404
+    if o["status"] != "removed":
+        why = ("it is already on the calendar" if o["status"] == "upcoming" else
+               "its result is pinned to the day it was run")
+        return jsonify(ok=False, error=f"a {o['status']} race cannot be put back — {why}"), 409
+    if o["date"] < datetime.now().date().isoformat():
+        return jsonify(ok=False, error="its day has passed — add the next edition as a new race"), 409
+    # §OBJ2 duplicate rule — putting this row back must not collide with a race added in the meantime.
+    if db.execute(
+        "SELECT 1 FROM objectives WHERE status='upcoming' AND date=? AND type=? AND lower(label)=lower(?)",
+        (o["date"], o["type"], o["label"])
+    ).fetchone():
+        return jsonify(ok=False, error=f"already on the calendar: {o['label']} on {o['date']}"), 409
+    return replan(db, lambda: db.execute(
+        "UPDATE objectives SET status='upcoming', removed_at=NULL WHERE id=?", (oid,)))
 
 
 @app.get("/api/availability")

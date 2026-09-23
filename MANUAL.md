@@ -200,6 +200,14 @@ the engine will treat it as a goal change. A race can move by up to 45 days and 
 same race — beyond that it is a different one, which is what keeps next year's edition of an annual from
 inheriting this year's history. A race that has already been run or removed cannot be moved.
 
+### Removing a race
+
+The remove control asks first. Once confirmed the race comes off the calendar and the plan re-anchors
+around the races that remain (maintenance when none are left). For 24 hours the race stays listed under
+the calendar with a **put back** control: it restores the same row — its id, its founding road and its
+prediction ledger — and re-plans; after that, add it again as a new race. A race that has been run cannot
+be removed or put back; its result is a matter of record.
+
 ### Several A-races (a chain)
 
 Set two or more A-races and the engine **chains** them into one continuous build: an intermediate peak and

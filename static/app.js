@@ -1349,6 +1349,15 @@ function objManager(p){
         <span class="od">${esc(o.date)} · ${esc(o.type)} · ${pastChip(o)}</span></div>`).join("");
   const pastRow = past ? `<div class="muted" style="font-size:11px;margin-top:8px">Past races</div>
     <div class="objs">${past}</div>` : "";
+  // §OBJ3 — a race removed in the last 24 h stays listed with a put-back control (the undo of a slip)
+  const today=(LOG&&LOG.today)||new Date().toISOString().slice(0,10);
+  const recent=OBJECTIVES.filter(o=>o.status==='removed' && o.removed_at && o.date>=today
+      && (Date.now()-Date.parse(o.removed_at)) < 24*3600*1000)
+    .sort((a,b)=>String(b.removed_at).localeCompare(String(a.removed_at)));
+  const removedRow = recent.length ? `<div class="muted" style="font-size:11px;margin-top:8px">Removed in the last 24 hours</div>
+    <div class="objs">${recent.map(o=>
+      `<div class="obj removed"><span class="pr ${esc(o.priority)}">${esc(o.priority)}</span><span>${esc(o.label)}</span><span class="od">${esc(o.date)} · ${esc(o.type)} · removed</span><button class="putback" data-oid="${o.id}" title="Put this race back on the calendar — the plan re-anchors around it">put back</button></div>`
+    ).join("")}</div>` : "";
   const aCount = OBJECTIVES.filter(o=>o.status==='upcoming' && o.priority==='A').length;
   const conflictRow = aCount>=2 ? `
     <div class="conflictrow">
@@ -1362,6 +1371,7 @@ function objManager(p){
       <span id="ao_interp" class="nlinterp${(LLM_OK&&AI.parsing)?'':' guess'}">${LLM_OK?(AI.parsing?'':'⚙ Goal parsing is switched off in Settings → AI features'):'⚙ Add a Claude API key in Settings to enable AI parsing'}</span>
     </div>`;
   return `<div class="objs">${rows}</div>
+    ${removedRow}
     ${conflictRow}
     ${nlRow}
     <div class="addobj">
@@ -1467,12 +1477,30 @@ function wireObjActions(){
   });
   document.querySelectorAll(".obj .x").forEach(btn=>btn.addEventListener("click", async ()=>{
     if(btn.disabled) return;   // §OBJ2
+    const o=OBJECTIVES.find(x=>String(x.id)===btn.dataset.oid);
+    if(!await confirmDanger({title:`Remove ${o?o.label:"this race"}?`,
+        intro:"It comes off the calendar and the plan re-anchors around the races that remain (maintenance if none are left).",
+        lines: o?[[o.date,o.type,o.target].join(" · ")]:[],   // confirmDanger escapes each line itself
+        alt:"It stays listed under the calendar for 24 hours with a put-back control, in case this was a slip.",
+        confirmLabel:"Remove"})) return;
     const row=btn.closest(".obj");
     btn.disabled=true; if(row) row.setAttribute("aria-busy","true");
     try{
       const r=await fetch(`/api/objectives/${btn.dataset.oid}/remove`,{method:"POST"});
       const p=await r.json();
       if(!p.ok){ await notice({title:"Could not remove the race", intro:p.error||"unknown", tone:"danger"}); return; }
+      LASTDIFF=p.diff; await refreshPlan(p);
+    } finally{ btn.disabled=false; if(row) row.removeAttribute("aria-busy"); }
+  }));
+  // §OBJ3 — put a removed race back: the undo of remove, no confirm.
+  document.querySelectorAll(".obj .putback").forEach(btn=>btn.addEventListener("click", async ()=>{
+    if(btn.disabled) return;   // §OBJ2
+    const row=btn.closest(".obj");
+    btn.disabled=true; if(row) row.setAttribute("aria-busy","true");
+    try{
+      const r=await fetch(`/api/objectives/${btn.dataset.oid}/restore`,{method:"POST"});
+      const p=await r.json();
+      if(!p.ok){ await notice({title:"Could not put the race back", intro:p.error||"unknown", tone:"danger"}); return; }
       LASTDIFF=p.diff; await refreshPlan(p);
     } finally{ btn.disabled=false; if(row) row.removeAttribute("aria-busy"); }
   }));
