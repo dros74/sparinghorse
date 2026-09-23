@@ -1332,10 +1332,13 @@ function objManager(p){
     : `<input type="date" class="odate" data-oid="${o.id}" value="${esc(o.date)}"
         aria-label="date of ${esc(o.label)}" title="Move this race — the plan re-periodizes around the new day">`;
   const rows = OBJECTIVES.filter(o=>o.status==='upcoming').map(o=>{
-    const isAnchor = p.objective && o.label===p.objective.label && o.date===p.objective.date;
-    return `<div class="obj ${isAnchor?'anchor':''}">
+    // §CHAIN4b — the highlighted row is the race the console is SHOWING (viewRaceOf: the tapped leg,
+    // else the next race ahead), not the engine's terminal anchor; it re-renders with every strip tap.
+    const cur = viewRaceOf(p, (LOG&&LOG.today)||new Date().toISOString().slice(0,10)) || p.objective;
+    const isCurrent = !!(cur && o.label===cur.label && o.date===cur.date);
+    return `<div class="obj ${isCurrent?'current':''}">
       ${priBadge(o)}
-      <span>${esc(o.label)}${isAnchor?' <span class="muted mono" style="font-size:11px">· anchor</span>':''}</span>
+      <span>${esc(o.label)}${isCurrent?' <span class="muted mono" style="font-size:11px">· current</span>':''}</span>
       <span class="od">${dateCell(o)} · ${esc(o.type)} · ${esc(o.target)}</span>
       ${SH_READONLY?'':`<button class="x" data-oid="${o.id}">remove</button>`}
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;

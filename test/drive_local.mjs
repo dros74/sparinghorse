@@ -795,9 +795,13 @@ async function runFull() {
       pressedN: pressed.length,
       pressedRace: pressed[0]?.dataset.race || null,
       objlineRace: document.querySelector('.objline .race')?.textContent || '',
+      curRows: document.querySelectorAll('.obj.current').length,
+      curRow: document.querySelector('.obj.current')?.innerText || '',
     };
   });
   const planWithChain = await page.evaluate(() => fetch('/api/plan').then(r => r.json()));
+  ok(`§CHAIN4b the highlighted objective row is the next race ahead, one row only (${chainState1.curRows} highlighted: "${chainState1.curRow.split('\n')[0]}")`,
+     chainState1.curRows === 1 && chainState1.curRow.includes(near.label));
   ok(`§CHAIN4 objbar names the next race ahead by default, not the probe ("${chainState1.oname}" === "${near.label}")`,
      chainState1.oname === near.label);
   ok(`§CHAIN4 exactly one chain leg reads pressed, and it's the next race ahead (${chainState1.pressedN} pressed, data-race=${chainState1.pressedRace})`,
@@ -814,10 +818,14 @@ async function runFull() {
     { timeout: 15000 });
   const chainState2 = await page.evaluate(() => {
     const pressed = [...document.querySelectorAll('.chainrace[aria-pressed="true"]')];
-    return { pressedN: pressed.length, pressedRace: pressed[0]?.dataset.race || null };
+    return { pressedN: pressed.length, pressedRace: pressed[0]?.dataset.race || null,
+             curRows: document.querySelectorAll('.obj.current').length,
+             curRow: document.querySelector('.obj.current')?.innerText || '' };
   });
   ok(`§CHAIN4 tapping a leg in the strip still switches the console to it (pressed data-race=${chainState2.pressedRace})`,
      chainState2.pressedN === 1 && chainState2.pressedRace === far);
+  ok(`§CHAIN4b the highlighted objective row follows the tap (${chainState2.curRows} highlighted: "${chainState2.curRow.split('\n')[0]}")`,
+     chainState2.curRows === 1 && chainState2.curRow.includes('Chain probe marathon'));
 
   // clearing the stored choice returns the default to the next race ahead, not the tapped leg
   await page.evaluate(() => { try { localStorage.removeItem('sh.raceSel'); } catch (e) {} });

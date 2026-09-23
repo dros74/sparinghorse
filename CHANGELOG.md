@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.74.2] - 2026-09-23
+
+### Fixed
+
+- **The objectives list still crowned the chain's terminal race after 0.74.1, not the race the
+  console was showing (§CHAIN4b).** §CHAIN4 moved the objective bar, the plan header and the
+  drift view onto `viewRaceOf` — the tapped leg, else the next race ahead — but the objectives
+  list's own highlight was still keyed on the engine's `plan.objective`, the chain's last A-race,
+  and never moved: the accent border and the "· anchor" tag stayed on the far race while
+  everything else agreed on the near one, and tapping a leg in the chain strip did not touch it.
+  Reported shortly after the 0.74.1 deploy.
+  `static/app.js` + `static/app.css` only — the engine is unchanged. The objectives list now
+  reads the same `viewRaceOf` resolver as the rest of the console; the class is `current` (was
+  `anchor`) and the tag reads "· current" (was "· anchor"), and both re-render with every
+  chain-strip tap. Single-race plans are untouched — the resolver still answers null there and
+  the one race stays highlighted as before. `test/drive_local.mjs`'s §CHAIN4 step now also
+  asserts that exactly one objective row is highlighted, that it names the next race ahead by
+  default, and that it follows the tap to the probe race.
+
 ## [0.74.1] - 2026-09-23
 
 ### Fixed

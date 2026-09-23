@@ -730,7 +730,7 @@
   .obj .x{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:6px;
     padding:2px 8px;font-size:11px;background:none}
   .obj .x:hover{color:var(--danger);border-color:var(--danger)}
-  .obj.anchor{border-color:var(--accent)}
+  .obj.current{border-color:var(--accent)}   /* §CHAIN4b — the race the console is showing */
   .obj.removed{opacity:.72}   /* §OBJ3 — a removed race, listed for 24h, reads muted like the past-races rows */
   .obj .putback{cursor:pointer;color:var(--muted);border:1px solid var(--line);border-radius:6px;
     padding:2px 8px;font-size:11px;background:none}
