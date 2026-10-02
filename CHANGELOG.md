@@ -10,6 +10,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.74.5] - 2026-10-02
+
+### Fixed
+
+- **A database the app could read but not write stopped the nightly scheduler for good, and
+  `/healthz` still answered healthy (§RWDB).** On a box where the database's `-wal` or `-shm` file
+  ended up owned by another user (a host-side `sqlite3 -readonly` check does this: a read-only open
+  of a WAL database creates both files and leaves them behind when it closes), the container could
+  read the database and not write it. The next nightly pass failed on its first write; the pass then
+  recorded its outcome (`sched:last_run`) outside any try/except, the "attempt to write a readonly
+  database" error went up through `_nightly_job` into `_scheduler_loop`, which had no handler, and
+  the scheduler thread ended. The re-plan, track-record scan, music nightly, guide push and backup
+  of that pass never ran, no later pass ran either, and restoring the file permissions without a
+  restart would not have brought the thread back. `/healthz` kept reporting `ok: true` and
+  `consecutive_failures: 0` throughout, because that count was kept in the database it could not
+  write; only `sync_stale` showed anything. The change:
+  - `/healthz` now checks writability without taking a lock or writing anything
+    (`db_unwritable()`: the database's directory, the file, and any `-wal`/`-shm` file that exists).
+    When something is not writable `ok` is false and the response is HTTP 503, so the container's
+    health check turns unhealthy. A new boolean `db_writable` is in the public allowlist; the
+    read-only public box never reports it (its database is read-only by design). Authenticated
+    private callers also get the file names (`db_unwritable`), which are withheld from anonymous
+    ones. Settings → System shows a "Database" row with the same reading.
+  - The failure count is also kept in the process (`_sched_fail_count`: the larger of the stored and
+    the in-process count), so `/healthz` and `/api/system` show failures while the database cannot
+    record them.
+  - `_nightly_job_once` no longer lets the outcome write end the pass: the re-plan, music, guide push
+    and backup go on, and the log line names the files that are not writable and the remedy (restart
+    the container; the entrypoint re-owns `/data`). `_scheduler_tick()` wraps every scheduled wake
+    and the boot catch-up, prints anything that escapes with its traceback and counts it, so the
+    thread outlives a bad night.
+  - DEPLOY.md §9 names the check and the 503, and gains a runbook line: do not open the live
+    database from the host; read the newest backup, the Settings → Backup & export download, or a
+    `docker compose exec -u 10001:10001` session instead. ENGINE_SCIENCE §10's calibration
+    inventory counts the one new constant (the in-process failure count, a starting value of 0).
+
+  Tests: new `det/db-unwritable`, seven limbs on a scratch database with its sidecars made
+  read-only: `/healthz` 503 naming the files; two nightlies raise nothing, still run the guide push
+  and count 2 in the process while the stored count stays 0; `/healthz` and `/api/system` both read
+  2; a raising pass is swallowed and counted by `_scheduler_tick`; an anonymous caller gets 503 and
+  `db_writable: false` with no file names or timestamps; the read-only box answers 200 with no
+  `db_writable`; after the permissions are restored the box is healthy and a pass records normally.
+  Run against the prior `SparingHorse.py`, every limb but the read-only-box one fails. The det is
+  skipped when run as root, which ignores file modes.
+
+## [0.74.4] - 2026-09-29
+
+### Fixed
+
+- **A down week the streak brought forward was undone by any regeneration after Monday (§PULL).**
+  §PRO6 forces a recovery week once four consecutive building weeks have projected an end-of-week
+  ACWR at or above 1.20; §PRO11 re-phases rather than stacking — when the block's own template
+  still has a down week ahead, that week is swapped forward into the one the streak tripped on,
+  and the building week it displaced takes the later position. The decision sat below the branch
+  that lays a week straddling today (the branch a regeneration takes on any day but the week's own
+  Monday), and that branch ends the week's turn before the decision is reached, so a week decided
+  whole on a Monday-or-earlier regeneration could read differently from the same week regenerated
+  a day later, though nothing about the streak, the trough or the shape had changed. On the live
+  plan the streak reached four going into the week of 28 September; a Sunday and a Monday
+  regeneration both laid that week as the pulled-forward down week (54.3 km, five easy days) and
+  the week after it as the building week the pull had displaced; a Tuesday regeneration, with no
+  run logged and no setting changed in between, laid the week of 28 September as a fifth
+  near-ceiling building week (68.5 km, VO₂ intervals on the Tuesday) and pushed the down week to
+  the week after. Same-day, same-seed comparison: taking the down week that
+  week against taking it the week after differs by 3 seconds and 4.9 km of total volume over the
+  next seven weeks, with the long-run ladder from 18 October on unchanged either way. The change:
+  the §PRO6/§PRO11 decision now runs above the straddle branch, from the same carried streak, so
+  both paths take it the same way; the straddling week reads a forced or pulled-forward down week
+  exactly as a whole week does — trough sizing, zone-free lay, the down-week label, the streak
+  reset. Tests: new `det/straddle-pull` regenerates a fixture week on each of the six days after
+  its Monday lay and requires the road, the label and every day ahead to hold; run against the
+  prior engine it fails from the first day after Monday. A pre-existing det's road label read a key
+  the engine never wrote (`forced_deload` instead of `deload_forced`); corrected.
+
+- **The week after a lived pulled-forward down week was laid as a second down week (§PULL).**
+  §PRO11's swap runs on the block's shape inside the week-by-week generator, but that shape is
+  rebuilt fresh from the template at every regeneration; once the pulled week has elapsed it is
+  frozen from the prior plan and handed to no generator, so the swap is never taken on it again,
+  and the template's own down week — never moved on this fresh shape — still stands at its
+  original position. A regeneration the Monday after a lived pulled-forward down week read that
+  next week as a second down week (54.3 km) where the prior plan had read it as the building week
+  the pull had displaced (68.2 km): the day-of-week sessions changed kind, not just size, the
+  chronic load carried into the taper dropped from 126.0 to 118.4, and the race projection moved by
+  1 min 45 s.
+  The change: a new replay step runs on each phase's freshly built shape before the plan reads
+  which week is owed a deload, and for every fully elapsed week whose record carries the pulled-down
+  flag at a position the fresh shape does not already have down, it repeats the same swap so the
+  shape matches what the plan actually laid and lived. Tests: new `det/pulled-deload-replay` covers
+  the swap in isolation (a template down week moves forward, the building week it displaced keeps
+  its quality session, and a second call or a week still underway is a no-op) and through a full
+  regeneration on a synthetic athlete, with and without the pulled-down flag on the record; run
+  against the fix with the replay call removed, the full-regeneration limb fails.
+
+A 110-regeneration simulation over the following eight weeks of the live plan, one morning and one
+evening regeneration per day with the day's own run fed back before the evening one, found no week
+changing role and no day ahead changing kind after the first corrected regeneration.
+
 ## [0.74.3] - 2026-09-24
 
 ### Fixed

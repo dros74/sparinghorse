@@ -217,5 +217,15 @@ a major upgrade (§8).
 - `docker compose logs -f sparinghorse` — the app prints its own diagnostics (sync, scheduler, tz,
   secrets) to stdout; waitress logs to stderr.
 - `/healthz` — liveness plus scheduler telemetry (last sync, last successful nightly, consecutive
-  failures) on the private box; booleans only on the public box.
+  failures) on the private box; booleans only on the public box. On the private box it also checks
+  that the database and its `-wal`/`-shm` files are writable: if not, it answers 503 with
+  `ok: false`, the health column turns unhealthy, and **Settings → System** names the files.
 - `docker compose ps` — the health column is the same probe.
+- **Never open the live database from the host** while the box runs, not even with `sqlite3 -readonly`.
+  A read-only open creates `sparinghorse.db-wal` and `-shm` as the host user and leaves them behind
+  when it closes; the app user (10001, or your `SH_UID`) can then read but not write: no nightly, no
+  plan, no watch push. Read a copy instead: the newest file in `./backups`, **Settings → Backup &
+  export**, or a session inside the container as the app user (`docker compose exec -u 10001:10001
+  sparinghorse python …`; a plain `exec` runs as root, and sidecars it creates stay root-owned if the
+  app holds the database when it exits). If it has happened: `docker compose restart sparinghorse` —
+  the entrypoint re-owns `./data` on every start.

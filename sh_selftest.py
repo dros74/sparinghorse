@@ -3769,6 +3769,156 @@ def _stc_scheduler_health():
                passed=ok, output=out)
 
 
+def _stc_db_unwritable():
+    """SH-60 — a database this process can read but not write (the 29 Sep outage: a host-side
+    `sqlite3 -readonly` left `-wal`/`-shm` owned by another user). Fixture: a temp-dir WAL database, a
+    holding connection that keeps the sidecars alive, both chmod 0o444. (a) private /healthz answers
+    503 ok:false and names the two files; (b) the nightly survives the failed meta write, still runs
+    the steps after it and counts the failure in memory while the stored count stays put; (c) /healthz
+    and /api/system report that in-process count; (d) the scheduler tick outlives a pass that raises;
+    (e) an anonymous caller gets booleans, no file names, no timestamps; (f) the public box answers
+    200 with no write-state key; (g) healed files read healthy again and the pass records normally."""
+    import os as _os
+    import sqlite3 as _sq
+    import tempfile as _tf
+    desc = ("SH-60 — an unwritable database: /healthz 503 ok:false naming the files (public: one boolean; "
+            "read-only box: none); the nightly survives it and counts the failure in memory; the loop "
+            "outlives a pass that raises; healed files read healthy again")
+    if _os.geteuid() == 0:
+        return _st("det", "db-unwritable", desc, skipped=True, note="root ignores file modes")
+    out, ok = [], True
+
+    def case(name, p, **kw):
+        nonlocal ok
+        out.append({"case": name, "passed": bool(p), **kw}); ok = ok and bool(p)
+
+    mem = getattr(S, "_SCHED_MEM", None)
+    saved = (S.DB_PATH, S.run_sync, S.push_guides, S.READONLY, S._auth_user,
+             dict(mem) if mem is not None else None, S._nightly_job)
+    saved_active = S._AUTH_ACTIVE
+    tmp = S.Path(_tf.mkdtemp())
+    S.DB_PATH = tmp / "sparinghorse.db"
+    seeddb = S.connect_db(); seeddb.executescript(S.SCHEMA)
+    seeddb.execute("PRAGMA wal_autocheckpoint=0")
+    S.set_meta(seeddb, "sched:fail_count", "0"); seeddb.commit()
+    holder = _sq.connect(str(S.DB_PATH)); holder.execute("SELECT count(*) FROM meta").fetchall()
+    seeddb.close()
+    sidecars = [S.DB_PATH.with_name(S.DB_PATH.name + sfx) for sfx in ("-wal", "-shm")]
+    names = sorted(p.name for p in sidecars)
+
+    def chmod(mode):
+        for p in sidecars:
+            if p.exists():
+                _os.chmod(p, mode)
+
+    def stored_fail():
+        d = S.connect_db()
+        try:
+            return S.get_meta(d, "sched:fail_count")
+        finally:
+            d.close()
+
+    pushed = []
+
+    def fake_push(db):
+        pushed.append(1)
+        return {"skipped": True}
+
+    def boom(backfill=False):
+        raise RuntimeError("runalyze down")
+
+    def fake_sync(backfill=False):
+        return {"ok": True, "activities": {"added": 0}, "stub": True}
+
+    try:
+        if mem is not None:
+            mem["fail_count"] = 0
+        S.run_sync, S.push_guides = boom, fake_push
+        chmod(0o444)
+        c = S.app.test_client()
+        S.READONLY = False
+        # (a) private /healthz
+        r = c.get("/healthz"); h = r.get_json() or {}
+        case("private /healthz: 503, ok false, db_writable false, names the two sidecars",
+             r.status_code == 503 and h.get("ok") is False and h.get("db_writable") is False
+             and sorted(h.get("db_unwritable") or []) == names,
+             status=r.status_code, body={k: h.get(k) for k in ("ok", "db_writable", "db_unwritable")})
+        # (b) the nightly survives
+        raised = None
+        for _ in range(2):
+            try:
+                S._nightly_job()
+            except Exception as e:
+                raised = repr(e)
+        mem_now = (getattr(S, "_SCHED_MEM", None) or {}).get("fail_count")
+        case("nightly twice: no exception, the steps after the meta write still ran, in-memory count 2, stored count untouched",
+             raised is None and len(pushed) == 2 and mem_now == 2 and stored_fail() == "0",
+             raised=raised, pushed=len(pushed), mem=mem_now, stored=stored_fail())
+        # (c) the count on the endpoints
+        h = c.get("/healthz").get_json() or {}
+        sj = c.get("/api/system").get_json() or {}
+        case("/healthz consecutive_failures and /api/system sched.fail_count read the in-process 2; system names db_writable false",
+             h.get("consecutive_failures") == 2 and (sj.get("sched") or {}).get("fail_count") == 2
+             and sj.get("db_writable") is False,
+             healthz=h.get("consecutive_failures"), system=(sj.get("sched") or {}).get("fail_count"),
+             db_writable=sj.get("db_writable"))
+        # (d) the tick outlives a pass that raises
+        def raiser(kind="nightly"):
+            raise RuntimeError("pass blew up")
+        S._nightly_job = raiser
+        esc = None
+        try:
+            S._scheduler_tick()
+        except Exception as e:
+            esc = repr(e)
+        finally:
+            S._nightly_job = saved[6]
+        mem_after = (getattr(S, "_SCHED_MEM", None) or {}).get("fail_count")
+        case("_scheduler_tick: a raising pass escapes nowhere and is counted (2 → 3)",
+             esc is None and mem_after == 3, escaped=esc, mem=mem_after)
+        # (e) anonymous caller on the private box
+        if S.DEMO:
+            out.append({"case": "anonymous caller: booleans only", "passed": True, "note": "skipped, DEMO is on"})
+        else:
+            S._auth_user, S._AUTH_ACTIVE = (lambda: None), True
+            r = c.get("/healthz"); h = r.get_json() or {}
+            case("anonymous /healthz on the private box: 503, ok false, db_writable false, no file names, no last_sync",
+                 r.status_code == 503 and h.get("ok") is False and h.get("db_writable") is False
+                 and "db_unwritable" not in h and "last_sync" not in h,
+                 status=r.status_code, keys=sorted(h))
+            S._auth_user, S._AUTH_ACTIVE = saved[4], saved_active
+        # (f) public box
+        S.READONLY = True
+        r = c.get("/healthz"); h = r.get_json() or {}
+        case("public /healthz: 200, ok true, no db_writable key",
+             r.status_code == 200 and h.get("ok") is True and "db_writable" not in h,
+             status=r.status_code, keys=sorted(h))
+        S.READONLY = False
+        # (g) heal
+        chmod(0o644)
+        S.run_sync = fake_sync
+        unw = S.db_unwritable() if hasattr(S, "db_unwritable") else None
+        S._nightly_job()
+        r = c.get("/healthz"); h = r.get_json() or {}
+        mem_now = (getattr(S, "_SCHED_MEM", None) or {}).get("fail_count")
+        case("healed: db_unwritable() empty, nightly records, /healthz 200 ok, failures 0, memory 0, stored 0",
+             unw == [] and r.status_code == 200 and h.get("ok") is True and h.get("db_writable") is True
+             and h.get("consecutive_failures") == 0 and mem_now == 0 and stored_fail() == "0",
+             unwritable=unw, status=r.status_code, failures=h.get("consecutive_failures"),
+             mem=mem_now, stored=stored_fail())
+    finally:
+        chmod(0o644)
+        try:
+            holder.close()
+        except Exception:
+            pass
+        (S.DB_PATH, S.run_sync, S.push_guides, S.READONLY, S._auth_user, _m, S._nightly_job) = saved
+        S._AUTH_ACTIVE = saved_active
+        if mem is not None and _m is not None:
+            mem.clear(); mem.update(_m)
+    return _st("det", "db-unwritable", desc, passed=ok, output=out)
+
+
 def _stc_profile_readonly():
     """_profile_cached on the public box (Gemini review 2026-08-21 #3, verified): the public container is
     tokenless and its DB mount is query_only, so a hover-profile cache miss must neither call the MCP nor
@@ -6100,7 +6250,7 @@ def _stc_straddle_deload_invariant():
     fails = []
 
     def _road(ws):
-        return [(w["wk"], round(w["km"], 1), "DOWN" if E._is_down(w) else ("FORCED" if w.get("forced_deload") else ""))
+        return [(w["wk"], round(w["km"], 1), "DOWN" if E._is_down(w) else ("FORCED" if w.get("deload_forced") else ""))
                 for w in ws]
 
     full, fb = E.generate_block([dict(w) for w in shape], mon, *seed, easy, **A)
@@ -6167,6 +6317,226 @@ def _stc_straddle_deload_invariant():
                     "control": {"proj_acwr": wc["proj_acwr"], "consec_hard": b_c["consec_hard"],
                                 "road": road_c, "acwr_diff": round(acwr_diff, 3), "straddle_km_diff": round(swk_diff, 2)},
                     "failures": fails or "none"})
+
+
+def _stc_straddle_pull():
+    """§PULL (0.74.4) — A DOWN WEEK THE STREAK BROUGHT FORWARD STAYS THE WEEK'S ROLE ON EVERY DAY OF IT.
+    §PRO6/§PRO11 sat below the straddle branch, which `continue`s, so they were taken on a week laid
+    whole (a Monday regeneration) and never on a week underway: Monday laid the pulled down week, and
+    from Tuesday on the same week was the shape's building week with its quality session, the down week
+    back where the template had it (live, plans 281 → 282, 28 → 29 Sep 2026). det/straddle-deload-invariant
+    could not see it: its streak comes in at 2, so nothing trips on the straddling week.
+    Two fixtures, the streak coming in AT the limit, each regenerated on the six days after the Monday
+    lay with the Monday lay followed: (a) the shape has a down week ahead — the pull; (b) it has none —
+    the forced deload, pure easy. Pure/in-memory. Seen to fail on 0.74.3 (both limbs, from Tuesday)."""
+    from datetime import date, timedelta
+    mon = date(2026, 9, 7)
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    seed, easy = (78.3, 100.5), 414
+    zones = {"easy_top": easy, "easy": 450, "marathon": 347, "threshold": 320, "interval": 290}
+    q = [{"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+          "rep_min": 3, "rec_min": 2, "label": "VO₂ intervals"}]
+
+    def _shape(with_down):
+        sh = [{"wk": k, "km": 56 + 3 * k, "runs": 5, "long": 16 + k, "strides": 2,
+               "quality": [dict(x) for x in q], "intent": "Build — specific"} for k in (1, 2, 3)]
+        if with_down:
+            sh.append({"wk": 4, "km": 45, "runs": 5, "long": 14, "strides": 0, "quality": [],
+                       "intent": "Down week — absorb the block"})
+        sh.append({"wk": len(sh) + 1, "km": 68, "runs": 5, "long": 20, "strides": 2,
+                   "quality": [dict(x) for x in q], "intent": "Build — specific"})
+        return sh
+
+    A = dict(regime="assertive", zones=zones, last_nondown=600.0, recent_longs=[13.0, 14.0, 14.5, 15.0],
+             recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.5, 14.0, 14.5, 15.0],
+             consec_hard=E.MESO_MAX_HARD)
+
+    def _road(ws):
+        return [(w["wk"], "down" if E._is_down(w) else ("forced" if w.get("deload_forced") else "build"),
+                 bool(w.get("deload_pulled"))) for w in ws]
+
+    def _quality(w, since):
+        return [(s["date"], s["kind"]) for s in w["sessions"]
+                if s.get("kind") in E.QUALITY_KINDS and s["date"] >= since]
+
+    fails, got = [], {}
+    for name, with_down, flag in (("pull", True, "deload_pulled"), ("forced", False, "deload_forced")):
+        full, fb = E.generate_block(_shape(with_down), mon, *seed, easy, **A)
+        w0, road0 = full[0], _road(full)
+        if not w0.get(flag):
+            fails.append(f"{name}: fixture — the Monday lay's week 1 does not carry {flag} (road {road0})")
+            continue
+        if _quality(w0, days[0]):
+            fails.append(f"{name}: the Monday lay's recovery week carries quality {_quality(w0, days[0])}")
+        if not any(s.get("kind") in E.QUALITY_KINDS for s in full[1]["sessions"]):
+            fails.append(f"{name}: fixture — week 2 lays no quality, the limb could not show one appearing")
+        L = {d: 0.0 for d in days}
+        for x in w0["sessions"]:
+            if (x.get("kind") or "") != "rest":
+                L[x["date"]] = float(x.get("trimp") or 0.0)
+        mon_by_date = {x["date"]: x for x in w0["sessions"]}
+        by_day = []
+        for i in range(1, 7):
+            c, a = seed
+            for d in days[:i]:
+                c = E._ewma_step(c, L[d], E.TAU_CTL); a = E._ewma_step(a, L[d], E.TAU_ATL)
+            done = [x for x in w0["sessions"] if x["date"] < days[i] and (x.get("kind") or "") != "rest"]
+            long_done = [x["km"] for x in done if (x.get("kind") or "").startswith("long")]
+            ws, b = E.generate_block(_shape(with_down), mon, c, a, easy, today=mon + timedelta(days=i),
+                                     week_actuals=(len(done), round(sum(x["km"] for x in done), 1)),
+                                     day_series=L, week_actual_long=(max(long_done) if long_done else None),
+                                     pinned_past=({x["date"]: x for x in w0["sessions"] if x["date"] < days[i]},
+                                                  set(days[:i])), **A)
+            w, road = ws[0], _road(ws)
+            by_day.append(road[0])
+            if road != road0:
+                fails.append(f"{name}: regenerated {days[i]} — road {road} vs the Monday lay {road0}")
+            if not w.get(flag):
+                fails.append(f"{name}: regenerated {days[i]} — the week underway lost {flag}")
+            if _quality(w, days[i]):
+                fails.append(f"{name}: regenerated {days[i]} — quality laid on a recovery week: {_quality(w, days[i])}")
+            if b["consec_hard"] != fb["consec_hard"]:
+                fails.append(f"{name}: regenerated {days[i]} — streak out {b['consec_hard']} vs the Monday lay {fb['consec_hard']}")
+            for x in w["sessions"]:
+                if x["date"] < days[i] or (x.get("kind") or "") == "rest":
+                    continue
+                m = mon_by_date.get(x["date"])
+                if not m or m.get("kind") != x.get("kind") or abs((m.get("km") or 0.0) - (x.get("km") or 0.0)) > 0.5:
+                    fails.append(f"{name}: regenerated {days[i]} — {x['date']} reads {x.get('kind')} {x.get('km')} km, "
+                                 f"the Monday lay {m and (m.get('kind'), m.get('km'))}")
+        got[name] = {"monday": road0, "week_1_by_day": by_day, "streak_out": fb["consec_hard"]}
+    # caution never re-phases or forces: the same straddling regeneration, the streak at the limit
+    cw, _ = E.generate_block(_shape(True), mon, *seed, easy, today=mon + timedelta(days=1),
+                             **{**A, "regime": "caution"})
+    if any(w.get("deload_pulled") or w.get("deload_forced") for w in cw):
+        fails.append("caution must never re-phase or force (assertive-only)")
+    return _st("det", "straddle-pull",
+               "§PULL a down week the near-ceiling streak brought forward (or forced, with none ahead) is "
+               "the week's role on every day it is regenerated: same road, same flag, no quality session, "
+               "the days ahead as the Monday lay had them; caution untouched",
+               passed=not fails, expect="Tue–Sun regenerations: road == the Monday lay; week 1 keeps "
+               "deload_pulled / deload_forced; no quality kind from today on; each day ahead within 0.5 km "
+               "of the Monday lay; streak out unchanged",
+               got={**got, "failures": fails or "none"})
+
+
+def _stc_pulled_deload_replay():
+    """§PULL (0.74.4) — A PULLED DOWN WEEK, ONCE LIVED, IS NOT FOLLOWED BY THE TEMPLATE'S OWN. The pull is a
+    swap taken inside `generate_block` on a shape rebuilt from the template at every regeneration; a
+    lived week is frozen and handed to no generator, so from the Monday after a pulled down week the
+    template's down week stood at its position again and was laid as a second one (measured on a
+    live copy, 5 Oct 2026: 54.3 km for the 68.2 the plan had shown, race-day CTL 126.1 → 118.4).
+    (a) the helper on a build shape: the record's pulled week takes the template's down week, the
+        displaced building week takes the position ahead with its quality; nothing moves without the
+        record's flag, for a week not yet elapsed, or twice;
+    (b) THE CALL SITE, through `generate_plan` on a synthetic athlete: a plan is laid and saved, the
+        week before the template's first down week is recorded as a lived pulled down week, and the
+        plan regenerated on the Monday after it lays a building week there. The same regeneration with
+        the flag taken off the record lays the template's down week — the fixture shows the defect."""
+    from datetime import date, timedelta
+    import copy
+    fails = []
+    ps = date(2026, 9, 14)
+    tmpl = E.build_shape(6, 60.0, davis=True)
+    downs_t = [w["wk"] for w in tmpl if E._is_down(w)]
+    if downs_t != [4]:
+        fails.append(f"fixture — the build template's down weeks are {downs_t}, expected [4]")
+    rec = {(ps + timedelta(weeks=2)).isoformat(): {"start": (ps + timedelta(weeks=2)).isoformat(),
+                                                   "role": "down", "deload_pulled": True}}
+    sh = copy.deepcopy(tmpl)
+    E._replay_pulled_deloads(sh, ps, rec, ps + timedelta(weeks=3))
+    if [w["wk"] for w in sh if E._is_down(w)] != [3] or [w["wk"] for w in sh] != [1, 2, 3, 4, 5, 6]:
+        fails.append(f"(a) replay: downs {[w['wk'] for w in sh if E._is_down(w)]}, positions {[w['wk'] for w in sh]}")
+    if (sh[3].get("quality") or []) != (tmpl[2].get("quality") or []) or not sh[3].get("quality"):
+        fails.append("(a) the displaced building week did not take the position ahead with its quality")
+    for label, r_, today_ in (("no record", {}, ps + timedelta(weeks=3)),
+                              ("no flag", {k: {**v, "deload_pulled": False} for k, v in rec.items()},
+                               ps + timedelta(weeks=3)),
+                              ("week underway", rec, ps + timedelta(weeks=2, days=3))):
+        sh2 = copy.deepcopy(tmpl)
+        E._replay_pulled_deloads(sh2, ps, r_, today_)
+        if sh2 != tmpl:
+            fails.append(f"(a) {label}: the shape moved")
+    sh3 = copy.deepcopy(sh)
+    E._replay_pulled_deloads(sh3, ps, rec, ps + timedelta(weeks=3))
+    if sh3 != sh:
+        fails.append("(a) a second replay moved the shape again")
+
+    # (b) the call site
+    t0 = date(2026, 7, 6)                                       # a Monday, after the fixture's history
+    got_b = {}
+
+    def _lay(flagged):
+        mem = S.sqlite3.connect(":memory:")
+        mem.row_factory = S.sqlite3.Row
+        mem.executescript(S.SCHEMA)
+        undo = _patch_globals(get_db=(lambda: mem))
+        try:
+            S.seed_synthetic_db(mem, end="2026-06-30", with_objective=False)
+            mem.execute("DELETE FROM plans")
+            mem.execute("DELETE FROM meta WHERE key='rebase_start'")
+            mem.execute("DELETE FROM objectives")
+            mem.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                        "VALUES ('marathon','Replay Marathon',?,'3:45','A','upcoming','2026-01-01T00:00:00+00:00')",
+                        ((t0 + timedelta(weeks=22, days=6)).isoformat(),))
+            mem.commit()
+            first = E.generate_plan(mem, force_regime="assertive", today=t0)
+            if not first.get("ok"):
+                return None, f"the first plan failed: {first.get('error')}"
+            blk = next((first[ph["key"]] for ph in first.get("phases", [])
+                        if any(E._is_down(w) for w in (first.get(ph["key"]) or {}).get("weeks", [])[1:])), None)
+            if not blk:
+                return None, "no phase with a down week after its first week"
+            j = next(i for i, w in enumerate(blk["weeks"]) if i and E._is_down(w))
+            prev, down = blk["weeks"][j - 1], blk["weeks"][j]
+            if E._is_down(prev) or _date(prev["start"]) < t0:
+                return None, f"the week before the down week is not a building week ahead of the first plan ({prev['start']})"
+            prev.update(role="down", intent="Down week — absorb the block")
+            if flagged:
+                prev["deload_pulled"] = True
+            mem.execute("INSERT INTO plans (created_at, for_date, inputs, plan) VALUES (?,?,?,?)",
+                        (t0.isoformat() + "T20:30:00+00:00", t0.isoformat(), "{}", S.json.dumps(first, default=str)))
+            mem.commit()
+            again = E.generate_plan(mem, force_regime="assertive", today=_date(down["start"]))
+            if not again.get("ok"):
+                return None, f"the second plan failed: {again.get('error')}"
+            wk = next((w for ph in again.get("phases", []) for w in (again.get(ph["key"]) or {}).get("weeks", [])
+                       if w.get("start") == down["start"]), None)
+            lived = next((w for ph in again.get("phases", []) for w in (again.get(ph["key"]) or {}).get("weeks", [])
+                          if w.get("start") == prev["start"]), None)
+            return (wk, lived), None
+        finally:
+            undo()
+            mem.close()
+
+    _date = E._date
+    for flagged in (True, False):
+        out, err = _lay(flagged)
+        if err:
+            fails.append(f"(b) fixture — {err}")
+            continue
+        wk, lived = out
+        got_b["flagged" if flagged else "unflagged"] = {
+            "lived": lived and (lived.get("start"), lived.get("role"), bool(lived.get("frozen"))),
+            "next": wk and (wk.get("start"), wk.get("role"), wk.get("km"))}
+        if not (lived and lived.get("frozen") and E._is_down(lived)):
+            fails.append(f"(b) fixture — the recorded down week was not carried frozen ({got_b})")
+        if wk is None:
+            fails.append("(b) the week after the lived down week is not on the road")
+        elif flagged and E._is_down(wk):
+            fails.append(f"(b) a second down week follows the lived pulled one ({wk.get('start')}, {wk.get('km')} km)")
+        elif not flagged and not E._is_down(wk):
+            fails.append("(b) revert limb — without the record's flag the template's down week is not laid; "
+                         "the fixture cannot show the defect")
+    return _st("det", "pulled-deload-replay",
+               "§PULL a pulled down week that was lived is the block's down week: the template's own moves "
+               "to its position and the building week it displaced is laid on the Monday after, through "
+               "generate_plan; without the record's flag the template's down week is laid again",
+               passed=not fails, expect="helper: downs [3], wk 4 carries wk 3's quality, no move without "
+               "the flag / for a week underway / on a second replay; generate_plan: the week after a lived "
+               "pulled down week is a building week, and a down week when the flag is taken off the record",
+               got={"template_downs": downs_t, "replayed_downs": [w["wk"] for w in sh if E._is_down(w)],
+                    "plan": got_b, "failures": fails or "none"})
 
 
 def _stc_phase_handover_windows():
@@ -9412,7 +9782,7 @@ def _stc_calibration_inventory():
                    expect="run on a checkout", got={"engine_science": "absent"})
     # Plumbing: rate limits, cache lifetimes, schema versions, HTTP headers. Nothing here shapes a
     # prescription or a projection, so nothing here is calibration.
-    PLUMBING = {"LIMITS_LAID_TOL","PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
+    PLUMBING = {"LIMITS_LAID_TOL","_SCHED_MEM", "PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
                 "SUUNTO_ACTIVITY_RUNNING", "EXPORT_FORMAT",
                 "_EXPLAIN_CACHE_MAX",
                 # 0.55.1 — abuse dampers and the public by-id window: seconds and days of plumbing,
@@ -18941,7 +19311,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),
@@ -19003,7 +19373,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_taper(), lambda: _stc_taper_touch(db), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
                  lambda: _stc_availability(), lambda: _stc_av_public_strip(),
                  lambda: _stc_plan_summary(), lambda: _stc_mcp_session(), lambda: _stc_sync_lock(),
-                 lambda: _stc_scheduler_health(), lambda: _stc_selftest_subprocess(),
+                 lambda: _stc_scheduler_health(), lambda: _stc_db_unwritable(), lambda: _stc_selftest_subprocess(),
                  lambda: _stc_profile_readonly(),
                  lambda: _stc_quality_forward(), lambda: _stc_quality_forward_kinds(),
                  lambda: _stc_down_weeks(),

@@ -3203,6 +3203,7 @@ async function loadSystem(){
   const row = (k,v,warn) => `<div class="sysrow${warn?' warn':''}"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`;
   host.innerHTML=`<div class="secblock"><div class="sectitle">System</div>
     ${row("Engine", esc(d.engine_version||"")+(d.tz?` · clock ${esc(d.tz)}`:""))}
+    ${row("Database", d.db_writable===false ? `<b>not writable</b> (${esc((d.db_unwritable||[]).join(", "))}) — restart the container; DEPLOY.md §9` : "writable", d.db_writable===false)}
     ${row("Last sync", esc(when(d.last_sync)), d.sync_stale)}
     ${row("Nightly", d.sched.last_ok ? `ok ${esc(when(d.sched.last_ok))}` : "no successful run yet", !d.sched.last_ok)}
     ${row("Failures in a row", String(d.sched.fail_count||0), (d.sched.fail_count||0)>0)}

@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.74.3"
+ENGINE_VERSION = "0.74.5"
 
 
 def _zones_asof(db, date_iso=None):
@@ -4062,6 +4062,42 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
     return out
 
 
+def _swap_week_fields(a, b):
+    """§PRO11 — swap two shape weeks' fields IN PLACE; each keeps its own position (`wk`)."""
+    _MISS = object()
+    for k in (set(a) | set(b)) - {"wk"}:
+        av_, bv_ = a.get(k, _MISS), b.get(k, _MISS)
+        a.pop(k, None); b.pop(k, None)
+        if bv_ is not _MISS:
+            a[k] = bv_
+        if av_ is not _MISS:
+            b[k] = av_
+
+
+def _replay_pulled_deloads(shape, phase_start, prior_by_start, today):
+    """§PULL (0.74.4) — A DOWN WEEK BROUGHT FORWARD AND LIVED IS THE BLOCK'S DOWN WEEK. §PRO11 swaps the
+    shape's next down week into the week the streak tripped on, inside `generate_block`, on a shape
+    that is rebuilt from the template at every regeneration. Once the pulled week has elapsed it is
+    frozen and handed to no generator, so the swap is never taken again and the template's own down
+    week is still standing at its position: the week after a pulled down week was laid as a second
+    one. The record says what happened — the frozen week carries `deload_pulled` — so the swap is
+    replayed on the fresh shape before anything reads it: the template's next down week moves to the
+    lived week's position and the building week it displaced takes the position ahead, exactly as the
+    plan read when the pull was taken. Lived weeks only; a today-onward week is decided from the
+    streak in `generate_block`. No record, or a position the shape already has down ⇒ no change."""
+    from datetime import timedelta
+    for i, w in enumerate(shape):
+        mon = phase_start + timedelta(weeks=w["wk"] - 1)
+        if mon + timedelta(days=6) >= today:
+            continue
+        rec = (prior_by_start or {}).get(mon.isoformat()) or {}
+        if not rec.get("deload_pulled") or _is_down(w):
+            continue
+        nxt = next((j for j in range(i + 1, len(shape)) if _is_down(shape[j])), None)
+        if nxt is not None:
+            _swap_week_fields(w, shape[nxt])
+
+
 def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None,
                    week_actuals=None, regime="caution", ride_cap=ACWR_SOFT,
                    consec_hard=0, last_nondown=None, soft_ctl_floor=None, recent_longs=None,
@@ -4162,6 +4198,40 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             else:
                 av_dates = None
         av_frac = (len(av_days) / max(1, wk["runs"])) if av_shed else 1.0
+        is_down = _is_down(wk)
+        is_taper = _is_taper(wk)
+        is_peak = _week_phase(wk) == "peak"      # §P1 — the field, not the sentence's prefix
+        # §PRO6 — force a deload when too many near-ceiling building weeks have stacked up without one.
+        # EXCLUDE the PEAK/sharpen phase: it always flows straight into the taper, which IS the recovery,
+        # so an extra forced deload there is redundant and would shed race fitness right before race day
+        # (the limiter's real job is the long base/build grind). consec_hard still counts through peak,
+        # but the taper resets it — the peak rides uninterrupted into the taper as designed.
+        # §PULL (0.74.4) — DECIDED ABOVE THE STRADDLE BRANCH, FOR BOTH PATHS. The decision reads the
+        # streak carried in from the lived weeks and the shape, neither of which moves inside a week,
+        # so it belongs to the WEEK, not to the day the plan is regenerated on. It used to sit below
+        # the straddle branch, which `continue`s: a week whose Monday lay was a pulled down week was
+        # laid again from Tuesday on as the shape's building week, and the down week went back where
+        # the shape had it (live, plans 281 → 282, 28 → 29 Sep 2026: Monday's 54.3 km easy week read
+        # 68.5 km with 10×3 min VO₂ on the Tuesday and a 24.3 km MP long run on the Sunday, the
+        # streak standing at 4 of 4 and no input changed).
+        forced_deload = bool(assertive and not is_down and not is_taper and not is_peak
+                             and last_nondown and consec_hard >= MESO_MAX_HARD)
+        # §PRO11 — re-phase, don't stack: §PRO10 makes every riding week near-ceiling by construction,
+        # so the streak trips on schedule; if the SHAPE already provides a down week later in this
+        # block, pull it forward (swap the two weeks' fields) instead of inserting an EXTRA trough —
+        # the meso keeps one recovery per cycle and the displaced building week keeps its quality.
+        # No down week ahead ⇒ the original forced deload stands (the no-recovery backstop).
+        deload_pulled = False
+        if forced_deload:
+            nxt = next((j for j in range(wi + 1, len(shape))
+                        if _is_down(shape[j])), None)
+            if nxt is not None:
+                _swap_week_fields(wk, shape[nxt])
+                is_down, forced_deload, deload_pulled = True, False, True
+                intent_trimp = wk["km"] * TRIMP_PER_KM      # re-derive from the swapped-in down week
+                if av_off:                                  # §AV — day slots follow the new run count
+                    av_days, av_shed = _av_run_days(wk["runs"], av_off)
+                    av_frac = (len(av_days) / max(1, wk["runs"])) if av_shed else 1.0
         # §6o — the week that STRADDLES today: keep elapsed days, govern only today-onward (easy).
         if today and wk_start_d < today <= wk_start_d + timedelta(days=6):
             offsets = av_days if av_days is not None else _run_days(wk["runs"])
@@ -4224,8 +4294,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # basis for the elapsed display, the §6e-FREQ/§6o-B "already covered" tests, and the
             # remainder prorate. It moves the INTENT only — `chosen = min(prorate, allowed)` still
             # binds the remainder to the today-onward ACWR ceiling, so no safety bound is relaxed.
-            # §PRO6/§PRO11 (forced deload / re-phase) are deliberately NOT reproduced here: they
-            # mutate `shape`, and the straddling week is already underway.
+            # §PULL (0.74.4) — §PRO6/§PRO11 (forced deload / re-phase) ARE reproduced on this week,
+            # decided above the branch from the same carried streak the Monday lay read: `wk` is
+            # already the swapped-in down week when the shape had one to bring forward, and
+            # `forced_deload` stands when it had none (a recovery trough, pure easy).
             # Caution keeps `intent_trimp`/`wk["km"]` verbatim ⇒ byte-identical.
             # §PRO9 — the straddle path never received the long-run progression cap: every call below
             # went out without it, so the "+10% over the trailing-4wk longest" promise was simply not
@@ -4246,7 +4318,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             _session_eq_cap = (SESSION_EQ_STEP * max(_trailing_seq)) if (assertive and _trailing_seq) else None
             wk_intent_trimp, wk_intent_km = intent_trimp, (wk.get("km") or 0)
             if assertive and not _is_taper(wk):
-                _sd, _sp = _is_down(wk), _week_phase(wk) == "peak"      # §P1
+                _sd, _sp = (_is_down(wk) or forced_deload), _week_phase(wk) == "peak"   # §P1, §PULL
                 _prog = ((1 + PROG_RAMP) * last_nondown
                          if (last_nondown and eff_cap >= ACWR_SOFT - 1e-9
                              and not _sd and not _sp) else None)
@@ -4298,7 +4370,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # remainder still at 14.7). The straddle week is the one week whose days are already
             # fixed by history; it does not re-lay, exactly as `free_from`/`fixed_days` keep the
             # remainder itself from re-laying.
-            full, _ = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec, zones,
+            full, _ = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec,
+                                       (None if forced_deload else zones),   # §PULL — §PRO6/E
                                        days_override=(av_days if av_days is not None
                                                       else _run_days(wk["runs"])),
                                        av_blocked=av_off,
@@ -4680,6 +4753,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 pweek["av_dates"] = av_dates               # field; the public plan view strips it)
                 if av_shed:
                     pweek["av_shed"] = av_shed
+            if forced_deload:                              # §PULL — same two flags, same sentence, as
+                pweek["deload_forced"] = True              # the full-week path stamps below
+                pweek["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
+            elif deload_pulled:
+                pweek["deload_pulled"] = True
             # §PRO6 (0.26.1) — fold the straddling week into the near-ceiling streak + trough
             # anchor, judged exactly as the frozen fold will judge this same week next Monday
             # (down/taper intent resets; otherwise its proj_acwr counts against NEAR_CEILING_ACWR
@@ -4692,7 +4770,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # into the build phase. Which DAY of the week the plan is regenerated on must not
             # re-phase the road — this is the fold's judgment applied at lay time.
             if assertive:
-                if _is_down(wk) or _is_taper(wk):
+                if _is_down(wk) or _is_taper(wk) or forced_deload:     # §PULL — a recovery trough
                     consec_hard = 0
                 else:
                     consec_hard = consec_hard + 1 if (eow and eow >= NEAR_CEILING_ACWR) else 0
@@ -4705,39 +4783,6 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                max((_bout_eq_km(x) for x in rem_s), default=0.0)))   # logged this week counts, as
             #                                                                          the long run's does above
             continue
-        is_down = _is_down(wk)
-        is_taper = _is_taper(wk)
-        is_peak = _week_phase(wk) == "peak"      # §P1 — the field, not the sentence's prefix
-        # §PRO6 — force a deload when too many near-ceiling building weeks have stacked up without one.
-        # EXCLUDE the PEAK/sharpen phase: it always flows straight into the taper, which IS the recovery,
-        # so an extra forced deload there is redundant and would shed race fitness right before race day
-        # (the limiter's real job is the long base/build grind). consec_hard still counts through peak,
-        # but the taper resets it — the peak rides uninterrupted into the taper as designed.
-        forced_deload = bool(assertive and not is_down and not is_taper and not is_peak
-                             and last_nondown and consec_hard >= MESO_MAX_HARD)
-        # §PRO11 — re-phase, don't stack: §PRO10 makes every riding week near-ceiling by construction,
-        # so the streak trips on schedule; if the SHAPE already provides a down week later in this
-        # block, pull it forward (swap the two weeks' fields) instead of inserting an EXTRA trough —
-        # the meso keeps one recovery per cycle and the displaced building week keeps its quality.
-        # No down week ahead ⇒ the original forced deload stands (the no-recovery backstop).
-        deload_pulled = False
-        if forced_deload:
-            nxt = next((j for j in range(wi + 1, len(shape))
-                        if _is_down(shape[j])), None)
-            if nxt is not None:
-                a, b, _MISS = wk, shape[nxt], object()
-                for k in (set(a) | set(b)) - {"wk"}:
-                    av_, bv_ = a.get(k, _MISS), b.get(k, _MISS)
-                    a.pop(k, None); b.pop(k, None)
-                    if bv_ is not _MISS:
-                        a[k] = bv_
-                    if av_ is not _MISS:
-                        b[k] = av_
-                is_down, forced_deload, deload_pulled = True, False, True
-                intent_trimp = wk["km"] * TRIMP_PER_KM      # re-derive from the swapped-in down week
-                if av_off:                                  # §AV — day slots follow the new run count
-                    av_days, av_shed = _av_run_days(wk["runs"], av_off)
-                    av_frac = (len(av_days) / max(1, wk["runs"])) if av_shed else 1.0
         # §PRO10 — the progressive-overload floor: an assertive BUILDING week's allowance may not be
         # soft-clipped below (1+PROG_RAMP)× the last realised non-down load (the state-based ceiling
         # equilibrates; progression is a demand the acute brakes then bound). Building weeks only:
@@ -6742,6 +6787,7 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
                   # (which the taper just shrank), and keyed on the race just run, not the race ahead.
                   else recovery_shape(n_wk, pre_taper_km, ph.get("after_type")) if kind == "recovery"
                   else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive")))
+            _replay_pulled_deloads(sh, cur_start, prior_all, today)   # §PULL — lived pulls first
             # §C (0.59.0) — "this deload isn't owed". The shape has laid its positional down weeks;
             # the governor judges the ONE that contains today (its block has fully elapsed, so
             # `absorbed_frac` is a measurement), publishes the read on the week, and — only when every

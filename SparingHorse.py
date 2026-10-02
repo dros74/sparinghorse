@@ -33,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import zipfile
 import zlib
 from collections import namedtuple
@@ -1545,6 +1546,23 @@ def get_db():
     if db is None:
         db = g._db = connect_db()
     return db
+
+
+def db_unwritable():
+    """SH-60 — the database files this process cannot write; [] when all is well, and always [] on
+    the public box (query_only by design). A host-side `sqlite3` session on the live file once left
+    `-wal`/`-shm` owned by another user: reads kept working, every write failed, and /healthz said ok
+    for two days. os.access asks the kernel the same question open(O_RDWR) does, without a lock."""
+    if READONLY:
+        return []
+    bad = []
+    d = DB_PATH.parent
+    if not os.access(d, os.W_OK | os.X_OK):
+        bad.append(f"{d}/")
+    for p in (DB_PATH, DB_PATH.with_name(DB_PATH.name + "-wal"), DB_PATH.with_name(DB_PATH.name + "-shm")):
+        if p.exists() and not os.access(p, os.W_OK):
+            bad.append(p.name)
+    return bad
 
 
 def init_db():
@@ -7400,7 +7418,7 @@ _PV_PROFILE = {"cadence": True, "dist": True, "elevation": True, "error": True, 
 
 # NOT `last_sync` / `last_ok` — an unauthenticated probe must not learn when the nightly runs
 # (TECH-8). api_healthz builds the public booleans itself; this is the gate that keeps them so.
-_PV_HEALTHZ = {"consecutive_failures": True, "db": True, "llm": True, "ok": True, "readonly": True,
+_PV_HEALTHZ = {"consecutive_failures": True, "db": True, "db_writable": True, "llm": True, "ok": True, "readonly": True,
                "sync_ok": True, "sync_stale": True, "token_configured": True}
 
 # The COUNTERPART to the specs, and the thing that makes them auditable. "Not in PUBLIC_VIEWS"
@@ -7494,7 +7512,7 @@ _PV_WITHHELD = {
     #                                          or a companion; never classified as public
     "drift.scorecard.reckoning",             # the settled race result (also not COMPUTED publicly)
     "drift.counterfactual.reason",           # the regime rationale names the athlete's history
-    "healthz.last_sync", "healthz.last_ok",
+    "healthz.last_sync", "healthz.last_ok", "healthz.db_unwritable",
     "profile.hr", "profile.hr_avg", "profile.hrmax", "profile.hrzones", "profile.path",
 
     # SH-10 (2026-09-14) — classified as withheld: the allowlist already dropped these; listed so a
@@ -7607,24 +7625,29 @@ def plan_public_view(plan):
 def healthz():
     """Liveness + scheduler telemetry (TECH-8). The private box gets the raw timestamps; the PUBLIC box
     gets booleans only — an unauthenticated probe must not learn when the athlete's nightly runs (their
-    routine is private), but an uptime check can still see that syncing works and is fresh."""
+    routine is private), but an uptime check can still see that syncing works and is fresh. SH-60: when
+    the database cannot be written, `ok` is false and the status 503, so the container's health column
+    turns unhealthy."""
     db = get_db()
     last_sync = get_meta(db, "last_sync")
     last_ok = get_meta(db, "sched:last_ok")
-    fails = int(get_meta(db, "sched:fail_count", "0") or 0)
-    out = dict(ok=True, token_configured=bool(config().runalyze_token), db=DB_PATH.exists(),
+    fails = _sched_fail_count(db)
+    unwritable = db_unwritable()
+    out = dict(ok=not unwritable, token_configured=bool(config().runalyze_token), db=DB_PATH.exists(),
                llm=llm_available(), readonly=READONLY, consecutive_failures=fails)
+    if not READONLY:     # the public box never reports the private box's write state
+        out["db_writable"] = not unwritable
     # 0.56.0 — /healthz stays open (the container's healthcheck and an uptime probe carry no cookie)
     # but an UNAUTHENTICATED caller on the private box gets the same booleans the public box serves.
     anon = READONLY or (not DEMO and _AUTH_ACTIVE and _auth_user() is None)
     if anon:
         out.update(sync_ok=bool(last_ok),
                    sync_stale=(not last_ok) or _seconds_since(last_ok) > SCHED_STALE_HOURS * 3600)
-        return jsonify(public_view("healthz", out))    # §PV — the booleans are the whole allowlist
-    out.update(last_sync=last_sync, last_ok=last_ok,
+        return jsonify(public_view("healthz", out)), (200 if out["ok"] else 503)   # §PV — the booleans are the whole allowlist
+    out.update(last_sync=last_sync, last_ok=last_ok, db_unwritable=unwritable,
                ai={"narration": ai_enabled(db, "narration"), "parsing": ai_enabled(db, "parsing"),
                    "judgment": ai_enabled(db, "judgment")})
-    return jsonify(out)
+    return jsonify(out), (200 if out["ok"] else 503)
 
 
 _sync_lock = threading.Lock()   # one Runalyze pull at a time — page-load syncs, "Sync now", the nightly
@@ -9404,6 +9427,7 @@ def api_system():
     latest = files[-1] if files else None
     age_h = round((time.time() - latest.stat().st_mtime) / 3600, 1) if latest else None
     su = suunto_status()
+    unwritable = db_unwritable()
     seen = access_seen(db)
     access = {"bypass": bool(TRUST_PROXY_AUTH and CF_ACCESS_TEAM and CF_ACCESS_AUD),
               "team": CF_ACCESS_TEAM or None, "seen": seen,
@@ -9413,7 +9437,8 @@ def api_system():
                    last_sync=last_sync,
                    sync_stale=(not last_sync) or _seconds_since(last_sync) > SCHED_STALE_HOURS * 3600,
                    sched={"last_run": get_meta(db, "sched:last_run"), "last_ok": last_ok,
-                          "fail_count": int(get_meta(db, "sched:fail_count", "0") or 0)},
+                          "fail_count": _sched_fail_count(db)},
+                   db_writable=not unwritable, db_unwritable=unwritable,
                    suunto={"connected": bool(su.get("connected")), "last_push": get_meta(db, "suunto:last_push")},
                    backup={"dir": str(_backup_dir()), "latest": latest.name if latest else None, "age_h": age_h,
                            "kept": len(files), "keep": BACKUP_KEEP, "push": bool(BACKUP_PUSH)})
@@ -9743,6 +9768,8 @@ UI_SOURCE = INDEX_HTML + "\n" + APP_CSS + "\n" + APP_JS
 # (late enough to catch the day's runs). Inert on the read-only/tokenless public container.
 _scheduler_started = False
 _nightly_lock = threading.Lock()  # scheduled wake + boot catch-up: one WHOLE pass, never two in series
+_SCHED_MEM = {"fail_count": 0}   # SH-60 — the failure count kept in the process too: the meta row
+                                 # cannot count a night whose failure is that the database is unwritable
 # The hour the nightly job fires, in SH_TZ. It must land AFTER the day's last run has been ingested
 # UPSTREAM, not merely after the run ends: the job syncs and then re-plans, so firing early re-plans
 # the current week from actuals it cannot see yet. §PRO20 took the SEED off this clock (it is
@@ -9896,7 +9923,9 @@ def _nightly_job(kind="nightly"):
 def _nightly_job_once(kind="nightly"):
     """One full nightly pass — the scheduled run AND the boot catch-up share this: sync → daily
     re-plan → Suunto guides → rotated DB snapshot, with the outcome recorded in meta
-    (sched:last_run / sched:last_ok / sched:fail_count) so /healthz and the catch-up can see it."""
+    (sched:last_run / sched:last_ok / sched:fail_count) so /healthz and the catch-up can see it. SH-60:
+    a database that cannot be written no longer ends the pass, and the failure is counted in the
+    process too (`_SCHED_MEM`) because the stored count cannot be."""
     ok = False
     try:
         with _sync_lock:           # never overlap a "Sync now" / page-load pull
@@ -9905,8 +9934,10 @@ def _nightly_job_once(kind="nightly"):
         ok = True
     except Exception as e:
         print(f"[scheduler] {kind} sync failed: {e}")
-    db = connect_db()
+    recorded = False
+    db = None
     try:
+        db = connect_db()
         set_meta(db, "sched:last_run", _now_iso())
         if ok:
             set_meta(db, "sched:last_ok", _now_iso())
@@ -9914,8 +9945,23 @@ def _nightly_job_once(kind="nightly"):
         else:
             set_meta(db, "sched:fail_count", str(int(get_meta(db, "sched:fail_count", "0") or 0) + 1))
         db.commit()
+        recorded = True
+    except Exception as e:
+        msg = f"[scheduler] {kind}: could not record the outcome — {e}"
+        bad = db_unwritable()
+        if bad:
+            msg += f" (not writable: {', '.join(bad)}; restart the container — the entrypoint re-owns /data)"
+        print(msg)
     finally:
-        db.close()
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+    if ok and recorded:
+        _SCHED_MEM["fail_count"] = 0
+    else:
+        _SCHED_MEM["fail_count"] += 1
     # §6b — recompute against today even if the sync failed: advancing the plan's date and
     # §6e banking needs no fresh pull, so a flaky Runalyze night must not also freeze the plan.
     try:
@@ -9973,10 +10019,27 @@ def _sched_catchup_needed(db):
     return (not last_ok) or _seconds_since(last_ok) > SCHED_STALE_HOURS * 3600
 
 
+def _sched_fail_count(db):
+    """Failures in a row: the larger of the stored count and this process's own (SH-60). After a
+    restart the stored count speaks; while the database cannot be written, the process's does."""
+    return max(int(get_meta(db, "sched:fail_count", "0") or 0), _SCHED_MEM["fail_count"])
+
+
+def _scheduler_tick(kind="nightly"):
+    """One scheduled wake (SH-60). Anything the pass lets escape is printed and counted here, so the
+    daemon thread outlives a bad night; before this an unwritable database ended it at the first wake."""
+    try:
+        _nightly_job(kind)
+    except Exception as e:
+        _SCHED_MEM["fail_count"] += 1
+        print(f"[scheduler] nightly pass raised: {e!r}")
+        traceback.print_exc()
+
+
 def _scheduler_loop(hhmm):
     while True:
         time.sleep(_seconds_until(hhmm))
-        _nightly_job()
+        _scheduler_tick()
         time.sleep(61)  # step past the trigger minute before recomputing the next wait
 
 
@@ -10014,7 +10077,7 @@ def start_scheduler():
         if owed:
             print(f"[scheduler] no successful nightly in the last {SCHED_STALE_HOURS} h — "
                   "running a catch-up pass now")
-            threading.Thread(target=_nightly_job, args=("catch-up",), daemon=True).start()
+            threading.Thread(target=_scheduler_tick, args=("catch-up",), daemon=True).start()
     except Exception as e:
         print(f"[scheduler] boot catch-up check failed: {e}")
 
