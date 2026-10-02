@@ -82,6 +82,7 @@ MUSIC_SCORE_FOLLOW = 1.0       # §BEAT7 — …the followability the runner's c
 MUSIC_SCORE_CLOSE = 0.5
 MUSIC_SCORE_SERVED = 1.0       # §BEAT7 — …minus this per list the track was on inside the rotation window
 MUSIC_ROTATION_DAYS = 28       # §BEAT7 — the rotation window: lists built inside it count against a track
+MUSIC_LIST_ADOPT_SHARE = 0.5     # SH-59 — another day's list is the run's list when it holds at least this share of the songs played (and two)
 MUSIC_ENTRAIN_PCT = 0.01       # §BEAT7 — a song run within this of its tempo: the legs followed it.
 #                                §BEAT11: the picker's first rung — fill from here before the basin
 CADENCE_SENSOR_BIAS_SPM = 2.4  # §BEAT12 (0.68.9) — the watch's per-second cadence field reads this many
@@ -1776,10 +1777,83 @@ def segment_for(song, by_id, by_name):
     return by_id.get(song.get("spotify_id")) or by_name.get((_norm(song.get("artist")), _norm(song.get("title"))))
 
 
+def list_positions(spec):
+    """PURE — SH-59: each track's position in the list, in play order across the segments, by id and
+    by normalised (artist, title) — the same two keys `playlist_membership` matches on."""
+    by_id, by_name = {}, {}
+    i = 0
+    for seg in (spec or {}).get("segments") or []:
+        for t in seg.get("tracks") or []:
+            if t.get("id"):
+                by_id.setdefault(t["id"], i)
+            by_name.setdefault((_norm(t.get("artist")), _norm(t.get("title"))), i)
+            i += 1
+    return by_id, by_name
+
+
+def _key_day(key):
+    try:
+        return datetime.strptime((key or "")[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def choose_list(rows, run_date, songs):
+    """PURE — SH-59: the list a run was run on, from the lists near its date and the songs the play
+    history lined up with it. A list counts the songs it holds (by id or by name); the day's own list
+    wins any tie, since rotation repeats songs across neighbouring lists; between other days' lists
+    the one holding the songs in the order they were heard wins, then the nearest date, then the newest
+    build. Another day's list is taken only when it holds at least MUSIC_LIST_ADOPT_SHARE of the songs
+    played and two; otherwise the day's own list if there is one (what the read-back always did), else
+    none. Returns (row, how) with how 'date', 'songs' or None."""
+    if not rows:
+        return None, None
+    run_day = _key_day(run_date)
+    scored = []
+    for r in rows:
+        kd = _key_day(r["key"])
+        same = kd is not None and r["key"][:10] == run_date
+        gap = abs((kd - run_day).days) if kd is not None and run_day is not None else 9999
+        by_id, by_name = list_positions(r.get("spec"))
+        pos = []
+        for sg in songs:
+            p = by_id.get(sg.get("spotify_id"))
+            if p is None:
+                p = by_name.get((_norm(sg.get("artist")), _norm(sg.get("title"))))
+            if p is not None:
+                pos.append(p)
+        in_order = sum(1 for x, y in zip(pos, pos[1:]) if y > x)
+        scored.append(((len(pos), same, in_order, -gap, r.get("built_at") or ""), r, same))
+    own = [(k, r) for k, r, same in scored if same]
+    own_newest = max(own, key=lambda kr: kr[0][4])[1] if own else None
+    if not songs:
+        return (own_newest, "date") if own_newest else (None, None)
+    key, best, same = max(scored, key=lambda x: x[0])
+    if same:
+        return best, "date"
+    if key[0] >= max(2, MUSIC_LIST_ADOPT_SHARE * len(songs)):
+        return best, "songs"
+    return (own_newest, "date") if own_newest else (None, None)
+
+
+def library_tempo_read(tempo, spm):
+    """PURE — SH-59: a song read with no list entry has only its library tempo, and a running song's
+    library tempo is often the half-time beat (87 for 174). Read it at double when double sits nearer
+    the legs (the watch's cadence plus CADENCE_SENSOR_BIAS_SPM) and is still a cadence
+    (≤ MUSIC_CAD_SPM_RANGE[1]); else as it is. Returns (tempo, doubled)."""
+    if not tempo or not spm:
+        return tempo, False
+    legs = spm + CADENCE_SENSOR_BIAS_SPM
+    if tempo * 2 <= MUSIC_CAD_SPM_RANGE[1] and abs(tempo * 2 - legs) < abs(tempo - legs):
+        return tempo * 2, True
+    return tempo, False
+
+
 def readback(db, run_id):
     """One run, song by song: the stored plays that overlap it, the songs the play history dropped read
     from the list order (§BEAT8), the cadence stream between the seams, the rating each song carries,
-    and the playlist target if a playlist was built for that day."""
+    and the playlist target: the list built for that day, or another day's list when it holds most of the
+    songs played (SH-59)."""
     a = db.execute("SELECT id, date, date_time, distance, duration, raw FROM activities WHERE id=?", (run_id,)).fetchone()
     if not a:
         return {"ok": False, "error": "no such run"}
@@ -1851,8 +1925,13 @@ def readback(db, run_id):
         songs = align_songs(run_start, run_end, played, samples)
         # §BEAT5 — which playlist segment each song belonged to, if any: its target and its role;
         # §BEAT7 — matched by id or by name (another edition's id is the same song)
-        pl = conn.execute("SELECT name, spec FROM playlist WHERE key LIKE ? ORDER BY built_at DESC LIMIT 1", (a["date"] + "-%",)).fetchone()
-        spec = json.loads(pl["spec"]) if pl else {}
+        # SH-59 — the list is chosen by the songs played, the day's own list winning ties
+        lo_d = (date.fromisoformat(a["date"]) - timedelta(days=MUSIC_ROTATION_DAYS)).isoformat()
+        hi_d = (date.fromisoformat(a["date"]) + timedelta(days=MUSIC_UPCOMING_DAYS)).isoformat()
+        rows = [{"key": r["key"], "name": r["name"], "built_at": r["built_at"], "spec": json.loads(r["spec"] or "{}")}
+                for r in conn.execute("SELECT key, name, built_at, spec FROM playlist WHERE substr(key, 1, 10) BETWEEN ? AND ?", (lo_d, hi_d))]
+        pl, pl_how = choose_list(rows, a["date"], songs)
+        spec = pl["spec"] if pl else {}
         target = spec.get("target_spm") if pl else None
         # §BEAT8 — the songs the play history dropped, read from the list order into the gaps between
         # the aligned ones, and merged HERE so they take the same path as an aligned song from this
@@ -1884,7 +1963,13 @@ def readback(db, run_id):
                 else:
                     sg["jogs_only"] = True
             # the tempo the legs were offered: the list's (doubled for a half-time hit), else the library's
-            tempo = (hit[3] * 2 if hit[4] == "half" else hit[3]) if hit and hit[3] else tempos.get(sg["spotify_id"])
+            # (SH-59: read at double when that sits nearer the legs — a library tempo is often the half-time beat)
+            if hit and hit[3]:
+                tempo = hit[3] * 2 if hit[4] == "half" else hit[3]
+            else:
+                tempo, doubled = library_tempo_read(tempos.get(sg["spotify_id"]), sg.get("spm"))
+                if doubled:
+                    sg["tempo_doubled"] = True
             sg["tempo"] = round(tempo, 1) if tempo else None
             if tempo and sg.get("spm") and not sg.get("jogs_only"):
                 sg["delta_pct"] = round((sg["spm"] + CADENCE_SENSOR_BIAS_SPM - tempo) / tempo, 4)
@@ -1931,7 +2016,8 @@ def readback(db, run_id):
                     "never": sum(1 for r in per_run.values() if r == "never"),
                     "jogs_only": sum(1 for sg in songs if sg.get("jogs_only"))}    # §BEAT9
         res = {"ok": True, "run_id": run_id, "date": a["date"], "km": a["distance"], "minutes": round((a["duration"] or 0) / 60),
-               "playlist": pl["name"] if pl else None, "target_spm": target, "songs": songs,
+               "playlist": pl["name"] if pl else None,
+               "playlist_key": pl["key"] if pl else None, "playlist_by": pl_how, "target_spm": target, "songs": songs,
                "followed": followed, "presses": events, "stream_source": stream_source,
                "skipped": sum(1 for sg in songs if sg.get("skipped")),
                "off_playlist": sum(1 for sg in songs if pl and not sg.get("in_playlist")),
@@ -1959,10 +2045,16 @@ def recent_runs(db, n=MUSIC_READBACK_RUNS):
     try:
         done = {r["run_id"]: r["computed_at"] for r in conn.execute("SELECT run_id, computed_at FROM readback")}
         names = {r["key"][:10]: r["name"] for r in conn.execute("SELECT key, name FROM playlist")}
+        stored = {}                       # SH-59 — the list a stored read-back actually used
+        for r in conn.execute("SELECT run_id, payload FROM readback"):
+            try:
+                stored[r["run_id"]] = json.loads(r["payload"] or "{}").get("playlist")
+            except Exception:
+                pass
     finally:
         conn.close()
     return [{"id": r["id"], "date": r["date"], "km": r["distance"], "minutes": round((r["duration"] or 0) / 60),
-             "playlist": names.get(r["date"]), "readback_at": done.get(r["id"])} for r in rows]
+             "playlist": stored.get(r["id"]) or names.get(r["date"]), "readback_at": done.get(r["id"])} for r in rows]
 
 
 def ratings_file():

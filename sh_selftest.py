@@ -9809,7 +9809,9 @@ def _stc_calibration_inventory():
                 # clock-agreement window like MUSIC_FIT_CLOCK_TOL_S, just narrower, and
                 # MUSIC_GUIDE_LAP_DECODE_WINDOW_S is the same match against the run's own §RD decode
                 # instead of the plan's offset
-                "MUSIC_AUTOLAP_UNIT_TOL", "MUSIC_GUIDE_LAP_TOL_S", "MUSIC_GUIDE_LAP_DECODE_WINDOW_S"}
+                "MUSIC_AUTOLAP_UNIT_TOL", "MUSIC_GUIDE_LAP_TOL_S", "MUSIC_GUIDE_LAP_DECODE_WINDOW_S",
+                # SH-59 — the share of a run's songs another day's list must hold to be read as the run's list
+                "MUSIC_LIST_ADOPT_SHARE"}
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -19308,7 +19310,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -20123,6 +20125,163 @@ def _stc_music_sensor_bias():
                "and the read-back's entrainment gate corrects the watch's cadence by the same amount",
                passed=not fails, expect="picker takes 170 + B over raw 170; one bias note; legs at 170 "
                "entrain to a 170 + B tempo and not to a 170 tempo; zeroing the constant flips both",
+               got={"violations": fails or "none"})
+
+
+def _stc_music_list_choice():
+    """SH-59 — a run is read against the list it was run on, chosen by the songs played, not by the
+    date alone. (a) pure `choose_list`: the day's own list wins a tie; another day's list is adopted
+    when it holds at least half the songs (and two); too few and it is none; the list holding the
+    songs in play order beats a shuffled one, then the nearer date; no songs falls back to the day's
+    list. (b) pure `library_tempo_read`: a half-time library tempo is read at double when double sits
+    nearer the legs and is still a cadence. (c) end-to-end `readback` of a 29 Sep run with no 29 Sep
+    list, played off the 27 Sep list: that list is read ('songs'), the half-time song is entrained at
+    its doubled list tempo, and the follow rows carry it. (d) with no list at all, the library tempo is
+    read at double and flagged. (e) a list built for the day wins the tie with the 27 Sep one."""
+    if M is None:
+        return _music_skip("music-list-choice", "SH-59 — the list a run was run on")
+    import tempfile, sqlite3, json as _json
+    fails = []
+    B = M.CADENCE_SENSOR_BIAS_SPM
+
+    # ── (a) choose_list ─────────────────────────────────────────────────────
+    def lst(key, ids, built="2026-09-20T00:00:00"):
+        return {"key": key, "name": "L " + key, "built_at": built,
+                "spec": {"segments": [{"tracks": [{"id": i, "title": i, "artist": "A", "tempo": 170.0, "hit": "full"} for i in ids]}]}}
+    sg = lambda ids: [{"spotify_id": i, "title": i, "artist": "A"} for i in ids]
+    D = "2026-09-29"
+    r, how = M.choose_list([lst("2026-09-29-easy", "abcd"), lst("2026-09-28-easy", "abcd")], D, sg("abcd"))
+    if not (r and r["key"] == "2026-09-29-easy" and how == "date"):
+        fails.append(f"(a1) the day's own list must win a tie: {r and r['key']} {how}")
+    r, how = M.choose_list([lst("2026-09-27-long_mp", "abc"), lst("2026-09-26-easy", "xyz")], D, sg("abcd"))
+    if not (r and r["key"] == "2026-09-27-long_mp" and how == "songs"):
+        fails.append(f"(a2) 3 of 4 songs on another day's list must adopt it: {r and r['key']} {how}")
+    r, how = M.choose_list([lst("2026-09-27-long_mp", "a"), lst("2026-09-26-easy", "xyz")], D, sg("abcd"))
+    if (r, how) != (None, None):
+        fails.append(f"(a3) 1 of 4 songs must adopt nothing: {r and r['key']} {how}")
+    r, how = M.choose_list([lst("2026-09-29-easy", "a"), lst("2026-09-27-long_mp", "abcdef")], D, sg("abcdef"))
+    if not (r and r["key"] == "2026-09-27-long_mp" and how == "songs"):
+        fails.append(f"(a4) a date list holding 1 of 6 loses to another holding 6: {r and r['key']} {how}")
+    r, how = M.choose_list([lst("2026-09-28-easy", "cadb"), lst("2026-09-26-easy", "abcd")], D, sg("abcd"))
+    if not (r and r["key"] == "2026-09-26-easy" and how == "songs"):
+        fails.append(f"(a5) the in-order list must beat the shuffled one: {r and r['key']} {how}")
+    r, how = M.choose_list([lst("2026-09-26-easy", "abcd"), lst("2026-09-28-easy", "abcd")], D, sg("abcd"))
+    if not (r and r["key"] == "2026-09-28-easy" and how == "songs"):
+        fails.append(f"(a6) the nearer date must win between equal lists: {r and r['key']} {how}")
+    r, how = M.choose_list([lst("2026-09-29-easy", "ab"), lst("2026-09-28-easy", "ab")], D, [])
+    if not (r and r["key"] == "2026-09-29-easy" and how == "date"):
+        fails.append(f"(a7) no songs must fall back to the date's list: {r and r['key']} {how}")
+
+    # ── (b) library_tempo_read ──────────────────────────────────────────────
+    for args, want in (((87.0, 171.6), (174.0, True)), ((172.0, 171.6), (172.0, False)),
+                       ((115.0, 171.6), (115.0, False)), ((None, 170), (None, False)), ((87.0, None), (87.0, False))):
+        got = M.library_tempo_read(*args)
+        if got != want:
+            fails.append(f"(b) library_tempo_read{args} = {got}, want {want}")
+
+    # ── (c)–(e) end to end ──────────────────────────────────────────────────
+    run_start = 2_000_000.0
+    iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
+    samples = [(run_start + t, 171.6, 2.5 * t) for t in range(0, 601)]
+
+    def spec_of(tracks):
+        return {"target_spm": 172.0, "segments": [{"label": "Long run", "effort": "easy", "target_spm": 172.0,
+                "tracks": [{"id": i, "title": i.upper(), "artist": "Band", "tempo": t, "hit": h} for i, t, h in tracks]}]}
+    hf = [("h1", 86.8, "half"), ("f1", 174.0, "full")]
+
+    def put(conn, key, tracks):
+        conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES(?, 'p', ?, '', ?, ?)",
+                     (key, "SH · " + key, "2026-09-25T00:00:00", _json.dumps(spec_of(tracks))))
+
+    saved_path, saved_fetch, saved_parse = M.music_db_path, M.fetch_fit, M.parse_fit
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    M.fetch_fit = lambda rid: b".FIT"
+    M.parse_fit = lambda raw: {"start": run_start, "samples": list(samples), "laps": []}
+    db = sqlite3.connect(":memory:"); db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, distance REAL, duration REAL, raw TEXT)")
+    db.execute("INSERT INTO activities VALUES(91, ?, ?, 2.5, 600, '{}')", (D, iso(run_start)))
+    db.commit()
+
+    def read(label):
+        res = M.readback(db, 91)
+        if not res.get("ok"):
+            fails.append(f"{label} readback failed: {res.get('error')}")
+            return None, {}
+        return res, {x["spotify_id"]: x for x in res["songs"]}
+
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO played(played_at, spotify_id, title, artist, duration_ms, pulled_at) VALUES(?,?,?,?,?,?)",
+                             [(iso(run_start + 300), "h1", "H1", "Band", 300_000, "x"),
+                              (iso(run_start + 600), "f1", "F1", "Band", 300_000, "x")])
+            conn.executemany("INSERT INTO track(spotify_id, title, artist, duration_ms, tempo) VALUES(?,?,?,?,?)",
+                             [("h1", "H1", "Band", 300_000, 86.8), ("f1", "F1", "Band", 300_000, 174.0)])
+            put(conn, "2026-09-27-long_mp", hf)
+            put(conn, "2026-09-26-easy", [("x1", 170.0, "full"), ("x2", 170.0, "full")])
+            conn.execute("INSERT OR REPLACE INTO setting(key, value) VALUES('press_protocol_from', '2000-01-01')")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # (c) no list for the 29th: the 27 Sep list holds both songs
+        res, by = read("(c)")
+        if res:
+            if res.get("playlist") != "SH · 2026-09-27-long_mp" or res.get("playlist_by") != "songs":
+                fails.append(f"(c) the 27 Sep list must be read by its songs: {res.get('playlist')} {res.get('playlist_by')}")
+            if not (by.get("h1", {}).get("entrained") is True and by.get("f1", {}).get("entrained") is True):
+                fails.append(f"(c) both songs must read entrained: {[(k, v.get('entrained')) for k, v in by.items()]}")
+            if by.get("h1", {}).get("tempo") != 173.6:
+                fails.append(f"(c) the half-time song reads at its doubled list tempo 173.6: {by.get('h1', {}).get('tempo')}")
+            c2 = M._mdb()
+            try:
+                fr = {r["spotify_id"]: r["entrained"] for r in c2.execute("SELECT spotify_id, entrained FROM follow WHERE run_id=91")}
+            finally:
+                c2.close()
+            if fr != {"h1": 1, "f1": 1}:
+                fails.append(f"(c) the follow rows must carry both songs entrained: {fr}")
+
+        # (d) no list in the window at all: the library tempo, read at double
+        conn = M._mdb()
+        try:
+            conn.execute("DELETE FROM playlist")
+            conn.commit()
+        finally:
+            conn.close()
+        res, by = read("(d)")
+        if res:
+            h1 = by.get("h1", {})
+            if res.get("playlist") is not None:
+                fails.append(f"(d) no list must be read: {res.get('playlist')}")
+            if not (h1.get("tempo") == 173.6 and h1.get("tempo_doubled") is True and h1.get("entrained") is True):
+                fails.append(f"(d) the library tempo must be read at double and entrain: {h1.get('tempo')} "
+                             f"{h1.get('tempo_doubled')} {h1.get('entrained')}")
+
+        # (e) the day's own list wins the tie with the 27 Sep one
+        conn = M._mdb()
+        try:
+            put(conn, "2026-09-27-long_mp", hf)
+            put(conn, "2026-09-29-easy", hf)
+            conn.commit()
+        finally:
+            conn.close()
+        res, by = read("(e)")
+        if res and (res.get("playlist") != "SH · 2026-09-29-easy" or res.get("playlist_by") != "date"):
+            fails.append(f"(e) the day's own list must win the tie: {res.get('playlist')} {res.get('playlist_by')}")
+    finally:
+        M.music_db_path, M.fetch_fit, M.parse_fit = saved_path, saved_fetch, saved_parse
+        db.close()
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-list-choice",
+               "SH-59 — a run is read against the list it was run on, chosen by the songs played (the day's "
+               "own list winning ties), and a library half-time tempo is read at double",
+               passed=not fails, expect="own list wins ties; another day's list adopted at half the songs and two; "
+               "in-order then nearer then newest; library tempo doubled only when nearer the legs and a cadence; "
+               "end to end: 27 Sep list read by songs, no list reads the library at double, a 29 Sep list wins",
                got={"violations": fails or "none"})
 
 

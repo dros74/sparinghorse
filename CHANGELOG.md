@@ -10,6 +10,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.74.6] - 2026-10-02
+
+### Fixed
+
+- **A run played from a playlist built for another day was read back with no playlist, and songs
+  that had actually been followed were stored as not followed (§LISTPICK).** `readback()` chose the
+  run's playlist by date only: the newest build whose key started with the run's date. A run on a
+  day with no list of its own, or on a list carried over from the day before, was read with none.
+  A half-time song then fell back to its library tempo (87 for a 174 beat), missed the cadence
+  window, and went into `follow` as not followed, which feeds the picker's follow score. One run
+  stored 8 of 13 songs followed where 12 of 14 had been. The change:
+  - `choose_list(rows, run_date, songs)` picks among the lists keyed from 28 days before to 10 days
+    after the run date. Each candidate counts the aligned songs it holds (by id, or by normalised
+    artist and title). Ranking: most songs held, then the run date's own list, then songs in the
+    order heard, then the nearest date, then the newest build. Another day's list is taken only when
+    it holds at least `MUSIC_LIST_ADOPT_SHARE` (0.5) of the songs played and at least two;
+    otherwise the day's own list is used as before, or none. The day's own list wins ties because
+    the rotation repeats songs across neighbouring lists.
+  - `library_tempo_read(tempo, spm)`: a song with no list entry is read at double its library tempo
+    when double sits nearer the legs and is still a cadence (at most 220); the song row carries
+    `tempo_doubled`.
+  - The read-back result carries `playlist_key` and `playlist_by` (`date`, `songs` or none), and the
+    music page's recent-runs list names the list a stored read-back used. ENGINE_SCIENCE §10's
+    calibration inventory counts the new constant (284 to 285).
+
+  Tests: new `det/music-list-choice`. (a) the pure choice: the day's own list wins a tie; another
+  day's list is adopted at 3 of 4 songs and not at 1 of 4; a list holding 6 beats the day's own
+  holding 1; songs in order beat shuffled; the nearer date breaks an order tie; no songs gives the
+  day's own list. (b) `library_tempo_read`: 87.0 at legs 171.6 becomes 174.0, 172.0 stays, 115.0
+  stays, empty inputs give none. (c) a run with no list that day reads the list from two days
+  earlier, reads the half-time song at 173.6 and counts it followed. (d) no list in the window: the
+  half-time song is read at double from the library and followed. (e) the day's own list wins the
+  tie. Run against the prior `sh_music.py` (with stand-in helpers so the det can run), every limb
+  except (a3) fails.
+
 ## [0.74.5] - 2026-10-02
 
 ### Fixed
