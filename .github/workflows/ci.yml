@@ -191,7 +191,7 @@ jobs:
       # The same hash-pinned set the image installs (0.55.2): CI must not pass on a dependency
       # the container would then refuse.
       - run: pip install --require-hashes -r requirements.lock
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # The Node the BROWSER TESTS run on — a different axis from the `node24` runtime the
           # actions themselves use, and not what the deprecation notice was about. 20 went
