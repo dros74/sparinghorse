@@ -169,8 +169,8 @@
           "risk": {
             "axis": "long_step",
             "basis": "L",
-            "cohort": "Nielsen et al., Aarhus",
-            "n": 5000,
+            "cohort": "Frandsen et al., Aarhus",
+            "n": 5200,
             "read": "within the +10 % step"
           }
         },
@@ -548,8 +548,8 @@
           "risk": {
             "axis": "long_step",
             "basis": "L",
-            "cohort": "Nielsen et al., Aarhus",
-            "n": 5000,
+            "cohort": "Frandsen et al., Aarhus",
+            "n": 5200,
             "read": "within the +10 % step"
           },
           "tissue": {
@@ -751,8 +751,8 @@
           "risk": {
             "axis": "long_step",
             "basis": "L",
-            "cohort": "Nielsen et al., Aarhus",
-            "n": 5000,
+            "cohort": "Frandsen et al., Aarhus",
+            "n": 5200,
             "note": "race week: the race distance is the goal, not a step; the long-run read is the longest training bout",
             "read": "within the +10 % step"
           },

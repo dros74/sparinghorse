@@ -10,6 +10,230 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.81.3] - 2026-10-20
+
+### Fixed
+
+- **The durability card reads Runalyze's new decoupling unit.** Runalyze changed the unit of
+  `aerobic_decoupling_pace` on 31 Jul 2025: activities created before that date carry percent x 100
+  (560.0 is 5.6 %), activities created from it on carry plain percent (6.3 is 6.3 %). The app divided every
+  value by 100, so every long run since August 2025 read 0.0 to 0.2 %: the gauge sat at 0, every bar was
+  flat and the verdict always said "durable". One helper, `decoupling_pct(value, created_at)`, now returns
+  percent: it divides by 100 before the cutoff and keeps the value from it on; with no creation date (test
+  fixtures, the demo seed) it reads by magnitude (an absolute value of 50 or more is x 100). `run_metrics`
+  returns `decoupling` in percent for every reader: the durability read, the effort-discipline context and
+  the worked example. The card's API fields and thresholds are unchanged; its "raw" figures are now the
+  app's own percent x 100. The card's design is not changed in this release.
+- **The track record keeps its place on the public and demo boxes.** Since 0.57.0 those two boxes put the
+  Track record section at the top, open, under the objective bar. It now sits where the private console has
+  it, after Plan drift, closed like the other analytics sections; the left rail links to it.
+
+Self-test: new `det/decoupling-units` covers the helper on both units, with and without a creation date,
+and a fixture whose post-cutoff long runs give a percent median, not about 0. The public-mode test now
+checks the private order. Battery 253 of 259 PASS · 0 FAIL · 5 skipped; golden plans unchanged;
+`test/run_local_test.sh` passes all 10 modes (full 167, public 20).
+
+## [0.81.2] - 2026-10-19
+
+### Fixed
+
+- **One limit source is open at a time.** On "Why this week looks like this" several cards could be open at
+  once. Opening a card now closes any other open card (its source, its "Hide the source" link and its
+  highlight), clicking the open card closes it, and the tile's limit link opens exactly that card. The open
+  card has an accent border and a faint accent tint; keyboard focus keeps its own ring.
+- **The road's phase band lines up with the bars.** The bars had a 3 px gap after every week while the band
+  had a gap only between phases, so the band's edges drifted across the road. Every layer of the road
+  (flags, bars, band, today marker) is now the same column grid, one column per week with the same gap, and
+  each phase segment spans exactly its weeks. Measured edge error is 0.00 px on desktop and phone.
+- **Race flags point at their day.** Flags floated high above the chart, so it was hard to tell which week
+  they marked. Each race and tune-up flag now sits at the race's own day inside its week's column, with a
+  1 px dashed line down to the axis (lighter for a tune-up), and the flag row is lower. The "▲ today"
+  marker sits at today's day inside the current week with a short line rising to the base of the bars; its
+  label is beside it, to the right in the road's first half and to the left in the second.
+
+### Changed
+
+- **The latest run sits under Today's readiness.** The run card (map and read-back) came after the Training
+  load section because of where it sat in the page. The console now runs: objective bar, Today's readiness,
+  latest run, Training plan, Training load, the rest. The hidden run browser moved with it, so `/runs` still
+  shows the calendar above the run it opens. On phones the Today tab reads readiness, latest run, then the
+  load cards. `/today` still shows only the readiness card.
+
+No engine, server or public-surface change; golden plans unchanged. Battery 252 of 258 PASS · 0 FAIL ·
+5 skipped; `test/run_local_test.sh` passes all 10 modes (full 167).
+
+## [0.81.1] - 2026-10-19
+
+### Fixed
+
+- **A race's source opens as its own panel.** "Why this range, and the source" used to open inside the Races
+  tile, which stretched the row and left the first two tiles mostly empty. It now opens full width below the
+  three tiles, headed by the race name and "why this range" with a "Hide ↑" button. From 980 px its body has
+  two columns: the race's verdict, the "if the race were later" line, the stale marks and the "Now" line on
+  the left, the finish-time source on the right. The tiles keep their own heights, and each tile's last link
+  sits on its bottom line, left-aligned.
+- **The Races tile lines up with the other two.** With a chain of two races it kept the old chain strip's
+  10 px top margin; that is removed, so the three tiles start and end on the same lines. The selected race
+  has room between its ring and its text.
+- **The road's colours follow one rule.** Colour is the week's phase, the same hue as the band below. A solid
+  bar is a week already run, a pale bar a week planned; the week holding today is split (the run part solid,
+  the rest pale) once it has run kilometres. Down, taper, recovery and race weeks no longer get a shade of
+  their own: their shorter bar shows them. The week shown in the pane has a 2 px outline in the text colour.
+  The "▲ today" marker is always shown, on its own line above the dates. The legend reads "colour = phase
+  (band below) · run · planned · shown below". Before, planned bars were light, run bars mid grey and down
+  and taper weeks darker grey while the legend said "lighter = down", and dark mode added a fourth look.
+- **A chain's second cycle kept its phase band.** Segments 6 and later were washed out to plain surface
+  colour by an old per-segment mix step; every segment now uses the same mix. On a phone a short phase clips
+  its band label instead of widening the band past its bars.
+- **The week pane uses its width.** The days sit on top at full width in two columns (Monday to Thursday
+  left, Friday to Sunday right, from 980 px; lived weeks and the re-base week too), and the limits below are
+  a grid of cards: 3 columns from 980 px, 2 from 640 px, 1 on phones. A limit's source opens full width under
+  its row and the other cards keep their height. A card's basis badge and link sit on its bottom line. The
+  week-number gutter is gone from the pane at every width, since the pane's title names the week.
+- **Source panels read in two columns.** From 980 px the body of a limit, posture, paces or components
+  source has This week, What it is and The rule on the left; the sources, How the app uses it and the Caveat
+  on the right.
+- **The posture button fills the strip.** "Assertive build" and its source panel now span the strip's width
+  with the tiles' padding and radius.
+
+There is no engine, server or `index.html` change; the golden plans are unchanged.
+
+## [0.81.0] - 2026-10-19
+
+### Added
+
+- **Every limit names its source (SH-86).** The collapsed limits line under each week is now one row per
+  limit: its name, a tag ("holds the week", "ran over" or "exempt in the peak"), a bar of what the week laid
+  against the ceiling, a plain sentence with that week's own numbers, and a basis badge. The row that held
+  the week comes first. A "Why, and the source" button on each row opens a panel with This week, What it is,
+  The rule, Where the number comes from (named citations with what they found), How the app uses it, a
+  Caveat, and what the basis means. The badges are **Literature** (published science or an established
+  coaching convention), **Fitted to one runner** (measured on the calibration athlete's history, a starting
+  point for anyone else) and **Structural** (a definition or a window, not a safety threshold). Sources
+  named: fitness gain per week cites Friel and Couzens; the load ratio cites Gabbett 2016, Impellizzeri et
+  al. 2020 and Frandsen et al. 2025; the long-run step cites Frandsen et al. 2025; impact load cites Davis
+  and the fitted replay of the calibration athlete's 1,078 runs. Weeks near the ceiling follows the 3:1
+  periodisation convention and says a named source is still to be added. The limits were renamed to match:
+  "load ratio (ACWR)" is "load ratio", "damage-eq km, week/session" is "impact load, week" and "impact load,
+  single run", "near-ceiling streak" is "weeks near the ceiling", "fitness gain / week" is "fitness gain per
+  week". The Today page's "Binding limit" line uses the same basis labels.
+- **The road.** One bar per week of the whole plan, height by km: weeks run so far, this week, planned
+  weeks, and lighter weeks (down, taper, recovery, race week), with race and tune-up flags above, the phase
+  band below, the first and last dates and a "▲ today" marker. A bar picks the week the pane below shows.
+
+### Changed
+
+- **The Plan section reads as a dashboard (SH-86).** The order is now the banners (stale plan, plan diff,
+  active adjustment), the races drawer, three tiles, the road, the week pane and a strip. *Edit races*, a
+  button in the section heading (labelled *Races* on the public box, which edits nothing), opens the race
+  calendar: rows, dates, gun times, priority, remove and put back, past races and the add form; the
+  first-run "add a race" button opens it. The tiles are *This week* (km and runs, dates, week-end CTL, a mini
+  bar for each day Monday to Sunday, the week's intent, "Open the week, day by day"), *What holds this
+  week* (the limit that held the week with its bar, numbers, sentence, a short source credit and basis
+  badge, then the other limits compact, each opening its own row in the week pane) and *Races* (each race's
+  finish-time range on one time axis shared by all races with the median and goal marked, race-day CTL and
+  verdict; "Why this range, and the source" opens the verdict paragraph, the "if the race were later"
+  runway, the staleness marks and the finish-time source: Daniels, the fit on the calibration athlete's
+  four marathons, and 8 races in 10 landing inside the range). With a chain of races the Races tile is the
+  race selector the chain strip was, and now answers Enter and Space. The week pane shows This week, Lived
+  week or Planned week with ‹ › steppers, the phase line (weeks, start and end CTL and ATL, total km, what
+  the sessions build, with Davis's four components as its source) and the week card; from 980 px the days sit
+  left and the limits right, and on phones the card takes the full width. The strip holds the posture
+  (Assertive build or Conservative, opening its source), the pace chips with "Where these come from"
+  (Daniels; Davis on LT1; the plan's pace note) and the "Plan rebuilt" stamp.
+- **The AI controls leave the Plan section.** The objective line, "Explain this plan", the free-text
+  adjustment box, the goal-parse row and the A-race "get advice" button are gone, along with the phase bar
+  and per-phase week panels, the chain strip, the standalone finish-time strip, the regime bar, the tune-ups
+  line, the zones row, the refresh line and the plan-note paragraph; their content moved into the tiles, the
+  road, the pane and the strip. The active-adjustment banner still shows. The AI code paths stay in
+  `static/app.js`, unrendered, until SH-88 removes them with their backend. There is no engine logic change
+  and no server change; the public box shows the same layout read-only from fields already on its allowlist.
+
+### Fixed
+
+- **The long-run step was credited to the wrong study.** The cap on the longest run (10 % over the longest
+  of the last four weeks) rests on Frandsen et al. 2025 (5,200 runners followed for 18 months, where a run
+  more than 10 % longer than the longest of the previous 30 days raised the rate of overuse injury), not on
+  Nielsen et al. The engine's `limits.risk` now reads "Frandsen et al., Aarhus" with n 5200 (it said 5000);
+  seven golden files changed by those two fields only. The old "injury-risk read" line is gone; the
+  long-run step's source panel replaces it. README and MANUAL give the same attribution.
+- **The limits block keeps the brand hue in every phase.** It had picked up the per-phase hue, so in Base
+  the "holds the week" bar showed green.
+
+## [0.80.0] - 2026-10-19
+
+### Changed
+
+- **Today's readiness comes before the plan (SH-87).** Today's readiness decides how today's session is
+  run, so on the desktop console its card now sits above the training plan it adjusts. The order is the
+  objective bar, Today's readiness (the verdict, today's session and the check-in), the training plan, a
+  new **Training load** section, then the run browser and the rest as before. The Training load section
+  ("this week's load against your base, and how your running is holding up") holds the acute : chronic
+  gauge and the durability card side by side, half the row each as before, and below them the full-width
+  aerobic efficiency chart. These had shared the readiness section; moving the whole section above the plan
+  pushed the plan about 1,500 px down on desktop, so only the readiness card moved (the athlete's pick).
+  On a 1440 px wide screen the plan heading now sits about 750 px from the top. The section rail at the
+  left reads Today's readiness, Training plan, Training load, Current shape and so on. Phones are
+  unchanged: readiness and the trackers stay on the Today tab and the plan on the Plan tab. `/today` still
+  shows only the readiness card. On the public box the durability and efficiency cards are removed as
+  before, and the acute : chronic card takes the whole row of the Training load section. The change is in
+  `static/index.html` and `static/app.css`; there is no script change, the engine is untouched and the
+  golden plans are unchanged.
+
+## [0.79.1] - 2026-10-19
+
+### Fixed
+
+- **The drift card's race row names the race its numbers belong to (SH-85).** On a build of two A races the
+  plan-drift card's race-day row named the first race but read "27 → 142 gaining": 142 is the projected
+  race-day CTL of the chain's final race, while the first race's own is 126. Two faults
+  stood behind it. First, the scorecard's race axis (founding, now and the verdict) read the plan's own
+  `feasibility`, which always describes the plan's headline objective, the last race of a multi-A chain,
+  while the SPA asks for the next race ahead (`?race=<date>`, §CHAIN4). The row printed the selected
+  race's name over the final race's numbers, and its verdict came from the same source. The outcome
+  series had read the selected race since §CHAIN3; the race axis never did. `scorecard.weeks_to_go` was
+  also empty for a selected race, so the "— 6w to go" tail was missing. The race axis now reads the
+  selected race (the plan's own `feasibility` remains the fallback when there is no race), and the weeks
+  to go are computed once from today for both `scorecard.weeks_to_go` and `race.weeks_away`. Second, the
+  founding "27" came from the founding road of a selected earlier race, which was the earliest plan that
+  mentioned the race anywhere: here a June plan from the engine's first weeks, before the chain existed. The
+  athlete chose that an earlier race of a chain is compared from where its chain began, so its founding
+  road is now the first plan that also carries the chain's final race (the day the second race joined).
+  The outcome series and the §FT4 prediction ledger start there too. On a copy of the athlete's
+  database the first race's row reads 123.7 → 126.0 gaining (the card rounds it to 124 → 126) with
+  6 weeks to go, anchored like the headline; the final race's row is unchanged. The "Each A-race peak"
+  panel shows the same figures in both views. The first race's outcome series and ledger no longer show
+  the points from before the chain began. The headline
+  view, single-A builds, race-less plans and the post-race reckoning are unchanged. This fixes the API
+  (`api_plandrift`); `static/app.js` already labels the row with the selected race's name. The engine is
+  untouched and the golden plans are unchanged.
+
+## [0.79.0] - 2026-10-19
+
+### Added
+
+- **The belt's running dynamics on the run card (SH-39).** Runs recorded with the Suunto Smart HR Belt 2
+  (the first on 24 Sep 2026) carry ground contact time and vertical oscillation in Runalyze, and the run
+  card now shows them. Two tiles follow Cadence, only on runs that have the data: "Ground contact" (ms)
+  and "Vert. osc." (cm, one decimal). Each has the same hover and lock profile trace over distance as
+  Pace, HR, Cadence and Climb. The ground-contact trace is drawn inverted (shorter contact is higher) and
+  coloured on the pace scale, shorter contact in the fast colour. The vertical-oscillation trace is drawn
+  upright in the neutral single hue, because neither end of it is a verdict. The hint under the card now
+  reads "hover a metric tile". This is display only: nothing reaches the plan or the engine, and the golden
+  plans are unchanged. On the athlete's easy and long runs from 24 Sep to 17 Oct the run totals were
+  235-249 ms ground contact and 7.4-7.9 cm vertical oscillation; ground contact follows pace (233-236 ms
+  at marathon pace against 243-246 ms easy in early October), and the first belt long run (27 Sep, 22.1 km)
+  showed no late rise. Using these values in the plan is part of SH-77, after the autumn marathon. Runs without the
+  belt (7 Oct, the 18 Oct long run) have neither tile. On the server, the stream request asks for
+  `ground_contact_time` and `vertical_oscillation` as well (runs without them ignore the request),
+  `activity_profile` returns `gct` and `vo` at the same sample index as heart rate (a zero or missing
+  sample is a gap), and `PROFILE_VERSION` moves from 3 to 4, so each cached profile is fetched again the
+  first time its run is opened on the private console after the deploy. The six new fields are private
+  only; the public site serves none of them, and publishing them is undecided. The demo site's synthetic
+  profiles carry empty values, since the demo athlete wears no belt. Not included: vertical ratio, stride
+  length, ground-contact balance and R-R intervals. After the deploy, opening the 11 Oct long run (25.3 km)
+  on the private console should show both tiles and both traces.
+
 ## [0.78.3] - 2026-10-19
 
 ### Fixed

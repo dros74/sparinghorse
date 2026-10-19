@@ -9264,6 +9264,20 @@ def _stc_plandrift_race():
     for. No `race` param, or an unknown date, both fall back to the headline with no error — a
     stale/foreign selection never breaks the view.
 
+    SH-85 (2026-10-19) — the scorecard's race row read the HEADLINE's numbers under a picked leg's
+    name (the owner saw the first race's row read "27 → 142 gaining", 142 being the final race's projection):
+    a plan's own `feasibility` is always its headline (last) race, so the row now reads the
+    SELECTED race through `_plan_goal_view` as the outcome series does, and `weeks_to_go` is
+    computed off today (a picked leg's dict carries no `weeks_away`, so the "Nw to go" tail used
+    to vanish).
+
+    SH-85, second half (the owner's ruling, 2026-10-19) — a picked leg's founding road starts where
+    its CHAIN started: only plans that also headline the current plan's own (final) race may anchor
+    it. Without this the leg anchored on the first plan that ever mentioned it (a June plan, an
+    engine since rebuilt — the "27" on the card), a road the chain never ran on. The fixture grows
+    the way the real history did — a one-race plan saved FIRST, then the chain plan — and the leg's
+    anchor must be the chain plan (`is_current`, 2 versions), not the one-race one.
+
     Runs through `S.app.test_client()` (det/api-validation's pattern) against an isolated in-memory
     DB via a rebound `get_db` (the plandrift no-plan probe's own pattern in this file) — nothing
     touches the battery's shared DB.
@@ -9282,9 +9296,21 @@ def _stc_plandrift_race():
         mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
                     (typ, label, (today + S.timedelta(weeks=wks)).isoformat(), "finish", "A", "upcoming", S._now_iso()))
     add("First Marathon", 12, "marathon")
-    add("Second Marathon", 34, "marathon")
     mem.commit()
     fails = []
+
+    # SH-85 second half — the history grew the real way: a one-race plan FIRST, the chain plan only
+    # after the second race joined. The leg's founding road must start with the chain plan.
+    p0 = S.generate_plan(mem, force_regime="assertive")
+    if not p0.get("ok") or p0.get("mode") != "race" or \
+       (p0.get("objective") or {}).get("label") != "First Marathon":
+        fails.append(f"fixture one-race plan wrong: ok={p0.get('ok')} mode={p0.get('mode')} "
+                     f"objective={p0.get('objective')}")
+        return _st("det", "plandrift-race", "§CHAIN3 GET /api/plandrift?race=<date>",
+                   passed=False, expect="fixture generates a one-race plan first", got=fails)
+    S.save_plan(mem, p0)
+    add("Second Marathon", 34, "marathon")
+    mem.commit()
 
     p = S.generate_plan(mem, force_regime="assertive")
     if not p.get("ok") or p.get("mode") != "race" or len(p.get("chain") or []) != 2:
@@ -9296,6 +9322,10 @@ def _stc_plandrift_race():
     first, second = p["chain"][0], p["chain"][1]
     if p.get("objective", {}).get("label") != second["label"]:
         fails.append(f"fixture's own objective isn't the second race: {p.get('objective')}")
+    if first.get("proj_ctl") == (p.get("feasibility") or {}).get("projected_ctl"):
+        fails.append(f"the fixture cannot tell the legs apart: the first race's proj_ctl "
+                     f"({first.get('proj_ctl')}) equals the headline's projected_ctl — the "
+                     f"race-row checks below would be vacuous")
 
     def _contributes(d, race):
         """A series point that could only have come from THIS race's own numbers."""
@@ -9329,6 +9359,37 @@ def _stc_plandrift_race():
     elif d3.get("race", {}).get("label") != second["label"]:
         fails.append(f"an unknown ?race= answered {d3.get('race')}, want the headline {second['label']}")
 
+    # SH-85 — the scorecard's race row carries the SELECTED race's own numbers (founding/now/
+    # verdict), and weeks_to_go is filled and matches the race field, on a picked leg too.
+    sc1 = d1.get("scorecard") or {}
+    if d1.get("ok"):
+        anc = d1.get("anchor") or {}
+        if anc.get("is_current") is not True:
+            fails.append(f"?race={first['date']}: anchor.is_current = {anc.get('is_current')}, "
+                         f"want True — the leg's road starts with the chain plan, not the earlier "
+                         f"one-race plan")
+        if anc.get("versions") != 2:
+            fails.append(f"?race={first['date']}: anchor.versions = {anc.get('versions')}, want 2")
+        if (sc1.get("race") or {}).get("now") != first.get("proj_ctl"):
+            fails.append(f"?race={first['date']}: scorecard race now = "
+                         f"{(sc1.get('race') or {}).get('now')}, want the first race's own "
+                         f"{first.get('proj_ctl')}")
+        if (sc1.get("race") or {}).get("verdict") != first.get("feasibility"):
+            fails.append(f"?race={first['date']}: scorecard race verdict = "
+                         f"{(sc1.get('race') or {}).get('verdict')}, want the first race's own "
+                         f"{first.get('feasibility')}")
+        if sc1.get("weeks_to_go") is None or \
+           sc1.get("weeks_to_go") != (d1.get("race") or {}).get("weeks_away"):
+            fails.append(f"?race={first['date']}: scorecard weeks_to_go = "
+                         f"{sc1.get('weeks_to_go')}, want race.weeks_away = "
+                         f"{(d1.get('race') or {}).get('weeks_away')}")
+    if d2.get("ok"):
+        want_now = (p.get("feasibility") or {}).get("projected_ctl")
+        if (d2.get("scorecard") or {}).get("race", {}).get("now") != want_now:
+            fails.append(f"no ?race=: scorecard race now = "
+                         f"{(d2.get('scorecard') or {}).get('race', {}).get('now')}, want the "
+                         f"headline's own {want_now}")
+
     # Revert tooth — disable `_plan_goal_view` (always None) and confirm the selected race's own
     # series contribution disappears.
     orig_pgv = S._plan_goal_view
@@ -9348,11 +9409,15 @@ def _stc_plandrift_race():
     mem.close()
     return _st("det", "plandrift-race",
                "§CHAIN3 GET /api/plandrift?race=<date> answers with that race's own headline and "
-               "pulls its own numbers into the outcome/§FT4-ledger series even when the plan's own "
-               "objective is a LATER race in the chain; no race= or an unknown date both fall back "
-               "to the headline with no error",
+               "pulls its own numbers into the outcome/§FT4-ledger series AND the scorecard's race "
+               "row (now/verdict/weeks_to_go — SH-85) even when the plan's own objective is a "
+               "LATER race in the chain, with the leg's founding road anchored where its chain "
+               "started (SH-85, owner's ruling); no race= or an unknown date both fall back to the "
+               "headline with no error",
                passed=not fails,
-               expect="race field + series describe the SELECTED race; unknown/absent → headline; revert tooth trips",
+               expect="race field + series + scorecard race row describe the SELECTED race; the "
+                      "leg anchors on the chain plan (is_current, 2 versions); unknown/absent → "
+                      "headline; revert tooth trips",
                got={"violations": fails or "none"})
 
 
@@ -10901,6 +10966,104 @@ def _stc_stream_optin():
                passed=not fails,
                expect="ask for streams; retry a not-yet; settle a genuine none exactly once",
                got={"first_request": (calls[0] if calls else None), "failures": fails or "none"})
+
+
+def _stc_profile_belt_dynamics():
+    """SH-39 (2026-10-19) — the belt's running dynamics join the downsampled profile. The MCP
+    streams ground_contact_time (ms) and vertical_oscillation (mm) ride the same distance index j
+    as HR: gct stays int ms, vo is normalised to cm (one decimal), and a missing index, a None or
+    a 0 (stopped, walking) reads as None. A run without the belt settles both channels to all-None
+    with the has_ flags False. Display only — nothing here feeds the plan or the engine."""
+    fails = []
+    # 5 samples, so the 120-point downsampler hits EVERY input index: the one 0 in
+    # ground_contact_time must surface as a None rather than be sampled away.
+    STREAMS = {"distance": [0, 250, 500, 750, 1000], "time": [0, 60, 120, 180, 240],
+               "heart_rate": [150] * 5, "cadence": [172] * 5,
+               "ground_contact_time": [240, 0, 250, 245, 242],
+               "vertical_oscillation": [76, 80, 70, 74, 75]}
+    saved = S.activity_details
+    try:
+        S.activity_details = lambda aid, streams=True: {"id": 1, "source": "Suunto",
+                                                        "average_heart_rate": 150,
+                                                        "streams": dict(STREAMS)}
+        p = S.activity_profile(1)
+        if p.get("v") != 4:
+            fails.append(f"profile v{p.get('v')}, want v4 (belt dynamics)")
+        g, v = p.get("gct"), p.get("vo")
+        if not (isinstance(g, list) and g):
+            fails.append(f"gct empty: {g!r}")
+        else:
+            if not all(x is None or isinstance(x, int) for x in g):
+                fails.append(f"gct not int ms throughout: {g}")
+            if None not in g:
+                fails.append("the stopped sample (gct 0) did not read as None")
+            for want in (240, 250, 242):
+                if want not in g:
+                    fails.append(f"gct {want} ms missing: {g}")
+        if not (isinstance(v, list) and v):
+            fails.append(f"vo empty: {v!r}")
+        else:
+            if any(x is None for x in v):
+                fails.append(f"vo carries a gap the input did not have: {v}")
+            for mm in (76, 80, 70, 74, 75):
+                if round(mm / 10, 1) not in v:
+                    fails.append(f"vo {mm} mm not carried as {round(mm / 10, 1)} cm: {v}")
+        if not p.get("has_gct") or not p.get("has_vo"):
+            fails.append(f"has_ flags wrong on a belt run: has_gct={p.get('has_gct')}, "
+                         f"has_vo={p.get('has_vo')}")
+        # a wrist run records no such streams — both channels settle all-None, flags False
+        S.activity_details = lambda aid, streams=True: {"id": 2, "source": "Suunto",
+                                                        "average_heart_rate": 150,
+                                                        "streams": {k: STREAMS[k] for k in
+                                                                    ("distance", "time",
+                                                                     "heart_rate", "cadence")}}
+        p2 = S.activity_profile(2)
+        if p2.get("has_gct") or p2.get("has_vo"):
+            fails.append("a run without the belt claims dynamics")
+        if any(x is not None for x in p2.get("gct") or [1]) or \
+           any(x is not None for x in p2.get("vo") or [1]):
+            fails.append(f"a wrist run carries dynamics values: {p2.get('gct')}, {p2.get('vo')}")
+    finally:
+        S.activity_details = saved
+    return _st("det", "profile-belt-dynamics",
+               "SH-39 belt running dynamics in the downsampled profile: gct int ms and vo cm "
+               "(mm÷10) at the shared distance index, 0/None/missing → None, and a run without "
+               "the belt settles all-None with has_gct/has_vo False",
+               passed=not fails,
+               expect="v4; gct ms ints with None at the 0 sample; vo in cm; wrist run clean",
+               got={"failures": fails or "none"})
+
+
+def _stc_activity_belt_fields(db):
+    """SH-39 (2026-10-19) — the REST payload's belt fields on the activity tile: groundcontact
+    (ms) rides through as gct_ms, vertical_oscillation (mm) as vo_cm (÷10, one decimal); a run
+    without the belt gets None for both, and on the public box neither key is served at all
+    (withheld server-side until the owner rules on publishing them)."""
+    fails = []
+    base = {"id": -1, "distance": 5, "duration": 1500, "date_time": "2026-09-24T07:00:00"}
+    p = S._activity_payload(db, {**base, "groundcontact": 242, "vertical_oscillation": 76})
+    if p.get("gct_ms") != 242:
+        fails.append(f"gct_ms {p.get('gct_ms')!r}, want 242")
+    if p.get("vo_cm") != 7.6:
+        fails.append(f"vo_cm {p.get('vo_cm')!r}, want 7.6")
+    p2 = S._activity_payload(db, base)
+    if p2.get("gct_ms") is not None or p2.get("vo_cm") is not None:
+        fails.append(f"a run without the belt carries dynamics: "
+                     f"{p2.get('gct_ms')!r}, {p2.get('vo_cm')!r}")
+    saved = S.READONLY
+    try:
+        S.READONLY = True
+        pub = S._activity_payload(db, {**base, "groundcontact": 242, "vertical_oscillation": 76})
+    finally:
+        S.READONLY = saved
+    if "gct_ms" in pub or "vo_cm" in pub:
+        fails.append("belt dynamics leak onto the public box")
+    return _st("det", "activity-belt-fields",
+               "SH-39 belt fields on the activity payload: gct_ms straight in ms, vo_cm in cm; "
+               "None without the belt; both withheld on the public box",
+               passed=not fails,
+               expect="242 → 242, 76 mm → 7.6 cm; None without the keys; absent when read-only",
+               got={"failures": fails or "none"})
 
 
 def _stc_guide_notify():
@@ -12553,6 +12716,58 @@ def _stc_durability():
                got={"n_long": d.get("n_long"), "recent_med": d.get("recent_median_raw"),
                     "verdict": d.get("verdict"), "trend": d.get("trend"),
                     "shift_trend": shift.get("trend"), "failures": fail or "none"})
+
+
+def _stc_decoupling_units():
+    """Runalyze changed aerobic_decoupling_pace from percent x100 to plain percent on 31 Jul 2025 (keyed on
+    raw.created_at). Locks decoupling_pct (before/after the cutoff, magnitude fallback without created_at,
+    None) and the end-to-end durability read on post-cutoff long runs that carry percent values."""
+    import sqlite3 as _sq, json as _j
+    fail = []
+    cut = S.RUNALYZE_DECOUPLING_PCT_FROM
+    if cut != 1753920000:
+        fail.append(f"cutoff must be 2025-07-31T00:00:00Z = 1753920000: {cut}")
+    cases = [("before cutoff x100", 560.0, cut - 1, 5.6), ("after cutoff percent", 6.3, cut, 6.3),
+             ("no created_at x100", 780.0, None, 7.8), ("no created_at percent", 6.3, None, 6.3),
+             ("None", None, cut + 5, None), ("None, no created_at", None, None, None)]
+    for name, v, ca, want in cases:
+        got = S.decoupling_pct(v, ca)
+        if (got is None) != (want is None) or (want is not None and abs(got - want) > 1e-9):
+            fail.append(f"{name}: decoupling_pct({v}, {ca}) = {got}, want {want}")
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(
+        "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+        "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, training_effect REAL, raw TEXT);"
+        "CREATE TABLE shape_snapshots(snapshot_date TEXT PRIMARY KEY, captured_at TEXT, effective_vo2max REAL, "
+        "effective_vo2max_progress REAL, fitness REAL, fatigue REAL, performance REAL, fitness_pct REAL, "
+        "acwr REAL, marathon_shape REAL, hrv_baseline REAL, monotony REAL, training_strain REAL, raw TEXT);"
+        "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
+        "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
+    post = [(f"2026-06-{12-2*i:02d}", 20.0, 6.0 + i * 0.1, cut + 86400 * (300 + i)) for i in range(6)]   # percent
+    pre = [(f"2025-06-{12-2*i:02d}", 20.0, 600.0, cut - 86400 * (30 + i)) for i in range(6)]              # x100
+    for i, (d, km, dec, ca) in enumerate(post + pre, start=1):
+        mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,duration,hr_avg,raw) VALUES(?,?,?,?,?,?,?,?)",
+                    (i, d + "T18:00", d, S.RUNNING_SPORT, km, int(km * 360), 150,
+                     _j.dumps({"aerobic_decoupling_pace": dec, "created_at": ca})))
+    mem.executescript(S.RUN_METRICS_VIEW); mem.commit()
+    d = S.durability_signal(mem)
+    if not d.get("ok"):
+        fail.append(f"end-to-end not ok: {d.get('reason')}")
+    else:
+        if d["recent_median_pct"] != 6.2:
+            fail.append(f"post-cutoff percent values must read as percent: recent_median_pct={d['recent_median_pct']} want 6.2")
+        if d["recent_median_raw"] != 625.0:
+            fail.append(f"recent_median_raw={d['recent_median_raw']} want 625.0")
+        if d["prior_median_raw"] != 600.0:
+            fail.append(f"prior x100 rows must read 6.0 %: prior_median_raw={d['prior_median_raw']} want 600.0")
+        if d["verdict"] != "moderate fade":
+            fail.append(f"verdict={d['verdict']} want 'moderate fade'")
+    return _st("det", "decoupling-units",
+               "Runalyze aerobic_decoupling_pace unit change (31 Jul 2025): x100 before, percent after, keyed on "
+               "raw.created_at; magnitude fallback without it; None stays None; durability read in percent end to end",
+               passed=not fail,
+               expect="560@pre->5.6, 6.3@post->6.3, 780 bare->7.8, 6.3 bare->6.3, None->None; recent_median_pct 6.2",
+               got={"recent_pct": d.get("recent_median_pct"), "failures": fail or "none"})
 
 
 def _stc_durability_api():
@@ -20334,9 +20549,11 @@ def _stc_keyboard_reach():
       (e) MOTION. A `prefers-reduced-motion` query in the stylesheet, and no bare smooth scroll left
           in the script: a transition is style, but `scrollIntoView`'s smoothness is an argument no
           media query can reach, so every jump goes through the one helper that reads the setting.
-      (f) STATE. The three segmented controls keep `aria-pressed` truthful — they toggle a class in
+      (f) STATE. The segmented controls keep `aria-pressed` truthful — they toggle a class in
           place rather than re-rendering, so the ARIA has to be moved alongside it or it goes stale
-          on the first click and stays wrong."""
+          on the first click and stays wrong. (SH-86 slice 2 retired the phase BAR: the road's
+          phase band is a static strip, so its tooth is gone; the road's week bars re-render AND
+          mark the pick in place first, so their tooth stays.)"""
     fails = []
     js, css, shell = S.APP_JS, S.APP_CSS, S.INDEX_HTML
     # strip line comments: this det's own rationale, and the handler's, both name these attributes
@@ -20380,9 +20597,9 @@ def _stc_keyboard_reach():
     if stray:
         fails.append(f"(e) {stray} bare smooth scroll(s) left in app.js — they must go through the "
                      f"one helper that reads the setting")
-    # (f) the three in-place segmented controls move their ARIA with their class
-    for sel, why in ((".phaseseg", "the plan's phase bar"),
-                     (".weekseg", "the week strip"),
+    # (f) the in-place segmented controls move their ARIA with their class (the phase bar's tooth
+    # went with the bar — SH-86 slice 2 made the road's phase band a static, non-clickable strip)
+    for sel, why in ((".weekseg", "the road's week bars"),
                      (".driftseg button", "the drift comparison control")):
         # finditer with a window I slice myself: findall would CONSUME the outer binding site and
         # hide the inner call that does the toggling, which is the one this tooth is about. The
@@ -20876,6 +21093,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_guide_recreate(), lambda: _stc_guide_notify(),
                  lambda: _stc_guide_reps_text(), lambda: _stc_guide_screen_layout(),
                  lambda: _stc_stream_optin(),
+                 lambda: _stc_profile_belt_dynamics(), lambda: _stc_activity_belt_fields(db),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
                  lambda: _stc_health_staleness(), lambda: _stc_explain_cache(), lambda: _stc_calibration_inventory(), lambda: _stc_track_record(),
                  lambda: _stc_lt1(),
@@ -20887,7 +21105,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_seed_anchor(), lambda: _stc_seed_resync(),
                  lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
-                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),
+                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_decoupling_units(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
                  lambda: _stc_cross_phase_freeze_integration(),
                  lambda: _stc_feasibility_floor(),

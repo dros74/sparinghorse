@@ -409,6 +409,8 @@ function profileVals(kind){
   if(kind==="hr" && p.has_hr) return {vals:p.hr, invert:false};
   if(kind==="cadence" && p.has_cadence) return {vals:p.cadence, invert:false};
   if(kind==="elevation" && p.has_elevation) return {vals:p.elevation, invert:false};
+  if(kind==="gct" && p.has_gct) return {vals:p.gct, invert:true};   // shorter contact = taller, as pace
+  if(kind==="vo" && p.has_vo) return {vals:p.vo, invert:false};
   return null;
 }
 function profileLabel(kind){
@@ -416,6 +418,8 @@ function profileLabel(kind){
   return kind==="pace"?"pace profile (faster = higher)"
     : kind==="hr"?`heart-rate profile · avg ${p.hr_avg||"—"} bpm`
     : kind==="elevation"?"elevation profile (climb)"
+    : kind==="gct"?"ground-contact profile (shorter = higher)"
+    : kind==="vo"?"vertical-oscillation profile (bounce)"
     : "cadence profile (higher = quicker)";
 }
 // red→green by t (0=red, 1=green) for the hover line
@@ -469,9 +473,10 @@ function metricColor(kind, v, ctx){
     const FB=[0.60,0.70,0.80,0.90]; for(let i=0;i<FB.length;i++) if(f<FB[i]) return HRZONE_COLORS[i];
     return HRZONE_COLORS[4]; }
   if(kind==="pace")    return rg((ctx.hi-v)/((ctx.hi-ctx.lo)||1));   // faster (smaller sec/km) = green
+  if(kind==="gct")     return rg((ctx.hi-v)/((ctx.hi-ctx.lo)||1));   // shorter contact = the fast colour, as pace
   if(kind==="cadence"){ const d=Math.abs(v-180);                    // 170–190 stays green, then ramps
     return rg(d<=10 ? 1 : 1-(d-10)/15); }                           // to red by ±25 (155 / 205)
-  return "var(--accent)";                                            // elevation: neutral single hue
+  return "var(--accent)";                                            // elevation, vo: neutral single hue (no good/bad end)
 }
 // draw the LOCKED metric as a shaded area; if hovering a DIFFERENT metric, trace it as a
 // value-coloured line on top (no fill). hoverKind=null → locked layer only.
@@ -569,12 +574,14 @@ async function loadActivity(aid){
         ${SH_READONLY?"":m("Avg HR", a.hr_avg||"—", "bpm", "hr")}
         ${SH_READONLY?"":m("Max HR", a.hr_max||"—", "bpm", "hr")}
         ${a.cadence?m("Cadence", a.cadence, "spm", "cadence"):""}
+        ${a.gct_ms?m("Ground contact", a.gct_ms, "ms", "gct"):""}
+        ${a.vo_cm?m("Vert. osc.", fmt(a.vo_cm,1), "cm", "vo"):""}
         ${m("TRIMP", a.trimp!=null?Math.round(a.trimp):"—", "")}
         ${a.elevation_up?m("Climb", a.elevation_up, "m", "elevation"):""}
       </div>
       <div class="structline" id="structline"></div>
       <div class="profbar">
-        <span class="profhint muted">Background shades the locked trace · hover <b>Pace/HR/Cadence/Climb</b> to overlay it (colour = value), click to lock.</span>
+        <span class="profhint muted">Background shades the locked trace · hover a metric tile to overlay it (colour = value), click to lock.</span>
         <span class="profmeta" id="profmeta"><span class="proflbl" id="proflbl"></span><span class="hrlegend" id="hrlegend"></span></span>
       </div>
     </div></div>
@@ -601,7 +608,7 @@ async function loadActivity(aid){
   // promises a trace that isn't there (e.g. Climb on a run Runalyze couldn't elevation-correct).
   host.querySelectorAll(".metric.hovx").forEach(el=>{
     const k=el.dataset.prof, P=ACTPROFILE||{};
-    const ok=(k==="pace"&&P.has_pace)||(k==="hr"&&P.has_hr)||(k==="cadence"&&P.has_cadence)||(k==="elevation"&&P.has_elevation);
+    const ok=(k==="pace"&&P.has_pace)||(k==="hr"&&P.has_hr)||(k==="cadence"&&P.has_cadence)||(k==="elevation"&&P.has_elevation)||(k==="gct"&&P.has_gct)||(k==="vo"&&P.has_vo);
     if(!ok){ el.classList.remove("hovx"); el.removeAttribute("data-prof"); }
   });
   renderProfile(null);
@@ -1258,6 +1265,10 @@ let RACE_SEL = (()=>{ try{ return localStorage.getItem("sh.raceSel"); }catch(e){
 // (§CHAIN3 — a date, or null for the headline. Validity against the CURRENT plan's own chain is
 // checked at render time (renderPlan), never here: a selection from a since-regenerated plan whose
 // chain moved on must fall back to the headline, not dangle.)
+// SH-86 (slice 2) — the plan page's own view state, kept across re-renders: the week the road and
+// the week pane show, the races drawer's open state, which source panel is open, and the limit row
+// to render open on the next pass (cleared after use).
+let WEEK_SEL=null, RACES_OPEN=false, PLAN_OPEN=null, LIM_OPEN=null;
 // §CHAIN4 — which chain leg the console shows: the stored selection when it names a leg of THIS
 // plan's chain, else the NEXT leg still ahead, else null (= the plan's own headline objective).
 // The engine's headline is the chain's terminal race — the periodization's anchor; the athlete is
@@ -1309,11 +1320,13 @@ function refreshFirstRun(){
   const sb=$("#fr_sync"); if(sb) sb.addEventListener("click", ()=>$("#syncBtn")&&$("#syncBtn").click());
   const rb=$("#fr_race"); if(rb) rb.addEventListener("click", async ()=>{
     scrollToEl(document.getElementById("plan"));
-    // The race form lives inside #plan's objManager, which only renders once a plan exists. On a
-    // fresh instance (history pulled, no plan yet) generate one first so the form is there to focus.
+    // The race form lives in the races drawer (#racesDrawer) inside #plan's objManager, which only
+    // renders once a plan exists. On a fresh instance (history pulled, no plan yet) generate one
+    // first so the form is there to focus; then open the drawer so the form is VISIBLE to focus.
     let inp=$("#ao_label");
     if(!inp){ const gen=$("#planBtn"); if(gen) gen.click();
       for(let i=0; i<20 && !inp; i++){ await new Promise(r=>setTimeout(r,150)); inp=$("#ao_label"); } }
+    if(!RACES_OPEN){ const rbtn=$("#racesBtn"); if(rbtn) rbtn.click(); }
     if(inp){ scrollToEl(inp, "center"); inp.focus(); }
   });
 }
@@ -1377,22 +1390,11 @@ function objManager(p){
     <div class="objs">${recent.map(o=>
       `<div class="obj removed"><span class="pr ${esc(o.priority)}">${esc(o.priority)}</span><span>${esc(o.label)}</span><span class="od">${esc(o.date)} · ${esc(o.type)} · removed</span><button class="putback" data-oid="${o.id}" title="Put this race back on the calendar — the plan re-anchors around it">put back</button></div>`
     ).join("")}</div>` : "";
-  const aCount = OBJECTIVES.filter(o=>o.status==='upcoming' && o.priority==='A').length;
-  const conflictRow = aCount>=2 ? `
-    <div class="conflictrow">
-      <button id="adjBtn" ${(LLM_OK&&AI.parsing)?'':'disabled'}>⚖ ${aCount} A-races compete — get advice${LLM_OK?(AI.parsing?'':' (switched off in Settings → AI)'):' (add a Claude API key in Settings)'}</button>
-      <div id="objAdjudicate"></div>
-    </div>` : "";
-  const nlRow = `
-    <div class="nlobj">
-      <input id="ao_nl" ${(LLM_OK&&AI.parsing)?'':'disabled'} placeholder="Describe a goal — e.g. &quot;sub-45 10k in October&quot;, &quot;spring marathon, want to BQ&quot;" style="flex:1">
-      <button id="ao_parse" ${(LLM_OK&&AI.parsing)?'':'disabled'} style="font-size:12px;padding:6px 11px">✨ Parse</button>
-      <span id="ao_interp" class="nlinterp${(LLM_OK&&AI.parsing)?'':' guess'}">${LLM_OK?(AI.parsing?'':'⚙ Goal parsing is switched off in Settings → AI features'):'⚙ Add a Claude API key in Settings to enable AI parsing'}</span>
-    </div>`;
+  // SH-86 (slice 2) — the races drawer keeps the calendar mechanics (rows, dates, gun times,
+  // priority, remove/put-back, past races, the add form); the AI goal-parse row and the A-race
+  // adjudication advice no longer render (SH-88 removes them with the backend).
   return `<div class="objs">${rows}</div>
     ${removedRow}
-    ${conflictRow}
-    ${nlRow}
     <div class="addobj">
       <input id="ao_label" placeholder="race name" style="width:130px">
       <select id="ao_type" aria-label="Race type"><option>5k</option><option>10k</option><option>half</option><option selected>marathon</option><option>custom</option></select>
@@ -1568,23 +1570,26 @@ function adjEffect(a){
   if(a.volume_multiplier>=1) return a.easy_only ? "Easy effort only over the window" : "On plan — no load change";
   return `Load eased to ${Math.round(a.volume_multiplier*100)}% of plan${a.easy_only?", easy effort only":""}`;
 }
-function adjustmentUI(p){
-  if(SH_READONLY) return "";   // public: no qualitative-adjustment controls or (medical) banner
+function adjBanner(p){
+  if(SH_READONLY) return "";   // public: no qualitative-adjustment (medical) banner
   const a=p.adjustment;
-  const banner = a ? `<div class="${(a.medical||a.medical_flag)?'adjmed':'adjbox'}">
+  return a ? `<div class="${(a.medical||a.medical_flag)?'adjmed':'adjbox'}">
       <div class="adjh">${(a.medical||a.medical_flag)?'⚠ Medical flag':'Active adjustment'} — ${adjEffect(a)}</div>
       <div class="adjmeta">“${esc(a.note)}” · ${esc(a.applies_from)}→${esc(a.applies_until)}${a.summary?` · ${esc(a.summary)}`:''}</div>
       ${a.clamp?`<div class="adjclamp">engine clamp: ${esc(a.clamp)}</div>`:''}
       ${(a.medical||a.medical_flag)?`<div class="adjclamp">Sparing Horse tracks &amp; flags — it never diagnoses. Clear this once your doctor signs off.</div>`:''}
       <button id="adj_clear" style="font-size:11px;padding:4px 9px;margin-top:8px">Clear adjustment</button>
     </div>` : "";
+}
+function adjustmentUI(p){
+  if(SH_READONLY) return "";   // public: no qualitative-adjustment controls or (medical) banner
   const ask = `<div class="adjask">
       <input id="adj_text" ${(LLM_OK&&AI.judgment)?'':'disabled'} placeholder="How'd it go / how are you? e.g. “felt great today”, “knee’s a bit sore”, “travelling Mon–Fri”">
       <button id="adj_propose" ${(LLM_OK&&AI.judgment)?'':'disabled'}>💬 Tell the horse</button>
       <div class="adjhint">A run that's done → I'll <b>log it</b> · something ahead (a niggle, travel, a cold) → I'll <b>propose easing</b> the plan. I only ever ease or hold — never push harder.</div>
       <div id="adj_preview" class="adjpreview">${LLM_OK?(AI.judgment?'':'<div class="adjclamp">⚙ Free-text adjustments are switched off in Settings → AI features — your words stay on this box</div>'):'<div class="adjclamp">⚙ Add a Claude API key in Settings to enable — the engine still clamps every suggestion.</div>'}</div>
     </div>`;
-  return banner + ask;
+  return adjBanner(p) + ask;
 }
 async function renderAdjPreview(d){
   const host=$("#adj_preview"); if(!host) return;
@@ -1792,31 +1797,182 @@ const weekDates = mon => { const d=new Date(mon+"T00:00:00Z"), out=[];
   for(let i=0;i<7;i++){ out.push(d.toISOString().slice(0,10)); d.setUTCDate(d.getUTCDate()+1); }
   return out; };
 // week containing today. Quality sessions are accented; the ACWR badge rides the right rail.
-// §LIMITS (0.58.0) — the body's limits as one strip per week: each axis with its ceiling, what the
-// week was laid at, the headroom, and which one HELD the week. `basis` says where the ceiling comes
-// from (L literature · A this athlete · S structural), so a reader can tell a consensus from an
-// inheritance. The risk line is a cohort READ on the long-run step, never a probability.
-const LIMIT_NAMES={acwr:"load ratio (ACWR)",long_step:"long-run step",eq_week:"damage-eq "+U.unit+", week",eq_session:"damage-eq "+U.unit+", session",tissue:"near-ceiling streak",chronic:"fitness gain / week"};
-const BASIS_NAMES={L:"literature",A:"fitted to this athlete",S:"structural"};
+// §LIMITS (0.58.0) — the body's limits, one row per week: each axis with its ceiling, what the
+// week was laid at, and which one HELD the week. `basis` says where the ceiling comes from
+// (L literature · A fitted · S structural). SH-86 turns each row into the reason and the source:
+// a plain sentence about THIS week, and on click the named study or guideline behind the number.
+const LIMIT_NAMES={acwr:"load ratio",long_step:"long-run step",eq_week:"impact load, week",eq_session:"impact load, single run",tissue:"weeks near the ceiling",chronic:"fitness gain per week"};
+const BASIS={
+  L:{label:"Literature", desc:"Literature: published science or an established coaching convention."},
+  A:{label:"Fitted to one runner", desc:"Fitted: measured on the history of the athlete this engine was calibrated on. If that is not you, treat the number as a starting point."},
+  S:{label:"Structural", desc:"Structural: a definition or a window, not a safety threshold."}};
 const limV=(v,u)=>(v==null)?v:(u==="km"||u==="eq-km")?U.d(v):v;            // a limit's number, in the display unit
 const limU=u=>u==="km"?U.unit:u==="eq-km"?"eq-"+U.unit:u;
-function limitsHtml(L){
-  if(!L) return "";
-  const rows=[];
-  for(const k of ["acwr","long_step","eq_week","eq_session","chronic"]){
-    const ax=L[k]; if(!ax) continue;
-    const held = ax.binds ? " held" : "";
-    rows.push(`<div class="lim${held}${L.binding===k?' binding':''}" title="${esc(LIMIT_NAMES[k])} — ceiling ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit))}, laid ${limV(ax.laid,ax.unit)}; basis: ${esc(BASIS_NAMES[ax.basis]||ax.basis)}">
-      <span class="lk">${esc(LIMIT_NAMES[k])}</span><span class="lv mono">${limV(ax.laid,ax.unit)} <span class="muted">/ ${limV(ax.ceiling,ax.unit)}</span></span>
-      <span class="lh mono ${ax.headroom<0?'over':''}">${ax.headroom>=0?"+":""}${limV(ax.headroom,ax.unit)}</span><span class="lb">${esc(ax.basis)}</span></div>`);
+// SH-86 — the source behind each number the plan shows: what it is, the rule, where the number comes
+// from, how the engine uses it. Generic on purpose: every install reads it, so nothing here names one
+// runner's history as the reader's own.
+const PLAN_SOURCES={
+  chronic:{title:"Fitness gain per week", basis:"L",
+    what:"How much fitness may rise in one week. Fitness here is CTL: the average training load of the last 42 days.",
+    rule:"At most +5 CTL points a week.",
+    refs:[{cite:"Friel J. Why ramp rate is an important training metric. TrainingPeaks.", finding:"About 5 to 8 CTL points a week suits most athletes; more than that starts to become crash training."},
+          {cite:"Couzens A. CTL ramp rates, TSB floors and loading patterns. alancouzens.com.", finding:"Over years of coaching, 5 to 8 a week proved too aggressive for long blocks; 3 to 5 is the recommendation instead."}],
+    use:"The app holds 5, where the two guidelines meet. It catches a slow, steady over-build that the load ratio, which compares this week with the base, does not see.",
+    caveat:"Coaching guidance from experience, not a controlled study."},
+  acwr:{title:"Load ratio", basis:"L",
+    what:"This week's training load divided by the base: the 7-day average of the load (ATL) over the 42-day average (CTL).",
+    rule:"The plan sizes each week so that a shape-neutral reading of the ratio stays at or under 1.25. The raw reading at the end of a hard week lands on the long-run day and can print above 1.30; that is normal. Race week carries the race, which is fixed.",
+    refs:[{cite:"Gabbett TJ. The training-injury prevention paradox: should athletes be training smarter and harder? Br J Sports Med 2016;50(5):273-280.", finding:"In team sports, ratios of about 0.8 to 1.3 went with the fewest injuries and 1.5 or more with the most. The data came from cricket, Australian football and rugby league; the author advises caution for individual-sport athletes."},
+          {cite:"Impellizzeri FM et al. Acute:chronic workload ratio: conceptual issues and fundamental pitfalls. Int J Sports Physiol Perform 2020;15(6):907-913.", finding:"No study has shown that changing the ratio changes injury rates, and the ratio has statistical flaws."},
+          {cite:"Frandsen et al. Br J Sports Med 2025;59(17):1203-1210.", finding:"In 5,200 runners followed for 18 months, the ratio showed no link with injury."}],
+    use:"A ceiling, never a target: the plan stays under it with a margin and does not push the load up to it.",
+    caveat:"Contested evidence, drawn mostly from team sports."},
+  long_step:{title:"Long-run step", basis:"L",
+    what:"How much longer this week's longest run may be than the longest run of the last four weeks.",
+    rule:"At most 10 % longer. A longer run is never laid; the kilometres go to the easy runs instead.",
+    refs:[{cite:"Frandsen et al. How much running is too much? Identifying high-risk running sessions in a 5200-person cohort study. Br J Sports Med 2025;59(17):1203-1210.", finding:"A single run more than 10 % longer than the longest run of the previous 30 days raised the rate of overuse injury. Week-to-week volume measures did not predict it."}],
+    use:"A hard cap, chosen 1 Jul 2026. The week's total load stays the same; only the single longest run is held.",
+    caveat:"One observational study; injuries were self-reported."},
+  eq_week:{title:"Impact load, week", basis:"A",
+    what:"The week's kilometres weighted by speed, because a fast kilometre loads tendons and bones more than an easy one: marathon pace counts 1.4×, threshold 2.5×, intervals 3.5×.",
+    rule:"At most 1.3× the heaviest week of the last four, counting the runs actually run.",
+    refs:[{cite:"Davis JJ. Marathon Excellence for Everyone; Running Writings.", finding:"Running injuries are mechanical: the damage a run does rises steeply with speed, which heart-rate load does not see."},
+          {cite:"Fitted: a replay of the calibration athlete's 1,078 runs over 4.7 years (2 Jul 2026).", finding:"These weights and the 1.3 step catch the one known overload in that history (March 2022, calf and hip) and would have braked 3 weeks that were absorbed well; Davis's published weights braked 7."}],
+    use:"When it binds, fast running is eased to easy pace and the aerobic kilometres stay.",
+    caveat:"Fitted on a single runner. For anyone else these weights are a starting point."},
+  eq_session:{title:"Impact load, single run", basis:"S",
+    what:"The same speed-weighted load, read on a single run instead of the whole week.",
+    rule:"One run may weigh at most 1.3× the heaviest single run of the last four weeks.",
+    refs:[{cite:"The same step as the weekly impact load (Davis's framing, fitted).", finding:"One number read at two scales, so a single big session cannot hide inside a normal week."}],
+    use:"It stops one session from carrying a jump the weekly total would average away.",
+    caveat:""},
+  tissue:{title:"Weeks near the ceiling", basis:"L",
+    what:"How many weeks in a row have run close to the load ceiling (a load ratio of 1.20 or more).",
+    rule:"After 4 such weeks in a row, a down week is forced. The peak is exempt: the taper that follows is its recovery.",
+    refs:[{cite:"Periodisation convention: three loading weeks, then one recovery week (3:1).", finding:"A named source is still to be added."}],
+    use:"A safety net behind the planned down weeks: at 4, the plan's own down weeks normally come first. Set to 4 on 6 Sep 2026.",
+    caveat:"A convention, not a measured threshold."},
+  finish:{title:"Finish-time range", basis:"A",
+    what:"The time range the engine expects for this race: 8 races in 10 should land inside it.",
+    rule:"Race pace from the speed current fitness supports, adjusted for the fitness carried on race day and for how the long runs compare with the race distance.",
+    refs:[{cite:"Daniels J. Daniels' Running Formula.", finding:"Race pace as a fixed share of the speed VO₂max supports."},
+          {cite:"Fitted to the calibration athlete's four marathons (fitness CTL 67, 92, 98 and 109 on race day).", finding:"Below a fitness floor, pace fades about 0.8 % per CTL point; three of the four races land within 1.5 % of the model."}],
+    use:"The range is the headline and the median the trend. It narrows as runs land and races calibrate it.",
+    caveat:"Race day also rides on fuelling, pacing, weather and the day's legs."},
+  paces:{title:"Training paces", basis:"L",
+    what:"The training paces, each a share of the speed current VO₂max supports.",
+    rule:"Easy up to 72 % of that speed, marathon pace 81 %, 5K pace 95 %; LT1 marks the top of truly easy running.",
+    refs:[{cite:"Daniels J. Daniels' Running Formula.", finding:"Training zones as fixed fractions of the speed at VO₂max."},
+          {cite:"Davis JJ on the first lactate threshold (Running Writings).", finding:"Easy running belongs below the first lactate threshold."}],
+    use:"Paces follow fitness and are re-read every night; the Effort discipline panel shows how the easy runs measure up.",
+    caveat:""},
+  posture:{title:"Posture: assertive or conservative", basis:"S",
+    what:"Which of two postures built the plan. Conservative holds the load well under the ceilings; assertive rides them.",
+    rule:"Assertive once 56 days pass with no symptom or medical event; back to conservative at the next one.",
+    refs:[{cite:"An app rule, not a published threshold.", finding:"A clean window long enough to show the work is being absorbed."}],
+    use:"When measured fitness lags the projection, the ceiling eases before anything else does.",
+    caveat:""},
+  components:{title:"What the sessions build", basis:"L",
+    what:"Marathon fitness splits into four parts: VO₂max, running economy, threshold (the fastest pace held for about an hour) and resilience (how little the first three fade late in the race).",
+    rule:"VO₂max is built early and then held; marathon-pace work grows through the build; the peak turns to resilience by extending the fast finish of the long run.",
+    refs:[{cite:"Davis JJ. Marathon Excellence for Everyone.", finding:"The four-component model of marathon performance and how a build periodises it."}],
+    use:"Each quality session carries the part it mainly builds; the phase line sums them.",
+    caveat:"The share of each part per phase is the app's own reading of Davis."}
+};
+// one-line credit per limit, for the tile (SH-86)
+const SOURCE_SHORT={chronic:"Friel; Couzens (ramp-rate guidance)", acwr:"Gabbett 2016 (contested)", long_step:"Frandsen et al. 2025, 5,200 runners", eq_week:"Davis; fitted", eq_session:"the weekly impact-load step", tissue:"3:1 periodisation convention"};
+// the source panel for one limit (SH-86): every text escaped; an unknown key is no panel.
+// SH-86c — in three parts (top / left / right) so a panel can lay the sections in two columns
+// (.srccols): the week line, the what and the rule on the left; the named sources, the use, the
+// caveat and the basis on the right. The race panel embeds the same source flat, one column.
+function sourceParts(key, weekLine, lineLabel="This week"){
+  const s=PLAN_SOURCES[key]; if(!s) return null;
+  const bas=BASIS[s.basis];
+  const lbl=t=>`<div class="srclbl">${esc(t)}</div>`;
+  return {
+    top:`<div class="srctop"><span class="srctitle">${esc(s.title)}</span>${bas?`<span class="basis ${s.basis}">${esc(bas.label)}</span>`:""}</div>`,
+    left:(weekLine?`${lbl(lineLabel)}<p>${esc(weekLine)}</p>`:"")
+      +`${lbl("What it is")}<p>${esc(s.what)}</p>`
+      +`${lbl("The rule")}<p>${esc(s.rule)}</p>`,
+    right:lbl("Where the number comes from")
+      +s.refs.map(r=>`<div class="srcref"><div class="srccite">${esc(r.cite)}</div><div>${esc(r.finding)}</div></div>`).join("")
+      +`${lbl("How the app uses it")}<p>${esc(s.use)}</p>`
+      +(s.caveat?`<p class="srccaveat">Caveat: ${esc(s.caveat)}</p>`:"")
+      +(bas?`<div class="srcbasis">${esc(bas.desc)}</div>`:"") };
+}
+function sourceHtml(key, weekLine, lineLabel="This week"){
+  const p=sourceParts(key, weekLine, lineLabel); if(!p) return "";
+  return p.top+`<div class="srccols"><div>${p.left}</div><div>${p.right}</div></div>`;
+}
+// the plain sentence a limit row leads with (SH-86): this week's own numbers, in the display unit
+function limitSentence(k, ax, w, L){
+  const sized = L.binding===k ? " This is the limit that sized the week." : "";
+  const v=(x,d=1)=>Number(limV(x,ax.unit)).toFixed(d);
+  if(k==="chronic"){
+    const laid=v(ax.laid), ceiling=v(ax.ceiling);
+    if(ax.laid<0){
+      const why=w&&(w.role==="taper"||w.role==="race")?"the taper"
+              :w&&w.role==="recovery"?"recovery after the race":"a down week";
+      return `Fitness eases by ${v(-ax.laid)} this week (${why}), well inside the limit.`;
+    }
+    if(ax.laid>ax.ceiling+0.05)
+      return `Fitness rose ${laid}, above the ${ceiling} limit: the week as run carried more than it was laid with.`;
+    return L.binding===k ? `Fitness rises ${laid} this week, the most allowed.${sized}`
+                         : `Fitness rises ${laid} of the ${ceiling} allowed.`;
   }
-  if(L.tissue) rows.push(`<div class="lim${L.tissue.binds?' held':''}${L.binding==='tissue'?' binding':''}" title="${esc(L.tissue.note||"consecutive near-ceiling weeks before a forced deload")}; basis: literature">
-      <span class="lk">${esc(LIMIT_NAMES.tissue)}</span><span class="lv mono">${L.tissue.streak} <span class="muted">/ ${L.tissue.limit}</span></span><span class="lh mono">${L.tissue.exempt?"exempt":"+"+L.tissue.headroom}</span><span class="lb">${esc(L.tissue.basis)}</span></div>`);
-  if(!rows.length) return "";
-  const head = L.binding ? `This week is held by <b>${esc(LIMIT_NAMES[L.binding]||L.binding)}</b>` : "No limit binds this week";
-  const risk = L.risk ? `<div class="limrisk">Injury-risk read: the long run sits <b>${esc(L.risk.read)}</b> — in the ${esc(L.risk.cohort)} cohort (n≈${L.risk.n}) sharp longest-run jumps predicted injury where weekly-mileage jumps did not. A read against published evidence, not a probability for you.</div>` : "";
-  return `<details class="limits"><summary><span class="limhead">${head}</span><span class="muted mono" style="font-size:11px"> · limits</span></summary>${rows.join("")}${risk}
-    <div class="help">ceiling / laid / headroom · basis: L literature, A fitted to this athlete, S structural</div></details>`;
+  if(k==="acwr")
+    return `This week's load is ${v(ax.laid,2)}× the base on the shape-neutral reading; the plan sizes it at or under ${v(ax.ceiling,2)}.${sized}`;
+  if(k==="long_step"){
+    const prev=v(ax.ceiling/1.10);
+    const at=Math.abs(ax.laid-ax.ceiling)<=0.15;
+    return (at?`Longest run ${v(ax.laid)} ${limU(ax.unit)}: right at the step, 10 % over the longest of the last four weeks (${prev} ${limU(ax.unit)}).`
+             :`Longest run ${v(ax.laid)} ${limU(ax.unit)}; the step allows ${v(ax.ceiling)} ${limU(ax.unit)}, 10 % over the longest of the last four weeks (${prev} ${limU(ax.unit)}).`)+sized;
+  }
+  if(k==="eq_week")
+    return `${v(ax.laid)} speed-weighted ${limU(ax.unit)} against a ceiling of ${v(ax.ceiling)}, 1.3× the heaviest week of the last four.${sized}`;
+  if(k==="eq_session")
+    return w&&w.role==="race"
+      ?`The race itself is the heaviest run (${v(ax.laid)} speed-weighted ${limU(ax.unit)}); race week is laid around it.${sized}`
+      :`The heaviest single run weighs ${v(ax.laid)} speed-weighted ${limU(ax.unit)}; one run may weigh up to ${v(ax.ceiling)}.${sized}`;
+  if(k==="tissue")
+    return ax.exempt
+      ?`${ax.streak} weeks in a row near the ceiling. The peak is exempt: the taper that follows is its recovery.`
+      :`${ax.streak} of ${ax.limit} weeks in a row near the load ceiling; at ${ax.limit}, a down week is forced.${sized}`;
+  return "";
+}
+function limitsHtml(L, w){
+  if(!L) return "";
+  const order=["chronic","acwr","long_step","eq_week","eq_session","tissue"].filter(k=>L[k]);
+  if(!order.length) return "";
+  order.sort((a,b)=>(a===L.binding?0:1)-(b===L.binding?0:1));   // the one that held the week first
+  const rows=order.map(k=>{
+    const ax=L[k], sentence=limitSentence(k,ax,w,L);
+    const binding=L.binding===k;
+    const tol=k==="acwr"?0.005:0.05;
+    const over=!ax.exempt&&ax.ceiling!=null&&ax.laid!=null&&ax.laid>ax.ceiling+tol;
+    const tag=binding?`<span class="limtag hold">holds the week</span>`
+            :over?`<span class="limtag over">ran over</span>`
+            :ax.exempt?`<span class="limtag">exempt in the peak</span>`:"";
+    let right, ratio;
+    if(k==="tissue"){ right=`${ax.streak} of ${ax.limit} weeks`; ratio=ax.limit?ax.streak/ax.limit:0; }
+    else if(k==="chronic"){ right=`${ax.laid>=0?"+":""}${Number(ax.laid).toFixed(1)} of ${ax.ceiling>=0?"+":""}${Number(ax.ceiling).toFixed(1)} CTL`;
+      ratio=ax.ceiling?Math.max(0,ax.laid)/ax.ceiling:0; }
+    else { right=`${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit))}`;
+      ratio=ax.ceiling?Math.max(0,ax.laid)/ax.ceiling:0; }
+    const pct=Math.round(Math.min(1,Math.max(0,ratio))*100);
+    const name=LIMIT_NAMES[k]||k;
+    const bas=BASIS[ax.basis];
+    return `<div class="limrow">
+      <button type="button" class="limhd" aria-expanded="false" data-lim="${k}">
+        <span class="limtop"><span class="limname">${esc(name.charAt(0).toUpperCase()+name.slice(1))}</span>${tag}<span class="limval mono">${right}</span></span>
+        <span class="limbar${binding?" hold":over?" over":""}"><i style="width:${pct}%"></i></span>
+        <span class="limsent">${esc(sentence)}</span>
+        <span class="limmeta">${bas?`<span class="basis ${ax.basis}">${esc(bas.label)}</span>`:""}<span class="limcta">Why, and the source →</span></span>
+      </button>
+      <div class="limsrc" hidden>${sourceHtml(k, sentence)}</div>
+    </div>`;
+  });
+  return `<div class="limits"><div class="limitslbl">Why this week looks like this</div>${rows.join("")}</div>`;
 }
 function weekHtml(w,p,today){
   const down=isDownWeek(w);
@@ -1885,7 +2041,7 @@ function weekHtml(w,p,today){
         <div class="wsesslog">${sess}</div>
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
-    ${limitsHtml(w.limits)}</div>`;
+    ${limitsHtml(w.limits, w)}</div>`;
 }
 // Map a phase's display name → the stable key shared by its bar segment and its weeks panel.
 function phaseKey(name){
@@ -2041,11 +2197,6 @@ function renderPlan(p){
       ? first.key : phaseGroups[phaseGroups.length-1].key;
   }
   curPhase=curPhase||"rebase";
-  const phaseBar=p.phases.filter(x=>x.weeks>0).map((x,i)=>{
-    const mix=20+i*16, k=x.key||phaseKey(x.phase);   // §6q — explicit per-segment key
-    return `<div class="phaseseg${k===curPhase?' active':''}" data-pk="${k}" title="${esc(x.phase)}"
-      role="button" tabindex="0" aria-pressed="${k===curPhase}" style="flex:${x.weeks};--mix:${mix}%">
-      <b>${x.phase.split(" ")[0]}</b>${x.weeks}w</div>`;}).join("");
   // Glanceable block total — Phase 0 is all easy running, so planned time = distance × easy pace.
   const phaseKm = planWeeks.reduce((s,w)=>s+(w.km||0),0);
   const easySec = (m=>m?(+m[1]*60+ +m[2]):0)(/(\d+):(\d+)/.exec(p.pace_zones.easy_top||""));
@@ -2055,20 +2206,19 @@ function renderPlan(p){
   const ran = LOG&&LOG.ran;   // actually run across the block so far (dups excluded)
   const ranTot = ran&&ran.km>0 ? `▸ ran ${U.d(ran.km,0)} ${U.unit}${ran.min?` · ${fmtDur(ran.min)}`:""}` : "";
   // Last refreshed = when the plan was regenerated (auto-replan runs nightly; paces & totals are
-  // recomputed from that snapshot's VO₂max, so this is how fresh the pills below are).
+  // recomputed from that snapshot's VO₂max, so this is how fresh the chips on the strip below are).
   const refreshed = p.generated_at
-    ? `<div class="legend" style="margin-top:6px;opacity:.85">↻ Last refreshed ${new Date(p.generated_at).toLocaleString()}</div>` : "";
+    ? `<span class="muted mono" style="font-size:11px">↻ Plan rebuilt ${new Date(p.generated_at).toLocaleString()}</span>` : "";
   // The re-base journal line = the shared logLine with a plain-distance plan label (Phase 0 is
   // pure easy running; quality summaries only matter in the later phases' weekHtml path).
   const sessHtml=s=>logLine(s,today,`<span class="splan">${sessSummary(s)}</span>`);
-  // Re-base weeks are LOG-enriched (done/missed/unplanned/doubles via sessHtml) — kept as their own
-  // renderer; we only wrap each in a week-detail and front it with the shared strip (selector below).
-  const rbSel=defaultWeek(planWeeks,today);
-  const weeks=weekStrip(planWeeks,'rebase',rbSel)+`<div class="weekdetails">`+planWeeks.map(w=>{
+  // The re-base week card (SH-86: it lives in the week pane like every other week now) —
+  // LOG-enriched (done/missed/unplanned/doubles via sessHtml).
+  const rebaseCard=w=>{
     const hasLog = w.sessions.some(s=>'done' in s);
     const sess = hasLog ? `<div class="wsesslog">${w.sessions.map(sessHtml).join("")}</div>`
       : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${sessSummary(s)}</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">@ easy ${p.pace_zones.easy_top}</div></div>`;
-    const inner = `<div class="wk ${isDownWeek(w)?'wdown':''}">
+    return `<div class="wk ${isDownWeek(w)?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
         <div><span class="wkm">${U.d(w.km)} ${U.unit}</span> · ${w.runs} runs${w.clipped?' · <span class="down">clipped to fit ACWR</span>':''}${w.adjusted?' · <span class="eased">eased</span>':''}</div>
@@ -2077,20 +2227,10 @@ function renderPlan(p){
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
     </div>`;
-    return weekDetail(inner,'rebase',w.wk,rbSel);}).join("")+`</div>`;
+  };
   const adh = (LOG&&LOG.adherence&&LOG.adherence.scheduled)
-    ? `<span class="muted mono" style="font-size:11px"> · done ${LOG.adherence.done}/${LOG.adherence.scheduled} so far</span>` : "";
-  // (§FORM1 2026-08-18 — the graduation, earned-build, and 6th-run banners are gone with the
-  // banked-week machinery: nothing is unlocked by adherence bookkeeping any more. The regime bar
-  // above carries the posture story; §PRO5's ride note carries the responsiveness story.)
-  const grad = "", earnedNote = "", freqNote = "";
-  const tuneTxt = (p.tune_ups&&p.tune_ups.length)
-    ? `<div class="legend" style="margin-top:8px">Tune-ups before the peak: ${p.tune_ups.map(t=>`${esc(t.label)} (${t.date}, ${t.priority})`).join(" · ")}</div>` : "";
-  // §6q/#2 — multi-A chain strip: when the build chains ≥2 A-races, surface each race's projected
-  // race-day fitness (peak CTL carried into the taper) + its own feasibility verdict, so the roadmap reads "where does
-  // each race land", not just the final peak. Single-A skips it (the objline + headline verdict cover one).
+    ? ` · <span class="muted mono" style="font-size:11px">done ${LOG.adherence.done}/${LOG.adherence.scheduled} so far</span>` : "";
   const verdTone = v => v==="too soon" ? "warn" : (v==="finish"||v==="maintain") ? "ok" : "muted";
-  const roleName = r => r==="goal" ? "Goal" : r==="coequal" ? "Co-equal" : r==="subordinate" ? "Tune-up" : (r||"");
   const chainRaces = p.chain||[];
   // §CHAIN4 — which race the athlete is LOOKING AT. The default is the NEXT race still ahead, not
   // the plan's own headline (the chain's terminal race): the resolver above (viewRaceOf) applies
@@ -2101,44 +2241,6 @@ function renderPlan(p){
   // the resolver always answers null), leaves every downstream read exactly as it was pre-§CHAIN3.
   const selRace = vr;   // §CHAIN4 — the resolver above already applies RACE_SEL, then the next race ahead
   const selOverride = !!(selRace && !(o && selRace.date===o.date));
-  const chainStrip = chainRaces.length>1
-    ? `<div class="chainstrip">
-        <div class="legend" style="margin-bottom:5px">Race chain — projected fitness &amp; verdict at each A-race${qhint("Each A-race in the build, with the chronic load (CTL — your fitness) the engine projects you'll carry into it at the end of that race's taper, and whether that supports a healthy finish on its runway. Re-read every block as real fitness returns. Tap a race to view its own headline and drift below.")}</div>
-        ${chainRaces.map(c=>{
-          const ctl = (c.proj_ctl!=null) ? `CTL ≈ ${Math.round(c.proj_ctl)}` : "—";
-          const v = c.feasibility;
-          const ft = c.finish_time;
-          const ftTxt = ft ? (ft.band ? `${esc(ft.band.lo_hms)}–${esc(ft.band.hi_hms)}` : esc(ft.hms)) : "";
-          const on = selRace ? selRace.date===c.date : !!(o && c.date===o.date);   // CI axe: never "null" — the headline reads pressed by default
-          return `<div class="chainrace${on?' on':''}" role="button" tabindex="0" aria-pressed="${on?'true':'false'}" data-race="${esc(c.date)}">
-            <span class="crole">${esc(roleName(c.role))}</span>
-            <span class="cname">${esc(c.label)}</span>
-            <span class="cwhen">${esc(c.date)}</span>
-            <span class="cctl" title="Projected race fitness — peak CTL carried into the taper (ACWR-capped)">${ctl}</span>
-            ${ftTxt?`<span class="cft" title="Projected finish">${ftTxt}</span>`:""}
-            ${v?`<span class="cverd ${verdTone(v)}">${esc(v)}</span>`:""}
-          </div>`;
-        }).join("")}
-      </div>` : "";
-  // §CHAIN3 — when a non-headline leg is selected, the objective line describes THAT race: its own
-  // target/priority (looked up in OBJECTIVES by label+date — chain entries don't carry them) when
-  // the athlete still has it as a live objective row, else blank (an earlier leg that's since been
-  // dropped from `objectives` still shows the race itself, just no target/priority).
-  const selObj = selOverride
-    ? OBJECTIVES.find(x=>x.label===selRace.label && x.date===selRace.date) || {}
-    : null;
-  const headObj = selOverride
-    ? {label: selRace.label, date: selRace.date, weeks_away: selRace.weeks_away,
-       target: selObj.target, priority: selObj.priority}
-    : o;
-  const header = headObj
-    ? `<div class="objline">
-        <span class="race">${esc(headObj.label)}</span>
-        <span class="away">${headObj.weeks_away} weeks away · ${esc(headObj.date)}</span>
-        <span class="away" style="color:var(--muted)">goal: ${esc(selOverride ? selObj.target : o.target)} · priority ${esc(headObj.priority||'A')}</span>
-      </div>`
-    : `<div class="objline"><span class="race">Maintenance</span>
-        <span class="away" style="color:var(--muted)">no objective — holding fitness</span></div>`;
   // §PRO7/§FT6 — finish-time strip. It used to read now→+4w→+8w, which prices a LATER RACE DATE —
   // a counterfactual nobody asked about, and one that reads like a timeline ("am I training for the
   // next 8 weeks?"). It now answers the question a runner actually has: what does this BLOCK buy?
@@ -2174,10 +2276,6 @@ function renderPlan(p){
   // The engine withheld the "off today's shape" read rather than decaying a number it cannot
   // calibrate a decay for; say WHY it is missing, or the strip just looks like the pre-§FT6 one.
   const ftAnchor = FT && FT.anchor_stale;
-  const ftPts = FTT
-    ? [{lab:"off today's shape", hms:FTT.hms}, {lab:"by race day", hms:FT.hms, now:true}]
-    : (FT&&FT.curve||[]).map(c=>({lab: c.plus_weeks===0?(FTB?'median now':'now'):'+'+c.plus_weeks+'w',
-                                  hms: c.hms, now: c.plus_weeks===0}));
   const fcMin=s=>{const m=Math.round(Math.abs(s)/60);
     return m>=60?`${Math.floor(m/60)}h ${String(m%60).padStart(2,"0")}min`:`${m} min`};
   // Named honestly in BOTH directions — a taper-only or detraining runway must not be dressed up
@@ -2187,29 +2285,6 @@ function renderPlan(p){
     : gain<-60 ? `this runway costs ${fcMin(gain)}` : "holds today's shape";
   const runway = ftFrozen ? "" : (FT&&FT.curve||[]).filter(c=>c.plus_weeks>0)
     .map(c=>`+${c.plus_weeks}w → ${c.hms}`).join(" · ");
-  // §CHAIN3 — the narrative verdict paragraph is written per-race inside `feasibility()`, but a
-  // chain LEG only carries its own verdict WORD (§CHAIN3's `c["feasibility"]`) — the prose doesn't
-  // ride per leg. A selected non-headline race shows that word as a badge instead of the plan's own
-  // (wrong-race) write-up.
-  const feasNote = selOverride
-    ? (selRace.feasibility_note
-        ? esc(selRace.feasibility_note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
-        : `<span class="cverd ${verdTone(selRace.feasibility)}">${esc(selRace.feasibility||'—')}</span> — projected verdict for ${esc(selRace.label)}.`)
-    : esc(p.feasibility.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
-  const fcHint = !FT ? "" : (FT.note||"")
-    + (runway?` If the race were later (same training): ${runway}.`:"")
-    + (ftStale?" This prediction was saved by an earlier version of the engine — regenerate the plan to re-read it on the current model.":"")
-    + (ftAnchor?` Your last measured speed is ${ftAnchor.age_days} days old (${esc(ftAnchor.as_of)}), so there is no current read of today's shape to compare against — run, and it re-anchors on its own.`:"");
-  const finishCurve = FT ? `<div class="finishcurve">
-      <span class="fclabel">Projected ${esc(FT.distance)} finish
-        ${FTB?`<b>${esc(FTB.lo_hms)}–${esc(FTB.hi_hms)}</b>`:`<b>${esc(FT.hms)}</b>`}</span>
-      ${ftPts.map(c=>`<span class="fcpt${c.now?' now':''}">${esc(c.lab)}: <b>${esc(c.hms)}</b></span>`)
-        .join('<span class="fcsep">→</span>')}
-      ${gainTxt?`<span class="fcgain">${esc(gainTxt)}</span>`:''}
-      ${(ftStale||planStale)?`<span class="fcstale">⟳ saved by an earlier engine — regenerate to re-read</span>`:''}
-      ${ftAnchor?`<span class="fcstale">◷ last measured ${ftAnchor.age_days}d ago — today's shape unread</span>`:''}
-      ${qhint(fcHint)}
-    </div>` : "";
   // §PRO3/§PRO5 — training-regime posture: which regime drove the plan + why, and (assertive) how hard
   // it's riding the load ceiling given the measured-vs-projected response. Surfaced so the auto-gate is
   // never silent. The ceiling is named for what binds (0.27.0, log §70): `ride_cap` is the PLANNING cap —
@@ -2220,27 +2295,237 @@ function renderPlan(p){
     ? (SR.factor>=1 ? `riding the full load ceiling (ACWR planning cap ${SR.ride_cap}, hard cap 1.30)`
                     : `easing the push — measured fitness ${Math.round((SR.ratio||0)*100)}% of projection (ACWR planning cap ${SR.ride_cap})`)
     : "";
-  const regimeNote = RG.mode ? `<div class="regimebar ${RG.mode}">
-      <span class="rgbadge">${RG.mode==='assertive'?'⟢ Assertive build':'◇ Conservative'}</span>
-      <span class="rgreason">${esc(RG.reason||'')}</span>
-      ${rideTxt?`<span class="rgride">${rideTxt}</span>`:''}
-    </div>` : "";
-  // Per-phase week lists, each behind its bar segment. Only the active phase's panel is shown;
-  // clicking a segment swaps which one is open (wired below). Empty phases render no panel.
-  // §6q — one panel per non-rebase phase in p.phases (single-A = base/build/peak/taper; a chain adds
-  // its bridge/peak/taper segments), keyed by the phase's own key so segments never collide.
-  const panel=(k,inner)=>inner?`<div class="phasepanel${k===curPhase?' active':''}" data-pk="${k}">${inner}</div>`:'';
-  const phasePanels = o ? (p.phases||[]).filter(x=>x.key&&x.key!=="rebase")
-      .map(x=>panel(x.key, phaseSection(x.phase, enrich(x.key, p[x.key]), p, today, x.key))).join("") : '';
-  const rebaseInner=`
-    <h3 style="font-family:var(--serif);font-weight:600;font-size:16px;margin:18px 0 2px;display:flex;justify-content:space-between;align-items:baseline;gap:12px">
-      <span>Phase 0 — the re-base block <span class="muted mono" style="font-size:11px">(start ${rb.start}, ends CTL ${rb.end_ctl}/ATL ${rb.end_atl})${adh}</span>${qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.")}</span>
-      <span style="text-align:right;line-height:1.4">
-        <div class="mono" style="font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap" title="Total planned distance and easy-run time across the re-base block">${phaseTot}</div>
-        ${ranTot?`<div class="mono" style="font-size:11px;font-weight:600;color:var(--ok);white-space:nowrap" title="Distance and time you've actually run during this block so far (duplicates excluded)">${ranTot}</div>`:""}
-      </span>
-    </h3>
-    ${weeks}`;
+  // SH-86 (slice 2) — the plan page: three tiles (this week · what holds it · races), the road of
+  // week bars, one week pane, and a strip of sources. The phase bar, the per-phase panels, the
+  // chain strip and the standalone finish/regime/paces lines are gone from the output; their
+  // content moved into the tiles and the pane. The AI explain/adjudicate/parse handlers stay wired
+  // (and guarded) below, but their controls no longer render — SH-88 removes them with the backend.
+  // SH-86c — a race's source panel opens as #tilePanel, a full-width sibling BELOW the tiles.
+  const phaseNameOf=k=>k==="rebase"?"Re-base":(((p.phases||[]).find(x=>x.key===k)||{}).phase||k);
+  // every week in road order, pk-tagged, with the phase's display name alongside
+  const allWeeks=[];
+  phaseGroups.forEach(g=>{
+    const blk = g.key==="rebase" ? {weeks:g.weeks} : enrich(g.key, p[g.key]);
+    ((blk&&blk.weeks)||[]).forEach(w=>allWeeks.push({pk:g.key, w, phase:phaseNameOf(g.key)}));
+  });
+  // the shown week: the remembered pick while it still names a week, else the week holding today,
+  // else the first week ahead, else the last on the road
+  let selIt = (WEEK_SEL && allWeeks.find(x=>x.pk+":"+x.w.wk===WEEK_SEL)) || null;
+  if(!selIt) selIt = allWeeks.find(x=>weekHoldsToday(x.w, today))
+    || allWeeks.find(x=>x.w.start && x.w.start>today) || allWeeks[allWeeks.length-1] || null;
+  if(selIt) WEEK_SEL=selIt.pk+":"+selIt.w.wk;
+  const curIt = allWeeks.find(x=>weekHoldsToday(x.w, today)) || selIt;   // the tiles read THIS week
+  const hmm=s=>{ s=Math.round(Math.max(0,s)); return Math.floor(s/3600)+":"+String(Math.floor(s%3600/60)).padStart(2,"0"); };
+  // a typed goal in seconds: "3:45" reads as h:mm on a marathon and "45:00" as mm:ss on a 10K, so a
+  // two-part time takes the reading nearer the race's own median
+  const goalSec=(t,ref)=>{ const m=/^(\d+):(\d{2})(?::(\d{2}))?$/.exec(t||""); if(!m) return null;
+    if(m[3]) return +m[1]*3600 + +m[2]*60 + +m[3];
+    const hm=+m[1]*3600 + +m[2]*60, ms=+m[1]*60 + +m[2];
+    return (ref && Math.abs(ms-ref)<Math.abs(hm-ref)) ? ms : hm; };
+  const gainWord=g=>g>60?`the build buys ${fcMin(g)}`:g<-60?`this runway costs ${fcMin(g)}`:"holds today's shape";
+
+  // — tile 1: this week at a glance (mini bars Mon–Sun, height ∝ the session's km) —
+  const weekTile = curIt ? (()=>{ const w=curIt.w;
+    const maxkm=Math.max(1,...(w.sessions||[]).map(s=>s.km||0));
+    const days=weekDates(w.start).map((d,i)=>{
+      const s=(w.sessions||[]).find(x=>x.date===d);
+      const h=s?Math.max(6,Math.round((s.km||0)/maxkm*44)):2;   // a rest day is a 2px stub
+      const cls=!s?"rest":s.race?"race":(s.reps&&s.reps.length)?"qual":(/^(long|long_mp)/.test(s.kind||"")?"long":"easy");
+      return `<span class="wkd ${cls}${d===today?" today":""}"><i style="height:${h}px"></i><b>${"MTWTFSS"[i]}</b></span>`;
+    }).join("");
+    return `<div class="plantile">
+      <div class="tilelbl">This week · ${esc(curIt.phase.split(" ")[0])} week ${w.wk}</div>
+      <div class="tilebig">${U.d(w.km)} ${U.unit} <span class="muted">· ${w.runs} runs</span></div>
+      <div class="muted mono" style="font-size:12px">${sessDate(w.start)} – ${sessDate(weekEndIso(w.start))}${w.proj_ctl!=null?` · fitness at week end CTL ${Math.round(w.proj_ctl)}`:""}</div>
+      <div class="wkdays">${days}</div>
+      <div class="wklegend"><span><i class="easy"></i>easy</span><span><i class="qual"></i>quality</span><span><i class="long"></i>long</span></div>
+      <div class="wintent">${w.intent||""}</div>
+      <button type="button" class="linkbtn" id="openWeek">Open the week, day by day ↓</button>
+    </div>`;})() : "";
+
+  // — tile 2: what holds this week (the binding limit, then the rest compact) —
+  const LW=curIt&&curIt.w.limits;
+  const limOrder=["chronic","acwr","long_step","eq_week","eq_session","tissue"].filter(k=>LW&&LW[k]);
+  const limVal=(k,ax)=>k==="tissue"?`${ax.streak} of ${ax.limit} weeks`
+    :k==="chronic"?`${ax.laid>=0?"+":""}${Number(ax.laid).toFixed(1)} of ${ax.ceiling>=0?"+":""}${Number(ax.ceiling).toFixed(1)} CTL`
+    :`${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${limU(ax.unit)}`;
+  const limPct=(k,ax)=>{ const r=k==="tissue"?(ax.limit?ax.streak/ax.limit:0):(ax.ceiling?Math.max(0,ax.laid)/ax.ceiling:0);
+    return Math.round(Math.min(1,Math.max(0,r))*100); };
+  const leadKey=limOrder.length?(LW.binding&&LW[LW.binding]?LW.binding:limOrder[0]):null;
+  const limitsTile=!curIt?"":`<div class="plantile">
+    <div class="tilelbl">What holds this week</div>
+    ${leadKey?(()=>{const ax=LW[leadKey];return `
+      <div class="limname" style="font-family:var(--serif);font-size:17px">${esc((LIMIT_NAMES[leadKey]||leadKey).replace(/^./,c=>c.toUpperCase()))}</div>
+      <span class="limbar${LW.binding===leadKey?" hold":""}" style="height:12px"><i style="width:${limPct(leadKey,ax)}%"></i></span>
+      <div class="mono" style="font-size:12px">${limVal(leadKey,ax)}</div>
+      <div class="limsent" style="margin-top:4px">${esc(limitSentence(leadKey,ax,curIt.w,LW))}</div>
+      <div class="muted" style="font-size:12px;margin-top:4px">Source: ${esc(SOURCE_SHORT[leadKey]||"")} ${BASIS[ax.basis]?`<span class="basis ${ax.basis}">${esc(BASIS[ax.basis].label)}</span>`:""}</div>
+      <button type="button" class="linkbtn limgo" data-lim="${leadKey}">Why, and where the number comes from ↓</button>`;})():""}
+    ${limOrder.filter(k=>k!==leadKey).length?`<div class="limothers"><div class="muted mono" style="font-size:11px;margin:10px 0 2px;border-top:1px solid var(--line);padding-top:8px">The other limits</div>${limOrder.filter(k=>k!==leadKey).map(k=>`
+      <button type="button" class="limgo limmini" data-lim="${k}">
+        <span class="lk2">${esc(LIMIT_NAMES[k]||k)}</span>
+        <span class="limbar" style="height:6px;margin:0"><i style="width:${limPct(k,LW[k])}%"></i></span>
+        <span class="mono lv2">${limVal(k,LW[k])}</span>
+      </button>`).join("")}</div>`:""}
+    ${!limOrder.length?`<div class="muted" style="font-size:13px">No limit binds this week.</div>`:""}
+  </div>`;
+
+  // — tile 3: the races, one finish range each, on a shared axis —
+  const raceRows=(chainRaces.length>1 ? chainRaces.map(c=>({
+      label:c.label, date:c.date, weeks_away:c.weeks_away,
+      target:(OBJECTIVES.find(x=>x.label===c.label && x.date===c.date)||{}).target,   // a chain entry carries none
+      proj_ctl:c.proj_ctl, verdict:c.feasibility, note:c.feasibility_note, ft:c.finish_time,
+      headline:!!(o && c.date===o.date)}))
+    : (o ? [{label:o.label, date:o.date, weeks_away:o.weeks_away, target:o.target,
+      proj_ctl:p.feasibility&&p.feasibility.projected_ctl, verdict:p.feasibility&&p.feasibility.verdict,
+      note:p.feasibility&&p.feasibility.note, ft:p.feasibility&&p.feasibility.finish_time,
+      headline:true}] : []));
+  const banded=raceRows.filter(r=>r.ft&&r.ft.band);
+  // the shared axis spans every range AND every goal, so a goal's tick never lands off the bar
+  const bandAxis=banded.length?(()=>{ const goals=banded.map(r=>goalSec(r.target, r.ft.seconds)).filter(g=>g!=null);
+    const lo=Math.min(...banded.map(r=>r.ft.band.lo_seconds),...goals)-300,
+    hi=Math.max(...banded.map(r=>r.ft.band.hi_seconds),...goals)+300;
+    return {lo:Math.floor(lo/600)*600, hi:Math.ceil(hi/600)*600}; })():null;
+  const bandBar=r=>{
+    const b=r.ft&&r.ft.band; if(!b||!bandAxis) return "";
+    const span=bandAxis.hi-bandAxis.lo, pc=x=>((x-bandAxis.lo)/span*100);
+    const goal=goalSec(r.target, r.ft.seconds);
+    return `<div class="bandbar">
+      <span class="bandrange" style="left:${pc(b.lo_seconds).toFixed(2)}%;width:${(pc(b.hi_seconds)-pc(b.lo_seconds)).toFixed(2)}%"></span>
+      ${r.ft.seconds?`<span class="bandmed" style="left:${pc(r.ft.seconds).toFixed(2)}%"></span>`:""}
+      ${goal?`<span class="bandgoal" style="left:${pc(goal).toFixed(2)}%"></span>`:""}
+      <span class="bandtick">${hmm(bandAxis.lo)}</span><span class="bandtick mid">${hmm((bandAxis.lo+bandAxis.hi)/2)}</span><span class="bandtick end">${hmm(bandAxis.hi)}</span>
+    </div>`;
+  };
+  const racePanel=r=>{
+    const verdict=r.note
+      ? esc(r.note).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>')
+      : `<span class="cverd ${verdTone(r.verdict)}">${esc(r.verdict||'—')}</span> — projected verdict for ${esc(r.label)}.`;
+    const ft=r.ft, t=ft&&ft.today;
+    const todayLine=(t&&ft.hms)?`Off today's shape ${esc(t.hms)} → by race day ${esc(ft.hms)}${t.gain_seconds!=null?` · ${esc(gainWord(t.gain_seconds))}`:""}`:"";
+    const fcH=(ft&&(ft.curve||[]).map(c=>c.hms))||[];
+    const rw=(fcH.length>1&&new Set(fcH).size===1)?"":(ft&&(ft.curve||[]).filter(c=>c.plus_weeks>0).map(c=>`+${c.plus_weeks}w → ${c.hms}`).join(" · "));
+    const rwLine=rw?`<div class="adjmeta">If the race were later (same training): ${esc(rw)}.</div>`:"";
+    const marks=`${(planStale||(ft&&!ft.band&&!ft.today))?`<div class="fcstale">⟳ saved by an earlier engine — regenerate to re-read</div>`:""}${(ft===FT&&ftAnchor)?`<div class="fcstale">◷ last measured ${ftAnchor.age_days}d ago — today's shape unread</div>`:""}`;
+    // SH-86c — the panel opens below the tiles (#tilePanel), in two columns at ≥980px: the verdict
+    // side left (with the "Now" line), the finish-range source flat on the right
+    const sp=sourceParts("finish");
+    return { left:`<p class="feas" style="margin-top:0">${verdict}</p>${rwLine}${marks}${todayLine?`<div class="srclbl">Now</div><p>${esc(todayLine)}</p>`:""}`,
+             right:sp?sp.top+sp.left+sp.right:"" };
+  };
+  const racesTile=raceRows.length?`<div class="plantile racetile${chainRaces.length>1?' chainstrip':''}">
+    <div class="tilelbl">Races</div>
+    ${raceRows.map(r=>{
+      const open=PLAN_OPEN==="race:"+r.date;
+      const on=selRace?selRace.date===r.date:!!(o&&r.date===o.date);   // the §CHAIN4 pressed contract
+      const head=chainRaces.length>1
+        ?`<div class="chainrace${on?' on':''}" role="button" tabindex="0" aria-pressed="${on?'true':'false'}" data-race="${esc(r.date)}">
+            <span class="cname">${esc(r.label)}</span>
+            <span class="cwhen">${esc(r.date)} · ${r.weeks_away} w · goal ${esc(r.target||'—')}</span></div>`
+        :`<div class="racename">${esc(o.label)}</div>
+          <div class="muted mono" style="font-size:12px">${esc(o.date)} · ${o.weeks_away} weeks · goal ${esc(o.target||'—')}</div>`;
+      return `<div class="racerow">${head}
+        ${bandBar(r)}
+        ${r.ft?`<div class="racenum mono">${r.ft.band?`${esc(r.ft.band.lo_hms)}–${esc(r.ft.band.hi_hms)} · median ${esc(r.ft.hms)}`:`median ${esc(r.ft.hms)}`}${goalSec(r.target, r.ft.seconds)?` · goal ${esc(r.target)}`:""}</div>`:""}
+        <div class="muted" style="font-size:12px">Fitness on race day: ${r.proj_ctl!=null?`CTL ${Math.round(r.proj_ctl)}`:"—"}${r.verdict?` · verdict: ${esc(r.verdict)}`:""}</div>
+        ${r.ft?`<button type="button" class="linkbtn plansrc" data-open="race:${esc(r.date)}" aria-expanded="${open}" aria-controls="tilePanel">${open?"Hide the source ↑":"Why this range, and the source →"}</button>`:""}
+      </div>`;}).join("")}
+  </div>`:`<div class="plantile racetile">
+    <div class="tilelbl">Races</div>
+    <div class="muted" style="font-size:13px">No race: the plan holds fitness.</div>
+    <button type="button" class="linkbtn" id="racesOpen">Edit races →</button>
+  </div>`;
+  // SH-86c — a race's source opens BELOW the tiles, full width on its own grid row, so the three
+  // tiles keep their own heights beside it. The header names the race; the close button is the
+  // same toggle as the tile's (one PLAN_OPEN slot), so it closes the same way.
+  const openRace=raceRows.find(r=>PLAN_OPEN==="race:"+r.date)||null;
+  const tilePanel=openRace?(()=>{ const rp=racePanel(openRace);
+    return `<section class="plantile tilepanel" id="tilePanel">
+      <div class="tilepanel-hd"><h3>${esc(openRace.label)} · why this range</h3>
+        <button type="button" class="linkbtn plansrc" data-open="race:${esc(openRace.date)}" aria-controls="tilePanel">Hide ↑</button></div>
+      <div class="srccols"><div>${rp.left}</div><div>${rp.right}</div></div>
+    </section>`;})():"";
+
+  // — the road: one bar per week (height ∝ km), race flags above, the phase band below —
+  const maxWkm=Math.max(1,...allWeeks.map(x=>x.w.km||0));
+  const flagAt=date=>{ const i=allWeeks.findIndex(x=>x.w.start&&x.w.start<=date&&date<=weekEndIso(x.w.start)); return i<0?null:i; };
+  // SH-86d — a flag sits in its week's column at the race's own day, with a dashed line down to the axis
+  const dayIn=(wkStart,date)=>Math.max(0,Math.min(6,Math.round((new Date(date+"T00:00:00Z")-new Date(wkStart+"T00:00:00Z"))/864e5)));
+  const flagCell=(i,date,cls,title)=>`<span class="roadflagcell${cls}" style="grid-column:${i+1}"><span class="roadflag${cls}" style="left:${((dayIn(allWeeks[i].w.start,date)+0.5)/7*100).toFixed(2)}%" title="${esc(title)} · ${esc(date)}">🏁</span><i class="roadline" style="left:${((dayIn(allWeeks[i].w.start,date)+0.5)/7*100).toFixed(2)}%"></i></span>`;
+  const roadFlags=raceRows.map(r=>{ const i=flagAt(r.date); return i==null?"":flagCell(i,r.date,"",r.label); }).join("")
+    +(p.tune_ups||[]).map(t=>{ const i=flagAt(t.date); return i==null?"":flagCell(i,t.date," small",t.label+" (tune-up)"); }).join("");
+  const roadBars=allWeeks.map(x=>{
+    const w=x.w, sel=!!(selIt&&x.pk===selIt.pk&&w.wk===selIt.w.wk);
+    const h=Math.max(4,Math.round((w.km||0)/maxWkm*150));
+    const cls=["weekseg",w.frozen||(w.start&&weekEndIso(w.start)<today)?"wsdone":"",weekHoldsToday(w,today)?"wscur":"",
+      isDownWeek(w)||["taper","recovery","race"].includes(w.role)?"wsdown":"",sel?"on":""].filter(Boolean).join(" ");
+    // SH-86c — colour names the phase (--ph), the FILL says run vs planned: the straddling week
+    // splits, its run share solid from the baseline; a week with no km_done yet reads all pale
+    const run=(w.partial&&w.km_done!=null&&w.km>0)?Math.min(100,Math.round(w.km_done/w.km*100)):0;
+    return `<button type="button" class="${cls}" data-pk="${x.pk}" data-wk="${w.wk}" aria-pressed="${sel?'true':'false'}"
+      aria-label="${esc(x.phase.split(" ")[0])} week ${w.wk}, ${sessDate(w.start)} – ${sessDate(weekEndIso(w.start))}: ${U.d(w.km)} ${U.unit}, ${w.runs} runs"
+      style="height:${h}px">${run?`<i style="height:${run}%"></i>`:""}</button>`;
+  }).join("");
+  const roadBand=phaseGroups.map((g,i)=>{
+    // one mix for every segment: the old phase bar stepped it per index, which washed a chain's
+    // second cycle (segment 6 on) out to plain surface; the hue alone tells the phases apart
+    return `<div class="phaseseg" data-pk="${g.key}" title="${esc(phaseNameOf(g.key))}" style="grid-column:span ${g.weeks.length};--mix:40%"><b>${esc(phaseNameOf(g.key).split(" ")[0])}</b></div>`;
+  }).join("");
+  const todayIdx=allWeeks.findIndex(x=>weekHoldsToday(x.w,today));
+  // SH-86c — the today marker ALWAYS shows, on its own line above the axis's dates. SH-86d — the ▲ sits
+  // in today's week column at today's day, with a stem up to the bars; its label goes to the side
+  // that has room (the right in the road's first half, the left after)
+  const todayPct=todayIdx<0?0:(dayIn(allWeeks[todayIdx].w.start,today)+0.5)/7*100;
+  const todaySide=todayIdx*2>=allWeeks.length?"end":"start";
+  const todayMarker=todayIdx<0?"":`<span class="roadtodaycell" style="grid-column:${todayIdx+1}"><span class="roadtoday ${todaySide}" style="left:${todayPct.toFixed(2)}%"><i class="roadstem"></i><b>▲</b><em>today</em></span></span>`;
+  const road=allWeeks.length?`<section class="road" style="--n:${allWeeks.length}">
+    <div class="roadlbl">The road · ${allWeeks.length} weeks · ${U.unit} per week</div>
+    <div class="roadlegend"><span>colour = phase (band below)</span><span><i class="rl-run"></i>run</span><span><i class="rl-plan"></i>planned</span><span><i class="rl-on"></i>shown below</span></div>
+    <div class="roadflags">${roadFlags}</div>
+    <div class="roadbars">${roadBars}</div>
+    <div class="roadband">${roadBand}</div>
+    <div class="roadaxis"><div class="roadmarks">${todayMarker}</div><div class="roaddates"><span>${sessDate(allWeeks[0].w.start)}</span><span>${sessDate(weekEndIso(allWeeks[allWeeks.length-1].w.start))}</span></div></div>
+  </section>`:"";
+
+  // — the week pane: the selected week's own card, plus its phase's line —
+  const weekPane=selIt?(()=>{
+    const w=selIt.w, pk=selIt.pk, idx=allWeeks.indexOf(selIt);
+    const status=weekHoldsToday(w,today)?"This week":(w.frozen||(w.start&&weekEndIso(w.start)<today))?"Lived week":"Planned week";
+    const ctlHint=qhint("CTL = chronic load (your fitness), a slow ~42-day average of training; ATL = acute load (recent fatigue), a fast ~7-day average. Shown here is each value projected to this phase's end.");
+    let phaseLine;
+    if(pk==="rebase"){
+      phaseLine=`Re-base · ${planWeeks.length} weeks from ${rb.start} · ends CTL ${rb.end_ctl}/ATL ${rb.end_atl}${ctlHint} · Σ ${phaseTot}${ranTot?` · ${ranTot}`:""}${adh}`;
+    }else{
+      const blk=p[pk];
+      const km=((blk&&blk.weeks)||[]).reduce((s,x)=>s+(x.km||0),0);
+      const builds=(blk&&blk.builds&&blk.builds.length)
+        ?` · builds ${blk.builds.map(c=>COMPL[c]||c).join(" + ")}${qhint("Marathon fitness decomposes into four components: VO₂max × running economy × SSmax/LT2 (the classic three-factor model) plus physiological resilience — how little the first three decay over "+U.d(42.2,U.mi?1:0)+" "+U.unit+". Each quality session is tagged with the component it chiefly builds (hover a session's chip); this line sums what the phase is FOR. The assertive plan periodizes them: VO₂max developed early then merely maintained (red-cell persistence makes it cheap to hold), marathon-pace work growing through the build, and the peak pivoting to resilience — the long run's MP segment extends at constant speed. Framing follows John Davis; the fractions are our operationalization.")}`
+        :"";
+      phaseLine=`${esc(phaseNameOf(pk))} · ${((blk&&blk.weeks)||[]).length} weeks from ${blk?blk.start:""} · ends CTL ${blk?blk.end_ctl:""}/ATL ${blk?blk.end_atl:""}${ctlHint} · Σ ${U.d(km,0)} ${U.unit}${builds}`;
+    }
+    const compOpen=PLAN_OPEN==="components";
+    return `<section class="weekpane" id="weekpane">
+      <div class="wplbl">${status}</div>
+      <div class="wphd"><h3>${esc(selIt.phase.split(" ")[0])} · week ${w.wk}</h3>
+        <span class="wpnav"><button type="button" id="wkPrev" aria-label="Previous week"${idx<=0?" disabled":""}>‹</button><button type="button" id="wkNext" aria-label="Next week"${idx>=allWeeks.length-1?" disabled":""}>›</button></span></div>
+      <div class="muted mono" style="font-size:12px">${sessDate(w.start)} – ${sessDate(weekEndIso(w.start))} · ${U.d(w.km)} ${U.unit} · ${w.runs} runs${w.proj_ctl!=null?` · fitness at week end CTL ${Math.round(w.proj_ctl)}`:""}</div>
+      <div class="wphase">${phaseLine}
+        <button type="button" class="linkbtn plansrc" data-open="components" aria-expanded="${compOpen}">${compOpen?"Hide the source ↑":"What these mean, and the source →"}</button></div>
+      ${compOpen?`<div class="limsrc">${sourceHtml("components","")}</div>`:""}
+      ${pk==="rebase"?rebaseCard(w):weekHtml(w,p,today)}
+    </section>`;})():"";
+
+  // — the strip: posture, paces and the rebuild stamp, each with its source one click away —
+  const postureOpen=PLAN_OPEN==="posture", pacesOpen=PLAN_OPEN==="paces";
+  const planStrip=`<section class="planstrip">
+    ${RG.mode?`<button type="button" class="stripbtn plansrc" data-open="posture" aria-expanded="${postureOpen}"><span class="rgbadge">${RG.mode==='assertive'?'⟢ Assertive build':'◇ Conservative'}</span>${rideTxt?` <span class="rgride">${rideTxt}</span>`:""}</button>`:""}
+    <span class="zones" style="margin:0">${zoneChips}</span>
+    <button type="button" class="linkbtn plansrc" data-open="paces" aria-expanded="${pacesOpen}">${pacesOpen?"Hide the source ↑":"Where these come from →"}</button>
+    ${refreshed}
+    ${postureOpen?`<div class="limsrc stripanel">${sourceHtml("posture", RG.reason||"", "Now")}</div>`:""}
+    ${pacesOpen?`<div class="limsrc stripanel">${sourceHtml("paces", U.t(p.note), "Now")}</div>`:""}
+  </section>`;
+
   host.innerHTML=`
     ${planStale?`<div class="stalebanner">⟳ <b>This plan was built by an earlier version of the engine.</b>
       Updating the app does not rebuild saved plans — the weeks below, and every number derived from
@@ -2253,43 +2538,70 @@ function renderPlan(p){
       day${SN.bridged_days>1?'s':''} by measurement,`:''}${SN.stale_unresolved?` (every snapshot in the window was taken before a later upload, so each was checked against your own runs instead),`:SN.stale_skipped?` (${SN.stale_skipped} snapshot${SN.stale_skipped>1?'s':''} taken before a later upload skipped),`:''}${SN.tainted_skipped?` (${SN.tainted_skipped} snapshot${SN.tainted_skipped>1?'s':''} that did not match your own runs skipped),`:''}`} now reads CTL ${esc(SN.ctl)} · ATL
       ${esc(SN.atl)}. ${SH_READONLY?"":`Hit <b>Generate plan</b> to re-read today off it.`}</div>`:''}
     ${diffBanner(LASTDIFF)}
-    ${objManager(p)}
-    ${header}
-    ${adjustmentUI(p)}
-    ${SH_READONLY?'':`<div class="explainrow">
-      <button id="explainBtn" ${(LLM_OK&&AI.narration)?'':'disabled'}>📖 Explain this plan${LLM_OK?(AI.narration?'':' — switched off in Settings → AI'):' — add a Claude API key in Settings'}</button>
-    </div>
-    <div id="planExplain"></div>`}
-    <p class="feas">${feasNote}</p>
-    ${finishCurve}
-    ${regimeNote}
-    <div class="phases">${phaseBar}</div>
-    <div class="legend" style="margin-top:4px">${o?`Full periodization, re-base → race week (${totalw} weeks; ${o.weeks_away} still ahead) · tap a phase to open its weeks`:'Re-base, then hold'}</div>
-    ${chainStrip}
-    ${tuneTxt}
-    <div class="zones">${zoneChips}</div>
-    ${refreshed}
-    <p class="feas" style="border-color:var(--warn)">${esc(U.t(p.note)).replace(/THRESHOLD/,'<b>THRESHOLD</b>')}</p>
-    ${grad}${earnedNote}${freqNote}
-    <div class="phasepanels">
-      ${panel('rebase',rebaseInner)}
-      ${phasePanels}
-    </div>`;
-  // The phase bar acts as a selector: clicking a segment opens that phase's weeks and closes the rest.
-  host.querySelectorAll(".phaseseg").forEach(seg=>seg.addEventListener("click",()=>{
-    const pk=seg.dataset.pk;
-    if(!host.querySelector(`.phasepanel[data-pk="${pk}"]`)) return;  // no weeks for this phase
-    host.querySelectorAll(".phaseseg").forEach(s=>{
-      s.classList.toggle("active",s===seg); s.setAttribute("aria-pressed", s===seg); });
-    host.querySelectorAll(".phasepanel").forEach(pn=>pn.classList.toggle("active",pn.dataset.pk===pk));
+    ${adjBanner(p)}
+    <div class="racesdrawer" id="racesDrawer"${RACES_OPEN?"":" hidden"}>${objManager(p)}</div>
+    <div class="plantiles">${weekTile}${limitsTile}${racesTile}${tilePanel}</div>
+    ${road}
+    ${weekPane}
+    ${planStrip}`;
+  // SH-86 — a tile's "why" click lands here: render that limit's row open and bring it into view.
+  // The accordion rule (SH-86d) holds by construction: the rows just rendered all closed, so
+  // exactly the named card ends up open.
+  if(LIM_OPEN){
+    const el=host.querySelector(`#weekpane .limhd[data-lim="${LIM_OPEN}"]`);
+    if(el){
+      el.setAttribute("aria-expanded","true");
+      const src=el.nextElementSibling; if(src&&src.classList.contains("limsrc")) src.hidden=false;
+      const cta=el.querySelector(".limcta"); if(cta) cta.textContent="Hide the source ↑";
+      scrollToEl(el);
+    }
+    LIM_OPEN=null;
+  }
+  // the road's bars pick the week the pane shows — marked in place first (the re-render below
+  // rebuilds the same state), so neither the paint nor the ARIA ever reads stale
+  host.querySelectorAll(".road .weekseg").forEach(seg=>seg.addEventListener("click",()=>{
+    host.querySelectorAll(".road .weekseg").forEach(s=>{ s.classList.toggle("on",s===seg); s.setAttribute("aria-pressed", s===seg); });
+    WEEK_SEL=seg.dataset.pk+":"+seg.dataset.wk; LIM_OPEN=null; renderPlan(LAST_PLAN);
   }));
-  // The week strip is the second-level selector: clicking a week shows only its detail, scoped to
-  // its own phase (data-pk + data-wk) so e.g. W1 of Base doesn't toggle W1 of Build.
-  host.querySelectorAll(".weekseg").forEach(seg=>seg.addEventListener("click",()=>{
-    const pk=seg.dataset.pk, wk=seg.dataset.wk;
-    host.querySelectorAll(`.weekstrip[data-pk="${pk}"] .weekseg`).forEach(s=>{
-      s.classList.toggle("active",s===seg); s.setAttribute("aria-pressed", s===seg); });
-    host.querySelectorAll(`.weekdetail[data-pk="${pk}"]`).forEach(d=>d.classList.toggle("active",d.dataset.wk===wk));
+  // ‹ › step the shown week
+  const stepWeek=d=>{ const i=allWeeks.indexOf(selIt), j=i+d;
+    if(!selIt||j<0||j>=allWeeks.length) return;
+    WEEK_SEL=allWeeks[j].pk+":"+allWeeks[j].w.wk; LIM_OPEN=null; renderPlan(LAST_PLAN); };
+  const wprev=host.querySelector("#wkPrev"); if(wprev) wprev.addEventListener("click",()=>stepWeek(-1));
+  const wnext=host.querySelector("#wkNext"); if(wnext) wnext.addEventListener("click",()=>stepWeek(1));
+  // the tile's "open the week" selects its week and brings the pane into view
+  const ow=host.querySelector("#openWeek");
+  if(ow&&curIt) ow.addEventListener("click",()=>{
+    WEEK_SEL=curIt.pk+":"+curIt.w.wk; LIM_OPEN=null; renderPlan(LAST_PLAN);
+    const pane=$("#weekpane");
+    scrollToEl(pane);
+  });
+  // a tile's limit button opens that row in the week pane
+  host.querySelectorAll(".limgo[data-lim]").forEach(el=>el.addEventListener("click",()=>{
+    LIM_OPEN=el.dataset.lim; if(curIt) WEEK_SEL=curIt.pk+":"+curIt.w.wk; renderPlan(LAST_PLAN);
+  }));
+  // source panels (a race's range, the posture, the paces, the phase components)
+  host.querySelectorAll(".plansrc[data-open]").forEach(el=>el.addEventListener("click",()=>{
+    PLAN_OPEN=PLAN_OPEN===el.dataset.open?null:el.dataset.open; renderPlan(LAST_PLAN);
+  }));
+  // the empty races tile's own way into the drawer
+  const ropen=host.querySelector("#racesOpen");
+  if(ropen) ropen.addEventListener("click",()=>{ RACES_OPEN=true;
+    const rbtn=$("#racesBtn"); if(rbtn) rbtn.setAttribute("aria-expanded","true");
+    renderPlan(LAST_PLAN); });
+  // SH-86 — a limit row opens its source panel: the sentence's why, the rule, the named source
+  // SH-86d — an accordion: one card open at a time within its .limits grid; opening one closes
+  // the others, clicking the open card closes it
+  const limSet=(el,open)=>{
+    el.setAttribute("aria-expanded", String(open));
+    const src=el.nextElementSibling; if(src&&src.classList.contains("limsrc")) src.hidden=!open;
+    const cta=el.querySelector(".limcta"); if(cta) cta.textContent=open?"Hide the source ↑":"Why, and the source →";
+  };
+  host.querySelectorAll("#plan .limhd").forEach(el=>el.addEventListener("click",()=>{
+    const open=el.getAttribute("aria-expanded")==="true";
+    const grid=el.closest(".limits");
+    if(!open&&grid) grid.querySelectorAll(".limhd").forEach(o=>{ if(o!==el) limSet(o,false); });
+    limSet(el,!open);
   }));
   // a completed session → load that day's run into the activity tile + its route map
   host.querySelectorAll(".sline.sclick").forEach(el=>el.addEventListener("click",()=>{
@@ -2312,14 +2624,18 @@ function renderPlan(p){
     loadActivity(+el.dataset.actId);
     scrollToEl(document.getElementById("recent"));
   }));
-  // §CHAIN3 — the chain strip doubles as the race selector: tap a leg to view ITS OWN headline
-  // (objline/FT/verdict above) and its own drift below, persisted across visits.
-  host.querySelectorAll(".chainrace[data-race]").forEach(el=>el.addEventListener("click",()=>{
-    RACE_SEL = el.dataset.race;
-    try{ localStorage.setItem("sh.raceSel", RACE_SEL); }catch(e){}
-    renderPlan(LAST_PLAN);
-    loadDrift();
-  }));
+  // §CHAIN3 — the races tile doubles as the race selector: tap a leg to view ITS OWN headline
+  // and its own drift below, persisted across visits. Enter/Space picks it from the keyboard.
+  host.querySelectorAll(".chainrace[data-race]").forEach(el=>{
+    const pick=()=>{
+      RACE_SEL = el.dataset.race;
+      try{ localStorage.setItem("sh.raceSel", RACE_SEL); }catch(e){}
+      renderPlan(LAST_PLAN);
+      loadDrift();
+    };
+    el.addEventListener("click",pick);
+    el.addEventListener("keydown",ev=>{ if(ev.key==="Enter"||ev.key===" "){ ev.preventDefault(); pick(); } });
+  });
   wireObjActions();
   wireAdjust();
 }
@@ -2335,6 +2651,17 @@ async function loadPlan(){ try{ await refreshPlan(); }catch(e){ tileFail($("#pla
   // "Loading…" for the life of the page. Terminate it HERE rather than also calling loadDrift() at boot:
   // that fired a second /api/plandrift on every healthy load (the plan's heaviest read, twice per page).
   tileFail($("#drift"), "Plan drift", loadDrift, e); } }
+// SH-86 — the races drawer: the button lives in the section heading (outside #plan's re-renders),
+// so its wiring lands once here; renderPlan re-hides or re-shows the drawer from RACES_OPEN.
+{ const rbtn=$("#racesBtn");
+  if(rbtn){
+    if(SH_READONLY) rbtn.textContent="Races";   // the public box edits nothing; the drawer is a list there
+    rbtn.addEventListener("click",()=>{
+      RACES_OPEN=!RACES_OPEN;
+      rbtn.setAttribute("aria-expanded", String(RACES_OPEN));
+      const d=$("#racesDrawer"); if(d) d.hidden=!RACES_OPEN;
+    });
+  } }
 $("#planBtn").addEventListener("click", async ()=>{
   const b=$("#planBtn"); b.disabled=true; const t=b.textContent; b.textContent="Generating…";
   try{
@@ -3560,7 +3887,6 @@ if(_setDlg){
       document.body.dataset.mtab=tab; history.replaceState(null,"",location.pathname);
       document.querySelectorAll(".mnav-btn[data-goto]").forEach(b=>b.setAttribute("aria-current", b.dataset.goto===tab?"page":"false"));
     }
-    if(SH_READONLY||SH_DEMO){ const t=$("#sec-track"), o=$("#objbar"); if(t&&o){ o.after(t); t.open=true; } }
     buildRail();
   }
 })();
@@ -3609,7 +3935,7 @@ if(SH_PAGE==="today"){
     for(const k of Object.keys(p||{})){ const v=p[k]; if(v&&typeof v==="object"&&Array.isArray(v.weeks)) for(const w of v.weeks){ if(w.start&&w.start<=today&&today<=weekEndIso(w.start)) cur=w; } }
     if(!cur||!cur.limits) return;
     const L=cur.limits, b=L.binding, ax=b?L[b]:null;
-    const line = b ? `This week is held by <b>${esc(LIMIT_NAMES[b]||b)}</b>${ax&&ax.ceiling!=null?` — ${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit||""))}`:""}${ax&&ax.basis?` <span class="muted">(${esc(BASIS_NAMES[ax.basis]||ax.basis)})</span>`:""}.` : "No limit binds this week.";
+    const line = b ? `This week is held by <b>${esc(LIMIT_NAMES[b]||b)}</b>${ax&&ax.ceiling!=null?` — ${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit||""))}`:""}${ax&&ax.basis?` <span class="muted">(${esc((BASIS[ax.basis]||{}).label||ax.basis)})</span>`:""}.` : "No limit binds this week.";
     let lines = `<div class="whyline"><b>Binding limit:</b> ${line}</div>`;
     // §C (0.59.0) — the judged down week's read, when this is one
     const dl=cur.deload;

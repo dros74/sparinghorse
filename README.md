@@ -71,8 +71,8 @@ everything.
   pace against an aerobic-threshold (LT1) bar, with an HR-redline backstop either way.
 - **Readiness.** A daily green/amber/red verdict that flags stop-the-run and cardiac-type symptoms.
 - **Today.** A one-screen daily surface (`/today`): the readiness verdict, the session, the check-in and
-  why this session. The installed app starts there. The dashboard is plan-first, with the analytics
-  collapsed until opened (remembered per device).
+  why this session. The installed app starts there. The dashboard opens with today's readiness, then the
+  plan, with the analytics collapsed until opened (remembered per device).
 - **Reads of your running.** The latest run with stats, a per-point trace (pace, HR, cadence,
   elevation), an HR-zone band and a route map. A read-back line names what the recorded run was: reps,
   strides, a progression. A run browser (`/runs`) opens any past run the same way. A durability tracker
@@ -340,8 +340,9 @@ single mileage ratio cannot see. Each brake only ever reduces a week; the conser
 byte-identical with them dormant.
 
 - **Long-run-jump cap.** The single longest run never grows more than **+10 %** over your longest of the
-  previous four weeks. In the Aarhus/Nielsen cohort (n≈5000), sharp long-run jumps predicted injury where
-  weekly-mileage jumps did not; the +10 % figure is our own conservative choice.
+  previous four weeks. Frandsen et al. 2025 followed 5,200 runners for 18 months: a single run more than 10 %
+  longer than the longest run of the previous 30 days raised the rate of overuse injury, and week-to-week
+  volume changes did not predict it. The +10 % is the study's own threshold.
 - **Biomechanical load (`eq_km`).** A pace-weighted "damage-equivalent" distance (fast kilometres count
   for several easy ones), following the tissue-damage axis Davis's biomechanical-load work highlights. A
   soft brake trims a week's fast work when that damage proxy spikes, even if mileage looks fine. The
@@ -373,7 +374,7 @@ regime keeps its gentler classic mix; only the tags show there.
 > **Scientific basis.** The safety model is informed by John Davis
 > ([*Marathon Excellence for Everyone*](https://runningwritings.com)) and builds on primary work by
 > [Gabbett](https://doi.org/10.1136/bjsports-2015-095788) (ACWR),
-> [Nielsen et al.](https://doi.org/10.2519/jospt.2014.5164) (the Aarhus load-change injury cohort),
+> [Frandsen et al.](https://doi.org/10.1136/bjsports-2024-109380) (the Aarhus 5,200-runner cohort, long-run spikes),
 > Friel (*Total Heart Rate Training*, %LTHR zones), Daniels (*Daniels' Running Formula*, VDOT pacing;
 > with Gilbert, *Oxygen Power*, the oxygen-cost tables behind it) and
 > [Jones](https://doi.org/10.1113/JP284205) (physiological resilience). The specific thresholds (the

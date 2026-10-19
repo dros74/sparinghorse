@@ -377,8 +377,11 @@ def cadence_is_halved(source):
 # (the route map, the pace/HR profile, the §RD read-back) went quietly blank on the next run.
 # Fields not recorded for an activity are IGNORED by the server rather than rejected, so one list
 # serves every device — `elevation_corrected` is absent from a Suunto upload and costs nothing.
+# SH-39 — the belt's running dynamics (ground contact time, vertical oscillation) ride the same
+# rule: a wrist-only run simply has no such stream, and the ask costs nothing there.
 RD_STREAM_FIELDS = ("distance", "time", "heart_rate", "cadence",
-                    "elevation_corrected", "elevation_original", "latitude", "longitude")
+                    "elevation_corrected", "elevation_original", "latitude", "longitude",
+                    "ground_contact_time", "vertical_oscillation")
 RD_STREAM_POINTS = 1000          # the documented maximum; the server trims to its own budget
 
 
@@ -403,19 +406,23 @@ def streams_are_final(act):
 
 
 # Bump when activity_profile's shape changes (new channel etc.) so cached profiles in trackcache
-# that predate the bump are re-fetched instead of served stale. v2 = elevation; v3 = route path (lat/long).
-PROFILE_VERSION = 3
+# that predate the bump are re-fetched instead of served stale. v2 = elevation; v3 = route path
+# (lat/long); v4 = belt running dynamics (GCT/VO).
+PROFILE_VERSION = 4
 
 
 def activity_profile(activity_id, n=120):
     """Downsampled pace/HR/cadence/elevation-vs-distance profile for one activity (via MCP streams).
-    Returns {dist[], pace[], hr[], cadence[], elevation[], hr_avg, v, has_*} — pace in sec/km,
-    dist in km, elevation in metres."""
+    Returns {dist[], pace[], hr[], cadence[], elevation[], path[], gct[], vo[], hr_avg, v, has_*} —
+    pace in sec/km, dist in km, elevation in metres, gct in ms, vo in cm (SH-39 belt dynamics)."""
     act = activity_details(activity_id)
     cad_mult = 2 if cadence_is_halved(act.get("source")) else 1
     s = act.get("streams") or {}
     dist, tim, hr, cad = (s.get("distance") or [], s.get("time") or [],
                           s.get("heart_rate") or [], s.get("cadence") or [])
+    # SH-39 — the belt's running dynamics: ground contact time (ms) and vertical oscillation (mm,
+    # normalised to cm below). Absent streams on wrist runs leave both lists empty.
+    gcts, vos = s.get("ground_contact_time") or [], s.get("vertical_oscillation") or []
     # DEM/barometric-corrected altitude first, raw GPS altitude as fallback (metres). Pick the first
     # channel that actually carries values — a present-but-all-null list (no DEM correction happened)
     # must not shadow a populated original.
@@ -424,12 +431,14 @@ def activity_profile(activity_id, n=120):
     lat, lon = s.get("latitude") or [], s.get("longitude") or []   # GPS track for the route map
     if not dist or not tim or len(dist) != len(tim):
         return {"dist": [], "pace": [], "hr": [], "cadence": [], "elevation": [], "path": [],
+                "gct": [], "vo": [], "has_gct": False, "has_vo": False,
                 "has_gps": False, "hr_avg": act.get("average_heart_rate"), "v": PROFILE_VERSION,
                 "streams_final": streams_are_final(act)}
     total = dist[-1] or 1
     km = total > 100  # distance likely in metres if it exceeds 100 → normalise to km
     scale = 1000.0 if km else 1.0
     out_d, out_p, out_h, out_c, out_e, out_path = [], [], [], [], [], []
+    out_g, out_v = [], []
     for i in range(n):
         target = total * i / (n - 1)
         # nearest index by distance
@@ -444,13 +453,21 @@ def activity_profile(activity_id, n=120):
         cv = cad[j] if j < len(cad) else None
         out_c.append(cv * cad_mult if cv is not None else None)
         out_e.append(round(elev[j], 1) if j < len(elev) and elev[j] is not None else None)
+        # a stopped/walking sample logs 0 → None, like the other channels' gaps
+        gv = gcts[j] if j < len(gcts) else None
+        out_g.append(int(gv) if gv is not None and gv > 0 else None)
+        vv = vos[j] if j < len(vos) else None
+        out_v.append(round(vv / 10, 1) if vv is not None and vv > 0 else None)
         if j < len(lat) and j < len(lon) and lat[j] is not None and lon[j] is not None:
             out_path.append([round(lat[j], 5), round(lon[j], 5)])   # ~1 m precision, small payload
     return {"dist": out_d, "pace": out_p, "hr": out_h, "cadence": out_c, "elevation": out_e,
-            "path": out_path, "hr_avg": act.get("average_heart_rate"), "v": PROFILE_VERSION,
+            "path": out_path, "gct": out_g, "vo": out_v,
+            "hr_avg": act.get("average_heart_rate"), "v": PROFILE_VERSION,
             "has_pace": any(p for p in out_p), "has_hr": any(h for h in out_h),
             "has_cadence": any(c for c in out_c),
             "has_elevation": any(e is not None for e in out_e),
+            "has_gct": any(g is not None for g in out_g),
+            "has_vo": any(v is not None for v in out_v),
             "has_gps": len({tuple(p) for p in out_path}) >= 2}   # ≥2 distinct points = a real route
 
 
@@ -1532,6 +1549,7 @@ SELECT
   json_extract(a.raw,'$.cadence')               AS cadence,
   json_extract(a.raw,'$.stride_length')         AS stride,
   json_extract(a.raw,'$.aerobic_decoupling_pace') AS decoupling,
+  json_extract(a.raw,'$.created_at')            AS raw_created_at,   -- unit key for decoupling_pct(); popped by run_metrics
   json_extract(a.raw,'$.vo2max')                AS run_vo2max,
   json_extract(a.raw,'$.subjective_feeling')    AS feel,
   json_extract(a.raw,'$.is_night')              AS is_night,
@@ -3809,7 +3827,7 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                        "hr_avg": hr_avg,
                        "hr_pct": round(hr_avg / hrmax * 100) if hrmax else None,
                        "gap_pace": gap_pace, "te": te, "feeling": raw.get("subjective_feeling"),
-                       "decoupling": raw.get("aerobic_decoupling_pace"),    # context only (units TBD)
+                       "decoupling": decoupling_pct(raw.get("aerobic_decoupling_pace"), raw.get("created_at")),    # context only; percent
                        "verdict": verdict, "confidence": conf, "pace_verdict": pace_verdict}
             if len(g) > 1:                                # §SJ — surface the join (UI chip + honesty)
                 row_out["joined"] = len(g)
@@ -4029,6 +4047,8 @@ def run_metrics(db, route_id=None, days=None, limit=None, with_projection=True):
     if limit is not None:
         sql += " LIMIT ?"; args.append(int(limit))
     rows = [dict(r) for r in db.execute(sql, args).fetchall()]
+    for r in rows:                       # decoupling is PERCENT from here on (Runalyze changed units, see decoupling_pct)
+        r["decoupling"] = decoupling_pct(r["decoupling"], r.pop("raw_created_at", None))
     if with_projection and rows:
         proj = {h["date"]: h for h in reconstruct_history(db)}     # one reconstruction, keyed by date
         for r in rows:
@@ -4182,10 +4202,29 @@ def run_metrics_analysis(db):
 DURABILITY_MIN_KM = 16.0       # a run long enough for economy decay to manifest (durability is a long-run trait)
 DURABILITY_GOOD_RAW = 500.0    # decoupling below this on a long run ≈ durable (economy held); Runalyze raw units
 DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the distance
-# Runalyze stores aerobic_decoupling_pace in raw units ≈ percentage ×100 (the athlete's median long-run ≈540 ≈5.4%; the athlete's
-# last marathon ≈1740 ≈17.4% w/ feel=1) — the ×100→% is INFERRED (units officially TBD upstream), so the RAW
-# value is the source of truth and % is only a reading aid.
+# Runalyze changed the unit of aerobic_decoupling_pace on 31 Jul 2025: activities created before it carry
+# percent ×100 (560.0 = 5.6 %; the athlete's last marathon ≈1740 ≈17.4 %), activities created from it on carry
+# plain percent (6.3 = 6.3 %). decoupling_pct() normalises both to percent; the "raw" fields of the durability
+# read are the app's OWN ×100 reading of that percent (decoupling_raw = pct × DURABILITY_PCT_SCALE), so the
+# thresholds above and the trend maths (±100) stay as they were.
 DURABILITY_PCT_SCALE = 100.0
+# Epoch seconds of 2025-07-31T00:00:00Z (1753920000) — the unit change. Found on the athlete's history: all
+# 1,198 rows with raw.created_at before it are multiples of 10 (×100 values), 0 of the 217 rows from it on has
+# |v| >= 50, and no activity breaks the rule.
+import calendar as _calendar
+RUNALYZE_DECOUPLING_PCT_FROM = _calendar.timegm((2025, 7, 31, 0, 0, 0))
+
+
+def decoupling_pct(value, created_at=None):
+    """Runalyze aerobic_decoupling_pace in PERCENT, whichever unit the activity was stored in (None stays None).
+    Keyed on raw.created_at (epoch s); without it (fixtures, the demo seed) on magnitude."""
+    if value is None:
+        return None
+    if created_at is not None:
+        return value / 100.0 if created_at < RUNALYZE_DECOUPLING_PCT_FROM else value
+    # No created_at: a real long-run decoupling in percent stays well under 50, while a ×100 value of a
+    # >= 0.5 % fade is >= 50, so the magnitude tells the two units apart.
+    return value / 100.0 if abs(value) >= 50 else value
 
 
 EFFICIENCY_MIN_KM = 4.0        # below this a run is a shakeout — warm-up drag dominates the average HR
@@ -4315,9 +4354,9 @@ def durability_signal(db, recent_n=6):
     rows = run_metrics(db, with_projection=False)      # newest first; projection not needed for this read
     longs = [r for r in rows
              if (r.get("km") or 0) >= DURABILITY_MIN_KM and r.get("decoupling") is not None]
-    def _pct(v): return round(v / DURABILITY_PCT_SCALE, 1)
-    series = [{"date": r["date"], "km": round(r["km"], 1), "decoupling_raw": round(r["decoupling"]),
-               "decoupling_pct": _pct(r["decoupling"]), "hr": r["hr"], "feel": r["feel"]}
+    def _pct(v): return round(v / DURABILITY_PCT_SCALE, 1)       # the app's ×100 reading -> percent
+    series = [{"date": r["date"], "km": round(r["km"], 1), "decoupling_raw": round(r["decoupling"] * DURABILITY_PCT_SCALE),
+               "decoupling_pct": round(r["decoupling"], 1), "hr": r["hr"], "feel": r["feel"]}
               for r in longs]
     if not series:
         return {"ok": False, "min_km": DURABILITY_MIN_KM,
@@ -4355,8 +4394,8 @@ def durability_signal(db, recent_n=6):
             "pace:HR drift). Lower = more durable.",
             "Decoupling RISES with distance, so compare like distances; the trend is void when the distance "
             "mix shifts. Exploratory.",
-            "Decoupling units are Runalyze-raw (≈ percentage ×100, INFERRED — officially TBD upstream); the "
-            "raw value is the source of truth, the % is a reading aid.",
+            "Runalyze stores decoupling as percent ×100 before 31 Jul 2025 and as plain percent after; both are "
+            "normalised to percent, and the raw figure here is that percent ×100.",
         ],
     }
 
@@ -7616,6 +7655,9 @@ _PV_WITHHELD = {
     "drift.counterfactual.reason",           # the regime rationale names the athlete's history
     "healthz.last_sync", "healthz.last_ok", "healthz.db_unwritable",
     "profile.hr", "profile.hr_avg", "profile.hrmax", "profile.hrzones", "profile.path",
+    "activity.gct_ms", "activity.vo_cm",       # SH-39 (2026-10-19) — belt running dynamics,
+    "profile.gct", "profile.vo", "profile.has_gct", "profile.has_vo",
+    #                                          private while publishing them is undecided
 
     # SH-10 (2026-09-14) — classified as withheld: the allowlist already dropped these; listed so a
     # field in neither list fails det/public-view-coverage-all. Review before publishing any of them.
@@ -8143,9 +8185,18 @@ def api_plandrift():
             obj = dict(past_a)
     race_date = _date(obj["date"]) if obj.get("date") else None
     goal = obj if obj.get("date") else None          # tie the founding road to THIS race (None = no race)
+    # SH-85 (the ruling of 2026-10-19) — a picked EARLIER leg's road starts where its chain did:
+    # only plans that also headline the current plan's own (final) race count. Without this a leg
+    # anchored on the first plan that ever mentioned it (June, an engine since rebuilt), a road the
+    # chain never ran on. None for the headline itself, a single-A build, a race-less plan and the
+    # §6s reckoning (whose `current` carries no objective).
+    head_goal = current.get("objective") or {}
+    head_goal = head_goal if (goal and head_goal.get("date") and not _same_race(head_goal, goal)) else None
 
     def _this_goal(p):                               # §GM — the race, not the calendar cell it sits on
         if goal:
+            if head_goal and not _same_race(p.get("objective") or {}, head_goal):
+                return False                         # SH-85 — a leg's road starts with its chain
             # §CHAIN3 — a plan is this race's road when the race is its OWN objective (as before) OR
             # sits somewhere in its chain (a plan headlining race 2 still carries race 1's own leg).
             return _plan_goal_view(p, goal) is not None
@@ -8222,9 +8273,12 @@ def api_plandrift():
     #   §CHAIN3 — read through `_plan_goal_view` so a picked leg of the chain reads that leg's OWN
     #   projected_ctl, not the plan's headline one; a plan that never mentions this race contributes
     #   nothing (same shape as before for a single-A build, whose only leg IS the headline) —
+    #   SH-85 — `_this_goal` keeps the series to the same road the founding plan anchors on. —
     byweek = {}
     for r in rows:
         p = json.loads(r["plan"])
+        if not _this_goal(p):
+            continue
         gv = _plan_goal_view(p, goal)
         pc = (gv or {}).get("projected_ctl")
         if pc is None:
@@ -8292,8 +8346,14 @@ def api_plandrift():
     cur_actual = [p for p in cur_dist if p.get("kind") == "actual"]
     vol_found, vol_now = _at_today(init_dist, "cum"), (cur_actual[-1]["cum"] if cur_actual else None)
     fit_found, fit_now = _at_today(init_ctl, "ctl"), (actual_ctl[-1]["ctl"] if actual_ctl else None)
-    race_found = (anchor.get("feasibility") or {}).get("projected_ctl")    # same founding road
-    race_now = (current.get("feasibility") or {}).get("projected_ctl")
+    # SH-85 — the race axis reads the SELECTED race's own numbers through `_plan_goal_view`
+    # (§CHAIN3), as the outcome series does: a plan's own `feasibility` is its headline (last)
+    # race, so a picked earlier leg printed its name over the final race's projection.
+    # Race-less (no goal): the plan's own, as before.
+    race_view_found = (_plan_goal_view(anchor, goal) if goal else anchor.get("feasibility")) or {}
+    race_view_now = (_plan_goal_view(current, goal) if goal else current.get("feasibility")) or {}
+    race_found = race_view_found.get("projected_ctl")    # same founding road
+    race_now = race_view_now.get("projected_ctl")
 
     # CTL has a t0 seam the cumulative-km road doesn't: the plan's curve seeds from Runalyze's
     # snapshot (`shape.ctl`) while the actual curve is locally reconstructed — they start a few
@@ -8408,14 +8468,15 @@ def api_plandrift():
         verdict = "Score open." if not READONLY else "Too early to call."
         headline = f"The rebuild is {PHRASE[(fit_state, vol_state)]}.{tail}{peak_tail} " + verdict
 
+    race_weeks = (weeks_until(obj["date"], today) if obj.get("date") else obj.get("weeks_away"))
     scorecard = {
         "open": not is_current,
         "settled": settled,
-        "weeks_to_go": obj.get("weeks_away"),
+        "weeks_to_go": race_weeks,
         "volume":  {"founding": vol_found, "now": vol_now, "gap": vol_gap, "state": vol_state},
         "fitness": {"founding": fit_found, "now": fit_now, "gap": fit_gap, "state": fit_state},
         "race":    {"founding": race_found, "now": race_now, "gap": race_gap, "trend": race_trend,
-                    "caveat": bool(dup_count), "verdict": (current.get("feasibility") or {}).get("verdict")},
+                    "caveat": bool(dup_count), "verdict": race_view_now.get("verdict")},
         "chain":   chain_drift if len(chain_drift) > 1 else None,   # §6q/#3 — per-peak drift (multi-A only)
         "reckoning": reckoning,     # §6s — present only once the race is run (settled)
         "headline": headline,
@@ -8470,8 +8531,7 @@ def api_plandrift():
         anchor={"for_date": anchor_row["for_date"], "created_at": anchor_row["created_at"],
                 "versions": len(rows), "is_current": is_current},
         race={"label": obj.get("label"), "date": obj.get("date"),
-              "weeks_away": (weeks_until(obj["date"], today) if obj.get("date")
-                             else obj.get("weeks_away"))},
+              "weeks_away": race_weeks},
         races=([{"label": c.get("label"), "date": c.get("date")} for c in _chain_now]
                if len(_chain_now) > 1 else []),
         distance={"initial": init_dist, "current": cur_dist},
@@ -9098,6 +9158,9 @@ def _activity_payload(db, a):
     cad = a.get("cadence")
     if cad and cadence_is_halved(a.get("source")):  # Suunto logs one-leg cadence → ×2 for spm
         cad *= 2
+    # SH-39 — belt running dynamics straight off the REST payload: ground contact (ms) and vertical
+    # oscillation (mm → cm); wrist runs carry neither key, a non-positive read is no read.
+    gct, vo = a.get("groundcontact"), a.get("vertical_oscillation")
     payload = {
         "id": a.get("id"), "sport": (a.get("sport") or {}).get("name"),
         "date_time": a.get("date_time"), "date": (a.get("date_time") or "")[:10],
@@ -9106,6 +9169,8 @@ def _activity_payload(db, a):
         "pace_min_km": pace, "hr_avg": a.get("hr_avg"), "hr_max": a.get("hr_max"),
         "trimp": a.get("trimp"), "elevation_up": a.get("elevation_up"),
         "cadence": cad,
+        "gct_ms": gct if gct and gct > 0 else None,
+        "vo_cm": round(vo / 10, 1) if vo and vo > 0 else None,
         "ignored": bool(db.execute("SELECT 1 FROM ignored_activities WHERE id=?",
                                    (a.get("id"),)).fetchone()),
     }
@@ -10648,6 +10713,7 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
                 # It RISES with distance and FALLS as the athlete adapts, which is exactly the
                 # confound that card spends three caveats on: the demo's long runs get longer AND
                 # decouple less, so the chart shows the two moving against each other on real axes.
+                # ×100 values with no created_at: decoupling_pct() reads them by magnitude
                 extra["aerobic_decoupling_pace"] = round(max(
                     120.0, DEMO_DECOUP_BASE - DEMO_DECOUP_GAIN * prog
                     + DEMO_DECOUP_PER_KM * (km - DURABILITY_MIN_KM) + rnd.uniform(-22, 22)), 1)
@@ -10963,7 +11029,8 @@ def _demo_track(aid, km, duration_s, hr_avg):
     return {"v": PROFILE_VERSION, "has_gps": True, "has_pace": True, "has_hr": True,
             "has_elevation": True, "has_cadence": True, "hr_avg": hr0,
             "path": path, "dist": dist, "pace": pace, "hr": hr,
-            "elevation": elev, "cadence": cad, "streams_final": True}
+            "elevation": elev, "cadence": cad, "streams_final": True,
+            "gct": [], "vo": [], "has_gct": False, "has_vo": False}   # SH-39: the demo wears no belt
 
 
 def demo_seed_tracks(db):

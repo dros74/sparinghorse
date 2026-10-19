@@ -81,14 +81,155 @@ async function runFull() {
   const cd2 = await page.evaluate(() => document.querySelector('#objbar #objcount')?.textContent ?? null);
   ok(`objective bar countdown present and ticking ("${cd1}" → "${cd2}")`,
      cd1 !== null && /· in /.test(cd1) && cd2 !== null && cd2 !== cd1);
-  ok('plan phase bar rendered', await page.locator('#plan .phaseseg').count() >= 1);
-  // 0.60.1 — the limits block must span the week card, not fall into its 30px number gutter (a
-  // real defect the owner saw first: every word on its own line). Open the first one and measure it.
-  await page.evaluate(() => { const d = document.querySelector('#plan details.limits'); if (d) d.open = true; });
-  const limBox = await page.locator('#plan details.limits').first().boundingBox().catch(() => null);
-  const wkBox = await page.locator('#plan .wk').first().boundingBox().catch(() => null);
+  ok('the road renders (phase band + week bars)', await page.locator('#plan .road .phaseseg').count() >= 1 && await page.locator('#plan .road .weekseg').count() >= 1);
+  // 0.60.1 — the limits block must keep its share of the week card, not fall into its 30px number
+  // gutter (a real defect the owner saw first: every word on its own line). SH-86c: the block is a
+  // grid of cards spanning the week card's full width again (the two-column days/limits split is
+  // gone), so it is measured against the card itself. Then open a limit's source panel (the reason
+  // and the named study behind the number).
+  const limBox = await page.locator('#plan .weekpane .limits').first().boundingBox().catch(() => null);
+  const wkBox = await page.locator('#plan .weekpane .wk').first().boundingBox().catch(() => null);
   ok(`the limits block spans the week card (${limBox ? Math.round(limBox.width) : '—'} of ${wkBox ? Math.round(wkBox.width) : '—'} px)`,
      !!(limBox && wkBox && limBox.width > wkBox.width * 0.8));
+  const firstLim = page.locator('#plan .weekpane .limrow').first();
+  // SH-86c (c) — the other cards' closed heights, captured before the panel opens under the row
+  const limClosedHs = await page.evaluate(() =>
+    [...document.querySelectorAll('#plan .weekpane .limhd')].map(e => Math.round(e.getBoundingClientRect().height)));
+  await firstLim.locator('.limhd').click();
+  const srcPanel = firstLim.locator('.limsrc');
+  const srcTxt = await srcPanel.textContent().catch(() => '');   // textContent, not innerText: the labels render uppercased
+  ok('a limit opens its source panel (reason + named source)',
+     await srcPanel.isVisible().catch(() => false) && (srcTxt || '').includes('Where the number comes from'));
+  const limOpenState = await page.evaluate(() => {
+    const src = document.querySelector('#plan .weekpane .limsrc:not([hidden])');
+    const lims = document.querySelector('#plan .weekpane .limits');
+    return { hs: [...document.querySelectorAll('#plan .weekpane .limhd')].map(e => Math.round(e.getBoundingClientRect().height)),
+             srcW: src ? src.getBoundingClientRect().width : 0,
+             limsW: lims ? lims.getBoundingClientRect().width : 0 };
+  });
+  ok(`an open limit source leaves the row's other cards at their closed height (${limClosedHs} → ${limOpenState.hs})`,
+     limOpenState.hs.length === limClosedHs.length && limOpenState.hs.every((h, i) => Math.abs(h - limClosedHs[i]) <= 1));
+  ok(`the open limit source spans the limits grid (${Math.round(limOpenState.srcW)} of ${Math.round(limOpenState.limsW)} px)`,
+     limOpenState.limsW > 0 && limOpenState.srcW > limOpenState.limsW * 0.95);
+  const lsRow = page.locator('#plan .weekpane .limhd[data-lim="long_step"]').first();
+  if (await lsRow.count()) {
+    await lsRow.click();
+    const lsTxt = await lsRow.locator('xpath=following-sibling::div[1]').textContent().catch(() => '');
+    ok('the long-run step names its study (Frandsen)', (lsTxt || '').includes('Frandsen'));
+  }
+  // SH-86d — the limit cards are an accordion: opening a second card closes the first; clicking the
+  // open card closes it
+  const limAcc = async () => page.evaluate(() => ({
+    open: document.querySelectorAll('#plan .weekpane .limits .limhd[aria-expanded="true"]').length,
+    shown: [...document.querySelectorAll('#plan .weekpane .limits .limsrc')].filter(e => !e.hidden && e.offsetParent).length }));
+  const accCards = page.locator('#plan .weekpane .limits .limhd');
+  if (await accCards.count() >= 2) {
+    await accCards.nth(0).click();
+    await accCards.nth(1).click();
+    const two = await limAcc();
+    ok(`opening a second limit card leaves exactly one open (${two.open} expanded, ${two.shown} source shown)`, two.open === 1 && two.shown === 1);
+    await accCards.nth(1).click();
+    const none = await limAcc();
+    ok(`clicking the open limit card closes it (${none.open} expanded, ${none.shown} source shown)`, none.open === 0 && none.shown === 0);
+  }
+  // SH-86d — the console order: readiness, then the latest run, then the plan, then the load
+  const secOrder = await page.evaluate(() => {
+    const ids = ['#sec-readiness', '#sec-recent', '#sec-plan', '#sec-load'];
+    const els = ids.map(i => document.querySelector(i));
+    const dom = els.every((e, k) => k === 0 || !!(els[k - 1].compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING));
+    const ys = els.map(e => e ? e.getBoundingClientRect().top + window.scrollY : -1);
+    return { dom, ys: ys.map(Math.round), asc: ys.every((y, k) => k === 0 || y > ys[k - 1]) };
+  });
+  ok(`the console reads readiness, latest run, plan, load (DOM ${secOrder.dom}, y ${secOrder.ys})`, secOrder.dom && secOrder.asc);
+  // SH-86d — the road: every layer is one grid, so a band segment's edges are its first and last bar's
+  // edges; each race flag's line and the today stem land inside their own week's bar
+  const roadMeasure = () => page.evaluate(() => {
+    const bars = [...document.querySelectorAll('#plan .road .weekseg')].map(b => b.getBoundingClientRect());
+    const segs = [...document.querySelectorAll('#plan .road .phaseseg')];
+    let k = 0, maxEdge = 0;
+    for (const sg of segs) {
+      const span = parseInt(sg.style.gridColumn.replace('span', '')) || 1, r = sg.getBoundingClientRect();
+      maxEdge = Math.max(maxEdge, Math.abs(r.left - bars[k].left), Math.abs(r.right - bars[k + span - 1].right));
+      k += span;
+    }
+    const inBar = (el, i) => { const r = el.getBoundingClientRect(), b = bars[i];
+      return r.left >= b.left - 0.5 && r.left <= b.right + 0.5; };
+    const lines = [...document.querySelectorAll('#plan .road .roadflagcell')].map(c =>
+      inBar(c.querySelector('.roadline'), parseInt(c.style.gridColumn) - 1));
+    const tc = document.querySelector('#plan .road .roadtodaycell'), stem = document.querySelector('#plan .road .roadstem');
+    return { n: bars.length, covered: k, segs: segs.length, maxEdge, lines,
+             stem: tc && stem ? inBar(stem, parseInt(tc.style.gridColumn) - 1) : null,
+             cur: !tc || document.querySelectorAll('#plan .road .weekseg')[parseInt(tc.style.gridColumn) - 1].classList.contains('wscur') };
+  });
+  for (const [label, w] of [['desktop', 1280], ['phone', 390]]) {
+    await page.setViewportSize({ width: w, height: w === 390 ? 844 : 1700 });
+    await page.waitForTimeout(300);
+    const rm = await roadMeasure();
+    ok(`the road's band segments share the bars' edges at ${label} (${rm.segs} segments over ${rm.covered}/${rm.n} weeks, worst edge ${rm.maxEdge.toFixed(2)}px)`,
+       rm.covered === rm.n && rm.maxEdge <= 1);
+    ok(`every race flag's line lands inside its week's bar at ${label} (${rm.lines.length} flags)`, rm.lines.length >= 1 && rm.lines.every(Boolean));
+    ok(`the today stem lands inside the current week's bar at ${label}`, rm.stem === true && rm.cur);
+  }
+  await page.setViewportSize({ width: 1280, height: 1700 });
+  await page.waitForTimeout(300);
+  // SH-86 slice 2 — the tiles, the why-button landing in the week pane, the races tile's ranges,
+  // and the AI controls gone from the section
+  ok('the plan section opens on three tiles', await page.locator('#plan .plantile').count() === 3);
+  const holdKey = await page.evaluate(() => document.querySelector('#plan .plantile .limgo')?.dataset.lim || null);
+  ok('the limits tile names a lead limit', !!holdKey);
+  if (holdKey) {
+    await page.locator('#plan .plantile .limgo').first().click();
+    await page.waitForTimeout(300);
+    const opened = await page.evaluate(k => {
+      const el = document.querySelector(`#weekpane .limhd[data-lim="${k}"]`);
+      const src = el && el.nextElementSibling;
+      return { open: el && el.getAttribute('aria-expanded'),
+               shown: !!(src && src.classList.contains('limsrc') && !src.hidden) };
+    }, holdKey);
+    ok(`the tile's why-button opens that limit in the week pane (${holdKey}: expanded ${opened.open}, source shown ${opened.shown})`,
+       opened.open === 'true' && opened.shown);
+  }
+  const raceBands = await page.evaluate(() => ({
+    rows: document.querySelectorAll('#plan .racetile .racerow').length,
+    bands: document.querySelectorAll('#plan .racetile .bandbar .bandrange').length }));
+  ok(`the races tile shows one finish range per race (${raceBands.bands} of ${raceBands.rows})`,
+     raceBands.rows >= 1 && raceBands.bands === raceBands.rows);
+  ok('no AI controls in the plan section', await page.evaluate(() =>
+    !document.querySelector('#plan #ao_parse') && !document.querySelector('#plan #adj_propose') && !document.querySelector('#plan #explainBtn')));
+
+  // SH-86c (b) — a race's source opens BELOW the tiles as #tilePanel, full width, leaving the
+  // three tiles at their closed heights (the panel used to stretch its own tile's grid row)
+  const tilesBefore = await page.evaluate(() =>
+    [...document.querySelectorAll('#plan .plantiles > .plantile')].map(e => Math.round(e.getBoundingClientRect().height)));
+  await page.locator('#plan .racetile .plansrc[data-open^="race:"]').first().click();
+  await page.waitForTimeout(300);
+  const raceOpen = await page.evaluate(() => {
+    const panel = document.querySelector('#tilePanel');
+    const tiles = [...document.querySelectorAll('#plan .plantiles > .plantile:not(.tilepanel)')];
+    const grid = document.querySelector('#plan .plantiles');
+    const pr = panel && panel.getBoundingClientRect(), gr = grid && grid.getBoundingClientRect();
+    return { inTile: !!document.querySelector('.racetile #tilePanel'),
+             hs: tiles.map(e => Math.round(e.getBoundingClientRect().height)),
+             below: !!(pr && tiles.length) && pr.top >= Math.max(...tiles.map(e => e.getBoundingClientRect().bottom)) - 1,
+             panelW: pr ? pr.width : 0, gridW: gr ? gr.width : 0,
+             hasClose: !!(panel && panel.querySelector('.plansrc[aria-controls="tilePanel"]')) };
+  });
+  ok(`a race's source opens below the tiles, not inside one (panel ${Math.round(raceOpen.panelW)} of grid ${Math.round(raceOpen.gridW)} px)`,
+     !raceOpen.inTile && raceOpen.below && raceOpen.panelW > raceOpen.gridW * 0.95 && raceOpen.hasClose);
+  ok(`opening it leaves the three tiles at their heights (${tilesBefore} → ${raceOpen.hs})`,
+     raceOpen.hs.length === 3 && raceOpen.hs.every((h, i) => Math.abs(h - tilesBefore[i]) <= 1));
+  await page.locator('#tilePanel .plansrc[data-open^="race:"]').click();   // the panel's own Hide button
+  await page.waitForTimeout(300);
+  ok("the panel's Hide button closes it (three tiles again)",
+     await page.locator('#tilePanel').count() === 0 && await page.locator('#plan .plantiles > .plantile').count() === 3);
+
+  // SH-86c (d) — the posture button fills the strip's row
+  const stripW = await page.evaluate(() => {
+    const b = document.querySelector('#plan .stripbtn'), s = document.querySelector('#plan .planstrip');
+    return b && s ? { b: b.getBoundingClientRect().width, s: s.getBoundingClientRect().width } : null;
+  });
+  ok(`the posture button fills its strip (${stripW ? Math.round(stripW.b) : '—'} of ${stripW ? Math.round(stripW.s) : '—'} px)`,
+     !!stripW && Math.abs(stripW.b - stripW.s) <= 2);
 
   // first-run card must be HIDDEN on a configured instance (token-or-data + objective)
   ok('first-run card hidden when configured', await page.locator('#firstrun .firstrun').count() === 0);
@@ -188,6 +329,9 @@ async function runFull() {
   ok('effort-discipline table rendered', await page.locator('#effort table.efftbl tbody tr').count() >= 1);
 
   // ── A|B|C priority selector (#62): promote the B objective → re-periodize ──
+  // SH-86 — the objectives manager lives behind the races drawer now: open it first
+  await page.locator('#racesBtn').click();
+  ok('#racesBtn toggles #racesDrawer', await page.locator('#racesDrawer').isVisible());
   const objNow = await page.evaluate(() => fetch('/api/objectives').then(r => r.json()));
   const bObj = objNow.find(o => o.priority === 'B');
   ok('seeded B objective present', !!bObj);
@@ -365,10 +509,10 @@ async function runFull() {
   ok('no tablist without tabs (the drift control is a group of pressed buttons)',
      aria.orphanTablists === 0);
 
-  // Pressing Enter on a focused week does what clicking it does. This is the whole point: the
-  // delegated handler keys off the ARIA, so every element that takes the role takes the keys.
+  // Pressing Enter on a focused week bar does what clicking it does (SH-86: the road's bars are
+  // real buttons now, so the keys come free; the pane below follows the pick).
   const kb = await page.evaluate(async () => {
-    const segs = [...document.querySelectorAll('.weekseg')];
+    const segs = [...document.querySelectorAll('#plan .road .weekseg')];
     const off = segs.find(s => s.getAttribute('aria-pressed') === 'false');
     if (!off) return { ran: false };
     const pk = off.dataset.pk, wk = off.dataset.wk;
@@ -380,14 +524,13 @@ async function runFull() {
   await page.keyboard.press('Enter');
   await page.waitForTimeout(200);
   const after = await page.evaluate(({ pk, wk }) => {
-    const seg = document.querySelector(`.weekseg[data-pk="${pk}"][data-wk="${wk}"]`);
-    const detail = document.querySelector(`.weekdetail[data-pk="${pk}"][data-wk="${wk}"]`);
+    const seg = document.querySelector(`#plan .road .weekseg[data-pk="${pk}"][data-wk="${wk}"]`);
     return { pressed: seg && seg.getAttribute('aria-pressed'),
-             shown: !!(detail && detail.classList.contains('active')),
-             onlyOne: document.querySelectorAll(`.weekstrip[data-pk="${pk}"] .weekseg[aria-pressed="true"]`).length };
+             title: document.querySelector('#weekpane .wphd h3')?.textContent || '',
+             onlyOne: document.querySelectorAll(`#plan .road .weekseg[aria-pressed="true"]`).length };
   }, { pk: kb.pk, wk: kb.wk });
-  ok(`Enter on a focused week opens it (pressed ${kb.before} → ${after.pressed}, detail shown ${after.shown})`,
-     after.pressed === 'true' && after.shown && after.onlyOne === 1);
+  ok(`Enter on a focused week opens it in the pane (pressed ${kb.before} → ${after.pressed}, pane "${after.title}")`,
+     after.pressed === 'true' && after.title.includes(`week ${kb.wk}`) && after.onlyOne === 1);
 
   // The focus ring itself. Two rules used to blank the outline on the only elements the app had made
   // focusable, so a keyboard user could operate them without ever seeing where they were. Tab for
@@ -728,6 +871,7 @@ async function runFull() {
   // actual rendered .obj row to click, not a stranded offline shell.
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#tiles .tile', { timeout: 15000 });
+  await page.locator('#racesBtn').click();   // SH-86: the objective rows live in the races drawer
   await page.waitForSelector('.obj .x', { timeout: 15000 });
 
   // ── §OBJ3 — remove asks first, and a removed race can be put back within 24h ──────
@@ -849,9 +993,9 @@ async function runFull() {
       oname: document.querySelector('#objbar .oname')?.textContent || '',
       pressedN: pressed.length,
       pressedRace: pressed[0]?.dataset.race || null,
-      objlineRace: document.querySelector('.objline .race')?.textContent || '',
+      pressedName: pressed[0]?.querySelector('.cname')?.textContent || '',   // SH-86: the pressed row IS the header now
       curRows: document.querySelectorAll('.obj.current').length,
-      curRow: document.querySelector('.obj.current')?.innerText || '',
+      curRow: document.querySelector('.obj.current')?.textContent || '',     // the drawer may be closed: textContent, not innerText
     };
   });
   const planWithChain = await page.evaluate(() => fetch('/api/plan').then(r => r.json()));
@@ -861,8 +1005,15 @@ async function runFull() {
      chainState1.oname === near.label);
   ok(`§CHAIN4 exactly one chain leg reads pressed, and it's the next race ahead (${chainState1.pressedN} pressed, data-race=${chainState1.pressedRace})`,
      chainState1.pressedN === 1 && chainState1.pressedRace === near.date);
-  ok(`§CHAIN4 the plan header names the next race ahead too ("${chainState1.objlineRace}" === "${near.label}")`,
-     chainState1.objlineRace === near.label);
+  ok(`§CHAIN4 the races tile's pressed row names the next race ahead too ("${chainState1.pressedName}" === "${near.label}")`,
+     chainState1.pressedName === near.label);
+  // SH-86c (a) — with a chain, the Races tile must still line up with the other two (the old
+  // .chainstrip margin pushed it 10px down): top and bottom edges match within 1px
+  const chainTiles = await page.evaluate(() =>
+    [...document.querySelectorAll('#plan .plantiles > .plantile')].map(e => {
+      const r = e.getBoundingClientRect(); return { top: Math.round(r.top * 10) / 10, bottom: Math.round(r.bottom * 10) / 10 }; }));
+  ok(`the three tiles line up top and bottom with a chain (${chainTiles.map(t => t.top + '/' + t.bottom).join(' · ')})`,
+     chainTiles.length === 3 && chainTiles.every(t => Math.abs(t.top - chainTiles[0].top) <= 1 && Math.abs(t.bottom - chainTiles[0].bottom) <= 1));
   ok(`§CHAIN4 the engine's own headline objective is still the chain's terminal race ("${planWithChain.objective && planWithChain.objective.label}")`,
      !!planWithChain.objective && planWithChain.objective.label === 'Chain probe marathon');
 
@@ -875,7 +1026,7 @@ async function runFull() {
     const pressed = [...document.querySelectorAll('.chainrace[aria-pressed="true"]')];
     return { pressedN: pressed.length, pressedRace: pressed[0]?.dataset.race || null,
              curRows: document.querySelectorAll('.obj.current').length,
-             curRow: document.querySelector('.obj.current')?.innerText || '' };
+             curRow: document.querySelector('.obj.current')?.textContent || '' };
   });
   ok(`§CHAIN4 tapping a leg in the strip still switches the console to it (pressed data-race=${chainState2.pressedRace})`,
      chainState2.pressedN === 1 && chainState2.pressedRace === far);
@@ -1086,9 +1237,9 @@ async function runPublic() {
   await page.locator('#themeBtn').click();   // auto → dark (0.57.0: one button cycles the themes)
   const tc = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
   ok('theme-color follows the switch on the public box too', tc === '#191a1d');
-  ok('0.57.0 — the public box opens on the track record (ledger-first, open)', await page.evaluate(() => {
-    const t = document.getElementById('sec-track'), o = document.getElementById('objbar');
-    return !!t && !!o && t.open === true && o.nextElementSibling === t; }));
+  ok('the public box keeps the track record where the private console has it (after the plan drift; the 0.57.0 ledger-first move is retired)', await page.evaluate(() => {
+    const t = document.getElementById('sec-track'), d = document.getElementById('sec-drift'), o = document.getElementById('objbar');
+    return !!t && !!d && d.nextElementSibling === t && o.nextElementSibling !== t; }));
   await page.screenshot({ path: `${SHOTS}/10-public.png`, fullPage: true });
   await axeCheck('public'); await axeThemes('public');
   // 0.60.2 — the public Today page kept "☀ Today" as its only link (the read-only branch swallowed
@@ -1106,6 +1257,11 @@ async function runPublicFull() {
   // above cannot see an objectives strip, and two review findings live on it: U1 (the public strip
   // used to render live date pickers and remove buttons that answered 403) and S3 (every run was
   // served by id with its time of day; now only the runs the page points at, date only).
+  // SH-86 — the objectives list sits in the races drawer on the public box too ("Races", not
+  // "Edit races"): open it first.
+  ok('the public box labels the drawer control "Races"',
+     (await page.locator('#racesBtn').innerText().catch(() => '')).trim() === 'Races');
+  await page.locator('#racesBtn').click();
   await page.waitForSelector('#plan .objs .obj', { timeout: 15000 });
   ok('U1 — the public objectives strip carries no date pickers',
      await page.locator('input.odate').count() === 0);

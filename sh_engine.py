@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.78.3"
+ENGINE_VERSION = "0.81.3"
 
 
 def _zones_asof(db, date_iso=None):
@@ -1476,7 +1476,7 @@ MESO_MAX_HARD = 4                      # max consecutive near-ceiling building w
 #   week by week; this only lets a fourth near-ceiling week stand before a recovery is forced.
 
 # §PRO9 — long-run progression cap (the Davis/Aarhus injury lever, ENGINE_SCIENCE.md §3.2). Aarhus
-# (n≈5000): a sharp jump in the SINGLE longest run vs the longest of the trailing ~4 weeks predicts
+# (Frandsen et al. 2025, n≈5,200): a sharp jump in the SINGLE longest run vs the longest of the trailing ~4 weeks predicts
 # injury MORE strongly than weekly-mileage jumps — a biomechanical-axis signal ACWR/TRIMP structurally
 # cannot see. HARD cap (my choice): the plan never PRESCRIBES a long run beyond LONG_RUN_STEP_CAP ×
 # the longest run of the trailing LONG_RUN_STEP_WINDOW weeks; the clip only ever REDUCES the long-run
@@ -4204,8 +4204,8 @@ def _hard_share(sessions, total_trimp):
 # page can say WHICH limit held this week and which numbers are inherited from one athlete.
 # Additive: nothing here changes a prescription; every number is read off the values the governors
 # already decided (det/golden-plans is byte-identical on the sessions).
-# `risk` is a READ, not a model: the long-run-step axis is the one with a cohort behind it (Nielsen
-# et al., Aarhus, n≈5000 — sharp longest-run jumps predicted injury where weekly-mileage jumps did
+# `risk` is a READ, not a model: the long-run-step axis is the one with a cohort behind it (Frandsen
+# et al., Aarhus, n≈5,200 — sharp longest-run jumps predicted injury where weekly-mileage jumps did
 # not), and the read says whether this week's long run sits inside that step. No probability is
 # printed: one athlete with one injury event cannot calibrate one, and the plan must not pretend to.
 RETIRE_ABSORB_MAX = 0.80     # §C (0.59.0) — a block absorbed at ≤ this fraction of its bar was not run: the deload is not owed
@@ -4424,7 +4424,7 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
         out["binding"] = min(rel, key=rel.get) if rel else None
     if "long_step" in out:
         ls = out["long_step"]
-        out["risk"] = {"axis": "long_step", "cohort": "Nielsen et al., Aarhus", "n": 5000, "basis": "L",
+        out["risk"] = {"axis": "long_step", "cohort": "Frandsen et al., Aarhus", "n": 5200, "basis": "L",
                        "read": "above the +10 % step" if ls["laid"] > ls["ceiling"] + LIMITS_LAID_TOL else "within the +10 % step"}
         if race_week:                         # the race bout is the goal, not a training step — the axis
             out["risk"]["note"] = "race week: the race distance is the goal, not a step; the long-run read is the longest training bout"

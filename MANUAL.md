@@ -66,7 +66,7 @@ ahead** — past weeks frozen exactly as you lived them, future weeks re-periodi
   nothing is unlocked by adherence bookkeeping.
 
 You operate it by keeping your data synced and your objectives current. The engine does the rest. The
-optional AI layer only narrates and parses; it never overrides the deterministic safety logic.
+optional AI layer only narrates and parses (and no longer appears in the Plan section); it never overrides the deterministic safety logic.
 
 > **What you inherit if you are not the author.** Most of the numbers in the engine are the sport's
 > published consensus (Daniels' pace zones, the acute:chronic band, the 10 % long-run rule, the 80/20
@@ -193,7 +193,7 @@ The standard case: one continuous build whose **final taper week lands on race d
 
 ### Moving a race
 
-Race dates change. Edit the date **in place** on the objective row — the plan re-periodizes onto the new
+Race dates change. Edit the date **in place** in the race calendar (**Edit races** in the Plan heading) — the plan re-periodizes onto the new
 day and the race keeps everything attached to it: its founding road, its **prediction ledger**, and (once
 run) its result. Do *not* add the new date and remove the old one; that is two races, not a moved one, and
 the engine will treat it as a goal change. A race can move by up to 45 days and still be recognised as the
@@ -203,9 +203,9 @@ inheriting this year's history. A race that has already been run or removed cann
 ### The gun time and the countdown
 
 The objective bar at the top of the console shows a **live countdown** to the race it names —
-"74 days, 3 hours, 12 minutes, 20 seconds", ticking every second, following whichever race the chain strip has
-selected. Each race optionally carries a **gun time** (the local start time, `HH:MM`), settable on
-the add form or edited in place on the objective row, next to the date. The countdown targets that
+"74 days, 3 hours, 12 minutes, 20 seconds", ticking every second, following whichever race is selected in the
+Races tile. Each race optionally carries a **gun time** (the local start time, `HH:MM`), settable on
+the add form or edited in place in the race calendar (**Edit races**), next to the date. The countdown targets that
 moment; with no gun time set it counts to midnight of race day. Setting or clearing the gun time is
 display-only — the engine periodizes to the *day*, so no re-plan runs — and a race that has already
 been run takes no edits: its start is a matter of record. The gun time is public (organizer-published
@@ -229,7 +229,7 @@ taper for the earlier race, a re-build *bridge* back up, then the peak and taper
 - **Co-equal** — far enough from the next race to hold a real (short) peak of its own.
 - **Tune-up (subordinate)** — too close to recover from a full peak, so it gets a one-week sharpen instead.
 
-The **A | B | C** selector and the chain strip in the plan tile let you see and steer this. If you set two
+The **A | B | C** selector and the Races tile in the Plan section let you see and steer this. If you set two
 A-races impossibly close, the engine clamps the phases so they can't overrun a race date.
 
 After an earlier race in the chain, the engine first lays a **recovery block** — easy running only,
@@ -239,10 +239,10 @@ left before the next taper: with at least eight weeks free, the engine builds a 
 Base → Build → Peak cycle toward the next race; with less, it falls back to the old short re-build
 bridge straight into a peak and taper.
 
-The chain strip lists each race with its own projected finish. By default the objective bar, the
+The Races tile lists each race with its own projected finish range. By default the objective bar, the
 plan header, the projected finish and the drift view describe the **next race still ahead** — the
 engine's own anchor is the last race in the chain, but the one you are training for comes first.
-Click any race in the strip to read them for that race instead; the choice is remembered in your
+Click any race in the tile (or focus it and press Enter or Space) to read them for that race instead; the choice is remembered in your
 browser and carries across visits, until the chain changes and it no longer names a race that's
 still in it, when the view returns to the next race ahead.
 
@@ -308,8 +308,8 @@ plots the whole ledger, so the projection's own track record stays visible.
 
 ## 6. Reading the dashboard, panel by panel
 
-> The dashboard is plan-first (objective, plan, readiness, latest run), and every analytics panel below is
-> collapsed until you open it (remembered per device). `/today` is the one-screen daily surface: the
+> The dashboard runs in this order: the objective, today's readiness, the latest run, the plan, the training-load
+> trackers and the rest. Every analytics panel below is collapsed until you open it (remembered per device). `/today` is the one-screen daily surface: the
 > readiness verdict, today's session, the check-in and one line saying why this session; the installed app
 > opens there. On wide screens a rail at the left lists the sections. The theme button in the header
 > switches between Daylight and Charcoal; without a saved choice the system setting decides.
@@ -324,12 +324,60 @@ therefore normal on a building week and does not mean a ceiling was broken — t
 published beside it if you want to check.
 
 ### The plan
-A phase bar (Re-base → Base → Build → Peak → Taper, plus any chain recovery, bridge and second-cycle
-phases) over a "weeks to race day" count.
-Tap a phase to open its weeks; tap a week to open its sessions. Each week shows planned km, run count, the
-projected end-of-week ACWR badge, and — once lived — what you actually ran. Watch for:
+The Plan section reads top to bottom as a dashboard:
 
-- **Regime badge (conservative / assertive)** — the plan tile shows which posture it's in, with the reason.
+- **Banners** first, when they apply: a stale plan, what changed since the last plan, and any active
+  adjustment.
+- **Edit races** (a button in the section heading; **Races** on the public box, which edits nothing) opens
+  the race calendar: the rows, dates, gun times and priorities, remove and put back, past races, and the
+  add form. A first-run plan with no race offers an "add a race" button that opens the same drawer.
+- **Three tiles.** *This week* shows km and runs, the dates, the week-end CTL, a mini bar for each day
+  Monday to Sunday (height by km; easy, quality or long; a rest day is a stub), the week's intent, and a
+  link that opens the week day by day. *What holds this week* names the limit that held the week with its
+  bar, numbers, a short source credit and basis badge, then the other limits compact; each opens its own
+  row in the week pane. *Races* lists each race with its date, weeks to go and goal, its finish-time range
+  on one time axis shared by all races (median and goal marked), and the race-day CTL and verdict.
+  **Why this range, and the source** opens a full-width panel below the three tiles, headed by the race
+  name, with a **Hide ↑** button; the tiles keep their heights. From 980 px the panel has two columns: the
+  verdict, the "if the race were later" runway, the staleness marks and the "Now" line on the left, and
+  where the finish-time range comes from (Daniels; a fit on the calibration athlete's four marathons; 8
+  races in 10 should land inside the range) on the right. With a chain of races the tile is also the race
+  selector.
+- **The road** is one bar per week of the whole plan, height by km. Colour is the week's phase, the same
+  hue as the band below. A solid bar is a week already run, a pale bar a week planned; the week holding
+  today is split (the run part solid, the rest pale) once it has run kilometres. Down, taper, recovery and
+  race weeks have no shade of their own: their shorter bar shows them. The week shown in the pane has a
+  2 px outline. The legend reads "colour = phase (band below) · run · planned · shown below". Every
+  layer of the road (flags, bars, band, today marker) is one column grid, one column per week with the same
+  gap, so each phase segment of the band spans exactly the bars of its weeks. Race and tune-up flags sit
+  above the bars, each at the race's own day inside its week's column, with a 1 px dashed line down to the
+  axis (lighter for a tune-up). The phase band (Re-base → Base → Build → Peak → Taper, plus any chain
+  recovery, bridge and second-cycle phases) sits below, with the first and last dates. The "▲ today" marker
+  sits at today's day inside the current week, with a short line rising from its point to the base of the
+  bars; its label is beside it, to the right in the road's first half and to the left in the second. A bar
+  picks the week the pane shows.
+- **The week pane** shows the picked week as This week, Lived week or Planned week, with ‹ › steppers, the
+  phase line (weeks, start and end CTL and ATL, total km, and what the sessions build, with its source),
+  and the week card. The days sit on top at full width, in two columns from 980 px (Monday to Thursday
+  left, Friday to Sunday right; lived weeks and the re-base week too). The limits below are a grid of
+  cards: 3 columns from 980 px, 2 from 640 px, 1 on phones. A card shows its name, tag, bar, sentence, and
+  on its bottom line the basis badge and the source link. Opening a source puts it full width under the
+  card's row, the other cards keep their height, and from 980 px its body has two columns (This week, What
+  it is and The rule on the left; the sources, How the app uses it and the Caveat on the right). One source
+  is open at a time: opening a card closes any other open card (its source, its "Hide the source" link and
+  its highlight), and clicking the open card closes it. The open card has an accent border and a faint accent
+  tint; the tile's limit link opens exactly that card. The pane's
+  title names the week, so there is no week-number gutter. Each week shows planned km, run count, the projected
+  end-of-week ACWR badge, and, once lived, what you actually ran.
+- **The strip** at the bottom holds the posture, a button as wide as the strip (Assertive build or
+  Conservative, with the reason; open it for its source, which opens as wide as the strip too), the pace chips with **Where these come from** (Daniels; Davis on LT1; the plan's pace
+  note), and the "Plan rebuilt" stamp.
+
+The AI controls (Explain this plan, the free-text adjustment box, goal parsing and the A-race advice button)
+are no longer in the Plan section; their code stays in the app until SH-88 removes it with its backend.
+Watch for:
+
+- **Regime badge (conservative / assertive)** — the strip shows which posture it's in, with the reason.
   *Assertive* is the normal posture: the plan follows your measured form toward the objective, riding
   the ACWR load ceiling under the full set of injury brakes. *Conservative* is the **post-illness**
   posture (a Re-base plus a gentle fixed ramp), and it engages only on **body evidence** — a medical
@@ -344,7 +392,7 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
 - **`clipped to fit ACWR`** — the safety ceiling trimmed that week's volume. Expected on aggressive weeks.
 - **Component chips + the "builds" line** — every quality session carries a small chip naming which of the
   four fitness components it chiefly builds (**VO₂max**, **SSmax/LT2**, **economy**, **resilience** — hover
-  a chip for the science), and each phase header sums what the phase is *for*, derived from the sessions
+  a chip for the science), and the week pane's phase line sums what the phase is *for*, derived from the sessions
   themselves. On the **assertive** regime the quality mix is periodized by component: a short VO₂ touch
   appears already in Base (develop it early, it is cheap to hold later; the touch is small so it fits the
   biomechanical budget of a volume rebuild), the mid-week interval session then keeps its full
@@ -379,35 +427,48 @@ the bar it was laid with. The adherence figures read the sheet; the governors re
 reps at marathon pace, the pace every long run has rehearsed. It is structured, not hard — the
 sharpening is in the freshness. Shorter races sharpen with a short tempo at threshold.
 
-**The limits strip.** Under each week's sessions a collapsed line says what held the week:
-"This week is held by the long-run step", or "No limit binds this week". Open it and every governor
-axis the regime runs is listed — the load ratio (ACWR), the long-run step, the damage-equivalent km
-for the week and for the single session, the near-ceiling streak, the fitness gain per week — each as
-*laid / ceiling* with the headroom and a letter for the ceiling's basis: **L** from the literature,
-**A** fitted to your own history, **S** a structural choice. A held axis is marked; the binding one is
-the axis that decided the week's size. Below the axes, the injury-risk read: whether the
-long run sits within the +10 % step, against the one cohort behind that rule (Nielsen et al., Aarhus).
-It is a read, not a probability — the app never prints an injury percentage, because one runner's
-history cannot calibrate one. In a race week the axis reads the longest *training* bout; the race
-distance is the goal, not a step. The conservative regime lists only the load ratio: its biomechanical
-governors are dormant there. Today carries the same binding limit under the why-line.
+**The limit rows.** Each week card lists the limits the regime runs, one row each, the one that held the
+week first. A row has the limit's name, a tag ("holds the week", "ran over" or "exempt in the peak"), a bar
+of what the week laid against the ceiling, a plain sentence with that week's own numbers, and a basis
+badge. The limits are the load ratio, the long-run step, impact load for the week, impact load for a single
+run, weeks near the ceiling, and fitness gain per week. If none binds, the card says no limit binds this
+week. The badge says where the ceiling comes from: **Literature** (published science or an established
+coaching convention), **Fitted to one runner** (measured on the calibration athlete's history; a starting
+point for anyone else) or **Structural** (a definition or a window, not a safety threshold).
 
-### Race chain strip (multi-A only)
-When you chain ≥ 2 A-races, a strip shows each race with its **role**, date, **projected race-day CTL**, and
-its own **feasibility verdict** — so you see where *each* peak lands, not just the final one. (A single
-A-race omits the strip; the headline verdict already covers it.)
+**Why, and the source.** The button on each row opens a panel: This week, What it is, The rule, Where the
+number comes from (named citations with what they found), How the app uses it, Caveat, and what the basis
+means. For the long-run step the source is Frandsen et al. 2025 (British Journal of Sports Medicine
+59(17):1203-1210), which followed 5,200 runners and found that a single run more than 10 % longer than the
+longest run of the previous 30 days raised the rate of overuse injury. The load ratio cites Gabbett 2016,
+Impellizzeri et al. 2020 on its conceptual problems, and Frandsen et al. 2025, who found no link with
+injury in runners. Fitness gain per week cites Friel and Couzens; impact load cites Davis and the fitted
+replay of the calibration athlete's 1,078 runs. Weeks near the ceiling follows the 3:1 periodisation
+convention and has no named source yet. It is a read, not a probability: the app never prints an injury
+percentage, because one runner's history cannot calibrate one. In a race week the long-run step reads the
+longest *training* bout; the race distance is the goal, not a step. The conservative regime lists only the
+load ratio: its biomechanical governors are dormant there. Today carries the same binding limit under the
+why-line.
+
+### The Races tile on a chain (multi-A only)
+When you chain ≥ 2 A-races, the Races tile shows each race with its **role**, date, **projected race-day CTL**, and
+its own **feasibility verdict** and finish range, so you see where *each* peak lands, not just the final one. With a
+single A-race the tile shows that one race.
 
 ### Plan drift / the scorecard
 *The road vs. the road as it stands.* Five charts (distance, effort/TRIMP, CTL, race-outcome, and the
 **prediction ledger**) compare your **founding road** (the first plan saved for this goal) to where it
 stands now, plus a one-line verdict on three axes: **volume**, **fitness**, and the **race-day
-projection**. On a chain, this view follows whichever race is selected in the chain strip, not always
-the headline.
+projection**. On a chain, this view follows whichever race is selected in the Races tile, not always
+the headline. For an earlier race of a chain, the founding road is the
+first plan of the chain (the first plan that also carries the final race), so every race of one build
+is compared from the same plan.
 
 - The **prediction ledger** plots every finish prediction the engine has ever made for this goal —
   median plus the 80 % envelope — against the day it was made. Steps in the line are model upgrades or
-  your shape moving; both are on the record. Once the race is run, the outcome is
-  scored against the prediction standing before it (in the band or not, plus a proper log score) and
+  your shape moving; both are on the record. For an earlier race of a chain, the ledger starts with
+  the chain's first plan. Once the race is run, the outcome is scored against the prediction standing
+  before it (in the band or not, plus a proper log score) and
   the reckoning names the engine's call.
 - The **fitness chart** carries a line about the engine rather than about you: *how far the CTL
   projection has run from what happened*, as a median over every week that has been scored,
@@ -521,8 +582,8 @@ A daily **green / amber / red** verdict. It flags stop-the-run / cardiac-type sy
 AI needed to catch them) and, on red, halts the plan and tells you to see a doctor. The public view shows the
 *verdict only* — the inputs are redacted.
 
-Beside the verdict card, the **acute : chronic** tracker gauges this week's load against your base, and the
-**durability** tracker watches a slower trait: **long-run aerobic decoupling** — how much your pace:HR drifts
+Below the plan, in the **Training load** section, the **acute : chronic** tracker gauges this week's load
+against your base, and the **durability** tracker watches a slower trait: **long-run aerobic decoupling** — how much your pace:HR drifts
 from the first half of a long run to the second, the proxy for how well your running economy holds up over
 distance. The gauge shows your median over the last six long runs (durable under 5%, high fade past 10%), and
 the bar chart tracks every recent long run (≥16 km) with its distance in the tooltip — decoupling drifts with
@@ -531,8 +592,8 @@ is **measure-first**: displayed and trended, never feeding the plan. It is HR-de
 **private-only** and never appears on the public box.
 
 ### Aerobic efficiency
-Under the readiness cards, a full-width chart plots **speed per heartbeat** — metres per minute per
-bpm — one point per run over the last 180 days, with a trend line. It is the least model-dependent
+Under those two trackers, in the same Training load section, a full-width chart plots **speed per
+heartbeat** — metres per minute per bpm — one point per run over the last 180 days, with a trend line. It is the least model-dependent
 read the app holds: the same pace at a lower heart rate *is* the adaptation, and unlike CTL nothing
 has to be inferred — it comes straight off the watch.
 
@@ -551,7 +612,8 @@ the card is **private-only**.
 ### Latest running activity + route map
 The most recent **running** activity (trail and treadmill count), with a per-point trace (pace / HR / cadence
 / elevation) and a route map. The **map is private-only** (location privacy). If the most recent activity is
-a non-run, a private note tells you so.
+a non-run, a private note tells you so. The card sits under Today's readiness and above the plan; on a
+phone the Today tab reads readiness, the latest run, then the load cards.
 
 **Read back** — under the metrics, the app narrates what the recorded pace profile *says you did*, in the
 plan's own vocabulary: `Intervals — 12min wu @5:50 · 3× 3–4min @5:05–5:15 w/ 60–90s floats · 15min cd @6:30`,
@@ -576,8 +638,12 @@ Set `ANTHROPIC_API_KEY` (or add a Claude key in Settings) and four capabilities 
 
 - **Natural-language objectives** — "sub-45 10k in October" → a structured race.
 - **Multi-A adjudication advice** — guidance on how to treat closely-spaced A-races.
-- **Plain-language plan narration** — "Explain this plan" narrates the engine's numbers (it explains, it
-  does not invent — it is fed the computed plan, not asked to design one).
+- **Plain-language plan narration** — narrates the engine's numbers (it explains, it does not invent — it
+  is fed the computed plan, not asked to design one).
+
+The controls for the first three (the goal-parse row, the A-race advice button and "Explain this plan") are no
+longer in the Plan section; the code stays until SH-88 removes it with its backend.
+
 - **Qualitative check-ins** — "knee's a bit sore" → the engine *eases*; it never pushes.
 
 **The guardrail that never bends:** the readiness gate's stop-symptom and medical-hold logic is
@@ -725,7 +791,7 @@ operationalisation, tuned on one athlete, not prescriptions from these authors.
 - **Regenerating mid-week:** the days still ahead keep the sessions the week laid for them, kind and
   distance. A run over its prescription is not taken back from the days that follow, and a missed day is
   not folded into them. Only the load ceiling can shorten the remainder, and the week says so when it does.
-- **When you change a goal:** add/remove/re-prioritize in the Objectives panel and regenerate. The drift
+- **When you change a goal:** add/remove/re-prioritize under **Edit races** (Plan section heading) and regenerate. The drift
   baseline re-anchors to the new goal and self-heals as plans for it accrue. **Moving** a race is not a goal
   change — edit its date in place and the whole history follows it (§5, *Moving a race*).
 
@@ -904,7 +970,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 | Symptom | Likely cause / fix |
 |---|---|
 | "No shape snapshot — Sync first" | You haven't synced yet. Hit **Sync now**, then **Backfill all**. |
-| Plan is in *maintenance* mode | No objective set. Add an A-race in the Objectives panel. |
+| Plan is in *maintenance* mode | No objective set. Add an A-race under **Edit races** in the Plan section heading. |
 | Fitness looks inflated, a banner mentions a duplicate | A duplicate upload. Open the banner link and resolve it; the de-duplicated model already excludes it from CTL. |
 | CTL from the chart ≠ the shape snapshot by a point or two | Expected seam — local running reconstruction vs. Runalyze's all-sport snapshot. Not a bug. |
 | AI buttons are disabled / "add a Claude API key" | No Anthropic key. Add one in **Settings → Connections & keys** (optional — the engine runs without it). |

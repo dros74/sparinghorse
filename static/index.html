@@ -56,16 +56,33 @@ __SH_DEMOBAR__
     <div id="dqbanner"></div>
     <div id="objbar" class="objbar" data-mtab="today"></div>
 
+    <!-- SH-87 (0.80.0) — the readiness card sits above the plan because it decides how today's
+         session is run; the latest run (#sec-runs, #sec-recent) follows it, then the plan, then the
+         load, durability and efficiency trackers it used to share a section with, in #sec-load. -->
+    <div class="section" id="sec-readiness" role="region" aria-labelledby="h-readiness" data-mtab="today">
+      <h2 id="h-readiness">Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
+      <div id="readiness"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="section" id="sec-runs" role="region" aria-labelledby="h-runs">
+      <h2 id="h-runs">Run browser <span class="muted mono" style="font-size:12px">— pick a day, the run opens below</span></h2>
+      <div class="panel" id="runscal"><div class="empty">Loading calendar…</div></div>
+    </div>
+
+    <div class="section" id="sec-recent" data-mtab="today" role="region" aria-label="Latest running activity">
+      <div class="panel" id="recent"><div class="empty">Loading latest activity…</div></div>
+    </div>
+
     <div class="section" id="sec-plan" role="region" aria-labelledby="h-plan" data-mtab="plan">
       <h2 id="h-plan">Training plan <span class="muted mono" style="font-size:12px">— objective-driven, bounded by your fitness</span>
+        <button type="button" class="ghost" id="racesBtn" aria-expanded="false" aria-controls="racesDrawer" style="float:right;font-size:12px;padding:6px 12px;margin-left:8px">Edit races</button>
         <button class="primary" id="planBtn" style="float:right;font-size:12px;padding:6px 12px">Generate plan</button></h2>
       <div class="panel" id="plan"><div class="empty">No plan yet.</div></div>
     </div>
 
-    <div class="section" id="sec-readiness" role="region" aria-labelledby="h-readiness" data-mtab="today">
-      <h2 id="h-readiness">Today's readiness <span class="muted mono" style="font-size:12px">— should you run today's session?</span></h2>
+    <div class="section" id="sec-load" role="region" aria-labelledby="h-load" data-mtab="today">
+      <h2 id="h-load">Training load <span class="muted mono" style="font-size:12px">— this week's load against your base, and how your running is holding up</span></h2>
       <div class="rgrid">
-        <div id="readiness"><div class="empty">Loading…</div></div>
         <div class="panel acwrcard">
           <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:11px;font-weight:400">— this week's load against your base</span></div>
           <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
@@ -74,7 +91,7 @@ __SH_DEMOBAR__
           <div class="acwr-foot" id="acwrFoot"><div class="tilebg" id="acwrRampBg"></div><div class="acwr-foot-txt" id="acwrFootTxt"></div><div class="tilecap" id="acwrRampBgcap"></div></div>
         </div>
         <!-- §3.3 / 0.32.0 — the durability tracker. PRIVATE-only (decoupling is HR-adjacent): app.js
-             removes this card on the public box, where the ACWR card then takes the whole second
+             removes this card on the public box, where the ACWR card then takes the whole
              row (.rgrid:not(:has(.durcard))). Populated by loadDurability from /api/durability. -->
         <div class="panel acwrcard durcard" id="durcard">
           <div class="acwr-title">Durability <span class="muted mono" style="font-size:11px;font-weight:400">— how your running economy holds up over long runs</span></div>
@@ -82,7 +99,7 @@ __SH_DEMOBAR__
         </div>
       </div>
       <!-- §EF — aerobic efficiency (speed per heartbeat). PRIVATE-only, like durability: HR-derived.
-           Full width, BELOW the three-card row, because the owner asked for more prominence than the
+           Full width, BELOW the two trackers' row, because the owner asked for more prominence than the
            durability tile has (2026-08-25) — decoupling only says something once runs get long, and
            his longest is 12 km, while efficiency reads on every easy run he does. Two panels, each
            with its OWN vertical scale, sharing one time axis: efficiency above, temperature below.
@@ -93,15 +110,6 @@ __SH_DEMOBAR__
         <div class="acwr-title">Aerobic efficiency <span class="muted mono" style="font-size:11px;font-weight:400">— speed per heartbeat, and the weather it was earned in</span></div>
         <div id="effbody"><div class="empty">Loading…</div></div>
       </div>
-    </div>
-
-    <div class="section" id="sec-runs" role="region" aria-labelledby="h-runs">
-      <h2 id="h-runs">Run browser <span class="muted mono" style="font-size:12px">— pick a day, the run opens below</span></h2>
-      <div class="panel" id="runscal"><div class="empty">Loading calendar…</div></div>
-    </div>
-
-    <div class="section" id="sec-recent" data-mtab="today" role="region" aria-label="Latest running activity">
-      <div class="panel" id="recent"><div class="empty">Loading latest activity…</div></div>
     </div>
 
     <details class="section" id="sec-shape" data-mtab="fitness">

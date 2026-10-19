@@ -360,11 +360,11 @@
   .statuscard .sc-fresh:empty{display:none}
   /* Past the nightly's own staleness window the chip stops being a footnote and says so. */
   .statuscard .sc-fresh.stale{color:var(--onready);font-weight:600}
-  .statuscard .sc-fresh.stale::before{content:"⚠ "}  /* readiness ⨉ chronic-load ⨉ durability: the verdict card takes the whole row; the two trackers
-     share the row below, half each (0.32.1 — three-across read crowded) */
+  .statuscard .sc-fresh.stale::before{content:"⚠ "}
+  /* chronic-load ⨉ durability: the two trackers share one row, half each
+     (0.32.1 — three-across read crowded) */
   .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:stretch}
-  .rgrid>#readiness{grid-column:1 / -1}
-  /* the public box removes the durability card, so the ACWR card takes the whole second row there */
+  /* the public box removes the durability card, so the ACWR card takes the whole row there */
   .rgrid:not(:has(.durcard))>.acwrcard{grid-column:1 / -1}
   @media(max-width:760px){.rgrid{grid-template-columns:1fr}}
   /* readiness + today's session share one surface tile (same bg as the load tile); the green
@@ -1125,6 +1125,13 @@
   .phaseseg[data-pk^="taper"],  .phasepanel[data-pk^="taper"],
   .phaseseg[data-pk^="recovery"],.phasepanel[data-pk^="recovery"]{ --accent: var(--accent1); }
   /* (0.56.1: the opacity dimming that lived here moved to a desaturated fill — see .phaseseg above) */
+  /* SH-86c — the road's week bars take the SAME hues on a bar-only variable: --ph, never --accent
+     (the rings and chips around the road read --accent for their own meanings) */
+  .roadbars .weekseg[data-pk="rebase"]{ --ph: var(--accent1); }
+  .roadbars .weekseg[data-pk^="base"]{ --ph: var(--accent2); }
+  .roadbars .weekseg[data-pk^="build"], .roadbars .weekseg[data-pk^="bridge"]{ --ph: var(--accent3); }
+  .roadbars .weekseg[data-pk^="peak"]{ --ph: var(--accent4); }
+  .roadbars .weekseg[data-pk^="taper"], .roadbars .weekseg[data-pk^="recovery"]{ --ph: var(--accent1); }
   /* Health markers: cycle four hues */
   .hgrid .hcard:nth-child(4n+1){ --accent: var(--accent1); }
   .hgrid .hcard:nth-child(4n+2){ --accent: var(--accent2); }
@@ -1160,9 +1167,17 @@
 
 /* 0.56.1 — week segments in the dark themes: the strip mixes only 30% surface into the phase accent, and the
    light label read at 3.4:1 on the selected week; clamp the fill toward the surface
-   as the phase bar does. Last in the file on purpose: it must outrank .weekseg[aria-pressed] above. */
+   as the phase bar does. The road's own dark rules follow just below (SH-86c). */
 [data-theme="dark"] .weekseg,[data-theme="dark"] .weekseg[aria-pressed="true"]{
   background:color-mix(in oklab,var(--accent),var(--surface-2) 58%)}
+
+/* SH-86c — the blanket dark clamp above predates the road's encoding and must NOT reach the road's
+   bars: they keep their phase-hue fills (pale = planned, solid = run) in the dark themes too. The
+   system-dark scheme paints through data-theme as well, so these two rules cover both. */
+[data-theme="dark"] .roadbars .weekseg,[data-theme="dark"] .roadbars .weekseg[aria-pressed="true"]{
+  background:color-mix(in oklab,var(--ph,var(--accent)),var(--surface2) 60%)}
+[data-theme="dark"] .roadbars .weekseg.wsdone{background:color-mix(in oklab,var(--ph,var(--accent)),var(--surface2) 12%)}
+[data-theme="dark"] .roadbars .weekseg>i{background:color-mix(in oklab,var(--ph,var(--accent)),var(--surface2) 12%)}
 
 /* 0.57.0 — the theme control: one button (system → dark → light) instead of three 30×9 swatches */
 .themebtn{font:inherit;font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;min-height:28px;
@@ -1173,6 +1188,7 @@
 [data-page="today"] #sec-plan,[data-page="today"] #sec-recent,[data-page="today"] #sec-runs,
 [data-page="today"] details.section,[data-page="today"] #firstrun,[data-page="today"] #dqbanner,
 [data-page="today"] .acwrcard,[data-page="today"] .effcard,[data-page="today"] .durcard,
+[data-page="today"] #sec-load,
 [data-page="today"] #syncBtn,[data-page="today"] #backfillBtn,[data-page="today"] #planBtn{display:none!important}
 [data-page="today"] .rgrid{grid-template-columns:1fr}
 [data-page="today"] #sec-readiness{display:block!important}
@@ -1202,13 +1218,187 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
   .wrap:has(> .rail){margin-left:182px;max-width:min(1080px,calc(100vw - 208px))}
 }
 
-/* §LIMITS (0.58.0) — the week's limits strip */
-details.limits{grid-column:1 / -1;margin:8px 0 2px;border:1px solid var(--line);border-radius:8px;padding:6px 10px;background:var(--surface)}   /* 0.60.1 — the week card is a 30px-gutter grid; the block spans it, or it lands in the gutter one word per line */
-details.limits > summary{cursor:pointer;list-style:none;font-size:12px}
-details.limits > summary::-webkit-details-marker{display:none}
-details.limits .limhead b{color:var(--accent-ink)}
-.lim{display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:baseline;padding:4px 0;border-top:1px solid var(--line);font-size:12px}
-.lim .lk{color:var(--muted)} .lim .lv{font-variant-numeric:tabular-nums} .lim .lh{font-variant-numeric:tabular-nums;color:var(--ok-ink)}
-.lim .lh.over{color:var(--danger)} .lim .lb{font-family:var(--mono);font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:0 5px}
-.lim.held .lk{color:var(--text);font-weight:600} .lim.binding .lk::after{content:" · holds this week";color:var(--accent-ink);font-weight:400}
-.limrisk{margin-top:8px;font-size:12px;line-height:1.5;color:var(--muted)} .limrisk b{color:var(--text)}
+/* §LIMITS (0.58.0) — the week's limits: one row per axis, opening to its reason and source (SH-86) */
+.limits{grid-column:1 / -1;margin:8px 0 2px;--accent:var(--accent1)}   /* the brand hue in every phase: "holds the week" is a meaning, not a phase. 0.60.1 — the week card is a 30px-gutter grid; the block spans it, or it lands in the gutter one word per line */
+/* SH-86c — the limits lay out as a grid of cards (3 columns at ≥980px, 2 at 640–979px, 1 below):
+   .limrow vanishes into the grid (display:contents) so each .limhd IS its card and an open source
+   panel spans the full width under its row, dense packing keeping the row's other cards together */
+.limits{display:grid;grid-template-columns:1fr;gap:10px;grid-auto-flow:row dense}
+@media(min-width:640px){.limits{grid-template-columns:1fr 1fr}}
+@media(min-width:980px){.limits{grid-template-columns:1fr 1fr 1fr}}
+.limitslbl{grid-column:1 / -1;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 2px 4px}
+.limrow{display:contents}
+.limhd{display:flex;flex-direction:column;justify-content:flex-start;width:100%;font:inherit;color:inherit;text-align:left;border:1px solid var(--line);
+  border-radius:12px;background:var(--surface);padding:12px 14px;min-height:44px;cursor:pointer}
+.limhd[aria-expanded="true"]{border-color:var(--accent);background:color-mix(in oklab,var(--accent),var(--surface) 92%)}
+.limhd:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.limtop{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
+.limname{font-weight:600}
+.limval{margin-left:auto;font-variant-numeric:tabular-nums;font-size:12px;color:var(--muted)}
+.limtag{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:1px 6px;background:var(--surface2);color:var(--muted)}
+.limtag.hold{background:color-mix(in oklab,var(--accent),transparent 82%);color:var(--accent-ink)}
+.limtag.over{background:color-mix(in oklab,var(--danger),transparent 84%);color:var(--danger)}
+.limbar{display:block;height:8px;border-radius:4px;background:var(--surface2);margin:6px 0;overflow:hidden}
+.limbar i{display:block;height:100%;border-radius:4px;background:var(--muted)}
+.limbar.hold i{background:var(--accent)} .limbar.over i{background:var(--danger)}
+.limsent{display:block;font-size:13px;line-height:1.5}
+.limmeta{display:flex;align-items:center;gap:8px;margin-top:auto;padding-top:6px}   /* a card in a taller row keeps its badge and link on the bottom line */
+.basis{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:1px 6px}
+.basis.L{background:color-mix(in oklab,var(--ok),transparent 84%);color:var(--ok-ink)}
+.basis.A{background:color-mix(in oklab,var(--accent),transparent 82%);color:var(--accent-ink)}
+.basis.S{background:var(--surface2);color:var(--muted)}
+.limcta{margin-left:auto;font-size:12px;color:var(--accent-ink)}
+.limsrc{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:16px;margin:2px 0 12px;font-size:13px;line-height:1.55}
+.limsrc p{margin:0 0 10px}
+.limits .limsrc{grid-column:1 / -1;margin:0}   /* an open source panel spans the limits grid's full width */
+.srctop{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+.srctitle{font-family:var(--serif);font-weight:600;font-size:17px}
+.srclbl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:12px 0 4px}
+.srcref{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:0 0 8px}
+.srccite{font-size:12px;font-weight:600;margin-bottom:2px}
+.srccaveat{color:var(--warn-ink)}
+.srcbasis{font-family:var(--mono);font-size:11px;color:var(--muted);border-top:1px solid var(--line);padding-top:10px;margin-top:4px}
+
+/* SH-86 (slice 2) — the plan page's layout: three tiles, the road, the week pane, the strip */
+.plantiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin:10px 0 6px}
+.plantile{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:14px 16px;min-width:0;
+  display:flex;flex-direction:column}
+/* SH-86c — equal-height tiles end on the same line: the final link rides the bottom edge; and the
+   races tile starts on the others' line even with a chain (the .chainstrip margin at :539 is the
+   old standalone strip's, kept for its §CHAIN4 class contract but waived on the tile) */
+.plantile>.linkbtn{align-self:flex-start}   /* a flex column stretches a button, which centres its text */
+.plantile>.linkbtn:last-child{margin-top:auto}
+.plantile.chainstrip{margin:0}
+/* a race's source opens as a fourth item on the tiles grid, full width on its own row */
+.tilepanel{grid-column:1 / -1}
+.tilepanel-hd{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:6px}
+.tilepanel-hd h3{font-family:var(--serif);font-weight:600;font-size:20px;margin:0}
+/* one shared two-column body for the source panels (the race panel's, and each limit row's) */
+@media(min-width:980px){.srccols{display:grid;grid-template-columns:1fr 1fr;gap:0 32px}}
+.tilelbl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+.tilebig{font-family:var(--serif);font-weight:600;font-size:26px;line-height:1.1}
+/* the week's days as mini bars (height ∝ km), today's letter in the accent ink */
+.wkdays{display:flex;align-items:flex-end;gap:6px;margin:10px 0 4px;height:56px}
+.wkd{display:flex;flex-direction:column;align-items:center;gap:3px;flex:1}
+.wkd i{display:block;width:100%;border-radius:3px}
+.wkd b{font-family:var(--mono);font-size:10px;font-weight:400;color:var(--muted)}
+.wkd.today b{color:var(--accent-ink);font-weight:600}
+.wkd.easy i{background:color-mix(in oklab,var(--ok),transparent 45%)}
+.wkd.qual i{background:var(--accent)}
+.wkd.long i{background:var(--ok)}
+.wkd.race i{background:var(--danger)}
+.wkd.rest i{background:var(--surface2)}
+.wklegend{display:flex;gap:12px;font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:6px}
+.wklegend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+.wklegend .easy{background:color-mix(in oklab,var(--ok),transparent 45%)}
+.wklegend .qual{background:var(--accent)}
+.wklegend .long{background:var(--ok)}
+/* the limits tile: the lead limit large, the rest compact */
+.limothers .limmini{display:grid;grid-template-columns:110px 1fr auto;gap:8px;align-items:center;width:100%;
+  font:inherit;font-size:12px;color:inherit;text-align:left;background:none;border:0;padding:6px 2px;
+  min-height:44px;cursor:pointer;border-top:1px solid var(--line)}
+.limothers .limmini:first-of-type{border-top:0}
+.limmini .lk2{color:var(--muted)}
+.limmini .lv2{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}
+.limmini:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+/* the races tile: one row per race, the finish band on an axis shared by the rows */
+.racerow{padding:8px 0;border-top:1px solid var(--line)}
+.racerow:first-of-type{border-top:0}
+.racename{font-family:var(--serif);font-weight:600;font-size:15px}
+.racetile .chainrace{border-top:0;padding:4px 8px;margin:0 -8px;border-radius:8px}   /* the pressed ring sits clear of the text */
+.bandbar{position:relative;height:16px;margin:8px 0 16px;border-bottom:1px solid var(--line)}
+.bandrange{position:absolute;top:4px;height:8px;border-radius:4px;background:color-mix(in oklab,var(--accent),transparent 72%)}
+.bandmed{position:absolute;top:1px;width:2px;height:14px;background:var(--accent)}
+.bandgoal{position:absolute;top:1px;height:14px;border-left:2px dashed var(--warn)}
+.bandtick{position:absolute;top:19px;font-family:var(--mono);font-size:9px;color:var(--muted)}
+.bandtick.mid{left:50%;transform:translateX(-50%)}
+.bandtick.end{right:0}
+.racenum{font-size:12px;margin:2px 0}
+/* the road: one bar per week */
+.road{margin:14px 0 6px}
+.roadlbl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.roadlegend{display:flex;flex-wrap:wrap;gap:12px;font-family:var(--mono);font-size:10px;color:var(--muted);margin:4px 0 2px}
+.roadlegend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
+.roadlegend .rl-run{background:var(--muted)}
+.roadlegend .rl-plan{background:color-mix(in oklab,var(--muted),var(--surface2) 67%)}
+.roadlegend .rl-on{background:var(--surface2);box-shadow:0 0 0 1px var(--bg),0 0 0 2px var(--text)}
+/* SH-86d — every horizontal layer of the road is the same grid (--n week columns, one gap), so a band
+   segment's edges are exactly its first and last bar's edges and a flag sits in its own week's column */
+.roadflags,.roadbars,.roadband,.roadmarks{display:grid;grid-template-columns:repeat(var(--n),minmax(0,1fr));column-gap:3px}
+.roadflags{position:relative;z-index:2;height:16px}
+.roadflagcell{grid-row:1;position:relative;min-width:0;pointer-events:none}
+.roadflag{position:absolute;top:0;transform:translateX(-50%);font-size:13px;line-height:1;pointer-events:auto}
+.roadflagcell.small .roadflag{font-size:10px;top:2px;opacity:.75}
+.roadline{position:absolute;top:16px;height:178px;width:0;border-left:1px dashed color-mix(in oklab,var(--text),transparent 55%);pointer-events:none}   /* bars 150 + band margin 3 + band 22 + axis margin 3: down to the axis */
+.roadflagcell.small .roadline{border-left-color:color-mix(in oklab,var(--text),transparent 75%)}
+.roadbars{align-items:end;height:150px}
+/* SH-86c — one idea per visual channel: COLOUR names the phase (--ph, set beside the phase hue
+   rules below) and the FILL says run (solid) vs planned (a pale tint of the same hue). A down,
+   taper, recovery or race week keeps no shade of its own — the lower height already says it. */
+.roadbars .weekseg{position:relative;overflow:hidden;align-self:end;min-width:0;padding:0;border:0;border-radius:3px 3px 0 0;cursor:pointer;
+  background:color-mix(in oklab,var(--ph,var(--accent)),var(--surface2) 67%);opacity:1;transition:opacity .15s,box-shadow .15s}
+.roadbars .weekseg:hover{opacity:.8}
+.roadbars .weekseg:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.roadbars .weekseg.wsdone{background:color-mix(in oklab,var(--ph,var(--accent)),var(--surface2) 10%)}
+.roadbars .weekseg>i{position:absolute;left:0;right:0;bottom:0;display:block;
+  background:color-mix(in oklab,var(--ph,var(--accent)),var(--surface2) 10%)}
+/* the shown week's ring is the text ink, never the accent: the re-base and taper hues ARE the
+   accent, and an accent ring would vanish on them */
+.roadbars .weekseg.on{outline:2px solid var(--text);outline-offset:-2px}   /* inside the bar: an outer ring is clipped at the road's ends, and an outline paints over the run share */
+.roadband{margin-top:3px;height:22px;border-radius:6px;overflow:hidden}
+.roadband .phaseseg{cursor:default;filter:none;min-width:0;overflow:hidden;padding:0 2px}
+.roadband .phaseseg b{max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:clip}   /* a short phase on a phone clips its label rather than widening the band past its bars */
+.roadband .phaseseg:hover{filter:none}
+/* the today marker rides its own line above the axis's date labels, so neither ever overlaps */
+.roadaxis{margin-top:3px;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.roadmarks{height:13px}
+.roadtodaycell{grid-row:1;position:relative;min-width:0}
+.roadtoday{position:absolute;top:0;width:0;color:var(--accent-ink);white-space:nowrap;line-height:13px}
+.roadtoday b{position:absolute;left:0;transform:translateX(-50%);font-weight:400}
+.roadtoday em{position:absolute;font-style:normal}
+.roadtoday.start em{left:9px}
+.roadtoday.end em{right:9px}
+.roadstem{position:absolute;left:0;bottom:100%;height:28px;width:0;border-left:2px solid var(--accent);transform:translateX(-1px);pointer-events:none}
+.roaddates{display:flex;justify-content:space-between}
+/* the week pane */
+.weekpane{margin:10px 0}
+.wplbl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.wphd{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:4px 0 2px}
+.wphd h3{font-family:var(--serif);font-weight:600;font-size:20px;margin:0}
+.wpnav{display:flex;gap:6px}
+.wpnav button{width:44px;height:44px;border:1px solid var(--line);border-radius:10px;background:var(--surface);
+  color:var(--text);font-size:18px;cursor:pointer}
+.wpnav button:disabled{opacity:.4;cursor:default}
+.wphase{font-size:12px;color:var(--muted);margin:6px 0 2px}
+/* SH-86c — the pane's card uses its width: the week line, the intent and the badge (right) on top,
+   the days in two columns at ≥980px (Mon–Thu left, Fri–Sun right), the limits a card grid below.
+   The week-number gutter is redundant at every width — the pane's title names the week. */
+.weekpane .wk{grid-template-columns:minmax(0,1fr) auto;align-items:start}
+.weekpane .wk>.wn{display:none}
+@media(min-width:980px){
+  .weekpane .wsesslog{display:block;columns:2;column-gap:32px}
+  .weekpane .wsesslog .sline{break-inside:avoid;margin-bottom:2px}
+}
+/* phones: the card stays one column, the badge column gives its width back to the days */
+@media(max-width:760px){
+  .weekpane .wk{grid-template-columns:minmax(0,1fr)}
+  .weekpane .wk>.wbody+div{justify-self:start}
+}
+/* the strip */
+.planstrip{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:10px 0;
+  border-top:1px solid var(--line);padding-top:10px}
+/* SH-86c — the posture button fills the strip's whole row, padded and rounded like the tiles */
+.stripbtn{font:inherit;font-size:12px;color:inherit;text-align:left;background:var(--surface);
+  border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-height:44px;cursor:pointer;
+  flex:1 1 100%;box-sizing:border-box}
+.stripbtn .rgbadge{font-family:var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.stripbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.stripanel{flex:1 1 100%}
+.racesdrawer{border:1px solid var(--line);border-radius:12px;background:var(--surface);
+  padding:10px 14px;margin:8px 0}
+.racesdrawer[hidden]{display:none}
+/* phones: the tiles stack, the road keeps one row of bars, the pane is one column */
+@media(max-width:760px){
+  .plantiles{grid-template-columns:1fr}
+  .roadflags,.roadbars,.roadband,.roadmarks{column-gap:2px}
+}
