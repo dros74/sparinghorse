@@ -464,7 +464,18 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 9   # v9 (2026-08-26): THE DOUBLE-COUNT. My 4×2min VO₂ session read back as "3×
+STRUCT_VERSION = 11  # v11 (2026-10-19): THE MP FINISH UNDER THE WORK BAR. My 18 Oct long_mp
+#                      (46 min @5:41 after 2 h @6:10) read back as "Long run": the finish was 8.4%
+#                      faster than the baseline and work needs 10%. A trailing marathon-zone stretch
+#                      after a real easy base is now an MP finish at ≥ RD_FINISH_CONTRAST (5%),
+#                      tried only when the 10% pass finds no work.
+#                      v10 (2026-10-06): THE BASELINE WAS THE REPS. My 10×3min VO₂ session read back
+#                      as "Easy run · 73min @5:38/km · 3× strides": its easy running was spread over
+#                      several pace levels (warm-up, jogged then walked recoveries, a hard finish),
+#                      none reaching the baseline floor, so the reps' own level became the baseline
+#                      and nothing was 10% faster than it. A work-zone baseline now yields to the
+#                      easy-named blocks, pooled, when they carry the floor between them.
+#                      v9 (2026-08-26): THE DOUBLE-COUNT. My 4×2min VO₂ session read back as "3×
 #                      reps + 4× strides" — the same 2 minutes counted on both axes, and one rep
 #                      lost entirely. Two independent causes, one symptom:
 #                      (1) A REP IS CONTIGUOUS WORK, NOT ONE BLOCK. Segmentation cuts on contrast,
@@ -574,6 +585,12 @@ RD_MIN_WORK_S = 100        # a work REP is ≥ ~2min in the plan's vocabulary (D
 #                            smeared strides, never session elements.
 RD_MIN_TEMPO_S = 480       # a LONE continuous work block must be ≥ ~8min (the plan's smallest tempo/
 #                            MP element) — a single 3min surge is not a tempo session
+RD_FINISH_CONTRAST = 0.05  # §RD v11 — a trailing MARATHON-ZONE stretch (≥ RD_MIN_TEMPO_S, after ≥
+#                            RD_MP_BASE_MIN of running) is an MP finish at ≥5% faster than the
+#                            baseline: half the work bar, because the finish's place in the run and its
+#                            zone name already rule out easy-day drift. A run with a 5–10% finish and
+#                            no other work was "Long run" (18 Oct: 8.4%); a 2–3% marathon-zone tail
+#                            (13 Sep, 6:15 after 6:24) stays an easy long run.
 RD_TAIL_REST_MIN_S = 480   # a trailing "rep" is cooldown drift once the gap since the previous rep
 #                            is ≥8min AND ≥ the factor × the session's own longest inter-rep rest —
 #                            nobody floats 8 minutes between VO₂ reps (2026-07-22 live: the flat last
@@ -976,8 +993,8 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     def level_sec(b):
         return sum(s["sec"] for s in segs if abs(math.log(s["pace"] / b["pace"])) <= thr)
 
-    major = [b for b in segs if level_sec(b) >= min(max(RD_BASE_MIN_SHARE * total_sec, 600),
-                                                    0.5 * total_sec)]
+    base_floor = min(max(RD_BASE_MIN_SHARE * total_sec, 600), 0.5 * total_sec)
+    major = [b for b in segs if level_sec(b) >= base_floor]
     base_blk = max(major or segs, key=lambda b: (b["pace"], level_sec(b)))   # slowest qualifying level
     # The baseline pace is the whole LEVEL's time-over-distance, not the anchor block's own pace:
     # a 2-min recovery float can anchor the slowest qualifying level (its ±contrast neighbourhood
@@ -985,6 +1002,18 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     # a >10% "work" contrast it never had vs the run's real easy pace (2026-07-14 live read: a 15min
     # @6:29 cool-down became work rep 3 of a 2-rep VO₂ session).
     base_members = [s for s in segs if abs(math.log(s["pace"] / base_blk["pace"])) <= thr]
+    # v10 — the slowest qualifying level can be the REPS themselves when the easy running is spread
+    # over several pace levels, none of which reaches the floor alone. My 10×3min VO₂ session of
+    # 2026-10-06 (jogged recoveries, then walked ones, a warm-up at 5:33–6:15 and a 15-min hard
+    # finish): 30 min of reps formed the only level over the 18-min floor, the baseline landed in the
+    # INTERVAL zone, no block was 10% faster than it, and the session read "Easy run · 3× strides".
+    # An easy baseline named after a work zone while the easy-named blocks together carry the floor
+    # is that failure: baseline on those blocks, pooled. A run with no such easy time keeps its
+    # work-zone baseline, so a wall-to-wall race or tempo still reads as one sustained effort.
+    if base_blk["zone"] in RD_WORK_ZONES:
+        easy_blks = [s for s in segs if s["zone"] not in RD_WORK_ZONES]
+        if sum(s["sec"] for s in easy_blks) >= base_floor:
+            base_members = easy_blks
     base_km = sum(s["km"] for s in base_members)
     baseline = (sum(s["sec"] for s in base_members) / base_km) if base_km else base_blk["pace"]
     fast_ix = [i for i, s in enumerate(segs)
@@ -1000,7 +1029,7 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     # too_hard by 0.04 s/km. Fuse first, measure after: adjacent fast blocks have no recovery between
     # them, so they are one effort by construction. Fused pace is time-over-distance (the honest
     # number the baseline and overall pace already use), HR duration-weighted.
-    def _fuse(lo, hi):                                       # segs[lo..hi] → one rep
+    def _fuse(segs, lo, hi):                                 # segs[lo..hi] → one rep
         parts = segs[lo:hi + 1]
         sec = sum(x["sec"] for x in parts)
         km = sum(x["km"] for x in parts)
@@ -1011,7 +1040,9 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
                 "cad": _rd_median(cads) if cads else None,
                 "hr": round(sum(h * w for h, w in hrs) / sum(w for _, w in hrs)) if hrs else None,
                 "zone": _rd_zone(pace, zones)}
-    if fast_ix:
+    def _fuse_fast(segs, span, fast_ix):
+        if not fast_ix:
+            return segs, span, fast_ix
         _fast, _segs, _span, fast_ix = set(fast_ix), [], [], []
         i = 0
         while i < len(segs):
@@ -1023,19 +1054,51 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
                 #                                  made only of blocks that already cleared both
                 #                                  gates, so re-testing the average could drop a
                 #                                  genuine rep that faded across its own halves.
-                _segs.append(_fuse(i, j) if j > i else segs[i])
+                _segs.append(_fuse(segs, i, j) if j > i else segs[i])
                 _span.append((span[i][0], span[j][1]))
                 i = j + 1
             else:
                 _segs.append(segs[i])
                 _span.append(span[i])
                 i += 1
-        segs, span = _segs, _span
+        return _segs, _span, fast_ix
+
+    def _mp_finish(segs):
+        # v11 — the trailing marathon-zone stretch of a run with a real easy base before it: the
+        # last contiguous blocks named marathon and ≥ RD_FINISH_CONTRAST faster than the baseline,
+        # together ≥ RD_MIN_TEMPO_S, with ≥ RD_MP_BASE_MIN of running before and at most the
+        # long_mp branch's cool-down allowance after. [] when the run has no such finish.
+        q = [i for i, s in enumerate(segs) if s["zone"] == "marathon"
+             and math.log(baseline / s["pace"]) >= math.log1p(RD_FINISH_CONTRAST)]
+        if not q:
+            return []
+        lo = hi = q[-1]
+        while lo - 1 in q:
+            lo -= 1
+        if sum(s["sec"] for s in segs[lo:hi + 1]) >= RD_MIN_TEMPO_S \
+                and sum(s["sec"] for s in segs[:lo]) >= RD_MP_BASE_MIN * 60 \
+                and sum(s["sec"] for s in segs[hi + 1:]) <= max(900, 0.2 * total_sec):
+            return list(range(lo, hi + 1))
+        return []
+
+    segs0, span0 = segs, span
+    segs, span, fast_ix = _fuse_fast(segs, span, fast_ix)
     work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
     # (fast blocks too short to be reps — e.g. strides that segmented out on their own — are
     #  simply not work; the _rd_strides peak pass already counts them from the whole-run signal)
     if len(work_ix) == 1 and segs[work_ix[0]]["sec"] < RD_MIN_TEMPO_S:
         work_ix = []                                         # a lone short surge isn't a session
+    # v11 — AN MP FINISH RUN SHORT OF MP IS STILL A FINISH. My 18 Oct long run (101 min @6:06,
+    # 20 min @6:15, then 46 min @5:41 against a 5:34 MP) read back as "Long run · 168min @6:01/km":
+    # the finish was 8.4% faster than the 6:10 baseline and work needs 10%. That bar protects easy
+    # days whose drift crosses easy_top; a sustained marathon-zone stretch at the END of a run, after
+    # a real easy base, is not drift. Taken only when the 10% pass found no work, so every session
+    # with reps reads exactly as before.
+    if not work_ix:
+        fin = _mp_finish(segs0)
+        if fin:
+            segs, span, fast_ix = _fuse_fast(segs0, span0, fin)
+            work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
     # v8 — the workout ENDS: a trailing rep whose rest gap dwarfs the session's own observed rest
     # scale is cooldown drift (terrain letting go, legs rolling home), not a session element. Needs
     # ≥3 candidates: with only one real gap there is no scale to judge against, so a plain 2-rep
@@ -1308,7 +1371,8 @@ CREATE TABLE IF NOT EXISTS objectives (
     created_at TEXT,
     outcome    TEXT,                 -- §RL: JSON result once resolved (finished/dnf/unrun/unverified)
     resolved_at TEXT,                -- §RL: when resolve_passed_races settled it
-    removed_at  TEXT                 -- §OBJ3: when remove took it off the calendar (NULL once put back)
+    removed_at  TEXT,                -- §OBJ3: when remove took it off the calendar (NULL once put back)
+    start_time  TEXT                 -- §GUN: HH:MM local gun time (optional; NULL counts to midnight)
 );
 
 -- Versioned training plans. Each generation is a new row → diff-able history (§4).
@@ -1414,7 +1478,8 @@ CREATE TABLE IF NOT EXISTS availability (
     date_from  TEXT,               -- YYYY-MM-DD inclusive
     date_to    TEXT,               -- YYYY-MM-DD inclusive
     note       TEXT,               -- optional, the athlete's words ("flight", "family week")
-    active     INTEGER DEFAULT 1   -- 0 once deleted
+    active     INTEGER DEFAULT 1,  -- 0 once deleted
+    removed_at TEXT                -- SH-49: when ✕ cleared it (NULL while active or once put back)
 );
 
 -- Self-test harness (§ diagnostics). Each run is one row: summary counts for quick listing
@@ -1599,6 +1664,14 @@ def init_db():
     # control can be offered for 24 hours and then retired.
     if "removed_at" not in ocols:
         db.execute("ALTER TABLE objectives ADD COLUMN removed_at TEXT")
+    # §GUN migration: `start_time` — the race's local gun time (HH:MM), what the objective bar's
+    # countdown targets. NULL = the old semantics (count to midnight).
+    if "start_time" not in ocols:
+        db.execute("ALTER TABLE objectives ADD COLUMN start_time TEXT")
+    # SH-49 migration: the same stamp on away windows, so ✕ gets a 24 h put-back like a race.
+    avcols = {r["name"] for r in db.execute("PRAGMA table_info(availability)").fetchall()}
+    if "removed_at" not in avcols:
+        db.execute("ALTER TABLE availability ADD COLUMN removed_at TEXT")
     # Self-healing migration: deactivate any legacy *active* no-op adjustment (multiplier ≥ 1,
     # no easy-only, no medical) saved before the §6c routing fix — those were reflections that
     # got stored as an "Active adjustment" and still render a pointless banner. New no-ops are
@@ -5566,8 +5639,10 @@ def explain_plan(db, diff=None, fresh=False):
         "ramps while projected ACWR stays in the safe band, and where the goal stands "
         "(finishing healthy vs a time near their PB). Walk the WHOLE phase path in phase_blocks: Base "
         "grows easy aerobic volume with a light cruise-tempo on-ramp; Build adds the specific work — "
-        "VO₂ intervals plus a marathon-pace finish on the long run; Peak sharpens at race pace; Taper "
-        "drops volume to arrive fresh. Stress that it stays POLARIZED (~80%+ easy every week — the "
+        "a mid-week VO₂ session plus a marathon-pace finish on the long run, and on the assertive road "
+        "every other Build and Peak week also carries a continuous threshold run on the freshest mid-week "
+        "day, cut from that day's easy run; "
+        "Peak sharpens at race pace; Taper drops volume to arrive fresh. Stress that it stays POLARIZED (~80%+ easy every week — the "
         "hard work is a small, concentrated slice, never a target to fill). CRITICAL — race-day "
         "fitness: state ONLY projected_race_ctl, exactly as given. Do NOT compute, extrapolate, or "
         "estimate CTL growth yourself: a naive 3–4%/week extrapolation is WRONG here because the ACWR "
@@ -7152,6 +7227,24 @@ def _int_arg(name, default, lo=1, hi=None):
     return v, None
 
 
+# [0-9], not \d: in a str pattern \d matches any script's digits ("1٩:30"), which the browser
+# then reads as an Invalid Date.
+_GUN_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
+
+
+def _start_time(v):
+    """§GUN — normalize an objective's gun time to "HH:MM" (24-hour local) or raise ValueError.
+    Strict at the API edge, the same posture as the `_date()` guard on the add/move paths: junk
+    rejected HERE, never stored to poison every later render. None/"" → None (the field is
+    optional; absent counts to midnight)."""
+    if v is None or v == "":
+        return None
+    v = str(v).strip()
+    if not _GUN_RE.match(v):
+        raise ValueError(f"start_time must be HH:MM (24-hour), got {v!r}")
+    return v
+
+
 def replan(db, mutate):
     """Re-periodize around a write (§6b): snapshot the plan, apply `mutate`, regenerate, commit, return
     the diff. Centralises the invariant that every objective/adjustment change re-anchors the road
@@ -7404,8 +7497,10 @@ _PV_DRIFT = {"anchor": {"created_at": True, "for_date": True, "is_current": True
 
 # NOT `outcome` / `resolved_at` — a race RESULT is personal (§RL/H7). `SELECT *` feeds this, so the
 # allowlist is also what keeps a NEW objectives column off the public box.
-_PV_OBJECTIVES = {"date": True, "id": True, "label": True, "priority": True, "status": True,
-                  "target": True, "type": True}
+# `start_time` IS in: a race's gun time is organizer-published public info, the same class as the
+# date (already public) — and the public box's countdown needs it.
+_PV_OBJECTIVES = {"date": True, "id": True, "label": True, "priority": True, "start_time": True,
+                  "status": True, "target": True, "type": True}
 
 _PV_WEEKLY = {"km": True, "week": True}
 
@@ -7480,6 +7575,8 @@ _PV_PROJECTOR = {"history": {"date": True, "ctl": True, "atl": True, "tsb": True
 _PV_VO2MAX = {"months": True, "n": True, "points": {"date": True, "vo2max": True}}
 
 _PV_WITHHELD = {
+    "plan.seed_now.source", "plan.shape.seed.source",   # §SEED6 provenance of the load seed (own state vs Runalyze's rows),
+    "plan.shape.seed.runalyze", "plan.shape.seed.own_gap",   #   and how far apart they were: private only; publishing it is not decided
     "track.races[].p50_hms",                 # §TR — publishing the prediction beside its error
     "track.races[].err_pct",                 #   hands back the RESULT: actual = p50 × (1 + err)
     "track.races[].log_score",               # ditto, invertible given sigma
@@ -7491,8 +7588,13 @@ _PV_WITHHELD = {
     "plan.<phase>.weeks[].deload.readiness_why",     # §C — the token's own reason: private
     "track.ctl.points[].laid_km",            # §TR-A — the week's prescribed volume …
     "track.ctl.points[].ran_km",             #   … and what was run in it: private, the ratio is public
+    "plan.phases[].after", "plan.phases[].after_type",   # §CHAIN2 — the recovery phase's prior race; the console never reads them (the label is in "phase")
     "plan.adjustment",                       # free-text / medical context
     "plan.cold_start",                       # §33f-5 — AGE + an HRmax prior, H7-class
+    "plan.<phase>.weeks[].quality[].rot",    # §ROT — the threshold run's position in the rotation; `kind` already names the session
+    "plan.<phase>.weeks[].quality[].carve",          # §ROT — the threshold run's lay instruction; `kind` already names the session
+    "plan.<phase>.weeks[].sessions[].rot",           # §ROT — the marker on the carved run (the per-session step and §H2's un-carve read it)
+    "readiness.session.rot",                         # §ROT — the same marker on today's session in /api/readiness
     "plan.<phase>.weeks[].av_dates",         # §AV — away days are an empty-house broadcast
     "plan.<phase>.weeks[].av_shed",
     "plan.<phase>.weeks[].sessions[].reflection",   # free text, the readiness-note posture
@@ -8420,6 +8522,10 @@ def api_objectives_add():
         return jsonify(ok=False, error="date must be YYYY-MM-DD"), 400
     if d.get("priority", "A") not in ("A", "B", "C"):
         return jsonify(ok=False, error="priority must be A, B or C"), 400
+    try:                                   # §GUN — same guard as the date: reject junk HERE, not after
+        start_time = _start_time(d.get("start_time"))   # it is in the table (absent/"" → NULL)
+    except ValueError:
+        return jsonify(ok=False, error="start_time must be HH:MM (24-hour)"), 400
     label = d.get("label", "Race")
     db = get_db()
     # §OBJ2 — an unthrottled Add button once queued 12 identical clicks before the first re-plan
@@ -8430,10 +8536,10 @@ def api_objectives_add():
     ).fetchone():
         return jsonify(ok=False, error=f"already on the calendar: {label} on {d['date']}"), 409
     return replan(db, lambda: db.execute(
-        "INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO objectives (type,label,date,target,priority,status,created_at,start_time) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (d.get("type", "custom"), label, str(d["date"]),
-         d.get("target", "finish"), d.get("priority", "A"), "upcoming", _now_iso()),
+         d.get("target", "finish"), d.get("priority", "A"), "upcoming", _now_iso(), start_time),
     ))
 
 
@@ -8503,6 +8609,31 @@ def api_objectives_date(oid):
         "UPDATE objectives SET date=? WHERE id=?", (str(d["date"]), oid)))
 
 
+@app.post("/api/objectives/<int:oid>/time")
+def api_objectives_time(oid):
+    """§GUN — set or clear a race's gun time (HH:MM local), the moment the objective bar's countdown
+    targets. Unlike /date this is DISPLAY-ONLY: the engine periodizes to the DAY, so no re-periodize
+    runs — a plain UPDATE and commit, answered ok=True. Empty/null `start_time` clears it (the
+    countdown falls back to midnight). The guards mirror /date: only an `upcoming` race takes an
+    edit — a resolved one is a matter of record, stamped with the time it actually started."""
+    d = body()
+    try:                                   # same guard as the add path — reject junk HERE, not in
+        start_time = _start_time(d.get("start_time"))   # the table (absent/"" → NULL = clear)
+    except ValueError:
+        return jsonify(ok=False, error="start_time must be HH:MM (24-hour)"), 400
+    db = get_db()
+    o = db.execute("SELECT status FROM objectives WHERE id=?", (oid,)).fetchone()
+    if o is None:
+        return jsonify(ok=False, error="no such objective"), 404
+    if o["status"] != "upcoming":
+        why = ("it is no longer on the calendar" if o["status"] == "removed" else
+               "its start is a matter of record")
+        return jsonify(ok=False, error=f"a {o['status']} race takes no start time — {why}"), 409
+    db.execute("UPDATE objectives SET start_time=? WHERE id=?", (start_time, oid))
+    db.commit()
+    return jsonify(ok=True, start_time=start_time)
+
+
 @app.post("/api/objectives/<int:oid>/remove")
 def api_objectives_remove(oid):
     """Explicit removal (§6b) — drop the race and re-anchor the plan to what remains
@@ -8557,9 +8688,16 @@ def api_availability():
     db = get_db()
     monday = datetime.now().date()
     monday -= timedelta(days=monday.weekday())
+    # SH-49 — plus the windows ✕ cleared in the last 24 h whose days are still ahead, so the console
+    # can offer put back (active=0 + removed_at tells them apart). Active first, then newest-cleared.
+    today = datetime.now().date().isoformat()
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")   # removed_at is _now_iso(): UTC
     rows = [dict(r) for r in db.execute(
-        "SELECT id, date_from, date_to, note, created_at FROM availability "
-        "WHERE active=1 AND date_to >= ? ORDER BY date_from", (monday.isoformat(),)).fetchall()]
+        "SELECT id, date_from, date_to, note, created_at, active, removed_at FROM availability "
+        "WHERE (active=1 AND date_to >= ?) "
+        "OR (active=0 AND removed_at IS NOT NULL AND removed_at >= ? AND date_to >= ?) "
+        "ORDER BY active DESC, CASE WHEN active=1 THEN date_from END, removed_at DESC",
+        (monday.isoformat(), since, today)).fetchall()]
     return jsonify(rows)
 
 
@@ -8586,10 +8724,37 @@ def api_availability_add():
 
 @app.post("/api/availability/<int:avid>/remove")
 def api_availability_remove(avid):
-    """§AV — clear an away window; the plan re-lays immediately."""
+    """§AV — clear an away window; the plan re-lays immediately.
+
+    SH-49 — the stamp lets the console offer put back for 24 h; a window already cleared answers
+    409 instead of riding a pointless full re-plan."""
     db = get_db()
+    a = db.execute("SELECT active FROM availability WHERE id=?", (avid,)).fetchone()
+    if a is None:
+        return jsonify(ok=False, error="no such away window"), 404
+    if not a["active"]:
+        return jsonify(ok=False, error="already cleared"), 409
     return replan(db, lambda: db.execute(
-        "UPDATE availability SET active=0 WHERE id=?", (avid,)))
+        "UPDATE availability SET active=0, removed_at=? WHERE id=?", (_now_iso(), avid)))
+
+
+@app.post("/api/availability/<int:avid>/restore")
+def api_availability_restore(avid):
+    """SH-49 — the undo of ✕ (§OBJ3's twin). Puts the SAME row back (its id and created_at stay)
+    and re-lays the plan around it."""
+    db = get_db()
+    a = db.execute("SELECT active, date_from, date_to FROM availability WHERE id=?", (avid,)).fetchone()
+    if a is None:
+        return jsonify(ok=False, error="no such away window"), 404
+    if a["active"]:
+        return jsonify(ok=False, error="it is already in the plan"), 409
+    if a["date_to"] < datetime.now().date().isoformat():
+        return jsonify(ok=False, error="its days have passed"), 409
+    if db.execute("SELECT 1 FROM availability WHERE active=1 AND date_from=? AND date_to=?",
+                  (a["date_from"], a["date_to"])).fetchone():
+        return jsonify(ok=False, error=f"already declared: {a['date_from']} → {a['date_to']}"), 409
+    return replan(db, lambda: db.execute(
+        "UPDATE availability SET active=1, removed_at=NULL WHERE id=?", (avid,)))
 
 
 @app.post("/api/adjustment/propose")
@@ -8767,7 +8932,8 @@ def _seed_now(db, plan, today=None):
     the input has moved. It does NOT claim the sessions would change, because knowing that costs a
     full counterfactual `generate_plan` (measured on my DB at 1.6–2.0 s) and this runs on
     every dashboard load, behind a 4-thread server already seen queuing to depth 9. `plan_seed` is
-    0.1 ms. A cheap true statement beats an expensive one served slowly, and beats a cheap false one
+    about 60 ms on the live copy (median of 10, 19 Oct 2026; 54 ms before §SEED6 added the
+    reconstruction walk). A cheap true statement beats an expensive one served slowly, and beats a cheap false one
     absolutely — §6e2's hardcoded sentence is the standing lesson here.
 
     TRIGGERED ON VALUES, NOT PROVENANCE, and that distinction is the whole honesty of it: if the seed
@@ -8802,7 +8968,7 @@ def _seed_now(db, plan, today=None):
     return {"from": meta.get("from"), "bridged_days": meta.get("bridged_days"),
             "fallback": meta.get("fallback"), "was_from": saved.get("from"),
             "stale_skipped": meta.get("stale_skipped"), "stale_unresolved": meta.get("stale_unresolved"),
-            "tainted_skipped": meta.get("tainted_skipped"),
+            "tainted_skipped": meta.get("tainted_skipped"), "source": meta.get("source"),
             "moved": now != was, **now, "was": was}
 
 

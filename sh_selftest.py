@@ -1532,7 +1532,7 @@ def _stc_public_view_coverage(db):
     rather than hoped for. This det covers the PLAN payload only — see `_stc_public_view_coverage_all`
     for the same proof on the other public resources (shape, drift, track_record, objectives, log,
     readiness, activity, profile, weekly, healthz)."""
-    from datetime import date as _d
+    from datetime import date as _d, timedelta as _td
     fails, unclassified, seen = [], [], set()
     # (a) real roads: the ambient DB in both regimes, and a constructed race road
     plans = []
@@ -1543,6 +1543,23 @@ def _stc_public_view_coverage(db):
         plans.append(S.generate_plan(fx, today=fx_today))
     finally:
         fx.close()
+    # (a2) a TWO-RACE road: §CHAIN2 gives the chain's recovery phase `after` / `after_type`, fields
+    # no single-race road emits (SH-57: the live database tripped this det, the fixtures never did).
+    fx2, fx2_today = _race_fixture_db("marathon", weeks_out=12)
+    try:
+        fx2.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    ("marathon", "Fixture race two", (fx2_today + _td(weeks=40)).isoformat(),
+                     "3:40", "A", "upcoming", S._now_iso()))
+        fx2.commit()
+        two_race = S.generate_plan(fx2, today=fx2_today)
+    finally:
+        fx2.close()
+    if not any(isinstance(ph, dict) and ph.get("kind") == "recovery" and "after" in ph
+               for ph in (two_race.get("phases") or [])):
+        fails.append("two-race road emitted no recovery phase carrying `after` — the road verifies "
+                     "nothing about the §CHAIN2 fields")
+    plans.append(two_race)
     # (b) the governor annotations, pinned: `_mark_load_integrity` and the §PRO9 long-run cap set
     # these only when they bite, and the rest-day `optional` marker needs a week already complete.
     plans.append({"base": {"weeks": [{"wk": 1, "start": "2026-08-17", "km": 40, "runs": 5,
@@ -3142,13 +3159,16 @@ def _stc_demo_guard():
             for key in ("rest_day_rank", "long_run_day"):
                 had = hdb.execute("SELECT value FROM meta WHERE key=?", ("set:" + key,)).fetchone()
                 r = client.post("/api/settings", json={key: ""})
-                if r.status_code == 403:
-                    fails.append(f"the {key} setting is refused in demo — the engine cannot be driven")
+                # SH-62 — 200, not merely "not 403": the second key used to answer 500 ("database is
+                # locked", its POST waiting on this loop's own uncommitted restore of the first key)
+                # and pass as an allowance
+                if r.status_code != 200:
+                    fails.append(f"the {key} setting answered {r.status_code} in demo — the engine cannot be driven")
                 if had is None:
                     hdb.execute("DELETE FROM meta WHERE key=?", ("set:" + key,))
                 else:
                     hdb.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", ("set:" + key, had["value"]))
-            hdb.commit()
+                hdb.commit()          # restored before the next POST writes, never held across it
         finally:
             hdb.close()
         # (c) the status reads the Settings panel needs on first paint — and the Body tab's read
@@ -3161,7 +3181,14 @@ def _stc_demo_guard():
             fails.append("GET /api/secrets returned no status payload for the Settings panel")
         # (d) and none of it applies when the flag is off
         S.DEMO = False
-        off = client.post("/api/sync", json={})
+        # SH-62 — the pull itself is stubbed: with the guard off the route runs for real, and with an
+        # operator's token in the environment that was a live Runalyze sync from inside the battery
+        saved_sync = S.run_sync
+        S.run_sync = lambda backfill=False: {"ok": True, "stub": True}
+        try:
+            off = client.post("/api/sync", json={})
+        finally:
+            S.run_sync = saved_sync
         detail["guard_off_sync"] = off.status_code
         if off.status_code == 403 and (off.get_json() or {}).get("demo"):
             fails.append("the demo guard fired with SH_DEMO unset — every private console would inherit it")
@@ -6539,6 +6566,354 @@ def _stc_pulled_deload_replay():
                     "plan": got_b, "failures": fails or "none"})
 
 
+def _stc_seed_own_state():
+    """§SEED6 (0.78.3) — THE SEED IS THE ENGINE'S OWN LOAD STATE WHILE RUNALYZE AGREES TO ROUNDING. Runalyze
+    publishes CTL/ATL as integers, each day's row carrying its own ±0.5 error, so a seed read from the rows
+    jittered from one day to the next and the jitter reached sessions weeks ahead. `plan_seed` now returns the
+    engine's EWMA over the local daily TRIMP, unrounded, while every row the §SEED2–5 walk trusts sits within
+    SEED_OWN_TOL of it on its own date; a disagreement beyond rounding in the 14-row window closes the gate and
+    the seed is the cleaned Runalyze seed as before. Pure/in-memory fixture: 150 days of integer TRIMP and
+    the rounded rows of the 20 days before `today`.
+    (a) the seed is the independent EWMA at yesterday, to 1e-9, and not an integer;
+    (b) over six consecutive days the seed steps from one day to the next by that day's TRIMP, which the
+        cleaned integer seed does not;
+    (c) a trusted row 1.5 CTL off closes the gate for as long as it is among the 14 rows, and reopens after;
+    (d) a row beyond SEED_TAINT_TOL (skipped by §SEED3) and (e) a stale row leave it open;
+    (f) no activities ⇒ the Runalyze seed, no snapshot ⇒ None."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta
+    fail = []
+    cycle = [0, 95, 60, 120, 0, 70, 180]
+    first = date(2026, 5, 1)
+    t_start = date(2026, 10, 5)
+
+    def trimp_of(d):
+        i = (d - first).days
+        v = cycle[i % 7]
+        return float(v + i // 20) if v else 0.0
+
+    def own_series(upto):
+        c = a = 0.0
+        out, d = {}, first
+        while d <= upto:
+            t = trimp_of(d)
+            c, a = E._ewma_step(c, t, E.TAU_CTL), E._ewma_step(a, t, E.TAU_ATL)
+            out[d.isoformat()] = (c, a)
+            d += timedelta(days=1)
+        return out
+
+    def mk(today, bad=None, stale=None, acts=True, rows=True):
+        """History through yesterday. `bad` {iso: (dctl, datl)} offsets a row; `stale` iso gets a row that is
+        stale (an activity dated on it reached Runalyze after the row was captured) and short of its run."""
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)
+        yday = today - timedelta(days=1)
+        own = own_series(yday)
+        d = first
+        while acts and d <= yday:
+            t = trimp_of(d)
+            if t:
+                raw = S.json.dumps({"created_at": 1}) if d.isoformat() != stale else S.json.dumps({"created_at": 4102444800})
+                mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp,raw,synced_at) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (d.isoformat(), d.isoformat() + "T18:00", S.RUNNING_SPORT,
+                                                        8.0, 2900, t, raw, d.isoformat() + "T19:00:00+00:00"))
+            d += timedelta(days=1)
+        for k in range(20, 0, -1):
+            if not rows:
+                break
+            dd = (today - timedelta(days=k)).isoformat()
+            c, a = own[dd]
+            if dd == stale:
+                pc, pa = own[(today - timedelta(days=k + 1)).isoformat()]
+                c, a = E._ewma_step(pc, 0.0, E.TAU_CTL), E._ewma_step(pa, 0.0, E.TAU_ATL)
+            c, a = float(round(c)), float(round(a))
+            if bad and dd in bad:
+                c, a = c + bad[dd][0], a + bad[dd][1]
+            mem.execute("INSERT INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,fitness,fatigue) "
+                        "VALUES(?,?,?,?,?)", (dd, dd + "T20:00:00+00:00", 40.0, c, a))
+        mem.commit()
+        return mem
+
+    # (a) the seed is the engine's own state
+    own = own_series(t_start - timedelta(days=1))
+    _v, c0, a0, m0 = S.plan_seed(mk(t_start), t_start)
+    ec, ea = own[(t_start - timedelta(days=1)).isoformat()]
+    if m0.get("source") != "reconstruction":
+        fail.append(f"(a) source {m0.get('source')!r}, expected 'reconstruction' (own_gap {m0.get('own_gap')})")
+    if abs(c0 - ec) > 1e-9 or abs(a0 - ea) > 1e-9:
+        fail.append(f"(a) seed {c0}/{a0} is not the independent EWMA {ec}/{ea}")
+    if abs(ec - round(ec)) < 1e-3 and abs(ea - round(ea)) < 1e-3:
+        fail.append("(a) anti-vacuity — the fixture's state is an integer on both axes")
+
+    # (b) day-to-day consistency
+    seeds, olds = [], []
+    for k in range(7):
+        t = t_start + timedelta(days=k)
+        _v, c, a, m = S.plan_seed(mk(t), t)
+        seeds.append((c, a))
+        olds.append(tuple(m["runalyze"]) if m.get("runalyze") else (c, a))
+    worst_new = worst_old = 0.0
+    for k in range(6):
+        tr = trimp_of(t_start + timedelta(days=k))
+        for (p, q, store) in ((seeds[k], seeds[k + 1], "new"), (olds[k], olds[k + 1], "old")):
+            sc, sa = E._ewma_step(p[0], tr, E.TAU_CTL), E._ewma_step(p[1], tr, E.TAU_ATL)
+            dev = max(abs(sc - q[0]), abs(sa - q[1]))
+            if store == "new":
+                worst_new = max(worst_new, dev)
+            else:
+                worst_old = max(worst_old, dev)
+    if worst_new > 1e-9:
+        fail.append(f"(b) the seed does not step by the day's TRIMP: worst deviation {worst_new}")
+    if worst_old <= 0.05:
+        fail.append(f"(b) anti-vacuity — the integer seed steps within {worst_old} of the day's TRIMP too")
+
+    # (c) a trusted row 1.5 CTL off closes the gate while it is among the 14 rows
+    off_day = t_start + timedelta(days=-4)
+    bad = {off_day.isoformat(): (1.5, 0.0)}
+    states = []
+    for k in range(0, 17):
+        t = off_day + timedelta(days=1 + k)
+        _v, c, a, m = S.plan_seed(mk(t, bad=bad), t)
+        states.append((k, m.get("source"), m.get("own_gap")))
+        if m.get("source") == "runalyze":
+            r = mk(t, bad=bad).execute("SELECT fitness, fatigue FROM shape_snapshots WHERE snapshot_date=?",
+                                       ((t - timedelta(days=1)).isoformat(),)).fetchone()
+            if abs(c - r["fitness"]) > 1e-9 or abs(a - r["fatigue"]) > 1e-9:
+                fail.append(f"(c) closed gate on {t} seeds {c}/{a}, not the cleaned row {r['fitness']}/{r['fatigue']}")
+    closed = [k for k, src, _g in states if src == "runalyze"]
+    # the row dated off_day is among the 14 rows before `t` for t = off_day+1 … off_day+14
+    if closed != list(range(0, 14)):
+        fail.append(f"(c) the gate was closed on days {closed}, expected 0–13 after the off row")
+    gaps = [g for k, src, g in states if src == "runalyze"]
+    if not gaps or abs(min(gaps) - 1.5) > 0.5 + 1e-9:         # 1.5 plus or minus the row's own rounding
+        fail.append(f"(c) own_gap while closed {gaps[:3]}, expected ≈ 1.5")
+    if [src for k, src, _g in states if k >= 14] != ["reconstruction"] * 3:
+        fail.append(f"(c) the gate did not reopen on the first day the row left the window: {states[14:]}")
+
+    # (d) a row beyond the taint tolerance is skipped by §SEED3 and the gate stays open
+    t = t_start
+    _v, c, a, m = S.plan_seed(mk(t, bad={(t - timedelta(days=5)).isoformat(): (8.0, 40.0)}), t)
+    if m.get("tainted_skipped") != 1:
+        fail.append(f"(d) anti-vacuity — the 8/40 row was not skipped as tainted (tainted_skipped {m.get('tainted_skipped')})")
+    if m.get("source") != "reconstruction":
+        fail.append(f"(d) a tainted, skipped row closed the gate: {m.get('source')} (own_gap {m.get('own_gap')})")
+
+    # (e) a stale row is skipped and the gate stays open
+    t = t_start
+    _v, c, a, m = S.plan_seed(mk(t, stale=(t - timedelta(days=1)).isoformat()), t)
+    if m.get("stale_skipped") != 1:
+        fail.append(f"(e) anti-vacuity — the stale row was not skipped (stale_skipped {m.get('stale_skipped')})")
+    if m.get("source") != "reconstruction":
+        fail.append(f"(e) a stale, skipped row closed the gate: {m.get('source')} (own_gap {m.get('own_gap')})")
+
+    # (f) nothing to reconstruct from
+    _v, c, a, m = S.plan_seed(mk(t_start, acts=False), t_start)
+    base = mk(t_start, acts=False).execute(
+        "SELECT fitness, fatigue FROM shape_snapshots WHERE snapshot_date=?", (m.get("from"),)).fetchone()
+    ec, ea = base["fitness"], base["fatigue"]
+    for _k in range(m.get("bridged_days") or 0):                # the cleaned Runalyze seed: its row, bridged over rest days
+        ec, ea = E._ewma_step(ec, 0.0, E.TAU_CTL), E._ewma_step(ea, 0.0, E.TAU_ATL)
+    if m.get("source") != "runalyze" or abs(c - ec) > 1e-9 or abs(a - ea) > 1e-9:
+        fail.append(f"(f) no activities: source {m.get('source')!r}, seed {c}/{a}, the cleaned Runalyze seed {ec}/{ea}")
+    if S.plan_seed(mk(t_start, rows=False), t_start) is not None:
+        fail.append("(f) no snapshot must still return None")
+    return _st("det", "seed-own-state",
+               "§SEED6 the plan seed is the engine's own end-of-yesterday load state, unrounded, while the "
+               "trusted Runalyze rows agree to rounding; a disagreement beyond rounding in the 14-row window "
+               "seeds from the cleaned Runalyze rows as before",
+               passed=not fail, expect="source 'reconstruction' = the independent EWMA; steps by each day's "
+               "TRIMP; closed for exactly the 14 days an off row is in the window; open for tainted/stale rows",
+               got={"gate_by_day_after_off_row": states, "worst_step_dev_new": worst_new,
+                    "worst_step_dev_integer_seed": round(worst_old, 3), "failures": fail or "none"})
+
+
+def _stc_chain_precision():
+    """§SEED6 (0.78.3) — THE STATE CHAINED BETWEEN WEEKS AND PHASES IS NOT ROUNDED. A Monday plan starts from the
+    unrounded seed, but `_project_week` handed the next week its end state at 2 decimals and `generate_block`
+    and `_split_freeze` handed the next phase theirs at 1, so a hand-over moved a session 0.1–0.2 km that the
+    same week laid from its Monday did not.
+    (a) `_project_week` returns the end state stepped over its own days at full precision, from Monday, from
+        mid-week, and with an `actual_floor` that binds (the difference from the 2-decimal curve value must
+        show, or the fixture proves nothing);
+    (b) `generate_block`'s `end_ctl`/`end_atl` are the full-precision projection of everything it laid."""
+    from datetime import date, timedelta
+    fail = []
+    c, a = 97.3713, 121.0457
+    mon = "2026-10-12"
+    dt = {"2026-10-13": 80.0, "2026-10-15": 120.5, "2026-10-17": 60.0}
+
+    def man(c0, a0, start, end, d):
+        cur, cc, aa = E._date(start), c0, a0
+        while cur <= E._date(end):
+            t = d.get(cur.isoformat(), 0.0)
+            cc, aa = E._ewma_step(cc, t, E.TAU_CTL), E._ewma_step(aa, t, E.TAU_ATL)
+            cur += timedelta(days=1)
+        return cc, aa
+
+    dt_floor = dict(dt); dt_floor["2026-10-14"] = 150.0
+    for label, kw, start, merged in (("Monday", {}, mon, dt),
+                                     ("mid-week", {"roll_from": "2026-10-14"}, "2026-10-14", dt),
+                                     ("floor binds", {"roll_from": "2026-10-14",
+                                                      "actual_floor": {"2026-10-14": 150.0}}, "2026-10-14", dt_floor)):
+        r = E._project_week(c, a, mon, dt, **kw)
+        ec, ea = man(c, a, start, "2026-10-18", merged)
+        if abs(r[0] - ec) > 1e-9 or abs(r[1] - ea) > 1e-9:
+            fail.append(f"(a) {label}: end state {r[0]}/{r[1]}, expected {ec}/{ea}")
+        if max(abs(ec - round(ec, 2)), abs(ea - round(ea, 2))) <= 1e-6:
+            fail.append(f"(a) {label}: anti-vacuity — the expected state is already a 2-decimal number")
+    shape = [{"wk": i + 1, "km": 40 + 3 * i, "runs": 5, "long": 12 + i, "strides": 0,
+              "intent": "Base — aerobic volume"} for i in range(3)]
+    ps = date(2026, 10, 12)
+    wks, bound = E.generate_block(shape, ps, c, a, 400.0, today=ps, regime="assertive")
+    d = {}
+    for w in wks:
+        for s in w["sessions"]:
+            d[s["date"]] = d.get(s["date"], 0.0) + s["trimp"]
+    ec, ea = man(c, a, ps.isoformat(), (ps + timedelta(days=20)).isoformat(), d)
+    if abs(bound["end_ctl"] - ec) > 1e-6 or abs(bound["end_atl"] - ea) > 1e-6:
+        fail.append(f"(b) block end {bound['end_ctl']}/{bound['end_atl']}, expected the full-precision {ec}/{ea}")
+    if max(abs(bound["end_ctl"] - round(bound["end_ctl"], 1)), abs(bound["end_atl"] - round(bound["end_atl"], 1))) <= 1e-6:
+        fail.append("(b) anti-vacuity — the block's end state is already a 1-decimal number")
+    return _st("det", "chain-precision",
+               "§SEED6 the load state chained from a week to the next, and from a block to the next phase, is "
+               "carried at full precision; only the displayed curve and the displayed block are rounded",
+               passed=not fail, expect="_project_week and generate_block end states equal the unrounded "
+               "_ewma_step walk to 1e-9 / 1e-6", got={"failures": fail or "none"})
+
+
+def _stc_regen_follow_rounding():
+    """§SEED6 (0.78.3) — SAME INPUT ⇒ SAME PLAN, THROUGH RUNALYZE'S ROUNDING. Owner's ruling 2026-09-29: a regeneration
+    with no new input must lay the same days ahead. A follow-the-plan simulation on the live copy (19 Oct → 5 Dec
+    2026) showed the integer CTL/ATL rows moving sessions weeks ahead (12.8 ↔ 13.7 km, a threshold run falling to
+    easy). Here the synthetic athlete runs exactly what each day's plan laid for nine consecutive days, the
+    snapshot rows are the engine's own state rounded to integers, and each day the plan is regenerated: every day
+    still ahead must come back identical (kind, km, minutes, TRIMP, reps), no week may change role, and the
+    seed-now banner must read the plan it was just seeded from as unmoved. Crosses the Monday."""
+    from datetime import date, timedelta
+    import sqlite3 as _sq
+    fails = []
+    t0 = date(2026, 7, 6)                                         # a Monday
+    _date = E._date
+
+    def sessions(plan):
+        out = {}
+        for ph in plan.get("phases", []):
+            for w in (plan.get(ph["key"]) or {}).get("weeks", []):
+                for s in w.get("sessions", []):
+                    out.setdefault(s["date"], []).append(
+                        (s.get("kind"), s.get("km"), s.get("minutes"), s.get("trimp"), s.get("reps")))
+        return {k: sorted(v, key=repr) for k, v in out.items()}
+
+    def roles(plan):
+        return {w["start"]: w.get("role") for ph in plan.get("phases", [])
+                for w in (plan.get(ph["key"]) or {}).get("weeks", [])}
+
+    mem = S.sqlite3.connect(":memory:")
+    mem.row_factory = S.sqlite3.Row
+    mem.executescript(S.SCHEMA)
+    undo = _patch_globals(get_db=(lambda: mem))
+    got = {}
+    try:
+        S.seed_synthetic_db(mem, end=t0.isoformat(), with_objective=False)
+        mem.execute("DELETE FROM plans")
+        mem.execute("DELETE FROM meta WHERE key='rebase_start'")
+        mem.execute("DELETE FROM objectives")
+        mem.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                    "VALUES ('marathon','Rounding Marathon',?,'3:45','A','upcoming','2026-01-01T00:00:00+00:00')",
+                    ((t0 + timedelta(weeks=16, days=6)).isoformat(),))
+        mem.execute("UPDATE activities SET synced_at = date || 'T12:00:00+00:00', raw = json_remove(raw, '$.created_at')")
+        mem.commit()
+
+        def own_rows(upto_day):
+            """The engine's own state at the end of each of the 20 days up to `upto_day`, rounded as Runalyze
+            publishes it, captured after the day's activities."""
+            daily = E.daily_trimp_series(mem)
+            c = a = 0.0
+            cur, out = min(_date(k) for k in daily), []
+            while cur <= upto_day:
+                t = daily.get(cur.isoformat(), 0.0)
+                c, a = E._ewma_step(c, t, E.TAU_CTL), E._ewma_step(a, t, E.TAU_ATL)
+                out.append((cur, c, a))
+                cur += timedelta(days=1)
+            return out[-20:] if upto_day == t0 - timedelta(days=1) else out[-1:]
+
+        def put_rows(rows):
+            for d_, c, a in rows:
+                mem.execute("INSERT OR REPLACE INTO shape_snapshots(snapshot_date,captured_at,effective_vo2max,"
+                            "fitness,fatigue) VALUES(?,?,?,?,?)",
+                            (d_.isoformat(), d_.isoformat() + "T23:00:00+00:00", 40.0, float(round(c)), float(round(a))))
+            mem.commit()
+            return max(max(abs(c - round(c)), abs(a - round(a))) for _d, c, a in rows)
+
+        mem.execute("DELETE FROM shape_snapshots")
+        max_round = put_rows(own_rows(t0 - timedelta(days=1)))
+
+        def gen(today):
+            plan = E.generate_plan(mem, force_regime="assertive", today=today)
+            if not plan.get("ok"):
+                return None
+            mem.execute("INSERT INTO plans (created_at, for_date, inputs, plan) VALUES (?,?,?,?)",
+                        (today.isoformat() + "T06:00:00+00:00", today.isoformat(), "{}",
+                         S.json.dumps(plan, default=str)))
+            mem.commit()
+            return plan
+
+        plans = [(t0, gen(t0))]
+        if plans[0][1] is None:
+            fails.append("fixture — the first plan failed")
+        moved_banner = []
+        for k in range(9):
+            if plans[-1][1] is None:
+                break
+            d = t0 + timedelta(days=k)
+            for s in sessions(plans[-1][1]).get(d.isoformat(), []):
+                kind, km, minutes, trimp, _reps = s
+                mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp,raw,synced_at) "
+                            "VALUES(?,?,?,?,?,?,?,?)", (d.isoformat(), d.isoformat() + "T18:30", S.RUNNING_SPORT,
+                                                        km, (minutes or 0) * 60, trimp, "{}",
+                                                        d.isoformat() + "T12:00:00+00:00"))
+            mem.commit()
+            max_round = max(max_round, put_rows(own_rows(d)))
+            nxt = d + timedelta(days=1)
+            plan = gen(nxt)
+            if plan is None:
+                fails.append(f"fixture — the plan for {nxt} failed")
+                break
+            plans.append((nxt, plan))
+            sn = S._seed_now(mem, plan, nxt)
+            if sn and sn.get("moved"):
+                moved_banner.append(nxt.isoformat())
+        diffs = []
+        for (ta, pa), (tb, pb) in zip(plans, plans[1:]):
+            sa, sb = sessions(pa), sessions(pb)
+            for day in sorted(set(sa) | set(sb)):
+                if day >= tb.isoformat() and sa.get(day) != sb.get(day):
+                    diffs.append((tb.isoformat(), day, sa.get(day), sb.get(day)))
+            ra, rb = roles(pa), roles(pb)
+            for wk in sorted(set(ra) & set(rb)):
+                if _date(wk) + timedelta(days=6) >= tb and ra[wk] != rb[wk]:
+                    diffs.append((tb.isoformat(), "role " + wk, ra[wk], rb[wk]))
+        if len(plans) < 10:
+            fails.append(f"fixture — only {len(plans)} plans were laid")
+        if max_round <= 0.05:
+            fails.append("anti-vacuity — the rounded rows never differ from the engine's own state by more than 0.05")
+        if diffs:
+            fails.append(f"{len(diffs)} change(s) with no new input; first: {diffs[0]}")
+        if moved_banner:
+            fails.append(f"the seed-now banner read a just-generated plan as moved on {moved_banner}")
+        got = {"plans": len(plans), "changes": len(diffs), "first": diffs[:3], "banner_moved": moved_banner,
+               "max_row_rounding": round(max_round, 3)}
+    finally:
+        undo()
+        mem.close()
+    return _st("det", "regen-follow-rounding",
+               "§SEED6 a synthetic athlete who runs what each day's plan laid, on integer-rounded Runalyze rows, "
+               "gets the same days ahead on every regeneration across nine days and a Monday",
+               passed=not fails, expect="no session field and no week role changes on any day still ahead; "
+               "the seed-now banner stays silent on a plan generated today",
+               got={**got, "failures": fails or "none"})
+
+
 def _stc_phase_handover_windows():
     """§HANDOVER (0.68.4) — A PHASE THAT IS ENTIRELY LIVED HANDS ITS ACTUALS TO THE NEXT PHASE'S CEILINGS.
     `_split_freeze` refreshed the §PRO9/§3.1 windows from the elapsed weeks only when the phase still had a
@@ -7598,7 +7973,7 @@ def _stc_race_session():
     #     That would show up here as a difference in the sessions, not merely a missing race.
     GOV = ("intent_km", "clipped", "proj_acwr_soft", "intent_runs")
 
-    def _noop_place(sessions, day_trimps, race, week_start):
+    def _noop_place(sessions, day_trimps, race, week_start, **_kw):
         return sessions, day_trimps          # returns the SAME objects: the caller's `is` test fails
 
     for regime in ("caution", "assertive"):
@@ -15603,9 +15978,14 @@ def _stc_components():
     the MP finish GROWS monotonically START→END across non-down weeks (constant-speed extension);
     down weeks stay quality-free. SAFETY on every davis week: total work frac ≤ .25 sanity bound
     (polarized floor is MP-exempt) and the threshold+interval slice ≤ PHASE_HARD_CAP.
-    (c) SESSIONS + SURFACE — a generated davis Build block tags interval→vo2max,
-    long_mp→resilience, the down-week plain long→economy; _phase_builds derives the distinct
-    list; the polarized invariant holds on the generated davis weeks. Constructed fixture."""
+    §ROT: the mid-week slot of those shapes is the VO₂ session (DAVIS_INT_FRAC) in every quality week,
+    and every other one adds a `carve` threshold run (DAVIS_THU_FRAC, tempo) cut from an easy day, so
+    the carve spec is counted in the hard share but takes no slice of the work budget;
+    det/specific-rotation locks the rotation itself.
+    (c) SESSIONS + SURFACE — a generated davis Build block tags interval→vo2max, long_mp→resilience,
+    the down-week plain long→economy (and tempo→ssmax when the block lays a threshold run); _phase_builds
+    derives the distinct list; the polarized invariant holds on the generated davis weeks. Constructed
+    fixture."""
     from datetime import date
     fails = []
     # (a) caution byte-identity — the davis=False code path == the no-arg default, and the legacy literals
@@ -15653,16 +16033,40 @@ def _stc_components():
         fails.append(f"davis build MP must grow {S.DAVIS_BUILD_MP_START}→{S.DAVIS_BUILD_MP_END}: {mp_fracs}")
     if any(f != S.DAVIS_INT_FRAC for f in int_fracs):
         fails.append(f"davis build intervals must keep the full session size: {int_fracs}")
+    thr_fracs = [q["frac"] for w in db_shape if not S._is_down(w["intent"])
+                 for q in w["quality"] if q["kind"] == "tempo"]
+    if any(f != E.DAVIS_THU_FRAC for f in thr_fracs):   # §ROT — the alternate weeks' threshold run
+        fails.append(f"davis build threshold runs must be DAVIS_THU_FRAC: {thr_fracs}")
+    for w in db_shape:                                    # §ROT — quality[0] is the VO₂ session, the carve is extra
+        if S._is_down(w["intent"]):
+            continue
+        carves = [q for q in w["quality"] if q.get("carve")]
+        if w["quality"][0]["kind"] != "interval" or w["quality"][0]["frac"] != S.DAVIS_INT_FRAC:
+            fails.append(f"davis build wk{w['wk']} quality[0] is not the VO₂ session at DAVIS_INT_FRAC: {w['quality'][0]}")
+        if len(carves) != w["quality"][0]["rot"] % 2:
+            fails.append(f"davis build wk{w['wk']} carries {len(carves)} carve specs at rot {w['quality'][0]['rot']}")
+        if carves and not (carves[0]["kind"] == "tempo" and carves[0]["frac"] == E.DAVIS_THU_FRAC):
+            fails.append(f"davis build wk{w['wk']} carve spec off its size: {carves[0]}")
     if any(w["quality"] for w in db_shape if S._is_down(w["intent"])):
         fails.append("davis build down weeks must stay quality-free")
     dp_shape = S.peak_shape(3, 26, davis=True)
     pk_fracs = [q["frac"] for w in dp_shape for q in w["quality"] if q["kind"] == "long_mp"]
+    if any(q["frac"] != {"interval": S.DAVIS_INT_FRAC, "tempo": E.DAVIS_THU_FRAC}[q["kind"]]
+           for w in dp_shape for q in w["quality"] if q["kind"] in ("interval", "tempo")):
+        fails.append("davis peak mid-week session off its size (interval DAVIS_INT_FRAC / tempo DAVIS_THU_FRAC)")
+    for w in dp_shape:
+        carves = [q for q in w["quality"] if q.get("carve")]
+        if w["quality"][0]["kind"] != "interval" or len(carves) != w["quality"][0]["rot"] % 2:
+            fails.append(f"davis peak wk{w['wk']} VO₂ session / carve count off: {[q['kind'] for q in w['quality']]}")
     if not (pk_fracs[0] == S.DAVIS_PEAK_MP_START and pk_fracs[-1] == S.DAVIS_PEAK_MP_END
             and all(a <= b for a, b in zip(pk_fracs, pk_fracs[1:]))):
         fails.append(f"davis peak MP must grow {S.DAVIS_PEAK_MP_START}→{S.DAVIS_PEAK_MP_END}: {pk_fracs}")
     for name, shp in (("base", S.base_shape(6, 19, davis=True)), ("build", db_shape), ("peak", dp_shape)):
         for w in shp:
-            work = sum(q["frac"] for q in w["quality"])
+            # §ROT — a carve spec takes no slice of the work budget (the run is cut from an easy day at
+            # that day's TRIMP), so the 0.25 sanity bound sums the budgeted specs only; the hard share
+            # below counts it, because it is hard work.
+            work = sum(q["frac"] for q in w["quality"] if not q.get("carve"))
             hard = sum(q["frac"] for q in w["quality"] if q["zone"] in S.HARD_ZONES)
             # the engine's polarized floor is MP-EXEMPT (hard = thr+int only; the MP slice is bounded
             # by the load cap) — so the spec-level locks are the hard cap + a total-work sanity bound
@@ -15670,6 +16074,9 @@ def _stc_components():
                 fails.append(f"davis {name} wk{w['wk']} total work frac {work} > 0.25 sanity bound")
             if hard > S.PHASE_HARD_CAP[name] + 1e-9:
                 fails.append(f"davis {name} wk{w['wk']} hard frac {hard} > cap {S.PHASE_HARD_CAP[name]}")
+            if name in ("build", "peak") and hard > (1.0 - S.POLARIZED_EASY_MIN) + 1e-9:
+                fails.append(f"davis {name} wk{w['wk']} hard frac {hard} passes the polarized floor "
+                             f"{1.0 - S.POLARIZED_EASY_MIN} (§H2 would strip the week)")
     # (c) generated sessions carry the tags; the surface derives from them; polarized holds
     easy = 425
     zones = {"easy_top": easy, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
@@ -15677,8 +16084,10 @@ def _stc_components():
                               easy, zones=zones)
     tags = {s.get("kind"): s.get("component") for w in weeks for s in w["sessions"]
             if s.get("component")}
+    # §ROT — a threshold run is cut from an easy day only where the week has the room, which this fixture's
+    # volume does not promise; the tempo tag is checked when the block lays one
     if tags.get("interval") != "vo2max" or tags.get("long_mp") != "resilience" \
-       or tags.get("long") != "economy":
+       or tags.get("long") != "economy" or ("tempo" in tags and tags["tempo"] != "ssmax"):
         fails.append(f"generated session tags wrong: {tags}")
     builds = S._phase_builds(weeks)
     if not {"vo2max", "resilience", "economy"} <= set(builds):
@@ -15699,6 +16108,833 @@ def _stc_components():
                expect="caution literals locked; davis VO₂ .10 base / .06 maint; MP .07→.10, .10→.13; caps held; tags derived",
                got={"build_mp_fracs": mp_fracs, "peak_mp_fracs": pk_fracs,
                     "builds": builds, "failures": fails or "none"})
+
+
+def _golden_rot_odd_peak(db, today):
+    """§ROT fixture — one A-race (marathon) 126 days out, which periodizes to Build 6 + Peak 3: an ODD
+    Peak. With an even Peak the hand-over parity is the same whether or not `generate_plan` passes
+    `q_after` to the Build shaper, so dropping that plumbing would go unnoticed; with three Peak weeks
+    the Build's last quality week lands on the opposite kind unless the count runs on across."""
+    db.execute("DELETE FROM objectives")
+    db.execute("INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+               "VALUES ('marathon','Golden Marathon (ROT)',?,'3:45','A','upcoming','2026-01-01T00:00:00+00:00')",
+               ((today + S.timedelta(days=126)).isoformat(),))
+
+
+def _stc_specific_rotation():
+    """§ROT — EVERY OTHER BUILD/PEAK WEEK ADDS A CONTINUOUS THRESHOLD RUN, CARVED OUT OF THE WEEK'S FRESHEST
+    EASY DAY AT THAT DAY'S TRIMP. The VO₂ session keeps its day and size in every quality week. Positions
+    are counted over a segment's quality weeks (Build or Bridge non-down weeks, then the Peak after them)
+    back from the taper: r = 0 is the last, odd r carries the run, so the last week keeps two hard days.
+    (a) shapes: every quality week keeps the VO₂ spec first and the long_mp spec last; odd r adds exactly
+        one `carve` tempo spec in the threshold zone, even r none; rots run r, r-1 … 0 across Build → Peak;
+        down weeks carry nothing;
+    (b) the carve size is derived from the polarized floor and the VO₂ size;
+    (c) the live-shaped block (Build 6 + Peak 3), week by week, with intents, roles and phases;
+    (d) a §PRO11 swap of a down week (non-adjacent = the pull; adjacent) plus `_reseat_specific` keeps the
+        alternation, the carve specs, the intents and strictly descending rots;
+    (e) caution is byte-identical and carries no `rot`/`carve` anywhere;
+    (f) TRIMP NEUTRALITY: the week laid with and without the carve spec has identical day TRIMPs and
+        identical sessions but for the carved day, whose TRIMP equals the easy run it replaced; the reps
+        are a 10-min easy warm-up, ONE continuous threshold block, an easy cool-down; the hard share holds;
+    (g) the floor clip: where the share's slice passes what the VO₂ session's rounded reps leave under
+        the floor, the room is the bound;
+    (h) the day: Thursday on the stock 4- and 5-run layouts and on an athlete-like Tue/Wed/Thu/Sat/Sun
+        week, Friday on the stock 6-run one, none on 3 runs; always ≥ 2 days from every heavy day;
+    (i) a pinned day of the run's kind (the straddle remainder) is carved again, never handed the VO₂ spec;
+    (j) §H2 un-carves FIRST: a week eased until the share passes the floor loses the threshold run and
+        keeps its VO₂ session and MP finish;
+    (k) §SHARE: the long run stays inside the phase's share of the week with a small mid-week session
+        under a large MP finish;
+    (l) the public views withhold `rot` and `carve`;
+    (m) strides: the carved run carries none and no other day gains them;
+    (n) `_bout_eq_km` of the carved run is 0 while the week eq counts it;
+    (o) the low-volume regime plan does not hold a threshold week at the per-session ceiling;
+    (p) the §PULL replay on a fresh shape re-seats the rotation;
+    (q) a Tue..Sun regeneration of a threshold week follows the Monday lay, and the session once run is
+        not laid again;
+    (k2) the long run of a carved week is the one the no-carve week lays, inside the phase share of the
+        pre-carve week;
+    (s) the intent names the threshold run only where one is laid (a forced deload keeps its sentence);
+    (t) a tune-up's run-up un-carves a carved day (same TRIMP, strides back) and still clears a VO₂ session;
+    (u) a mid-week regeneration keeps Monday's un-carve decision (Tue, Wed, Thu morning and night);
+    (v) the governor's search lays without the run, and the final lay fits the §3.1 week eq ceiling;
+    (w) the carve keeps clear of next week's Monday long run;
+    (x) `_uncarve` keeps strides, an "eased — " note, the rest markers, and a check-in's easy run;
+    (y) the clipped straddle remainder keeps the full lay's minutes; no tempo pin, no carve;
+    (z1) the run keeps out of a race's window (carve_race_offs), on the free path and the pinned one;
+    (z2) §PAST: a day run today is recorded from history, not the evening re-lay;
+    (z3) a check-in over the carved day un-carves it first: easy at the carved TRIMP (x mult), strides back;
+    (z4) the §DAYSHARE copy goes back to the easy run when the eq already spent leaves no room for the run;
+    (r) THE CALL SITE: a full assertive plan with an odd Peak (Build 6 + Peak 3) alternates across the
+        Build/Peak hand-over and ends without a carve (drops out if `generate_plan` stops passing
+        `q_after`). Pure/in-memory except (o) and (r)."""
+    from datetime import date, timedelta
+    fails = []
+    MON = date(2026, 8, 3)
+    zq = {"easy_top": 425, "easy": 460, "marathon": 360, "threshold": 330, "interval": 300}
+    rate = E.trimp_per_min("threshold")
+
+    def _carves(w):
+        return [q for q in (w.get("quality") or []) if q.get("carve")]
+
+    def _rot(w):
+        q = w.get("quality") or []
+        return q[0].get("rot") if q else None
+
+    def _lay(w, W, drop=False, runs=None, **kw):
+        ww = dict(w)
+        if runs is not None:
+            ww["runs"] = runs
+        if drop:
+            ww["quality"] = [q for q in w["quality"] if not q.get("carve")]
+        return E._distribute_week(ww, MON, W, 425, zq, **kw)
+
+    def _carved(sess):
+        return [x for x in sess if x.get("rot") is not None]
+
+    def _off(x):
+        return (date.fromisoformat(x["date"]) - MON).days
+
+    b6 = E.build_shape(6, 60, davis=True, q_after=3)
+    p3 = E.peak_shape(3, 70, davis=True)
+    odd_wk = b6[0]                         # r = 7: a threshold-run week
+    if not _carves(odd_wk):
+        fails.append("fixture — Build 6 + Peak 3 week 1 must carry a carve spec")
+
+    # (a) shape alternation over several (build, peak) splits
+    for nb, npk in [(6, 3), (7, 2), (5, 0), (8, 4), (4, 1)]:
+        bs = E.build_shape(nb, 60, davis=True, q_after=npk)
+        for w in bs:
+            if E._is_down(w) and w["quality"]:
+                fails.append(f"(a) build {nb}+{npk} down wk{w['wk']} carries quality")
+        qw = [w for w in bs if not E._is_down(w)]
+        if npk:
+            qw += E.peak_shape(npk, 70, davis=True)
+        rots = [_rot(w) for w in qw]
+        if rots != list(range(len(qw) - 1, -1, -1)):
+            fails.append(f"(a) {nb}+{npk} rots are not r..0 across Build → Peak: {rots}")
+        for w in qw:
+            q = w["quality"]
+            r = _rot(w)
+            if not (q[0]["kind"] == "interval" and q[0]["frac"] == E.DAVIS_INT_FRAC and q[0]["rep_min"] == 3
+                    and q[0].get("component") == "vo2max" and not q[0].get("carve")):
+                fails.append(f"(a) {nb}+{npk} r={r} VO₂ spec drifted or is not first: {q[0]}")
+            if q[-1]["kind"] != "long_mp":
+                fails.append(f"(a) {nb}+{npk} r={r} long_mp is not the last slot: {[x['kind'] for x in q]}")
+            cs = _carves(w)
+            if len(cs) != r % 2 or len(q) != 2 + len(cs):
+                fails.append(f"(a) {nb}+{npk} r={r} carries {len(cs)} carve specs in {[x['kind'] for x in q]}")
+            for c in cs:
+                if not (c["kind"] == "tempo" and c["zone"] == "threshold" and c["frac"] == E.DAVIS_THU_FRAC
+                        and c["structure"] == "continuous" and c.get("component") == "ssmax" and c.get("rot") == r):
+                    fails.append(f"(a) {nb}+{npk} r={r} carve spec drifted: {c}")
+        if _carves(qw[-1]):
+            fails.append(f"(a) {nb}+{npk} the last quality week carries a carve")
+    # (b) derived size
+    if E.DAVIS_THU_FRAC != round(1.0 - E.POLARIZED_EASY_MIN - E.DAVIS_INT_FRAC, 3):
+        fails.append(f"(b) DAVIS_THU_FRAC {E.DAVIS_THU_FRAC} is not the floor's slice "
+                     f"{round(1.0 - E.POLARIZED_EASY_MIN - E.DAVIS_INT_FRAC, 3)}")
+    # (c) the live-shaped block
+    got_b = [bool(_carves(w)) if not E._is_down(w) else None for w in b6]
+    got_p = [bool(_carves(w)) for w in p3]
+    if got_b != [True, False, True, None, False, True]:
+        fails.append(f"(c) Build 6 + Peak 3: build carve flags {got_b}")
+    if got_p != [False, True, False]:
+        fails.append(f"(c) Build 6 + Peak 3: peak carve flags {got_p}")
+    for w in b6 + p3:
+        if E._is_down(w):
+            continue
+        if _carves(w) and "threshold run" not in w["intent"]:
+            fails.append(f"(c) wk{w['wk']} ({w['phase']}) carry week's intent does not say so: {w['intent']!r}")
+        if not _carves(w) and "threshold" in w["intent"]:
+            fails.append(f"(c) wk{w['wk']} ({w['phase']}) VO₂-only week's intent says threshold: {w['intent']!r}")
+        if "VO₂ maintenance" not in w["intent"]:
+            fails.append(f"(c) wk{w['wk']} ({w['phase']}) intent lacks 'VO₂ maintenance': {w['intent']!r}")
+        if E._week_role(w) != "build":
+            fails.append(f"(c) wk{w['wk']} ({w['phase']}) role {E._week_role(w)!r}, expected build")
+    if any(E._week_phase(w) != "peak" for w in p3):
+        fails.append("(c) a Peak week does not read phase 'peak'")
+    # (d) a §PRO11 swap + reseat keeps the alternation — non-adjacent (the pull case), then adjacent
+    tmpl = E.build_shape(6, 60, davis=True, q_after=3)
+    sh = E.build_shape(6, 60, davis=True, q_after=3)
+    E._swap_week_fields(sh[1], sh[3])
+    E._reseat_specific(sh)
+    qs = [w for w in sh if not E._is_down(w)]
+    rots = [_rot(w) for w in qs]
+    if not (E._is_down(sh[1]) and not E._is_down(sh[3])):
+        fails.append("(d) fixture — the non-adjacent swap did not move the down week to position 2")
+    if any(a <= b for a, b in zip(rots, rots[1:])) or len(set(rots)) != len(rots):
+        fails.append(f"(d) rots after the reseat are not strictly descending in position order: {rots}")
+    flags = [bool(_carves(w)) for w in qs]
+    if any(a == b for a, b in zip(flags, flags[1:])):
+        fails.append(f"(d) non-adjacent swap + reseat broke the carve alternation: {flags}")
+    if flags[-1] != [bool(_carves(w)) for w in tmpl if not E._is_down(w)][-1]:
+        fails.append("(d) the last quality week of the shape changed its carve across the reseat")
+    for w in qs:
+        cs = _carves(w)
+        if len(cs) != _rot(w) % 2 or (cs and cs[0]["rot"] != _rot(w)):
+            fails.append(f"(d) reseated wk{w['wk']} r={_rot(w)} carve specs {len(cs)} do not follow the position")
+        if bool(cs) != ("threshold run" in w["intent"]):
+            fails.append(f"(d) reseated wk{w['wk']} intent does not name its carve: {w['intent']!r}")
+        if w["quality"][0]["kind"] != "interval" or w["quality"][-1]["kind"] != "long_mp":
+            fails.append(f"(d) reseated wk{w['wk']} lost its VO₂ / MP order: {[q['kind'] for q in w['quality']]}")
+    sa = E.build_shape(6, 60, davis=True, q_after=3)
+    sb = E.build_shape(6, 60, davis=True, q_after=3)
+    E._swap_week_fields(sa[2], sa[3])
+    E._swap_week_fields(sb[2], sb[3])
+    E._reseat_specific(sb)
+    if sa != sb:
+        fails.append("(d) the reseat changed an adjacent swap, which already alternates")
+    # (e) caution byte-identity
+    if E.build_shape(6, 60) != E.build_shape(6, 60, davis=False, q_after=3):
+        fails.append("(e) caution build_shape moved with q_after")
+    if any(q["kind"] == "tempo" for w in E.build_shape(6, 60) + E.peak_shape(3, 70) for q in w["quality"]):
+        fails.append("(e) caution Build/Peak lays a tempo session")
+    if any("rot" in q or "carve" in q for w in E.build_shape(6, 60) + E.peak_shape(3, 70) for q in w["quality"]):
+        fails.append("(e) caution Build/Peak specs carry a 'rot' or 'carve' key")
+    # (f) TRIMP NEUTRALITY — the same week laid with the carve spec and without it
+    for label, wk_, W in (("build wk1", b6[0], 700.0), ("build wk1", b6[0], 900.0), ("peak wk2", p3[1], 800.0)):
+        s1, d1 = _lay(wk_, W)
+        s0, d0 = _lay(wk_, W, drop=True)
+        cv = _carved(s1)
+        if len(cv) != 1:
+            fails.append(f"(f) {label} @{W}: {len(cv)} carved runs, expected 1")
+            continue
+        cv = cv[0]
+        if d1 != d0:
+            fails.append(f"(f) {label} @{W}: day TRIMPs moved with the carve: {d1} vs {d0}")
+        by0 = {x["date"]: x for x in s0}
+        if [x["date"] for x in s1] != [x["date"] for x in s0]:
+            fails.append(f"(f) {label} @{W}: the carve moved or added a day")
+        for x in s1:
+            if x["date"] != cv["date"] and x != by0.get(x["date"]):
+                fails.append(f"(f) {label} @{W}: {x['date']} differs from the no-carve lay: {x} vs {by0.get(x['date'])}")
+        e0 = by0.get(cv["date"]) or {}
+        if e0.get("kind") != "easy" or cv["trimp"] != e0.get("trimp"):
+            fails.append(f"(f) {label} @{W}: carved trimp {cv['trimp']} != the easy run's {e0.get('trimp')} ({e0.get('kind')})")
+        reps = cv.get("reps") or []
+        eff = [r["effort"] for r in reps]
+        if eff != ["warmup", "work", "cooldown"]:
+            fails.append(f"(f) {label} @{W}: reps are {eff}, expected warm-up, ONE work block, cool-down")
+        else:
+            wu, wk_rep, cd = reps
+            if wu["minutes"] != E.QUALITY_WU_MIN or wu["zone"] != "easy" or cd["zone"] != "easy":
+                fails.append(f"(f) {label} @{W}: warm-up/cool-down off: {wu}, {cd}")
+            if wk_rep["zone"] != "threshold" or wk_rep["minutes"] < E.DAVIS_THU_MIN_MIN:
+                fails.append(f"(f) {label} @{W}: work block is not >= {E.DAVIS_THU_MIN_MIN} min of threshold: {wk_rep}")
+            if abs(sum(r["trimp"] for r in reps) - cv["trimp"]) > 0.15:
+                fails.append(f"(f) {label} @{W}: the reps' TRIMP {sum(r['trimp'] for r in reps):.1f} is not the run's {cv['trimp']}")
+        if E._hard_share(s1, sum(d1.values())) > 1.0 - E.POLARIZED_EASY_MIN + 1e-9:
+            fails.append(f"(f) {label} @{W}: hard share {E._hard_share(s1, sum(d1.values())):.4f} passes the floor")
+    # (g) the floor clip — the slice (frac × week) exceeds the room the VO₂ session's ROUNDED reps leave
+    for W in (660.0, 900.0):
+        s1, d1 = _lay(odd_wk, W)
+        s0, d0 = _lay(odd_wk, W, drop=True)
+        hard0 = sum(r["trimp"] for x in s0 for r in (x.get("reps") or [])
+                    if r.get("effort") == "work" and r.get("zone") in E.HARD_ZONES)
+        room_min = int(((1.0 - E.POLARIZED_EASY_MIN) * sum(d1.values()) - hard0 - 0.1) / rate)
+        frac_min = int(E.DAVIS_THU_FRAC * W / rate)
+        cv = _carved(s1)
+        if not room_min < frac_min:
+            fails.append(f"(g) fixture @{W}: the room ({room_min} min) is not under the slice ({frac_min} min)")
+        elif len(cv) != 1:
+            fails.append(f"(g) @{W}: no carved run")
+        else:
+            got_min = [r["minutes"] for r in cv[0]["reps"] if r["effort"] == "work"][0]
+            if got_min != room_min:
+                fails.append(f"(g) @{W}: work {got_min} min, the room bound is {room_min} (slice {frac_min})")
+            if E._hard_share(s1, sum(d1.values())) > 1.0 - E.POLARIZED_EASY_MIN + 1e-9:
+                fails.append(f"(g) @{W}: hard share {E._hard_share(s1, sum(d1.values())):.4f} passes the floor")
+    # (h) the day
+    def _day_of(runs=5, w=odd_wk):
+        s1, _ = _lay(w, 700.0, runs=runs)
+        cv = _carved(s1)
+        if not cv:
+            return None, s1
+        heavy = [_off(x) for x in s1 if x.get("kind") in E.QUALITY_KINDS and x.get("rot") is None]
+        heavy += [_off(x) for x in s1 if (x.get("kind") or "").startswith("long")]
+        heavy += [max(heavy) - 7]
+        if min(abs(_off(cv[0]) - h) for h in heavy) < 2:
+            fails.append(f"(h) runs={runs}: the carved day {_off(cv[0])} is within 1 day of a heavy day {sorted(heavy)}")
+        return _off(cv[0]), s1
+    for runs, want in ((4, 3), (5, 3), (6, 4), (3, None)):
+        got, _ = _day_of(runs)
+        if got != want:
+            fails.append(f"(h) stock {runs}-run layout carves day offset {got}, expected {want}")
+    saved_pref = E._DAY_PREF
+    try:
+        E.set_day_preferences("sun", "mon fri")            # Tue / Wed / Thu / Sat / Sun
+        got, s1 = _day_of(5)
+        if sorted(_off(x) for x in s1) != [1, 2, 3, 5, 6]:
+            fails.append(f"(h) fixture — the preference layout is {sorted(_off(x) for x in s1)}, not Tue/Wed/Thu/Sat/Sun")
+        if got != 3:
+            fails.append(f"(h) the Tue/Wed/Thu/Sat/Sun layout carves day offset {got}, expected Thursday (3)")
+    finally:
+        E._DAY_PREF = saved_pref
+    # (i) a pinned day of the run's kind is carved again, never handed the VO₂ spec
+    s_pin, _ = _lay(odd_wk, 700.0, days_override=[3, 5, 6], q_days={3: "tempo"})
+    thu = next((x for x in s_pin if _off(x) == 3), None)
+    if not (thu and thu.get("kind") == "tempo" and thu.get("rot") is not None):
+        fails.append(f"(i) the pinned Thursday is not carved: {thu and (thu.get('kind'), thu.get('rot'))}")
+    if any(x.get("kind") == "interval" and _off(x) == 3 for x in s_pin):
+        fails.append("(i) the pinned Thursday was handed the VO₂ spec")
+    # (j) §H2 un-carves FIRST. A check-in that eases the weekend lifts the hard share past the floor; the
+    # threshold run goes back to its easy run and the VO₂ session and MP finish stay.
+    jshape = E.build_shape(3, 60, davis=True, q_after=1)
+    jkw = dict(zones=zq, regime="assertive", last_nondown=600.0, recent_longs=[18.0, 20.0, 22.0, 24.0],
+               recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.0, 14.0, 15.0, 15.0])
+    adj = {"applies_from": (MON + timedelta(days=5)).isoformat(), "applies_until": (MON + timedelta(days=6)).isoformat(),
+           "volume_multiplier": 0.6}
+    base_w, _bb = E.generate_block(jshape, MON, 80.0, 75.0, 425, **jkw)
+    eased_w, _eb = E.generate_block(jshape, MON, 80.0, 75.0, 425, adjust=adj, **jkw)
+    cv0 = _carved(base_w[0]["sessions"])
+    if len(cv0) != 1:
+        fails.append(f"(j) fixture — the un-eased week 1 lays {len(cv0)} carved runs")
+    else:
+        pre = E._apply_adjustment(base_w[0]["sessions"], {x["date"]: x["trimp"] for x in base_w[0]["sessions"]}, adj)
+        pre_tot = sum(pre["dt"].values())
+        if not (E._hard_share(pre["sessions"], pre_tot) > 1.0 - E.POLARIZED_EASY_MIN + 1e-9):
+            fails.append("(j) fixture — the eased week's share does not pass the floor with the carve in")
+        if not (E._hard_share([E._uncarve(x, 425) for x in pre["sessions"]], pre_tot) <= 1.0 - E.POLARIZED_EASY_MIN + 1e-9):
+            fails.append("(j) fixture — the eased week's share still passes the floor without the carve")
+        ew = eased_w[0]["sessions"]
+        by = {x["date"]: x for x in ew}
+        vo2 = [x for x in ew if x.get("kind") == "interval"]
+        if len(vo2) != 1 or not vo2[0].get("reps"):
+            fails.append(f"(j) the eased week lost its VO₂ session: {[(x['kind'], bool(x.get('reps'))) for x in ew]}")
+        lm = [x for x in ew if x.get("kind") == "long_mp"]
+        if len(lm) != 1 or "MP" not in (lm[0].get("note") or ""):
+            fails.append(f"(j) the eased week lost its MP finish: {[(x['kind'], x.get('note')) for x in ew]}")
+        thu = by.get(cv0[0]["date"])
+        if not thu or thu.get("kind") != "easy" or thu.get("rot") is not None or thu.get("trimp") != cv0[0]["trimp"]:
+            fails.append(f"(j) Thursday is not the easy run at the carved run's TRIMP {cv0[0]['trimp']}: "
+                         f"{thu and (thu.get('kind'), thu.get('trimp'), thu.get('rot'))}")
+        if any(x.get("rot") is not None for x in ew):
+            fails.append("(j) a carved run survives the eased week")
+    # (k) §SHARE — the long run stays inside the phase's share of the WEEK. The raise to the ladder was bounded
+    # by max(long_cap, the converted share), which let it pass the share once the MP finish was large beside
+    # the mid-week session. Constructed: a small VO₂ session under a large MP finish, on a Peak week.
+    kw_ = dict(p3[1])
+    kw_["quality"] = [dict(p3[1]["quality"][0], frac=0.04), dict(p3[1]["quality"][-1], frac=0.25)]
+    ks, kd = E._distribute_week(kw_, MON, 700.0, 425, zq, long_km_cap=34.0, ladder=True)
+    k_km = sum(x["km"] for x in ks)
+    k_long = next(x for x in ks if (x.get("kind") or "").startswith("long"))
+    k_mid = next(x for x in ks if x.get("kind") == "interval")
+    k_mp = sum(r["minutes"] for r in (k_long.get("reps") or []) if r["effort"] == "work") * 60.0 / zq["marathon"]
+    k_cap = E._long_share_cap(kw_, zq)
+    if not k_mp > k_cap / (1.0 - k_cap) * k_mid["km"]:
+        fails.append(f"(k) fixture — the MP finish ({k_mp:.1f} km) is not large beside the mid-week session "
+                     f"({k_mid['km']} km); the old max() bound would not bite")
+    if k_long["km"] > k_cap * k_km + 0.15:
+        fails.append(f"(k) the long run {k_long['km']} km passes the share cap {k_cap} of the {k_km:.1f} km week "
+                     f"({k_long['km'] / k_km:.3f})")
+
+    # (k2) the guarantee the carve makes about the long run: it is laid on the week BEFORE the carve. The carve
+    # shortens the week by about a km (the same TRIMP at threshold pace covers less ground), so the share of
+    # the final week may pass the cap by that much; the run itself is the one the no-carve week lays, and it
+    # sits inside the cap of the pre-carve week.
+    kkw = dict(zones=zq, regime="assertive", last_nondown=600.0, recent_longs=[20.0, 22.0, 24.0, 25.0],
+               recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.0, 14.0, 15.0, 15.0])
+    kweeks, _kb = E.generate_block(E.build_shape(5, 60, davis=True, q_after=1), date(2026, 8, 3), 100.0, 95.0, 425, **kkw)
+    kstrip = E.build_shape(5, 60, davis=True, q_after=1)
+    for w_ in kstrip:
+        w_["quality"] = [q for q in w_["quality"] if not q.get("carve")]
+    kbase, _kb0 = E.generate_block(kstrip, date(2026, 8, 3), 100.0, 95.0, 425, **kkw)
+    n_k2 = 0
+    for w, w0 in zip(kweeks, kbase):
+        if not _carved(w["sessions"]):
+            continue
+        n_k2 += 1
+        lg = next((x for x in w["sessions"] if (x.get("kind") or "").startswith("long")), None)
+        lg0 = next((x for x in w0["sessions"] if (x.get("kind") or "").startswith("long")), None)
+        if not lg or not lg0 or (lg["km"], lg["trimp"]) != (lg0["km"], lg0["trimp"]):
+            fails.append(f"(k2) {w.get('start')}: the long run moved with the carve: "
+                         f"{lg and (lg['km'], lg['trimp'])} vs {lg0 and (lg0['km'], lg0['trimp'])}")
+            continue
+        pre_km = sum((E._uncarve(x, 425).get("km") or 0.0) for x in w["sessions"])
+        cap_pre = E.LONG_RUN_MAX_FRAC_BY_PHASE.get(w.get("phase"), E.LONG_RUN_MAX_FRAC) * pre_km
+        if lg["km"] > cap_pre + 0.15:
+            fails.append(f"(k2) {w.get('start')}: long run {lg['km']} km > {cap_pre:.2f} km, the phase share of the "
+                         f"{pre_km:.1f} km pre-carve week")
+    if not n_k2:
+        fails.append("(k2) fixture — no carved week to check")
+    # (l) the public views withhold `rot` and `carve`
+    for path in ("plan.<phase>.weeks[].quality[].rot", "plan.<phase>.weeks[].quality[].carve",
+                 "plan.<phase>.weeks[].sessions[].rot", "readiness.session.rot"):
+        if path not in S._PV_WITHHELD:
+            fails.append(f"(l) {path} is not registered in _PV_WITHHELD")
+    cv_all = _carved(_lay(odd_wk, 700.0)[0])
+    if not cv_all:
+        fails.append("(l-n) fixture — the 700 TRIMP odd week lays no carved run")
+    else:
+        cv_sess = cv_all[0]
+        rv = S.public_view("readiness", {"date": cv_sess["date"], "assessment": {"verdict": "green", "action": "x", "public": True},
+                                         "session": cv_sess})
+        if "rot" in (rv.get("session") or {}):
+            fails.append("(l) the public readiness session carries rot")
+        un = [k for k in cv_sess if k not in S._PV_READINESS["session"] and f"readiness.session.{k}" not in S._PV_WITHHELD]
+        if un:
+            fails.append(f"(l) readiness session fields neither published nor withheld: {un}")
+        cweek = {"wk": 1, "start": MON.isoformat(), "intent": "x", "km": 50.0, "quality": odd_wk["quality"],
+                 "sessions": _lay(odd_wk, 700.0)[0]}
+
+        def _keys(o, acc):
+            if isinstance(o, dict):
+                acc.update(o)
+                for v in o.values():
+                    _keys(v, acc)
+            elif isinstance(o, list):
+                for v in o:
+                    _keys(v, acc)
+            return acc
+        pv = S.plan_public_view({"build": {"weeks": [cweek]}, "phases": []})
+        leaked = {"rot", "carve"} & set(_keys(pv, {}))
+        if leaked:
+            fails.append(f"(l) the public plan view carries {sorted(leaked)}")
+        # (m) strides: the carved run carries none, and no other day gains them
+        s1, _d1 = _lay(odd_wk, 700.0)
+        s0, _d0 = _lay(odd_wk, 700.0, drop=True)
+        cv_day = _carved(s1)[0]["date"]
+        if _carved(s1)[0].get("strides"):
+            fails.append("(m) the carved run carries strides")
+        if not any(x["date"] == cv_day and x.get("strides") for x in s0):
+            fails.append("(m) fixture — without the carve the strides do not ride that day")
+        stride_days = {x["date"] for x in s1 if x.get("strides")}
+        if not stride_days <= {x["date"] for x in s0 if x.get("strides")} - {cv_day}:
+            fails.append(f"(m) a day gained strides with the carve: {sorted(stride_days)}")
+        # (n) the carved run is exempt from the per-session step but the week eq counts it
+        if E._bout_eq_km(_carved(s1)[0]) != 0.0:
+            fails.append(f"(n) _bout_eq_km of the carved run is {E._bout_eq_km(_carved(s1)[0])}, not 0.0")
+        if not E._week_eq_km([_carved(s1)[0]]) > 0:
+            fails.append("(n) the week eq no longer counts the carved run")
+    # (o) the session-ceiling exemption, outcome-level: the low-volume regime fixture (3-km seed runs,
+    # CTL 30 / ATL 28) must not hold a Build/Peak threshold week at the per-session ceiling
+    import sqlite3 as _sq
+    jtoday = date(2026, 6, 1)
+    j_binds = []
+    _orig_mwt = E._max_week_trimp
+
+    def _wrapped(ctl_, atl_, wk, start, easy_, cap, zones=None, **kw):
+        a_ = _orig_mwt(ctl_, atl_, wk, start, easy_, cap, zones=zones, **kw)
+        if kw.get("session_eq_cap") and zones:
+            b_ = _orig_mwt(ctl_, atl_, wk, start, easy_, cap, zones=zones, **{**kw, "session_eq_cap": None})
+            if b_ > a_ + 1.0:
+                j_binds.append((start, wk.get("phase"), [q.get("kind") for q in wk.get("quality") or []],
+                                round(a_, 1), round(b_, 1)))
+        return a_
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    mem.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max,fitness,fatigue) VALUES(?,?,?,?)",
+                (jtoday.isoformat(), 52.0, 30.0, 28.0))
+    mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                ("marathon", "Goal", (jtoday + timedelta(weeks=24)).isoformat(), "finish", "A", "upcoming", S._now_iso()))
+    jw = []
+    for i in range(2):
+        ws = jtoday - timedelta(weeks=2 - i)
+        jw.append({"start": ws.isoformat(), "intent_km": 30, "km": 30, "runs": 5, "intent": "Easy aerobic base"})
+        for off in (0, 1, 3, 5, 6):
+            d = (ws + timedelta(days=off)).isoformat()
+            mem.execute("INSERT INTO activities(date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?)",
+                        (d, d + "T18:00", S.RUNNING_SPORT, 3.0, 1050, 40.0))
+    mem.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                (S._now_iso(), jtoday.isoformat(), "{}", S.json.dumps({"base": {"weeks": jw}, "phases": [{"key": "base"}]})))
+    mem.commit()
+    E._max_week_trimp = _wrapped
+    try:
+        jp = S.generate_plan(mem, today=jtoday)
+    finally:
+        E._max_week_trimp = _orig_mwt
+        mem.close()
+    thr_weeks = [w for k in ("build", "peak") for w in (jp.get(k) or {}).get("weeks", [])
+                 if any(s.get("rot") is not None for s in w["sessions"])]
+    if not thr_weeks:
+        fails.append("(o) fixture — the low-volume plan lays no threshold run in Build/Peak")
+    held = [b for b in j_binds if b[1] in ("build", "peak") and "tempo" in b[2]]
+    if held:
+        fails.append(f"(o) threshold weeks held by the session ceiling: {held}")
+    if thr_weeks:
+        thr_sess = next(s for w in thr_weeks for s in w["sessions"] if s.get("rot") is not None)
+        if E._bout_eq_km(thr_sess) != 0.0:
+            fails.append(f"(o) _bout_eq_km of the low-volume carved run is {E._bout_eq_km(thr_sess)}, not 0.0")
+    # (p) the §PULL replay path: a lived pulled week 2 re-seats the rotation on the fresh shape
+    ps = date(2026, 9, 7)
+    rs = E.build_shape(6, 60, davis=True, q_after=3)
+    E._replay_pulled_deloads(rs, ps, {(ps + timedelta(weeks=1)).isoformat(): {"deload_pulled": True}},
+                             ps + timedelta(weeks=3))
+    rflags = [bool(_carves(w)) for w in rs if not E._is_down(w)]
+    if not E._is_down(rs[1]):
+        fails.append("(p) the replay did not make week 2 the down week")
+    if any(a == b for a, b in zip(rflags, rflags[1:])):
+        fails.append(f"(p) the replayed pull broke the carve alternation: {rflags}")
+    if rflags[-1] != [bool(_carves(w)) for w in tmpl if not E._is_down(w)][-1]:
+        fails.append("(p) the replayed pull changed the last quality week's carve")
+    # (q) straddle stability on a threshold week
+    mon = date(2026, 9, 7)
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    seed = (78.3, 100.5)
+    hz = {"easy_top": 414, "easy": 450, "marathon": 347, "threshold": 320, "interval": 290}
+    A = dict(regime="assertive", zones=hz, last_nondown=600.0, recent_longs=[13.0, 14.0, 14.5, 15.0],
+             recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.5, 14.0, 14.5, 15.0], consec_hard=1)
+
+    def _q(w, since):
+        return [(s["date"], s["kind"]) for s in w["sessions"]
+                if s.get("kind") in E.QUALITY_KINDS and s["kind"] != "long_mp" and s["date"] >= since]
+
+    full, _fb = E.generate_block(E.build_shape(2, 60, davis=True), mon, *seed, 414, **A)
+    w0 = full[0]
+    thr_days = [x["date"] for x in w0["sessions"] if x.get("rot") is not None]
+    if not _carves(E.build_shape(2, 60, davis=True)[0]) or len(thr_days) != 1:
+        fails.append(f"(q) fixture — the Monday lay's week 1 carves {thr_days}")
+    else:
+        thr_day = thr_days[0]
+        L = {d: 0.0 for d in days}
+        for x in w0["sessions"]:
+            if (x.get("kind") or "") != "rest":
+                L[x["date"]] = float(x.get("trimp") or 0.0)
+        mon_by_date = {x["date"]: x for x in w0["sessions"]}
+        for i in range(1, 7):
+            c, a = seed
+            for d in days[:i]:
+                c = E._ewma_step(c, L[d], E.TAU_CTL); a = E._ewma_step(a, L[d], E.TAU_ATL)
+            done = [x for x in w0["sessions"] if x["date"] < days[i] and (x.get("kind") or "") != "rest"]
+            long_done = [x["km"] for x in done if (x.get("kind") or "").startswith("long")]
+            ws, _b = E.generate_block(E.build_shape(2, 60, davis=True), mon, c, a, 414,
+                                      today=mon + timedelta(days=i),
+                                      week_actuals=(len(done), round(sum(x["km"] for x in done), 1)),
+                                      day_series=L, week_actual_long=(max(long_done) if long_done else None),
+                                      pinned_past=({x["date"]: x for x in w0["sessions"] if x["date"] < days[i]},
+                                                   set(days[:i])), **A)
+            w = ws[0]
+            if E._week_role(w) != "build":
+                fails.append(f"(q) regenerated {days[i]} — week 1 reads role {E._week_role(w)!r}")
+            if thr_day < days[i] and _q(w, days[i]):
+                fails.append(f"(q) regenerated {days[i]} — quality laid after the threshold day: {_q(w, days[i])}")
+            for x in w["sessions"]:
+                if x["date"] < days[i] or (x.get("kind") or "") == "rest":
+                    continue
+                m = mon_by_date.get(x["date"])
+                if not m or m.get("kind") != x.get("kind") or abs((m.get("km") or 0.0) - (x.get("km") or 0.0)) > 0.5:
+                    fails.append(f"(q) regenerated {days[i]} — {x['date']} reads {x.get('kind')} {x.get('km')} km, "
+                                 f"the Monday lay {m and (m.get('kind'), m.get('km'))}")
+    # (r) the call site, through a full plan with an odd Peak
+    plan = S.json.loads(_golden_build(dict(), _golden_rot_odd_peak, "assertive"))
+    n_peak = next((ph["weeks"] for ph in plan["phases"] if ph["kind"] == "peak"), 0)
+    plan_flags, pulled, n_all = [], [], 0
+    if n_peak % 2 != 1:
+        fails.append(f"(r) fixture drifted — the Peak is {n_peak} weeks, an odd count is the point")
+    for key in ("build", "peak"):
+        for w in (plan.get(key) or {}).get("weeks", []):
+            if w.get("deload_pulled"):
+                pulled.append(n_all)
+            n_all += 1
+            if E._is_down(w):
+                continue
+            vo2 = [s for s in w["sessions"] if s.get("kind") == "interval"]
+            if len(vo2) != 1:
+                fails.append(f"(r) {key} wk{w.get('wk')} lays {len(vo2)} VO₂ sessions, expected 1")
+            named = "threshold run" in w["intent"]
+            laid = bool(_carved(w["sessions"]))
+            if laid and not named:
+                fails.append(f"(r) {key} wk{w.get('wk')} lays a threshold run its intent does not name")
+            plan_flags.append(named)
+    if len(plan_flags) < 4:
+        fails.append(f"(r) fixture — only {len(plan_flags)} quality weeks collected")
+    if not any(plan_flags):
+        fails.append("(r) the plan names no threshold run in any week")
+    if any(a == b for a, b in zip(plan_flags, plan_flags[1:])):
+        fails.append(f"(r) plan: two equal neighbours (pulls at {pulled}): {plan_flags}")
+    if plan_flags and plan_flags[-1]:
+        fails.append(f"(r) plan: the last quality week names a threshold run: {plan_flags}")
+    # (s) the intent names a threshold run only where one is laid. A low-volume build (36 km start) has odd
+    # weeks whose run falls under DAVIS_THU_MIN_MIN; their sentence must not promise it. A forced deload
+    # keeps its own sentence.
+    sshape = E.build_shape(6, 36, davis=True, q_after=1)
+    sweeks, _sb = E.generate_block(sshape, date(2026, 8, 3), 40.0, 37.0, 425, zones=zq, regime="assertive")
+    n_laid = n_unlaid = 0
+    for sp, w in zip(sshape, sweeks):
+        if not _carves(sp) or E._is_down(w):
+            continue
+        laid = bool(_carved(w["sessions"]))
+        n_laid += laid
+        n_unlaid += not laid
+        if laid != ("threshold run" in w["intent"]):
+            fails.append(f"(s) {w.get('start')}: threshold run laid={laid} but intent reads {w['intent']!r}")
+    if not (n_laid and n_unlaid):
+        fails.append(f"(s) fixture — the low-volume build needs both a laid ({n_laid}) and an unlaid ({n_unlaid}) run")
+    fd = {"deload_forced": True, "phase": "build", "intent": "Down week — forced deload (consecutive near-ceiling weeks)",
+          "quality": odd_wk["quality"], "sessions": []}
+    if E._rot_intent(dict(fd))["intent"] != fd["intent"]:
+        fails.append("(s) a forced-deload week lost its own intent sentence")
+    # (t) a tune-up's run-up (TUNEUP_CLEAR_DAYS) keeps a carved day as the easy run it was cut from: same
+    # TRIMP, the week's strides back. Clearing it whole took the easy load off the day (117.7 TRIMP).
+    s1, d1 = _lay(odd_wk, 700.0)
+    cv_t = _carved(s1)
+    if len(cv_t) != 1:
+        fails.append("(t) fixture — the odd week lays no carved run")
+    else:
+        cv_t = cv_t[0]
+        n_str = E._displaced_strides(odd_wk, s1)
+        race_t = {"date": (MON + timedelta(days=_off(cv_t) + 2)).isoformat(), "km": 10.0, "pace_sec": 345.0,
+                  "zone": "marathon", "label": "tune-up", "tune_up": True}
+        kt, dtt = E._place_race(s1, d1, race_t, MON, easy_pace_sec=425, strides=n_str)
+        thu_t = next((x for x in kt if x["date"] == cv_t["date"]), None)
+        if not (thu_t and thu_t["kind"] == "easy" and thu_t.get("rot") is None and thu_t["trimp"] == cv_t["trimp"]):
+            fails.append(f"(t) the carved day before a tune-up is not the easy run at the carved TRIMP {cv_t['trimp']}: "
+                         f"{thu_t and (thu_t['kind'], thu_t['trimp'], thu_t.get('rot'))}")
+        elif not (n_str and thu_t.get("strides") == n_str):
+            fails.append(f"(t) the un-carved day lost the week's strides (want {n_str}): {thu_t.get('strides')}")
+        if dtt.get(cv_t["date"]) != d1.get(cv_t["date"]):
+            fails.append(f"(t) the day's TRIMP moved: {dtt.get(cv_t['date'])} vs {d1.get(cv_t['date'])}")
+        vo2_t = next(x for x in s1 if x.get("kind") == "interval")
+        race_v = dict(race_t, date=(MON + timedelta(days=_off(vo2_t) + 1)).isoformat())
+        kv, dtv = E._place_race(s1, d1, race_v, MON, easy_pace_sec=425, strides=n_str)
+        if any(x.get("kind") == "interval" for x in kv):
+            fails.append("(t) a VO₂ session in the tune-up's window was not cleared")
+        elif dtv.get(vo2_t["date"]) != round(d1[vo2_t["date"]] - vo2_t["trimp"], 1):
+            fails.append(f"(t) the cleared VO₂ day kept its load: {dtv.get(vo2_t['date'])}")
+    # (u) the straddle keeps Monday's un-carve decision. A weekend eased by 0.85 lifts the share past the floor,
+    # so Monday's lay un-carves Thursday; every regeneration after must read the same easy run, the morning
+    # of the run and the evening after it included.
+    ushape = E.build_shape(3, 60, davis=True, q_after=1)
+    ukw = dict(zones=zq, regime="assertive", last_nondown=600.0, recent_longs=[18.0, 20.0, 22.0, 24.0],
+               recent_eq=[60.0, 65.0, 70.0, 75.0], recent_session_eq=[13.0, 14.0, 15.0, 15.0])
+    useed = (80.0, 75.0)
+    udays = [(MON + timedelta(days=i)).isoformat() for i in range(7)]
+    uadj = {"applies_from": udays[5], "applies_until": udays[6], "volume_multiplier": 0.85}
+    ubase = E.generate_block(ushape, MON, *useed, 425, **ukw)[0][0]
+    uw0 = E.generate_block(ushape, MON, *useed, 425, adjust=uadj, **ukw)[0][0]
+    u_c = _carved(ubase["sessions"])
+    u_thu0 = next((x for x in uw0["sessions"] if x["date"] == udays[3]), None)
+    if not (u_c and u_c[0]["date"] == udays[3]):
+        fails.append("(u) fixture — the un-eased week does not carve Thursday")
+    elif not (u_thu0 and u_thu0["kind"] == "easy" and u_thu0.get("rot") is None and u_thu0["trimp"] == u_c[0]["trimp"]):
+        fails.append(f"(u) fixture — Monday's eased lay does not un-carve Thursday: {u_thu0 and (u_thu0['kind'], u_thu0.get('rot'))}")
+    else:
+        uL = {d: 0.0 for d in udays}
+        for x in uw0["sessions"]:
+            if (x.get("kind") or "") != "rest":
+                uL[x["date"]] = float(x.get("trimp") or 0.0)
+        for i in (1, 2, 3, 4):                 # Tue, Wed, Thu morning, Thu night / Fri (the run is lived)
+            c_, a_ = useed
+            for d in udays[:i]:
+                c_ = E._ewma_step(c_, uL[d], E.TAU_CTL); a_ = E._ewma_step(a_, uL[d], E.TAU_ATL)
+            done = [x for x in uw0["sessions"] if x["date"] < udays[i] and (x.get("kind") or "") != "rest"]
+            ld = [x["km"] for x in done if (x.get("kind") or "").startswith("long")]
+            uws, _ub = E.generate_block(ushape, MON, c_, a_, 425, today=MON + timedelta(days=i),
+                                        week_actuals=(len(done), round(sum(x["km"] for x in done), 1)),
+                                        day_series=uL, week_actual_long=(max(ld) if ld else None),
+                                        pinned_past=({x["date"]: x for x in uw0["sessions"] if x["date"] < udays[i]},
+                                                     set(udays[:i])), adjust=uadj, **ukw)
+            ut = next((x for x in uws[0]["sessions"] if x["date"] == udays[3]), None)
+            if not (ut and ut["kind"] == "easy" and ut.get("rot") is None and ut["trimp"] == u_thu0["trimp"]
+                    and abs(ut["km"] - u_thu0["km"]) <= 0.05):
+                fails.append(f"(u) regenerated {udays[i]}: Thursday reads {ut and (ut['kind'], ut['trimp'], ut['km'], ut.get('rot'))}, "
+                             f"Monday's lay {(u_thu0['kind'], u_thu0['trimp'], u_thu0['km'])}")
+            if any(x.get("rot") is not None for x in uws[0]["sessions"]):
+                fails.append(f"(u) regenerated {udays[i]}: a carved run survives the eased week")
+        # Thursday NIGHT: the run is lived (today_run), so the re-laid Thursday becomes the day's history
+        c_, a_ = useed
+        for d in udays[:3]:
+            c_ = E._ewma_step(c_, uL[d], E.TAU_CTL); a_ = E._ewma_step(a_, uL[d], E.TAU_ATL)
+        done = [x for x in uw0["sessions"] if x["date"] <= udays[3] and (x.get("kind") or "") != "rest"]
+        uws, _ub = E.generate_block(ushape, MON, c_, a_, 425, today=MON + timedelta(days=3),
+                                    today_trimp=uL[udays[3]], today_run=True,
+                                    week_actuals=(len(done), round(sum(x["km"] for x in done), 1)), day_series=uL,
+                                    pinned_past=({x["date"]: x for x in uw0["sessions"] if x["date"] < udays[3]},
+                                                 set(udays[:3])), adjust=uadj, **ukw)
+        ut = next((x for x in uws[0]["sessions"] if x["date"] == udays[3]), None)
+        if not (ut and ut["kind"] == "easy" and ut.get("rot") is None and ut["trimp"] == u_thu0["trimp"]):
+            fails.append(f"(u) Thursday night: Thursday reads {ut and (ut['kind'], ut['trimp'], ut.get('rot'))}, "
+                         f"Monday's lay {(u_thu0['kind'], u_thu0['trimp'])}")
+    # (v) the governor's search sizes the week WITHOUT the run; the final lay fits it under the §3.1 week eq
+    # ceiling (shrinks the block, or leaves the day easy). Reviewer's eq-binding fixture: week TRIMPs are the
+    # stripped block's, and no carved week passes its eq_week ceiling.
+    vz, vm = E.pace_zones(40.85), date(2026, 10, 19)
+    vshape = E.build_shape(6, 60, runs=5, davis=True, q_after=3)
+    vstrip = E.build_shape(6, 60, runs=5, davis=True, q_after=3)
+    for w_ in vstrip:
+        w_["quality"] = [q for q in w_["quality"] if not q.get("carve")]
+    vkw = dict(zones=vz, regime="assertive", recent_longs=[18.0, 18.0, 18.5, 19.0], recent_eq=[46, 46, 47, 47],
+               recent_session_eq=[26, 26, 26, 26])
+    vn, _vb = E.generate_block(vshape, vm, 70.0, 70.0, 377, **vkw)
+    vb, _vb2 = E.generate_block(vstrip, vm, 70.0, 70.0, 377, **vkw)
+    n_vc = n_vdecl = 0
+    for a_, b_ in zip(vn, vb):
+        if a_["trimp_total"] != b_["trimp_total"]:
+            fails.append(f"(v) wk{a_['wk']}: trimp_total {a_['trimp_total']} with the carve spec, {b_['trimp_total']} without")
+        carved_v = bool(_carved(a_["sessions"]))
+        n_vc += carved_v
+        if _carves(a_) and not carved_v and not E._is_down(a_):
+            n_vdecl += 1
+        ceil_v = ((a_.get("limits") or {}).get("eq_week") or {}).get("ceiling")
+        if carved_v and ceil_v is not None and a_["eq_km"] > ceil_v + 1e-6:
+            fails.append(f"(v) wk{a_['wk']}: carved week eq_km {a_['eq_km']} passes its eq_week ceiling {ceil_v}")
+    if not (n_vc and n_vdecl):
+        fails.append(f"(v) fixture — needs a carved week ({n_vc}) and a week whose run the eq ceiling declined ({n_vdecl})")
+    # (w) the day keeps clear of NEXT week's long run too: a Monday long run makes Sunday the day before it
+    saved_pref = E._DAY_PREF
+    try:
+        for ld_, rk_, nr_ in (("mon", "fri wed", 5), ("mon", "wed fri", 4), ("mon", "", 6)):
+            E.set_day_preferences(ld_, rk_)
+            s_w, _ = _lay(odd_wk, 700.0, runs=nr_)
+            cw = _carved(s_w)
+            if cw and _off(cw[0]) == 6:
+                fails.append(f"(w) Monday long run, {nr_} runs: the carve sits on Sunday, the day before next week's long run")
+            if not cw:
+                fails.append(f"(w) fixture — Monday long run, {nr_} runs: no carved run at all")
+    finally:
+        E._DAY_PREF = saved_pref
+    # (x) _uncarve fidelity
+    if cv_all:
+        cvx = cv_all[0]
+        bk = E._uncarve(cvx, 425, strides=2)
+        if not (bk["kind"] == "easy" and bk["trimp"] == cvx["trimp"] and bk.get("strides") == 2
+                and "2×4–6 strides" in bk["note"] and "rot" not in bk):
+            fails.append(f"(x) un-carve with strides: {bk}")
+        eb = E._uncarve(dict(cvx, note="eased — " + cvx["note"], rest_gated=True, rest_shed_km=1.5), 425)
+        if not (eb["note"].startswith("eased — ") and eb.get("rest_gated") is True and eb.get("rest_shed_km") == 1.5):
+            fails.append(f"(x) un-carve dropped the eased note or the rest marker: {eb}")
+        ck = {"date": cvx["date"], "kind": "easy", "km": 5.0, "minutes": 50, "trimp": 80.0, "rot": 3,
+              "note": "easy only — eased by your check-in"}
+        ek = E._uncarve(ck, 425, strides=2)
+        if ek != {k: v for k, v in ck.items() if k != "rot"}:
+            fails.append(f"(x) a session a check-in turned easy should only lose `rot`: {ek}")
+        if E._uncarve(s0[0], 425, strides=2) is not s0[0]:
+            fails.append("(x) a session without rot must pass through")
+    # (y) the clipped straddle remainder: sized off the whole week and held to the full lay's minutes; a
+    # remainder lay with no tempo pin lays no run
+    saved_pref = E._DAY_PREF
+    try:
+        E.set_day_preferences(None, "fri,mon,wed")
+        ymon, yz, yeasy, yW = date(2026, 10, 19), E.pace_zones(40.85), 377, 827.6
+        ywk = {"wk": 1, "km": 75, "runs": 5, "long": 21, "strides": 2, "phase": "build", "role": "build", "intent": "x",
+               "quality": [E._specific_mid(3), E._thu_spec(3),
+                           {"kind": "long_mp", "zone": "marathon", "frac": 0.08, "attach": "long", "label": "mp",
+                            "component": "resilience"}]}
+        yfull, _yd = E._distribute_week(dict(ywk), ymon, yW, yeasy, yz, ladder=True)
+        yo = lambda x: (date.fromisoformat(x["date"]) - ymon).days
+        yfw = [r["minutes"] for x in yfull if x.get("rot") is not None for r in x["reps"] if r["effort"] == "work"]
+        rem = [d for d in E._run_days(5) if d >= 2]
+        ahead = sum(x["trimp"] for x in yfull if yo(x) in rem)
+        if not yfw:
+            fails.append("(y) fixture — the full lay carves no run")
+        else:
+            for clip in (0.0, 1.0, 30.0):
+                ykw = dict(days_override=rem, free_from=2, fixed_days=[d for d in E._run_days(5) if d < 2])
+                ys, _ = E._distribute_week(dict(ywk), ymon, ahead - clip, yeasy, yz, q_days={3: "tempo"},
+                                           carve_basis=yW, carve_max_min=yfw[0], **ykw)
+                yw_ = [r["minutes"] for x in ys if yo(x) == 3 for r in (x.get("reps") or []) if r["effort"] == "work"]
+                if yw_ != yfw:
+                    fails.append(f"(y) clip {clip}: the pinned Thursday holds {yw_} min, the full lay {yfw}")
+            yn, _ = E._distribute_week(dict(ywk), ymon, ahead, yeasy, yz, q_days={6: "long_mp"},
+                                       carve_basis=yW, carve_max_min=yfw[0], **ykw)
+            if _carved(yn):
+                fails.append("(y) a remainder lay with no tempo pin carved a run")
+    finally:
+        E._DAY_PREF = saved_pref
+    # (z1) the run keeps out of a race's window: [race − TUNEUP_CLEAR_DAYS, race + 2], offsets from the week's
+    # Monday, any week. Tue/Wed/Thu/Sat/Sun layout, Thursday the usual carved day.
+    saved_pref = E._DAY_PREF
+    try:
+        E.set_day_preferences("sun", "mon fri")
+
+        def _thu_carved(offs, **kw):
+            s_z, _ = _lay(odd_wk, 700.0, runs=5, carve_race_offs=offs, **kw)
+            return [x for x in _carved(s_z) if _off(x) == 3], [_off(x) for x in _carved(s_z)]
+        if not _thu_carved(None)[0]:
+            fails.append("(z1) fixture — the layout does not carve Thursday without a race")
+        for offs, label in (([2], "a Wednesday race"), ([5], "a Saturday race")):
+            if _thu_carved(offs)[0]:
+                fails.append(f"(z1) the carve sits on Thursday inside the window of {label}")
+        if not _thu_carved([9])[0]:
+            fails.append("(z1) a race next Wednesday (offset 9) moved this week's Thursday carve")
+        z_pin, _ = _lay(odd_wk, 700.0, runs=5, days_override=[3, 5, 6], q_days={3: "tempo"}, free_from=3)
+        if not _carved(z_pin):
+            fails.append("(z1) fixture — the pinned Thursday is not carved without a race")
+        z_pin, _ = _lay(odd_wk, 700.0, runs=5, days_override=[3, 5, 6], q_days={3: "tempo"}, free_from=3,
+                        carve_race_offs=[5])
+        if _carved(z_pin):
+            fails.append("(z1) the pinned Thursday is carved inside a Saturday race's window")
+    finally:
+        E._DAY_PREF = saved_pref
+    # (z2) §PAST: a day run TODAY is lived, so it is recorded from history (the newest plan made on or before
+    # today), not from the evening's re-lay. Real path: `_split_freeze` with a db holding the morning's plan.
+    import sqlite3 as _sq2
+    zmon = date(2026, 8, 3)
+    zthu = zmon + timedelta(days=3)
+    zdb = _sq2.connect(":memory:"); zdb.row_factory = _sq2.Row
+    zdb.executescript(S.SCHEMA)
+    ZPLANT = 3.3
+    zplan = {"base": {"weeks": [{"wk": 1, "start": zmon.isoformat(), "sessions": [
+        {"date": zmon.isoformat(), "kind": "easy", "km": 6.0, "minutes": 40, "trimp": 60.0, "note": "easy run"},
+        {"date": zthu.isoformat(), "kind": "easy", "km": ZPLANT, "minutes": 22, "trimp": 33.0,
+         "note": "eased — easy run"}]}]}}
+    zdb.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,?,?)",
+                (zmon.isoformat() + "T07:00:00+00:00", zmon.isoformat(), "{}", S.json.dumps(zplan)))
+    zdb.commit()
+    zshape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 0, "intent": "General — aerobic",
+               "phase": "base", "role": "build", "quality": []}]
+    zz = E.pace_zones(45.0)
+
+    def _z2(run_today):
+        r_ = E._split_freeze(zshape, zmon, (50.0, 45.0), 425, None, zz, {}, zthu, (2, 9.0), regime="assertive",
+                             last_nondown=400.0, db=zdb, pace_zones=zz,
+                             today_trimp=(60.0 if run_today else None), today_run=run_today)
+        return next((x for x in r_[0][0]["sessions"] if x["date"] == zthu.isoformat()), None)
+    z_run, z_no = _z2(True), _z2(False)
+    if not z_no or z_no["km"] == ZPLANT:
+        fails.append(f"(z2) fixture vacuous — without a run today the re-lay already reads {z_no and z_no['km']}")
+    if not z_run or z_run["km"] != ZPLANT:
+        fails.append(f"(z2) a run logged today: Thursday reads {z_run and z_run['km']} km, the morning's plan "
+                     f"recorded {ZPLANT} (the evening re-lay says {z_no and z_no['km']})")
+    # (z3) a check-in over the carved day takes the run back to its easy run BEFORE easing it
+    z3 = E.build_shape(3, 60, davis=True, q_after=1)
+    z3_day = udays[3]
+    for mult, easy_only in ((1.0, True), (0.7, False)):
+        zadj = {"applies_from": z3_day, "applies_until": z3_day, "volume_multiplier": mult}
+        if easy_only:
+            zadj["easy_only"] = True
+        zw = E.generate_block(z3, MON, *useed, 425, adjust=zadj, **ukw)[0][0]
+        zt = next((x for x in zw["sessions"] if x["date"] == z3_day), None)
+        want = round(u_c[0]["trimp"] * mult, 1) if u_c else None
+        if not (zt and zt["kind"] == "easy" and zt.get("rot") is None and zt["trimp"] == want
+                and zt.get("strides") == odd_wk["strides"]):
+            fails.append(f"(z3) x{mult}{' easy_only' if easy_only else ''}: the eased carved day reads "
+                         f"{zt and (zt['kind'], zt['trimp'], zt.get('rot'), zt.get('strides'))}, "
+                         f"want easy at {want} with {odd_wk['strides']} strides and no rot")
+        if "threshold run" in zw["intent"]:
+            fails.append(f"(z3) x{mult}: the intent still names the threshold run: {zw['intent']!r}")
+    # (z4) §DAYSHARE: the copied remainder keeps the run only if it fits what the week has left of its eq
+    # ceiling; the actual eq already spent (`week_actual_eq`) can leave it short.
+    zc, za = useed
+    for d in udays[:2]:
+        zc = E._ewma_step(zc, uL[d], E.TAU_CTL); za = E._ewma_step(za, uL[d], E.TAU_ATL)
+    z4_done = [x for x in ubase["sessions"] if x["date"] < udays[2]]
+    z4_kw = dict(today=MON + timedelta(days=2), week_actuals=(len(z4_done), round(sum(x["km"] for x in z4_done), 1)),
+                 day_series={d: float(next((x["trimp"] for x in ubase["sessions"] if x["date"] == d), 0.0)) for d in udays},
+                 pinned_past=({x["date"]: x for x in z4_done}, set(udays[:2])), **ukw)
+
+    def _z4(spent):
+        ws_, _ = E.generate_block(ushape, MON, zc, za, 425, week_actual_eq=spent, **z4_kw)
+        return next((x for x in ws_[0]["sessions"] if x["date"] == udays[3]), None)
+    if not (_z4(0.0) or {}).get("rot") is not None:
+        fails.append("(z4) fixture — with no eq spent the Wednesday regeneration does not copy the run")
+    for spent in (60.0, 62.0, 64.0):
+        zt4 = _z4(spent)
+        if not (zt4 and zt4["kind"] == "easy" and zt4.get("rot") is None and zt4["trimp"] == u_c[0]["trimp"]):
+            fails.append(f"(z4) week eq spent {spent}: Thursday reads {zt4 and (zt4['kind'], zt4['trimp'], zt4.get('rot'))}, "
+                         f"want the easy run at the carved TRIMP {u_c[0]['trimp']}")
+    return _st("det", "specific-rotation",
+               "§ROT every other Build/Peak week adds a continuous threshold run cut from the freshest easy day "
+               "at that day's TRIMP (day TRIMPs and every other session unchanged), sized to what the polarized "
+               "floor leaves; the VO₂ session keeps its day; counted back from the taper so the last quality week "
+               "has none; §H2 un-carves first; stable under swap and mid-week regeneration; caution untouched",
+               passed=not fails,
+               expect="VO₂ every quality week; carve on odd r; Build 6 + Peak 3 = C – C – – C | – C –; carve is TRIMP-neutral; "
+               "plan (odd Peak) alternates across the hand-over; Tue–Sun regenerations follow the Monday lay",
+               got={"build_6_3": got_b, "peak_3": got_p, "plan_flags": plan_flags, "plan_pulled_at": pulled,
+                    "failures": fails or "none"})
 
 
 def _stc_taper():
@@ -16739,6 +17975,278 @@ def _stc_objective_restore(db):
                "guarded by status, the §OBJ2 duplicate rule and a passed date; removed_at never "
                "reaches the public box",
                passed=not fails, expect="see docstring (a)-(h)",
+               got={"violations": fails or "none"})
+
+
+def _stc_objective_time(db):
+    """§GUN (0.76.0) — the objective's optional gun time (HH:MM local), the moment the objective
+    bar's countdown targets instead of midnight. Display-only, so the write path is deliberately NOT
+    replan(): the engine periodizes to the day. Driven through the real add/time endpoints; the probe
+    rows are deleted afterwards.
+      (a) POST /api/objectives with start_time "07:30" → 200 ok; the row stores it and the private
+          GET /api/objectives returns it. A race added WITHOUT one stores NULL (midnight semantics).
+      (b) junk start_time on the add ("25:00", "8am") → 400 and NO row — rejected at the door, the
+          same posture as the `_date()` guard.
+      (c) POST …/time sets, changes and clears (null) the time; an unknown id → 404; junk → 400;
+          a resolved (done) race → 409 — its start is a matter of record.
+      (d) /time runs NO re-periodization: the plans table is untouched across set/change/clear.
+      (e) the public GET carries start_time — it is in _PV_OBJECTIVES (a gun time is
+          organizer-published, the same class as the date) and NOT in _PV_WITHHELD.
+      (f) migration: an objectives table predating the column gains it via init_db, idempotently,
+          keeping its rows."""
+    from datetime import timedelta
+    import tempfile as _tf
+    fails = []
+    label = "selftest-time-probe"
+    date_probe = (S.datetime.now().date() + timedelta(days=220)).isoformat()
+    saved_ro, saved_path = S.READONLY, S.DB_PATH
+    c = S.app.test_client()
+
+    def is_json(r):
+        return (r.headers.get("Content-Type") or "").startswith("application/json")
+
+    try:
+        S.READONLY = False
+        # (a) a race with a gun time lands, stores and serves it
+        r = c.post("/api/objectives", json={"type": "marathon", "label": label,
+                                            "date": date_probe, "start_time": "07:30"})
+        d = r.get_json() or {}
+        if r.status_code != 200 or not is_json(r) or not d.get("ok"):
+            fails.append(f"(a) add answered {r.status_code} {d} — want 200 ok")
+        row = db.execute("SELECT id, start_time FROM objectives WHERE lower(label)=lower(?) "
+                         "AND status='upcoming'", (label,)).fetchone()
+        oid = row["id"] if row else None
+        if oid is None:
+            fails.append("(a) probe row never landed — the rest of the det has nothing to drive")
+        elif row["start_time"] != "07:30":
+            fails.append(f"(a) row stores start_time={row['start_time']!r} — want '07:30'")
+        got = next((o for o in (c.get("/api/objectives").get_json() or []) if o.get("id") == oid), None)
+        if not got or got.get("start_time") != "07:30":
+            fails.append(f"(a) private GET /api/objectives doesn't carry start_time: {got}")
+        # …and a race added without one stores NULL (midnight), not "" or junk
+        r = c.post("/api/objectives", json={"type": "10k", "label": label + "-plain",
+                                            "date": (S.datetime.now().date() + timedelta(days=230)).isoformat()})
+        row2 = db.execute("SELECT start_time FROM objectives WHERE lower(label)=lower(?)",
+                          (label + "-plain",)).fetchone()
+        if r.status_code != 200 or row2 is None or row2["start_time"] is not None:
+            fails.append(f"(a) a race without a gun time answered {r.status_code} and stores "
+                         f"{None if row2 is None else row2['start_time']!r} — want 200 + NULL")
+        # (b) junk at the door
+        n0 = db.execute("SELECT COUNT(*) FROM objectives").fetchone()[0]
+        for junk in ("25:00", "8am", "1\u0669:30"):   # last: a non-ASCII digit
+            r = c.post("/api/objectives", json={"type": "5k", "label": label + "-junk",
+                                                "date": date_probe, "start_time": junk})
+            d = r.get_json() or {}
+            if r.status_code != 400 or not is_json(r) or d.get("ok") is not False:
+                fails.append(f"(b) start_time {junk!r} answered {r.status_code} {d} — want JSON 400")
+        if db.execute("SELECT COUNT(*) FROM objectives").fetchone()[0] != n0:
+            fails.append("(b) a rejected add left a row behind")
+        if oid is not None:
+            # (c)+(d) set / change / clear through /time — no re-plan anywhere in it
+            plans_before = db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+            for val, want in (("08:15", "08:15"), (None, None), ("06:45", "06:45")):
+                r = c.post(f"/api/objectives/{oid}/time", json={"start_time": val})
+                d = r.get_json() or {}
+                if r.status_code != 200 or not is_json(r) or not d.get("ok"):
+                    fails.append(f"(c) /time {val!r} answered {r.status_code} {d} — want 200 ok")
+                cur = db.execute("SELECT start_time FROM objectives WHERE id=?", (oid,)).fetchone()
+                if cur["start_time"] != want:
+                    fails.append(f"(c) after /time {val!r} the row reads {cur['start_time']!r}")
+            if db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] != plans_before:
+                fails.append("(d) /time created a plan row — the gun time must not re-periodize")
+            r = c.post("/api/objectives/999999/time", json={"start_time": "07:00"})
+            if r.status_code != 404 or not is_json(r):
+                fails.append(f"(c) /time on a missing id answered {r.status_code} — want JSON 404")
+            r = c.post(f"/api/objectives/{oid}/time", json={"start_time": "teatime"})
+            if r.status_code != 400 or not is_json(r):
+                fails.append(f"(c) /time with junk answered {r.status_code} — want JSON 400")
+            done_id = db.execute(
+                "INSERT INTO objectives (type,label,date,target,priority,status,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("marathon", label + "-done", date_probe, "finish", "A", "done", S._now_iso())).lastrowid
+            db.commit()
+            r = c.post(f"/api/objectives/{done_id}/time", json={"start_time": "07:00"})
+            d = r.get_json() or {}
+            if r.status_code != 409 or not is_json(r) or d.get("ok") is not False:
+                fails.append(f"(c) /time on a resolved race answered {r.status_code} {d} — want 409")
+            # (e) the public box serves it (allowlisted, like the date)
+            S.READONLY = True
+            pub = next((o for o in (c.get("/api/objectives").get_json() or []) if o.get("id") == oid), None)
+            S.READONLY = False
+            if not pub or pub.get("start_time") != "06:45":
+                fails.append(f"(e) public GET /api/objectives doesn't carry start_time: {pub}")
+        if "start_time" not in S._PV_OBJECTIVES:
+            fails.append("(e) start_time is not allowlisted in _PV_OBJECTIVES")
+        if "objectives[].start_time" in S._PV_WITHHELD:
+            fails.append("(e) start_time is BOTH published and registered withheld")
+        # (f) the migration heals a pre-§GUN table, twice
+        tmp = S.Path(_tf.mkdtemp())
+        S.DB_PATH = tmp / "sparinghorse.db"
+        old = S.connect_db()
+        old.executescript(S.SCHEMA)
+        old.execute("ALTER TABLE objectives DROP COLUMN start_time")   # the pre-0.76.0 shape
+        old.execute("INSERT INTO objectives (type,label,date) VALUES ('marathon','mig','2030-01-01')")
+        old.commit(); old.close()
+        S.init_db(); S.init_db()
+        chk = S.connect_db()
+        if "start_time" not in {x["name"] for x in chk.execute("PRAGMA table_info(objectives)").fetchall()}:
+            fails.append("(f) objectives.start_time missing after init_db on a pre-§GUN table")
+        if chk.execute("SELECT COUNT(*) FROM objectives WHERE label='mig'").fetchone()[0] != 1:
+            fails.append("(f) the migration lost a pre-existing row")
+        chk.close()
+    finally:
+        S.DB_PATH = saved_path
+        db.execute("DELETE FROM objectives WHERE lower(label) LIKE lower(?)", (label + "%",))
+        db.commit()
+        S.READONLY = saved_ro
+    return _st("det", "objective-time",
+               "the objective's optional gun time (§GUN): POST /api/objectives validates and stores "
+               "it, POST /api/objectives/<id>/time sets/changes/clears it with the /date guards but "
+               "NO re-periodization, the public box serves it (allowlisted), and init_db migrates a "
+               "pre-§GUN table idempotently",
+               passed=not fails, expect="see docstring (a)-(f)",
+               got={"violations": fails or "none"})
+
+
+def _stc_availability_restore(db):
+    """SH-49 — the undo of the away-window ✕ (§OBJ3's twin): POST /api/availability/<id>/restore puts
+    the SAME row back. The owner's rule (2026-09-23): a control that discards data or re-plans gets a
+    confirm in front AND an undo that restores the same row, durable for 24 h. Driven through the real
+    add/remove/restore endpoints; cases that need no re-plan of their own are set up by direct SQL.
+    The probe rows are deleted afterwards.
+      (a) remove → 200; active 0, removed_at stamped; GET lists the row with active 0 + removed_at.
+      (b) restore → 200 ok + diff; the SAME id is active again, removed_at NULL.
+      (c) unknown id → 404 on both routes.
+      (d) remove on a cleared row → 409 "already cleared"; restore on an active row → 409.
+      (e) restore with date_to before today → 409 "days have passed".
+      (f) restore while an identical ACTIVE window exists → 409 "already declared".
+      (g) a row cleared more than 24 h ago is not listed by GET.
+      (h) the whole prefix, restore included, is private-only.
+      (i) init_db twice is fine and the column exists.
+      (j) the cutoff is on the stamp's clock (UTC): at UTC+5 a row cleared 23 h ago is still listed."""
+    from datetime import timedelta
+    fails = []
+    today = S.datetime.now().date()
+    df = (today + timedelta(days=60)).isoformat()
+    dt = (today + timedelta(days=62)).isoformat()
+    past = (today - timedelta(days=3)).isoformat()
+    note = "selftest-av-probe"
+    saved_ro = S.READONLY
+    c = S.app.test_client()
+
+    def is_json(r):
+        return (r.headers.get("Content-Type") or "").startswith("application/json")
+
+    def listed(avid):
+        return next((x for x in (c.get("/api/availability").get_json() or []) if x.get("id") == avid), None)
+
+    try:
+        S.READONLY = False
+        db.execute("DELETE FROM availability WHERE note=?", (note,)); db.commit()
+        r = c.post("/api/availability", json={"date_from": df, "date_to": dt, "note": note})
+        row = db.execute("SELECT id FROM availability WHERE note=? AND active=1", (note,)).fetchone()
+        if r.status_code != 200 or row is None:
+            fails.append(f"add answered {r.status_code} / row {row} — nothing to drive")
+        else:
+            avid = row["id"]
+            # (a)
+            r = c.post(f"/api/availability/{avid}/remove")
+            d = r.get_json() or {}
+            if r.status_code != 200 or not d.get("ok"):
+                fails.append(f"(a) remove answered {r.status_code} {d}")
+            row = db.execute("SELECT active, removed_at FROM availability WHERE id=?", (avid,)).fetchone()
+            if row["active"] != 0 or not row["removed_at"]:
+                fails.append(f"(a) row reads active={row['active']!r} removed_at={row['removed_at']!r}")
+            got = listed(avid)
+            if not got or got.get("active") != 0 or not got.get("removed_at"):
+                fails.append(f"(a) GET does not list the cleared row with active 0 + removed_at: {got}")
+            # (d) second remove
+            plans_before = db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+            r = c.post(f"/api/availability/{avid}/remove")
+            d = r.get_json() or {}
+            if r.status_code != 409 or "already cleared" not in (d.get("error") or ""):
+                fails.append(f"(d) second remove answered {r.status_code} {d} — want 409 'already cleared'")
+            if db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] != plans_before:
+                fails.append("(d) a 409'd remove still re-planned")
+            # (b)
+            r = c.post(f"/api/availability/{avid}/restore")
+            d = r.get_json() or {}
+            if r.status_code != 200 or not d.get("ok") or "diff" not in d:
+                fails.append(f"(b) restore answered {r.status_code} {sorted(d)[:6]} — want 200 ok + diff")
+            row = db.execute("SELECT active, removed_at, date_from FROM availability WHERE id=?",
+                             (avid,)).fetchone()
+            if row["active"] != 1 or row["removed_at"] is not None:
+                fails.append(f"(b) row reads active={row['active']!r} removed_at={row['removed_at']!r}")
+            if db.execute("SELECT COUNT(*) FROM availability WHERE note=?", (note,)).fetchone()[0] != 1:
+                fails.append("(b) restore did not reuse the same row")
+            # (d) restore on an active row
+            r = c.post(f"/api/availability/{avid}/restore")
+            if r.status_code != 409:
+                fails.append(f"(d) restore on an active row answered {r.status_code} — want 409")
+            # (f) identical active window while this one is cleared
+            now = S._now_iso()
+            db.execute("UPDATE availability SET active=0, removed_at=? WHERE id=?", (now, avid))
+            dup = db.execute(
+                "INSERT INTO availability (created_at,date_from,date_to,note,active) VALUES (?,?,?,?,1)",
+                (now, df, dt, note)).lastrowid
+            db.commit()
+            r = c.post(f"/api/availability/{avid}/restore")
+            d = r.get_json() or {}
+            if r.status_code != 409 or "already declared" not in (d.get("error") or ""):
+                fails.append(f"(f) duplicate restore answered {r.status_code} {d} — want 409 'already declared'")
+            if db.execute("SELECT active FROM availability WHERE id=?", (avid,)).fetchone()["active"] != 0:
+                fails.append("(f) probe row went active despite the 409")
+            db.execute("DELETE FROM availability WHERE id=?", (dup,)); db.commit()
+            # (g) older than 24 h is retired — stamped the way remove stamps it (_now_iso: UTC)
+            utc_ago = lambda h: (S.datetime.now(S.timezone.utc) - timedelta(hours=h)).isoformat(timespec="seconds")
+            db.execute("UPDATE availability SET removed_at=? WHERE id=?", (utc_ago(25), avid)); db.commit()
+            if listed(avid) is not None:
+                fails.append("(g) a window cleared 25 h ago is still listed")
+            # (j) the 24 h cutoff is read on the same clock as the stamp: on a box whose local zone is
+            # ahead of UTC, a cutoff taken from naive local time retired the row hours early (CI runs in
+            # UTC and cannot see it, so the zone is shifted here)
+            import os as _os, time as _time
+            saved_tz = _os.environ.get("TZ")
+            try:
+                _os.environ["TZ"] = "Etc/GMT-5"; _time.tzset()          # UTC+5
+                db.execute("UPDATE availability SET removed_at=? WHERE id=?", (utc_ago(23), avid)); db.commit()
+                if listed(avid) is None:
+                    fails.append("(j) at UTC+5 a window cleared 23 h ago is not listed — the cutoff is on local time")
+            finally:
+                if saved_tz is None:
+                    _os.environ.pop("TZ", None)
+                else:
+                    _os.environ["TZ"] = saved_tz
+                _time.tzset()
+            # (e) passed
+            pid = db.execute(
+                "INSERT INTO availability (created_at,date_from,date_to,note,active,removed_at) "
+                "VALUES (?,?,?,?,0,?)", (now, past, past, note, now)).lastrowid
+            db.commit()
+            r = c.post(f"/api/availability/{pid}/restore")
+            d = r.get_json() or {}
+            if r.status_code != 409 or "days have passed" not in (d.get("error") or ""):
+                fails.append(f"(e) passed restore answered {r.status_code} {d} — want 409 'days have passed'")
+        # (c)
+        for route in ("remove", "restore"):
+            r = c.post(f"/api/availability/999999/{route}")
+            d = r.get_json() or {}
+            if r.status_code != 404 or not is_json(r) or d.get("ok") is not False:
+                fails.append(f"(c) {route} of a missing id answered {r.status_code} — want 404")
+        # (h)
+        if not S._private_only_path("/api/availability/3/restore"):
+            fails.append("(h) /api/availability/<id>/restore is not private-only")
+        # (i)
+        S.init_db(); S.init_db()
+        if "removed_at" not in {x["name"] for x in db.execute("PRAGMA table_info(availability)").fetchall()}:
+            fails.append("(i) availability.removed_at column missing after init_db")
+    finally:
+        db.execute("DELETE FROM availability WHERE note=?", (note,)); db.commit()
+        S.READONLY = saved_ro
+    return _st("det", "availability-restore",
+               "POST /api/availability/<id>/restore puts the SAME cleared away window back, guarded "
+               "by active state, passed days and the duplicate rule; GET lists a cleared row for 24 h",
+               passed=not fails, expect="see docstring (a)-(j)",
                got={"violations": fails or "none"})
 
 
@@ -18053,10 +19561,41 @@ def _stc_structure():
     expect("long-recovery-reps", synth([(600, 360), (180, 285), (300, 395), (180, 283),
                                         (300, 395), (180, 284), (600, 380)], with_hr=True),
            "interval", 3)
+    # v10 easy time SPREAD over levels (my 2026-10-06 10×3min, scaled to the test grid): a 10-min
+    # warm-up, three jogged then six walked 2-min recoveries, a short jog and a 14-min hard finish.
+    # No easy level reaches the floor alone; the reps (and the threshold half of the finish) do, so
+    # the old baseline sat in a work zone and the session read as an easy run, 0 reps. Pooled easy
+    # blocks as baseline: 10 reps + the finish as work.
+    rec = [(120, 395, 168)] * 3 + [(120, 700, 120)] * 6
+    spread = [(300, 375, 170), (300, 365, 172)]
+    for k in range(10):
+        spread.append((180, 285, 180))
+        if k < 9:
+            spread.append(rec[k])
+    spread += [(60, 395, 170), (375, 330, 178), (465, 305, 178)]
+    sp10 = expect("spread-easy-baseline", synth(spread, with_hr=True), "interval", 11)
+    if sp10 and [s["role"] for s in sp10["segments"]][-1] != "work":
+        fails.append(f"spread-easy-baseline: the hard finish is not work — "
+                     f"roles {[s['role'] for s in sp10['segments']]}")
+    # …and a race with a slow bracket UNDER the floor keeps its work-zone baseline (one sustained effort)
+    rb = expect("race-short-bracket", synth([(300, 380), (2400, 300), (300, 390)]), "tempo", 0)
+    if rb and "no easy bracket" not in rb["summary"]:
+        fails.append(f"race-short-bracket: not read as one sustained effort — {rb['summary']}")
     expect("easy", synth([(2700, 385)]), "easy", 0)
     expect("long", synth([(5700, 390)]), "long", 0)
     expect("tempo", synth([(600, 355), (1200, 312), (480, 380)]), "tempo", 1)
     expect("long-mp", synth([(4800, 385), (1500, 332)]), "long_mp", 1)
+    # v11 an MP finish run SHORT of MP (my 18 Oct long_mp, scaled to the test grid): 101 + 21 min
+    # easy (a 45-s slow patch between them), then 46 min in the marathon zone ~8% faster than the
+    # baseline — under the 10% work bar, so v10 read "Long run". The finish is work, the base is the run.
+    mf = expect("long-mp-under-bar", synth([(6060, 362), (45, 417), (1245, 371), (2760, 337)],
+                                           with_hr=True), "long_mp", 1)
+    if mf and [s["role"] for s in mf["segments"]] != ["easy_base"] * 3 + ["work"]:
+        fails.append(f"long-mp-under-bar: roles {[s['role'] for s in mf['segments']]}")
+    # …a marathon-zone TAIL a few % faster than the base (13 Sep: 6:15 after 6:24, cut off by a
+    # 1-min surge) stays an easy long run, and so does a marathon-zone stretch in the MIDDLE
+    expect("long-mp-tail-drift", synth([(5400, 352), (60, 300), (600, 342)]), "long", 0)
+    expect("long-mid-mp", synth([(3000, 362), (900, 337), (3000, 362)]), "long", 0)
     expect("hilly-const-effort", synth([(3000, 380)], hilly=True), "easy", 0)  # GAP flattens hills
     # in-run strides at REALISTIC contrast (~35% over easy, cadence up ~11% — the RD_STRIDE_PEAK
     # bar exists exactly so that 10–20% easy-run texture does NOT count, and the RD_STRIDE_CAD
@@ -19310,10 +20849,10 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),
@@ -19370,7 +20909,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_ft_ledger(),
                  lambda: _stc_ft_coldstart(), lambda: _stc_vo2_null_seed(), lambda: _stc_restart_dose(),
                  lambda: _stc_ft_scale(), lambda: _stc_polarized(),
-                 lambda: _stc_polarization_floor(), lambda: _stc_components(),
+                 lambda: _stc_polarization_floor(), lambda: _stc_components(), lambda: _stc_specific_rotation(),
                  lambda: _stc_ctl_floor_removed(),
                  lambda: _stc_taper(), lambda: _stc_taper_touch(db), lambda: _stc_freeze_continuity(), lambda: _stc_cap_truth_anchor(),
                  lambda: _stc_availability(), lambda: _stc_av_public_strip(),
@@ -19390,14 +20929,28 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
                  lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_public_view_coverage_all(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db), lambda: _stc_objective_dedupe(db),
-                 lambda: _stc_objective_restore(db),
+                 lambda: _stc_objective_restore(db), lambda: _stc_objective_time(db), lambda: _stc_availability_restore(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),
                  lambda: _stc_snapshot_payload_guard(), lambda: _stc_readiness_floor(db),
                  lambda: _stc_readiness_deterministic_halt(db), lambda: _stc_checkin_stop(), lambda: _stc_medical_track(db),
                  lambda: _stc_shape_sanity(db), lambda: _stc_inventory(db),
                  lambda: _stc_chat_routing(db), lambda: _stc_objective_parse(),
                  lambda: _stc_readiness_note_catch(db), lambda: _stc_plan_explain(db)]
-    results = [_run_one(fn) for fn in scenarios]
+    results = []
+    for fn in scenarios:
+        r = _run_one(fn)
+        # SH-62 — under the CLI (`SparingHorse.py selftest`, CI and the in-app child) the battery runs
+        # inside ONE app context, so every test-client request shares `db`. A scenario that leaves it
+        # inside a transaction pins an old snapshot, and the next write through it after any other
+        # connection has written fails at once with "database is locked" — three dets two dozen
+        # scenarios later, and only when the environment made some other connection write. Roll it
+        # back and fail the scenario that left it, by name.
+        if getattr(db, "in_transaction", False):
+            db.rollback()
+            r["passed"] = False
+            r["error"] = ((r["error"] + " · ") if r.get("error") else "") + \
+                "left the battery's shared connection inside a transaction (rolled back)"
+        results.append(r)
     if categories:
         results = [r for r in results if r["category"] in categories]
     return _selftest_report(results, "server")
@@ -19811,6 +21364,12 @@ def _stc_music_pick():
             seen.add(t["id"])
         if sg["filled_min"] < sg["minutes"]:
             fails.append(f"(a) {sg['label']} under-filled: {sg['filled_min']} < {sg['minutes']}")
+        # SH-36 — filled to the minutes, not past them: only the song that crosses them may run over, so
+        # dropping any one song leaves the segment short (every pool song here is 4 min). At 110 % the
+        # 15-min work segment carried 20 min and the next segment's first song came 5 min late.
+        short = min((t["duration_ms"] for t in sg["tracks"]), default=0) / 60000.0
+        if sg["tracks"] and sg["filled_min"] - short >= sg["minutes"]:
+            fails.append(f"(a) {sg['label']} over-filled: {sg['filled_min']} min for {sg['minutes']}")
     if "far" in seen or "h1" in seen or "h2" in seen or "amb" in seen:
         fails.append(f"(a/c) a track that must not qualify was picked: {seen & {'far', 'h1', 'h2', 'amb'}}")
     work_ids = [t["id"] for t in out[1]["tracks"]]
@@ -19820,8 +21379,8 @@ def _stc_music_pick():
         fails.append(f"(a) the same song under two ids must play once: {seen & {'dup1', 'dup2'}}")
     if [n for n in notes if n != bias_note]:
         fails.append(f"(a) a full pool produced notes: {notes}")
-    elif notes != [bias_note]:                        # §BEAT12 — the one note every list carries
-        fails.append(f"(a) the sensor-bias note is missing or duplicated: {notes}")
+    elif notes != ([bias_note] if B else []):         # §BEAT12 — the one note every list carries while a bias is set (SH-78: none at 0)
+        fails.append(f"(a) the sensor-bias note is missing, duplicated or unexpected: {notes}")
     # (g) §BEAT7 — rotation: the two weight-2.0 tracks were on three recent lists → the fresh k
     # tracks fill the segment ahead of them, and the note counts the new; the legs' verdict: k0
     # followed (+1.0) leads the k tracks, k4 broke and dipped (−1.5) is not picked at all
@@ -19833,7 +21392,9 @@ def _stc_music_pick():
               + [mk("klow", 172 + B, 0.8, 2.0), mk("kmid", 172 + B, 0.8, 2.0)])
     out_r, notes_r = M.pick_for_segments(segs[1:2], pool_r, [172.0], served={"klow": 3, "kmid": 3})
     got_r = [t["id"] for t in out_r[0]["tracks"]]
-    if "klow" in got_r or "kmid" in got_r or not any("new to the last" in n and "5 of 5" in n for n in notes_r):
+    n_r = f"{len(got_r)} of {len(got_r)}"                # SH-36: 4 songs since the segment fills to its minutes
+    if "klow" in got_r or "kmid" in got_r or len(got_r) != 4 \
+            or not any("new to the last" in n and n_r in n for n in notes_r):
         fails.append(f"(g) served tracks must yield to fresh ones and the note count them: picks={got_r} notes={notes_r}")
     if any(t.get("served") != 0 for t in out_r[0]["tracks"]) or out_r[0].get("fresh") != len(got_r):
         fails.append(f"(g) picks must carry served/fresh: {[(t['id'], t.get('served')) for t in out_r[0]['tracks']]} fresh={out_r[0].get('fresh')}")
@@ -19964,7 +21525,7 @@ def _stc_music_climb():
                "§BEAT10 (0.68.6) — the climbing segments (long_3, race_grind) pick first, take songs "
                "at or above the target before the rest of the window, and play in rising tempo",
                passed=not fails, expect="long_3/race_grind >= target and rising; running order kept; "
-               "every segment filled once with no notes beyond the sensor-bias one",
+               "every segment filled once with no notes beyond the sensor-bias one (none at B = 0)",
                got={"violations": fails or "none"})
 
 
@@ -20021,20 +21582,24 @@ def _stc_music_lock_band():
 
 
 def _stc_music_sensor_bias():
-    """§BEAT12 (0.68.9) — the watch's per-second cadence reads CADENCE_SENSOR_BIAS_SPM under its own
-    stride counter; the picker and the read-back's entrainment gate correct for it, everything else
+    """§BEAT12 (0.68.9), SH-78 (0.77.1) — the mechanism that corrects the watch's per-second cadence by
+    CADENCE_SENSOR_BIAS_SPM. The shipped value is 0.0 since the Smart HR Belt 2 (24 Sep 2026) supplies
+    cadence; (a)-(c) run with the bias patched to 2.4 (the wrist measurement) so the picker and the
+    read-back's entrainment gate stay tested; everything else
     (the curve, the targets, the rung) stays in watch units. (a) picker: a 170 target, a one-track
     segment, and a pool at 169.0 (inside ±1 % of 170 but outside ±1 % of 170 + B), 172.4 (= 170 + B
     exactly) and 176.0 — the pick is the 172.4 track, not the 169.0 one, and the list carries exactly
     one 'songs sit … above the target' note. (b) read-back: legs reading 170.0 (watch) against a
     172.4 tempo read entrained with delta≈0; the same legs against a 170.0 tempo do not. (c) REVERT
     TOOTH — with the bias zeroed, (a) picks the 169.0 track and (b)'s first case is not entrained:
-    the det fails without the change."""
+    the det fails without the change. (d) the shipped value is 0.0: on the belt the field matches the
+    stride counter (SH-78)."""
     if M is None:
         return _music_skip("music-sensor-bias", "§BEAT12 — the watch's cadence sensor reads low")
     import tempfile, sqlite3, json as _json
     fails = []
-    B = M.CADENCE_SENSOR_BIAS_SPM
+    shipped_bias = M.CADENCE_SENSOR_BIAS_SPM
+    M.CADENCE_SENSOR_BIAS_SPM = B = 2.4              # SH-78 — the wrist measurement, patched in to test the mechanism
     mk = lambda i, tempo, energy, weight, mins=5.0: {
         "id": i, "title": i, "artist": i, "duration_ms": int(mins * 60000),
         "tempo": tempo, "energy": energy, "weight": weight, "discovered": 0}
@@ -20114,17 +21679,23 @@ def _stc_music_sensor_bias():
         finally:
             M.CADENCE_SENSOR_BIAS_SPM = saved_bias
     finally:
+        M.CADENCE_SENSOR_BIAS_SPM = shipped_bias
         M.music_db_path, M.fetch_fit, M.parse_fit = saved_path, saved_fetch, saved_parse
         db.close()
         try:
             tmp.unlink()
         except OSError:
             pass
+    # ── (d) the shipped value ───────────────────────────────────────────────
+    if M.CADENCE_SENSOR_BIAS_SPM != 0.0:
+        fails.append(f"(d) SH-78: the shipped CADENCE_SENSOR_BIAS_SPM must be 0.0 (the Smart HR Belt 2's "
+                     f"cadence matches the stride counter from 24 Sep 2026): {M.CADENCE_SENSOR_BIAS_SPM}")
     return _st("det", "music-sensor-bias",
-               "§BEAT12 (0.68.9) — the picker matches songs against the target lifted by the sensor bias, "
-               "and the read-back's entrainment gate corrects the watch's cadence by the same amount",
-               passed=not fails, expect="picker takes 170 + B over raw 170; one bias note; legs at 170 "
-               "entrain to a 170 + B tempo and not to a 170 tempo; zeroing the constant flips both",
+               "§BEAT12 (0.68.9) / SH-78 (0.77.1) — with a bias set (patched to 2.4) the picker matches songs "
+               "against the target lifted by it and the read-back's entrainment gate corrects the cadence by "
+               "the same amount; the shipped bias is 0.0 on the chest strap",
+               passed=not fails, expect="(patched 2.4) picker takes 170 + B over raw 170; one bias note; legs at 170 "
+               "entrain to a 170 + B tempo and not to a 170 tempo; zeroing flips both; shipped value 0.0",
                got={"violations": fails or "none"})
 
 
@@ -20182,7 +21753,8 @@ def _stc_music_list_choice():
     # ── (c)–(e) end to end ──────────────────────────────────────────────────
     run_start = 2_000_000.0
     iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
-    samples = [(run_start + t, 171.6, 2.5 * t) for t in range(0, 601)]
+    # legs (watch units) + B = 174.0, the f1 tempo: right for any B, 0 included (SH-78)
+    samples = [(run_start + t, 174.0 - B, 2.5 * t) for t in range(0, 601)]
 
     def spec_of(tracks):
         return {"target_spm": 172.0, "segments": [{"label": "Long run", "effort": "easy", "target_spm": 172.0,
@@ -21836,6 +23408,80 @@ def _stc_music_ramp():
                "next race ahead, not the terminal one",
                got={"violations": fails or "none", **got})
 
+
+
+def _stc_music_ramp_land():
+    """SH-80 (0.78.0) — the ramp lands early when the legs have shown the trained line. Hand-built
+    curve (recent 152 + 1.6·v, trained 152 + 2.5·v; at 9 km/h 166.4 / 174.5, lift_trained 0.0487).
+    (a) the legs within the tempo window of the trained line on 3 of the newest 5 read-backs → at
+    ramp fraction 0.5 the target is the trained line and `why` names the legs; (b) on 2 of 5 it is
+    the calendar value (170.45); (c) the boundary: a read-back at lift_trained − 0.02 counts, 0.001
+    under it does not; (d) the comfort ceiling still caps the landed target; (e) REVERT TOOTH:
+    MUSIC_LAND_RUNS patched to 99 makes (a) the calendar value again."""
+    if M is None:
+        return _music_skip("music-ramp-land", "SH-80 — the ramp lands early when the legs reached the trained line")
+    fails, got = [], {}
+    rec, trn = {"a": 152.0, "b": 1.6}, {"a": 152.0, "b": 2.5}
+    cv = {"recent": rec, "trained": trn, "comfort_max": 200}
+    rec9, trn9 = 152 + 1.6 * 9, 152 + 2.5 * 9
+    lt = trn9 / rec9 - 1
+
+    def rb(i, spm):
+        return {"date": "2026-10-%02d" % (17 - i), "run_id": 100 - i, "km": 10.0, "minutes": 66.6667, "target_spm": 170.0,
+                "songs": [{"spm": spm, "read_s": 300, "pace_sec": 400.0, "seg_target": 170.0}]}
+    hit, miss = rec9 * (1 + lt), rec9 * 1.01          # on the trained line / one % over the recent line
+    five = lambda k: [rb(i, hit if i < k else miss) for i in range(5)]
+    # which of the five reach: newest first, so k hits among the newest five in any order
+    mixed = lambda hits: [rb(i, hit if i in hits else miss) for i in range(5)]
+    held = {"held": True, "lift_ran": 0.05, "lift_target": 0.03, "date": "2026-10-17", "ran": 175.0, "target": 170.0}
+    ramp = lambda lbl, cvx=cv, **kw: {"fraction": 0.5, "week": 7, "weeks": 12, "phase": "ramp", "rung": held,
+                                      "landed_by_legs": M.legs_landed(lbl, cvx), **kw}
+    cal = rec9 + 0.5 * (trn9 - rec9)
+    # (a) 3 of 5
+    la = M.legs_landed(mixed({0, 2, 4}), cv)
+    ta = M.target_spm(cv, 400.0, None, ramp(mixed({0, 2, 4})))
+    got["landed"], got["target_a"] = la, ta
+    if not (la and la["runs"] == 3 and la["of"] == 5 and len(la["dates"]) == 3):
+        fails.append(f"(a) 3 of 5 reached must land: {la}")
+    if not (ta and abs(ta["spm"] - round(trn9, 1)) < 0.06 and "legs" in ta["why"] and "3 of the last 5" in ta["why"]):
+        fails.append(f"(a) landed target must be the trained line and name the legs: {ta}")
+    # (b) 2 of 5
+    lb = M.legs_landed(mixed({1, 3}), cv)
+    tb = M.target_spm(cv, 400.0, None, ramp(mixed({1, 3})))
+    got["target_b"] = tb
+    if not (lb is None and tb and abs(tb["spm"] - round(cal, 1)) < 0.06 and "legs" not in tb["why"]):
+        fails.append(f"(b) 2 of 5 must leave the calendar value {cal:.2f}: {lb} / {tb}")
+    # (c) boundary at lift_trained - window
+    edge = rec9 * (1 + lt - M.MUSIC_TEMPO_WINDOW)
+    at = M.legs_landed([rb(i, edge + 1e-9) for i in range(3)], cv)
+    under = M.legs_landed([rb(i, edge - 0.001 * rec9) for i in range(3)], cv)
+    if not (at and at["runs"] == 3):
+        fails.append(f"(c) a read-back at lift_trained - window must count: {at}")
+    if under is not None:
+        fails.append(f"(c) a read-back 0.001 under the window must not count: {under}")
+    # (d) the comfort ceiling still caps
+    cvc = dict(cv, comfort_max=172.0)
+    td_ = M.target_spm(cvc, 400.0, None, ramp(mixed({0, 2, 4}), cvc))
+    got["target_d"] = td_
+    if not (td_ and td_["spm"] == 172.0 and td_["why"] == "comfort ceiling"):
+        fails.append(f"(d) the comfort ceiling must cap the landed target: {td_}")
+    # (e) revert tooth
+    old = M.MUSIC_LAND_RUNS
+    try:
+        M.MUSIC_LAND_RUNS = 99
+        te = M.target_spm(cv, 400.0, None, ramp(mixed({0, 2, 4})))
+    finally:
+        M.MUSIC_LAND_RUNS = old
+    got["target_e"] = te
+    if not (te and abs(te["spm"] - round(cal, 1)) < 0.06):
+        fails.append(f"(e) without the landing the calendar value must return: {te}")
+    return _st("det", "music-ramp-land",
+               "SH-80 — the cadence ramp lands early when the legs reached the trained line (within the tempo "
+               "window) on 3 of the newest 5 read-backs; fewer leaves the calendar ramp; the comfort ceiling "
+               "and the other caps still apply",
+               passed=not fails, expect="3 of 5 -> trained line 174.5 naming the legs; 2 of 5 -> 170.45; "
+               "boundary at lift_trained - 0.02 counts; ceiling caps; revert gives 170.45",
+               got={"violations": fails or "none", **got})
 
 
 def _stc_compose_clock():

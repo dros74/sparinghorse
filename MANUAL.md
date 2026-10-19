@@ -200,6 +200,17 @@ the engine will treat it as a goal change. A race can move by up to 45 days and 
 same race — beyond that it is a different one, which is what keeps next year's edition of an annual from
 inheriting this year's history. A race that has already been run or removed cannot be moved.
 
+### The gun time and the countdown
+
+The objective bar at the top of the console shows a **live countdown** to the race it names —
+"74 days, 3 hours, 12 minutes, 20 seconds", ticking every second, following whichever race the chain strip has
+selected. Each race optionally carries a **gun time** (the local start time, `HH:MM`), settable on
+the add form or edited in place on the objective row, next to the date. The countdown targets that
+moment; with no gun time set it counts to midnight of race day. Setting or clearing the gun time is
+display-only — the engine periodizes to the *day*, so no re-plan runs — and a race that has already
+been run takes no edits: its start is a matter of record. The gun time is public (organizer-published
+info, like the date), so the countdown ticks on the public page too.
+
 ### Removing a race
 
 The remove control asks first. Once confirmed the race comes off the calendar and the plan re-anchors
@@ -338,7 +349,12 @@ projected end-of-week ACWR badge, and — once lived — what you actually ran. 
   appears already in Base (develop it early, it is cheap to hold later; the touch is small so it fits the
   biomechanical budget of a volume rebuild), the mid-week interval session then keeps its full
   size in a *maintenance role* through Build and Peak (it never grows, but shrinking it lowers the whole
-  week's safe load, so it stays), while the marathon-pace long-run segment **grows week over week at
+  week's safe load, so it stays). Every other quality week in Build and Peak the week also carries a
+  **threshold run**: a continuous block at threshold pace, cut out of the freshest easy day (Thursday on
+  most layouts) with ten easy minutes before it and easy running after. It replaces that day's easy
+  running at the same training load, so the rest of the week does not change, and its length is what
+  the polarized floor of easy running allows (about 25 minutes on a 75 km week). The last quality week
+  before the taper does not carry it. Meanwhile the marathon-pace long-run segment **grows week over week at
   constant speed** (longer, not faster) and Peak pivots to resilience: the long fast run is the workout.
   The conservative regime keeps its gentler classic mix; only the tags show. An eased or fatigue-capped
   session loses its chip: a session that no longer happens builds nothing.
@@ -634,7 +650,9 @@ most similar listeners there, its collaborative picks and its weekly exploration
 Monday — scored for tempo by ReccoBeats (a free service reproducing the audio features Spotify
 withdrew) and picked inside the entrainment window, ±1 % of the target first, widening to ±2 % only
 when that band is dry. A race list follows a ramp toward the race's cadence over the weeks before it
-and takes the ramp of the day it is built — rebuild it in race week. After the run, the read-back grades
+and takes the ramp of the day it is built — rebuild it in race week. The ramp lands early when your legs
+have already shown the trained cadence: when the last read-backs reached it on 3 of 5 runs (within the
+same 2 % window), the target is the trained curve and the music page says so; your comfort ceiling still caps it. After the run, the read-back grades
 every song by the cadence your legs held through it, from the run's original FIT file when Runalyze
 holds one or the streams otherwise: a song run within 1 % of its tempo is followed. **One lap press
 during a song means "the beat lost me here"; two presses within six seconds mean "never again."** A
@@ -730,6 +748,8 @@ operationalisation, tuned on one athlete, not prescriptions from these authors.
   crammed into the days around them. Affected weeks carry an `✈ away` tag. Away days
   are **private**: they never appear on the public page in any form (an away date on a public site
   tells the world your house is empty).
+  Clearing a window asks first; a cleared window stays listed for 24 hours with a **put back**
+  control that restores the same window and re-lays the plan.
 
 ---
 

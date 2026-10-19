@@ -139,7 +139,7 @@
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.543,
+        "peak_acwr": 1.544,
         "phase": "base",
         "proj_acwr": 1.08,
         "proj_acwr_flat": 1.14,
@@ -237,7 +237,7 @@
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.206,
+        "peak_acwr": 1.207,
         "phase": "base",
         "proj_acwr": 0.946,
         "proj_acwr_flat": 0.969,
@@ -378,7 +378,7 @@
           "regime": "caution"
         },
         "long": 4,
-        "peak_acwr": 0.941,
+        "peak_acwr": 0.942,
         "phase": "base",
         "proj_acwr": 0.866,
         "proj_acwr_flat": 0.808,
@@ -485,11 +485,11 @@
           "regime": "caution"
         },
         "long": 4,
-        "peak_acwr": 1.086,
+        "peak_acwr": 1.088,
         "phase": "build",
-        "proj_acwr": 1.086,
-        "proj_acwr_flat": 0.743,
-        "proj_acwr_soft": 1.086,
+        "proj_acwr": 1.088,
+        "proj_acwr_flat": 0.744,
+        "proj_acwr_soft": 1.088,
         "proj_ctl": 23.5,
         "quality": [
           {
@@ -642,11 +642,11 @@
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.319,
+        "peak_acwr": 1.32,
         "phase": "build",
-        "proj_acwr": 0.851,
-        "proj_acwr_flat": 0.985,
-        "proj_acwr_soft": 0.851,
+        "proj_acwr": 0.852,
+        "proj_acwr_flat": 0.986,
+        "proj_acwr_soft": 0.852,
         "proj_ctl": 22.5,
         "quality": [
           {
@@ -818,11 +818,11 @@
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.222,
+        "peak_acwr": 1.223,
         "phase": "build",
-        "proj_acwr": 0.841,
-        "proj_acwr_flat": 0.917,
-        "proj_acwr_soft": 0.841,
+        "proj_acwr": 0.842,
+        "proj_acwr_flat": 0.918,
+        "proj_acwr_soft": 0.842,
         "proj_ctl": 21.7,
         "quality": [
           {
@@ -1095,11 +1095,11 @@
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.15,
+        "peak_acwr": 1.149,
         "phase": "peak",
-        "proj_acwr": 0.912,
-        "proj_acwr_flat": 0.911,
-        "proj_acwr_soft": 0.912,
+        "proj_acwr": 0.911,
+        "proj_acwr_flat": 0.91,
+        "proj_acwr_soft": 0.911,
         "proj_ctl": 21.2,
         "quality": [
           {
@@ -1139,7 +1139,7 @@
             "kind": "interval",
             "km": 4.8,
             "minutes": 23,
-            "note": "sharpening intervals \u2014 10min easy wu + 1\u00d73min @ interval w/ 2min jog + 10min easy cd",
+            "note": "sharpening intervals \u2014 10min easy wu + 1\u00d73min @ interval + 10min easy cd",
             "pace_zone": "3:44/km interval",
             "reps": [
               {
@@ -1721,7 +1721,7 @@
         "peak_acwr": 1.003,
         "phase": "rebase",
         "proj_acwr": 1.003,
-        "proj_acwr_flat": 0.81,
+        "proj_acwr_flat": 0.809,
         "proj_acwr_soft": 1.003,
         "proj_ctl": 27.5,
         "role": "build",
@@ -1786,13 +1786,19 @@
     "reason": "counterfactual (caution)"
   },
   "shape": {
-    "atl": 52.6725,
-    "ctl": 66.36279069767441,
+    "atl": 52.67121557660466,
+    "ctl": 66.367388492046,
     "effective_vo2max": 53.6,
     "seed": {
       "bridged_days": 1,
       "fallback": null,
       "from": "2026-06-29",
+      "own_gap": 0.005,
+      "runalyze": [
+        66.36,
+        52.67
+      ],
+      "source": "reconstruction",
       "stale_skipped": 0,
       "tainted_skipped": 0
     }
@@ -1847,10 +1853,10 @@
           "regime": "caution"
         },
         "long": 4,
-        "peak_acwr": 1.127,
+        "peak_acwr": 1.128,
         "phase": "taper",
         "proj_acwr": 0.769,
-        "proj_acwr_flat": 0.845,
+        "proj_acwr_flat": 0.846,
         "proj_acwr_soft": 0.769,
         "proj_ctl": 19.5,
         "quality": [
@@ -2005,9 +2011,9 @@
         "long": 3,
         "peak_acwr": 0.991,
         "phase": "taper",
-        "proj_acwr": 0.653,
+        "proj_acwr": 0.654,
         "proj_acwr_flat": 0.731,
-        "proj_acwr_soft": 0.653,
+        "proj_acwr_soft": 0.654,
         "proj_ctl": 17.2,
         "quality": [
           {
@@ -2039,7 +2045,7 @@
             "kind": "race_pace",
             "km": 4.4,
             "minutes": 22,
-            "note": "short race-pace touch \u2014 10min easy wu + 1\u00d72min @ marathon w/ 2min jog + 10min easy cd",
+            "note": "short race-pace touch \u2014 10min easy wu + 1\u00d72min @ marathon + 10min easy cd",
             "pace_zone": "4:28/km marathon",
             "reps": [
               {
@@ -2141,7 +2147,7 @@
           "regime": "caution"
         },
         "long": 2,
-        "peak_acwr": 3.101,
+        "peak_acwr": 3.102,
         "phase": "taper",
         "proj_acwr": 1.13,
         "proj_acwr_flat": 1.849,

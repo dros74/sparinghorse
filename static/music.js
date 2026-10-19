@@ -153,7 +153,7 @@
           <div class="mstat"><div class="mk">Last rung</div><div class="v">${!rg ? "—" : rg.held ? "held" : "missed"}</div></div>
         </div>
         <div class="mbar"><i style="width:${Math.round(100 * (rp.fraction || 0))}%"></i></div>
-        <p class="mhint" style="margin:0 0 8px">${when} (${rp.lead_days} days before the race). ${!rg ? "No read-back with a playlist yet — the rung is one step over the recent curve."
+        <p class="mhint" style="margin:0 0 8px">${rp.landed_by_legs ? `Landed early — legs on ${rp.landed_by_legs.runs} of ${rp.landed_by_legs.of} runs. ` : ""}${when} (${rp.lead_days} days before the race). ${!rg ? "No read-back with a playlist yet — the rung is one step over the recent curve."
           : rg.held ? `${esc(fmtDate(rg.date))} ran <b>${Math.round(rg.ran)}</b> against ${Math.round(rg.target)} over ${rg.songs} playlist song${rg.songs === 1 ? "" : "s"} — the next target can be one step higher.`
           : `${esc(fmtDate(rg.date))} ran <b>${Math.round(rg.ran)}</b> against ${Math.round(rg.target)} over ${rg.songs} playlist song${rg.songs === 1 ? "" : "s"} — the ramp waits there.`}</p>`;
     }

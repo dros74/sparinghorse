@@ -203,6 +203,13 @@ a major upgrade (§8).
   snapshot or a portable JSON export on demand; **Settings → System** shows the newest backup's age.
   Copy `./data` and `./secrets` off the host on a schedule; the secrets store is encrypted at rest
   (keep `SH_SECRET_KEY` or `secrets.key` with the copy, or the tokens must be re-entered).
+- **Encrypt what leaves the host.** A snapshot is the whole database, unencrypted: training history,
+  readiness notes and health markers. Before a copy goes to cloud storage, encrypt it with a tool
+  that does so on the host and keeps its password off the host: restic, borg, an `rclone crypt`
+  remote, or the NAS's own backup app with client-side encryption (Synology Hyper Backup, for one).
+  Run it on the host against `./backups`; inside the container, `SH_BACKUP_PUSH` does not see the
+  app's own secrets, so the tool's password must be passed to the hook on its own. A plain sync
+  folder or an unencrypted `rclone copy` leaves the data readable by the storage provider.
 - **Restore:** `docker compose stop sparinghorse && docker compose run --rm sparinghorse python
   SparingHorse.py restore /backups/<file> && docker compose start sparinghorse`. The command refuses
   a file that is not a Sparing Horse database, keeps the previous file as

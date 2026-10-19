@@ -10,6 +10,376 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.78.3] - 2026-10-19
+
+### Fixed
+
+- **A regeneration with no new input laid different days ahead (§SEED6, SH-38).** The plan is seeded from
+  Runalyze's CTL and ATL for yesterday, and Runalyze publishes both as whole numbers, so each day's row
+  carries its own rounding error of up to half a point. The seed moved from one day to the next by up to
+  0.93 CTL and 0.87 ATL (over the 122 days from 20 Jun to 19 Oct), and the plan followed it: a rebuild
+  with nothing new in it still moved sessions. Replaying the morning and nightly rebuilds from 19 Oct to
+  5 Dec, the 3 Nov interval session flipped between 12.8 and 13.7 km (one 3-minute rep) on up to 7
+  rebuilds per run, the 5 Nov threshold run fell to an easy run once, and 110 to 173 sessions moved by
+  0.1 to 0.5 km per run. With Runalyze's rows unrounded nothing moved. The engine's own EWMA over the
+  athlete's daily load, from the first activity, matches 123 of Runalyze's 125 rows from 15 Jun to 18 Oct
+  to within rounding (largest gap 0.499); the exceptions are two rows the engine already skips. Runalyze's
+  figure is the engine's own figure, rounded. The plan now starts from the engine's own end-of-yesterday
+  state, at full precision, whenever every Runalyze row it relies on agrees with that state to within 0.6
+  on both CTL and ATL. When one disagrees beyond rounding (a run Runalyze counts that the local data lacks,
+  or the reverse), the plan starts from Runalyze's reading as before, until that row is more than 14 days
+  old. While the seed is the engine's own state, the private seed banner reads "end-of-yesterday state, summed from your own runs (it agrees
+  with Runalyze's <date> reading to the rounding)"; the public page keeps its old wording. The state a
+  week hands to the next, and a phase to the next, was also rounded (to 2 and 1 decimals) and is now
+  carried at full precision, so sessions no longer shift by 0.1 to 0.2 km at those hand-overs. On the
+  live plan for 19 Oct the seed is 105.85 / 145.50 instead of 106 / 146, and the plan to 29 Nov moves from
+  430.2 to 429.1 km (the 15 Nov long run with marathon-pace finish 38.0 to 37.8 km, the 29 Nov long run
+  12.3 to 12.0 km); the race-day CTL of 142 and the median finish of 3:34:00 are unchanged. The athlete
+  needs to do nothing beyond the rebuild; the next nightly build re-reads the data.
+
+## [0.78.2] - 2026-10-19
+
+### Fixed
+
+- **The playlist's easy base ran past the marathon-pace finish (SH-36).** `MUSIC_SEGMENT_FILL` was 1.10,
+  and `pick_for_segments` adds songs to a segment until their total reaches that share of the segment's
+  minutes, so every segment carried about 10% more music than its minutes, plus the overshoot of its last
+  song. On a long run with a marathon-pace finish the extra sits in the easy base and pushes the first
+  marathon-tempo song late, by more the longer the run. In the 18 Oct list the plan gave 133 minutes of
+  easy base, the base was built from 41 songs lasting 149.9 minutes, and the first marathon-tempo song
+  started at 150 minutes of the run: 17 minutes after the plan's finish was due and 27 minutes after the
+  athlete actually began it. The 20 Sep and 27 Sep long runs and the 6 Oct intervals (a warm-up over-filled
+  by 2.5 minutes, a last work song that ran 6.5 minutes into the cool-down) showed the same drift. The
+  fill is now 1.00: a segment is filled to its minutes and only the song that crosses them runs past the
+  seam, so there is still no silence. Replayed on the 18 Oct list's own songs in their order, the easy part
+  would have ended at 136.2 minutes after 37 songs. Lists carry fewer easy songs, and when the athlete
+  starts a finish earlier than planned the list still follows the plan, so a skip forward is still needed.
+  Lists already built are not rebuilt; the next nightly build uses the new fill.
+
+## [0.78.1] - 2026-10-19
+
+### Fixed
+
+- **A marathon-pace finish run slower than marathon pace read back as a plain long run (§RD11).** The
+  athlete's prescribed long run of 18 Oct (about 133 minutes easy, then 34 minutes at marathon pace
+  5:34) was decoded as "Long run · 168min @6:01/km" with no work, although the finish is obvious in the
+  pace chart. The athlete ran it slower than prescribed (30 minutes at 5:44, then 17 at 5:29), a
+  46-minute stretch at 5:41/km in the marathon zone after 2 hours at about 6:10. The decoder calls a
+  block work only when it is 10% faster than the run's easy baseline, a bar that keeps easy-day drift
+  across the easy-pace limit from being read as work. The finish was 8.4% faster, so it was not work,
+  and with an easy pace close to that limit a finish had to be run at or under target pace to be seen.
+  When the 10% pass finds no work, the decoder now looks for a trailing stretch of marathon-zone
+  blocks that is at least 5% faster than the baseline, lasts at least 8 minutes, follows at least 30
+  minutes of running, and is followed by no more than the long-run cool-down allowance (15 minutes or
+  20% of the run). That stretch becomes the work and the run is named as a long run with a marathon-pace
+  finish. A run where the 10% pass found work decodes as before, a marathon-zone tail only a few
+  percent faster than the baseline (2.5% in a September run) stays an easy long run, and so does a
+  marathon-zone stretch in the middle of a run. The 18 Oct run should now read "Long run + MP finish ·
+  ~122min easy @6:06–6:57 · 46min @5:41 MP finish" (from its cached segments; not re-decoded from
+  streams). Replayed over the 70 cached easy and long decodes with no work, only that run changes. The
+  run card label, the music read-back and the effort monitor read the decode; the effort monitor
+  ignores the old decode until the run is opened again. No plan changes: the plan engine does not read
+  the decoder.
+
+## [0.78.0] - 2026-10-18
+
+### Added
+
+- **The cadence ramp lands early when the legs have already shown the trained line (SH-80).** A race
+  list's target climbs from the recent line (the last 56 days) to the trained line (the fittest third
+  of runs by CTL) over 12 weeks, landing 21 days before the A-race. Until 0.77.1 the picker laid songs
+  2.4 bpm above the target to offset the wrist sensor, and since the chest belt (24 September) the
+  athlete had followed songs at about the trained line for 3.5 weeks, naturally. With the correction at
+  0, a rebuilt easy list would have dropped to the calendar value: at 6:16/km, 175.4 against the
+  trained line's 177.6. The recent line sits low partly because 26 of its 45 runs were wrist runs
+  reading about 2 spm low. A read-back now counts as reached when its weighted lift over the recent
+  line is at least the trained line's lift at the same song paces minus `MUSIC_TEMPO_WINDOW` (0.02,
+  the tolerance `held` already uses). When 3 of the newest 5 usable read-backs reached, the ramp is
+  treated as landed: the target is the trained line, and its reason reads "trained curve — the legs
+  reached it on k of the last n runs". The ramp state reads the 12 newest read-backs (was 8), the
+  playlist spec records the early landing, and the music page shows "Landed early — legs on k of n
+  runs." The measured gap, lift ran minus lift trained, was between -0.004 and -0.016 on most runs
+  since 1 October and within 0.02 on 14 of the last 16 (an interval day: -0.071); a 1% tolerance
+  would never land. The trained line, the comfort ceiling (p90, 184) and the rung still cap the
+  target, and with fewer than 3 of 5 the calendar ramp applies as before. On the athlete's data on 18
+  October (ramp week 9 of 12, fraction 0.667) the ramp lands on 4 of the last 5 runs, and the targets
+  at 6:16 / 5:34 / 5:08 per km are 177.6 / 180.5 / 182.7 spm. New `det/music-ramp-land` covers 3 of 5
+  landing and naming the legs, 2 of 5 keeping the calendar value, the tolerance boundary, the comfort
+  ceiling still capping, and a revert check (`MUSIC_LAND_RUNS` set to 99 restores the calendar
+  value). `ENGINE_SCIENCE.md` §10 gains rows for the two new constants. Lists already built keep their
+  targets until rebuilt.
+
+## [0.77.1] - 2026-10-18
+
+### Fixed
+
+- **The songs were laid 2.4 bpm above the target, and the read-back scored locked songs as missed
+  (SH-78).** The cadence correction `CADENCE_SENSOR_BIAS_SPM` (§BEAT12, 0.68.9) was measured on wrist
+  cadence: the watch's per-second cadence field read 2.1 to 2.7 spm under its own stride counter on
+  three runs in August and September. From 24 September the athlete runs with a Suunto Smart HR
+  Belt 2, which supplies cadence, and the field no longer reads low. Across 29 original FITs from 13
+  September to 17 October, the stride counter minus the per-second field is +2.1 spm (median) on the
+  8 runs before 24 September and about 0.0 on the 15 easy runs after it. The correction kept being
+  added: the picker laid songs at the target plus 2.4, and the read-back compared cadence plus 2.4
+  to the song's tempo inside a 1% window. On 10 October 17 of 17 songs were within 1% on raw
+  cadence but 1 of 17 counted as entrained; on 15 October 0 of 9 did. On 17 October raw cadence was
+  within 0.5 spm of the song's tempo on 12 of 14 songs, and the athlete reported being locked on
+  every song. The correction is now 0.0. The mechanism stays, so a sensor that reads off can set a
+  value again. New lists pick songs at the target itself, 2.4 bpm slower than before, and the
+  read-back compares raw cadence to tempo. The picker's "songs sit above the target" note and the
+  page's bias notes show only when the correction is above zero, so they no longer appear. Read-backs
+  already stored keep their old scoring until "Read again" on the music page. `det/music-sensor-bias`
+  now runs its checks with the bias set to 2.4 and adds one for the shipped value (it fails with 2.4
+  restored); `det/music-pick`, `det/music-list-choice` and `det/music-climb` follow the new value.
+
+## [0.77.0] - 2026-10-16
+
+### Added
+
+- **Every other Build and Peak week carves a threshold run out of the week's freshest easy day (§ROT,
+  SH-46).** On the assertive regime, Build and Peak laid one mid-week session (VO₂ intervals) beside
+  the marathon-pace long run, and the threshold zone sat unused after Base. The athlete asked for a
+  speed session on alternate Thursdays after running a Thursday easy day at threshold. The first
+  build of this ruling swapped the Tuesday session; it was corrected before release, and the
+  Tuesday VO₂ session is unchanged.
+  - **Which weeks.** A segment's Build (or Bridge) weeks and the Peak after them count as one run of
+    quality weeks, numbered back from the last one before the taper (r = 0). The odd positions carry
+    the threshold run, so the last week before the taper keeps two hard days. Down weeks take no
+    position. After a pulled down week swaps two weeks' fields, the positions are handed out again
+    in date order, so the run still alternates.
+  - **Which day.** The run takes the day the strides use: the short easy run furthest from every
+    heavy day (the week's quality days, the long run, and the previous and next week's long run),
+    ties to the later day. It needs at least two days from each heavy day and another short easy
+    run left in the week, and it never falls from two days before a race to two days after it
+    (races of the last three days count). That is Thursday on a Tuesday/Wednesday/Thursday/Saturday/Sunday week and
+    on the stock four- and five-run layouts, and Friday on the stock six-run layout. The strides
+    that rode that day go.
+  - **The run.** It is cut out of that day's easy run at the same TRIMP: 10 minutes easy, one
+    continuous block at threshold pace, then easy for the rest of the day's load. Because the day's
+    TRIMP does not change, CTL, ATL, ACWR and every other day of the week are unchanged. The
+    governor search sizes the week without the run, so the run cannot change a week's load.
+  - **Size.** The block is 8% of the week's TRIMP as work (`DAVIS_THU_FRAC`, 1 − the 80% easy floor
+    − the VO₂ session's 12%), clipped to the room the polarized floor leaves after the VO₂ session's
+    rounded reps, to the easy run's own TRIMP less 20 minutes of easy running, and to 10% of the
+    week's kilometres at threshold pace (`DAVIS_THU_T_SHARE`, from Daniels's guidance). The
+    week-level ceiling can shrink it further. Under 15 minutes (`DAVIS_THU_MIN_MIN`) the day stays
+    an easy run.
+  - **When the run goes back to an easy run.** The run returns to the easy run it was cut from, at
+    the same TRIMP, with strides and "eased" notes kept: when the polarized floor or the week
+    ceiling is passed after a check-in eases the week (only a week still over after that loses its
+    other quality), when a check-in covers the run's day (the day then reads as the easy run eased),
+    in a tune-up race's two-day run-up, in a mid-week regeneration where Monday's lay inside the
+    straddle week kept that day easy, and when a mid-week regeneration's copy of the run would pass
+    what the week has left of its week ceiling. A clipped straddle remainder keeps the
+    full lay's minutes and carves only on the day the full lay carved.
+  - **The week's intent line** reads "… + VO₂ maintenance + a threshold run" on those weeks. A week
+    whose shape asked for the run but laid none drops the phrase.
+  - **Unchanged.** The Tuesday VO₂ session in every quality week, every other day's load, CTL, the
+    caution regime, taper, race week, Base and the maintenance and post-race shapes. The
+    per-session load step skips the run (the week ceiling still prices its kilometres). The public
+    view withholds the run's rotation position and lay instruction, including in the readiness
+    session.
+  - **On the live block** (the plan regenerated on a copy of the athlete's database): Thursday
+    22 Oct goes from an 11.3 km easy run to 10.1 km (10 minutes easy, 24 minutes at threshold,
+    24 minutes easy), Thursday 5 Nov from 11.3 km to 9.9 km (10, 27 and 19 minutes). Each day's
+    TRIMP is the same as before (117.7 and 116.7). Every other day through race day is identical,
+    and CTL at the end of Build, Peak and Taper is 110.5 / 125.5 / 107.5 in both. The weeks of
+    19 Oct and 2 Nov run 75.3 → 74.1 and 81.4 → 80.0 km at hard shares of 0.1976 and 0.1922. The
+    projected median moves by one second (3:34:04 → 3:34:05).
+  - **Size of the block, and why not longer.** The athlete's first ask was 10 minutes easy and the
+    rest at threshold to reach 10 km, about 43 minutes at threshold. Measured on the week of
+    19 Oct that is a hard share of 25.6% against the 20% polarized floor, and the floor then
+    stripped all of the week's quality. The athlete chose the block the floor allows over a smaller
+    Tuesday session or a lower floor.
+  - **Stability.** A day-by-day simulation from 16 Oct to 22 Nov (a regeneration each morning and
+    night, the day's run taken as laid): 76 regenerations, no day-ahead change of session kind, no
+    move over 0.5 km, no change of week role. Lived load is 4543.8 TRIMP in both builds and
+    kilometres go 418.8 → 416.2; only the two Thursdays differ.
+  - **The 2027 cycle.** Odd Build and Peak weeks carry 26–31 minute runs. The post-race recovery
+    and base weeks move by tenths of a kilometre, because recovery keys off a Build week's
+    kilometres (a hand-over behaviour that was already there; logged).
+
+### Changed
+
+- **A day run today is recorded as it was told.** The evening regeneration recorded a day already
+  run that day from its own re-lay of the week, so a day a check-in had eased was saved at its
+  un-eased size (told 7.6 km, recorded 12.7 km in a simulated week), and the plan history no longer
+  matched what the athlete was asked to run. A day run today is now read from plan history like
+  every earlier day of the week.
+- **A single-rep interval session no longer says "w/ 2min jog".** `1×3min @ interval` and
+  `1×2min @ marathon` replace the former wording with a jog that never happens.
+- **The plan explainer's prompt names the run:** every other Build and Peak week also carries a
+  continuous threshold run on the freshest mid-week day, cut from that day's easy run.
+- **The long run's raise to its ladder is bounded by the week share itself (SH-70).** The bound was
+  the larger of the long-run cap and the week share converted to a share of the easy budget. The
+  conversion is lower than the cap once the marathon-pace finish is large beside the mid-week
+  session, and the larger-of let the long run pass the week share there. Base and VO₂ weeks sit
+  above that line and keep the bound they had, so no golden moved from this change.
+
+### Known
+
+- **The long run's share of a carved week drifts up by up to about one point.** The long run's share
+  is held on the week as laid before the carve. The run covers about 1.2 km less at the same
+  TRIMP, so the long run is a slightly larger share of the week's kilometres: 25 Oct is 28.6 of
+  74.1 km, 38.6%, against the Build share of 0.38 (38.0% before the carve). Bounding it on the
+  carved kilometres would cut the long run by 0.45 km and move load onto other days; the athlete's
+  condition was that the other days do not change. The drift is at most about one point at a
+  40-minute block.
+- The threshold heart-rate band is cut from the lactate-threshold heart rate the engine derives
+  from whole-run averages, which reads low (SH-54). Until a manual threshold heart rate is set in
+  Settings, a run at threshold pace can read as too hard to the effort monitor.
+
+### Tests
+
+- New `det/specific-rotation`: the alternation over Build and Peak, with the last week before the
+  taper uncarved; the swap and re-seat; caution carrying no run; TRIMP neutrality (the week laid
+  with and without the run has identical day TRIMPs, and the carved day keeps its TRIMP); the floor
+  clip; the day rule on the stock five- and six-run layouts, a Tuesday/Wednesday/Thursday/Saturday/
+  Sunday preference layout and a three-run week; the pinned day; the run returning to an easy run
+  when a check-in eases the week; the long run held to the week share; the public-view fields; the
+  run's exemption from the per-session step; the intent naming only a laid run; a tune-up's run-up
+  returning the run to its easy run; a mid-week regeneration keeping Monday's easy Thursday through
+  the evening of the run; the week's load equal with and without the run where the week ceiling
+  binds; next week's long run in the day rule; the easy run restored with its strides and notes; a
+  clipped straddle remainder keeping the full lay's minutes; no run in a race's run-up or the two days
+  after it; a day run today recorded from plan history; a check-in on the run's day returning it to
+  its easy run; and a mid-week copy of the run held to the week's remaining ceiling. Each limb fails on a targeted
+  mutation. `det/components` updated. Goldens re-baked: the
+  assertive, away-week, short-rebuild and mid-base goldens carve Thursdays 10 Sep and 24 Sep (the
+  17 Aug week's Thursday falls two days after its Tuesday tune-up and stays easy), cold-start carves 22 Oct, and multi-a-chain carves 30 Jul and 13 Aug, each at the same
+  TRIMP, with the carved weeks 1.2–1.6 km shorter and the shape quality lists and intents naming
+  the run. Later multi-a-chain segments move by tenths of a TRIMP. The caution golden changes only
+  the two single-rep wordings, the taper golden gains `rot: 0` on its VO₂ spec, and maintenance and
+  post-race are unchanged. CI-mode battery: 246/252 PASS, 0 FAIL, 5 skipped, 0 need human eyes.
+
+## [0.76.2] - 2026-10-06
+
+### Fixed
+
+- **A VO₂ session with its easy running spread over several paces read back as an easy run with
+  strides (§RD10).** The athlete's 10×3 min session of 6 Oct (a 10-minute warm-up, recoveries
+  jogged and then walked, a 15-minute hard finish) was decoded as "Easy run · 73min @5:38/km · 3×
+  strides (2+1)" with no work reps. The structure decoder takes the slowest pace level that carries
+  at least a quarter of the run (and 10 minutes) as the easy baseline. Here the easy time was split
+  across warm-up, jogged and walked recoveries and the finish, none of which reached that floor
+  alone, so the reps' own level became the baseline and no block was 10% faster than it. When the
+  chosen baseline sits in a work zone (marathon, threshold, interval) and the easy-named blocks
+  together carry the floor, the baseline is now those blocks pooled. A run without that much easy
+  time keeps its work-zone baseline, so a wall-to-wall race or tempo still reads as one sustained
+  effort. The run now reads "Intervals · 10min wu @5:31–6:17 · 11× 3min–14min @4:34–5:19 interval
+  w/ 45s–2min floats": the ten reps plus the finish as an eleventh work block, which the athlete
+  confirmed was intended as hard work. The run card, the music read-back (the reps-only read had not
+  fired) and the effort monitor's per-rep read all take their input from this decode; the plan engine
+  does not read it, so no plan changed. `STRUCT_VERSION` 9 → 10, so cached decodes are re-read when
+  a run is opened. `det/structure` gains `spread-easy-baseline` (fails on the v9 code) and
+  `race-short-bracket`. Replayed over all 107 of the athlete's 2026 runs, 106 decode identically
+  and only the 6 Oct run changes; golden plans are unchanged.
+
+## [0.76.1] - 2026-10-06
+
+### Fixed
+
+- **The countdown dropped its minutes above one day (§GUN).** From a day out the objective bar read
+  "74 days, 3 hours, 20 seconds": the seconds wrapped every minute with nothing else moving. It now
+  reads "74 days, 3 hours, 12 minutes, 20 seconds"; under a day it is unchanged (hours, minutes,
+  seconds). The fix is in `fmtCountdown` (`static/app.js`).
+- **A gun time written in non-ASCII digits was accepted and then broke the countdown.** The
+  validator behind `start_time` used `\d`, which in a Python string pattern matches the decimal
+  digits of any script: "1٩:30" (an Arabic-Indic nine) passed the door and was stored, the browser
+  read it as an Invalid Date, and the bar showed "race day 🏁" from then on, on the public box too.
+  The pattern is now `^([01][0-9]|2[0-3]):[0-5][0-9]$` and such a value is refused with a 400 and no
+  row. When the date or time cannot be read at all, the bar now shows no countdown, never a false
+  "race day". `det/objective-time` gains the non-ASCII-digit case.
+- **The gun-time editor stayed disabled after a failed save.** Its change handler had no error path:
+  a network failure or an answer that was not JSON left the input disabled until the page was
+  reloaded. The failure is now caught, the previous value is put back, the input is re-enabled, and a
+  notice says the server could not be reached.
+
+The race's gun time stays public (`start_time` in `_PV_OBJECTIVES`), the same class as the race
+date; this was confirmed on 2026-10-06.
+
+## [0.76.0] - 2026-10-05
+
+### Added
+
+- **A live countdown in the objective bar, ticking to the gun (§GUN).** The banner that names the
+  race the console is showing now also counts down to it — "74 days, 3 hours, 20 seconds" (under a
+  day: hours, minutes, seconds), re-ticking every wall-clock second, race-day 🏁 when the moment
+  passes. It follows the §CHAIN4 view race: tap a leg of a chain and the countdown re-arms onto that
+  race. It renders on the public read-only box too (the date and the gun time are public there
+  already). Tabular figures, so the ticking never jitters the bar's width; no `aria-live` — a
+  per-second live region is hostile to screen readers.
+- **Objectives gain an optional `start_time` (HH:MM local gun time)** so the countdown targets the
+  actual start instead of midnight:
+  - Schema + an idempotent `init_db` migration (`ALTER TABLE objectives ADD COLUMN start_time TEXT`).
+    NULL keeps the old semantics — count to midnight.
+  - `POST /api/objectives` accepts an optional `start_time`, validated strict
+    (`^([01]\d|2[0-3]):[0-5]\d$`) at the door — 400 on junk, the same posture as the date guard.
+  - New `POST /api/objectives/<id>/time` sets or clears it (empty clears). Display-only: the engine
+    periodizes to the DAY, so — unlike `/date` — it does NOT re-periodize, just commits the UPDATE.
+    Guarded like `/date`: 404 unknown id, 409 unless the race is still upcoming (a resolved race's
+    start is a matter of record), 400 on junk.
+  - The Objectives panel grows the field in both places: an optional time input on the add form, and
+    an inline editor on each upcoming race's row beside the date-mover. Editing it re-renders the
+    strip and the bar without a re-plan; the public view renders it as text.
+  - `start_time` is allowlisted in `_PV_OBJECTIVES`: a race's gun time is organizer-published public
+    info, the same class as the date. (`det/public-view-coverage` requires every served field to be
+    classified.)
+
+  Tests: new `det/objective-time` — add with/without a valid time, junk → 400 with no row, set /
+  change / clear through `/time`, 404/409/400 guards, no new plan row (no re-periodization), the
+  public GET carries the field, and the migration is idempotent. The Playwright run asserts the
+  countdown is in the bar and visibly ticking.
+
+## [0.75.0] - 2026-10-02
+
+### Added
+
+- **Clearing an away window now asks first, and the clearing can be undone (§AVUNDO).** The ✕ on an
+  away window in the Availability panel cleared it and re-laid the plan on one tap, with no
+  confirmation and no way back: the same flaw §OBJ3 closed for races in 0.74.0. The ✕ now opens the
+  house confirm dialog first ("Clear these away days?", the button reads "Clear", Cancel holds the
+  default focus), and a cancelled clear re-plans nothing. A cleared window stays listed for 24
+  hours, muted and marked "· cleared", with a **put back** button (no confirmation). Errors from
+  either control show in the house notice dialog. The server side:
+  - A new `availability.removed_at` column carries the stamp (an idempotent migration in
+    `init_db`). `GET /api/availability` is still a list: the active windows as before, plus windows
+    cleared in the last 24 hours whose days are still ahead, each with `active` and `removed_at`.
+    The 24-hour cutoff is read in UTC, the zone `removed_at` is stamped in.
+  - `POST /api/availability/<id>/remove` now answers 404 for an unknown id and 409 for a window
+    that is already cleared; otherwise it clears the window as before (`active=0`, the row kept) and
+    now stamps `removed_at` too.
+  - New `POST /api/availability/<id>/restore` is the undo: it puts the SAME row back (id and
+    `created_at` kept) and re-lays the plan. Guarded by 404 for an unknown id; 409 when the window
+    is already in the plan; 409 when its days have passed; and 409 ("already declared") when an
+    identical active window exists. Private-only, like the rest of the `/api/availability` prefix.
+
+  Tests: new `det/availability-restore`. (a) remove stamps `removed_at` and the GET lists the cleared
+  row. (b) restore returns the same id, active, `removed_at` empty, with the re-plan payload. (c) the
+  404s. (d) a second remove answers 409 and re-plans nothing; restoring an active row answers 409.
+  (e) 409 when the days have passed. (f) 409 on a duplicate active window. (g) a row cleared 25
+  hours ago is not listed. (h) the restore path is private-only. (i) the migration is idempotent. (j)
+  with the process zone shifted to UTC+5, a row cleared 23 hours ago is still listed; CI runs in UTC
+  and cannot see a zone error, so this limb sets the zone itself. Against the previous
+  `SparingHorse.py` the behavioural limbs fail, and (j) fails on a cutoff that compares the UTC
+  stamp with local time. The Playwright run gains a flow: add a window 49 days ahead, ✕ and Cancel
+  (the window stays, nothing re-plans), ✕ and Clear (the put-back row appears), put back (active
+  again), then clear it for real.
+
+### Fixed
+
+- **`det/public-view-coverage` failed on any database whose chain holds a second race (SH-57).**
+  The recovery phase added in 0.72.0 (§CHAIN2) carries `after` and `after_type`, and neither
+  appeared in the public plan spec or in `_PV_WITHHELD`, so the coverage check reported two
+  unregistered fields. Nothing reached the public page: the allowlist already dropped both from the
+  public payload. `_PV_WITHHELD` now names `plan.phases[].after` and `plan.phases[].after_type` as
+  withheld (the console never reads them; the earlier race's label is already in the phase's
+  `phase` text). The det now also walks a two-race road (a race at 12 weeks and a second A
+  marathon at 40 weeks) and fails if that road produces no recovery phase with `after`, so it
+  cannot pass without exercising the field. On the previous register it fails naming exactly those
+  two fields, on the seeded database and on a copy of the live one; with the register it passes on
+  both.
+
 ## [0.74.6] - 2026-10-02
 
 ### Fixed

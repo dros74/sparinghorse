@@ -60,12 +60,18 @@ MUSIC_TAIL_MIN = 15.0          # §BEAT5 — a run-home tail after the session's
 #                                phone's autoplay filled the last seven with tempos the legs then fought
 MUSIC_RAMP_DAYS = 84           # §BEAT4 — the ramp from the recent line to the trained line runs twelve weeks…
 MUSIC_RAMP_LEAD_DAYS = 21      # …and lands this long before the A-race: the taper rehearses the race's cadence
+MUSIC_LAND_RUNS = 3            # §BEAT4 / SH-80 — the ramp lands early when the legs have shown the trained line: on this many…
+MUSIC_LAND_OF = 5              # …of the newest this-many read-backs the legs reached the trained line (inside the tempo window).
+#                                0.77.1 zeroed the chest-belt bias; the athlete had run at the trained line for 3.5 weeks
+#                                (lift_ran minus lift_trained -0.004…-0.016 on most runs since 1 Oct, 14 of 16 within 0.02)
 MUSIC_TRAINED_TOP_FRAC = 0.33  # the fittest third of runs (by CTL at the time) defines the trained curve
 MUSIC_RECENT_DAYS = 56         # the recent curve's window — long enough to fit, short enough to move
 MUSIC_MIN_FIT_RUNS = 12        # below this a curve is a median plus the trained slope, not a fit
 MUSIC_COMFORT_PCTL = 0.90      # comfort ceiling when unset: the runner's own 90th-percentile cadence
 MUSIC_CAD_SPM_RANGE = (120, 220)   # plausible steps-per-minute; a value under 120 is a one-leg count
-MUSIC_SEGMENT_FILL = 1.10      # fill a segment to 110 % of its minutes — a song may run past the seam
+MUSIC_SEGMENT_FILL = 1.00      # fill a segment to its minutes; the song that crosses them runs past the seam.
+#                                SH-36 (0.78.2): 1.10 laid 10 % more easy songs on a 133-min base, so on 18 Oct
+#                                the first MP-tempo song came at 150 min against a finish due at 133
 MUSIC_MIN_SEGMENT_MIN = 4.0    # a rep shorter than a song cannot carry one: consecutive reps under this
 #                                are one block at the work pace (10 × 2 min plays as one 20-min block)
 MUSIC_LONG_SPLIT_MIN = 75      # a plain long run at or over this is cut in thirds with rising energy
@@ -85,13 +91,17 @@ MUSIC_ROTATION_DAYS = 28       # §BEAT7 — the rotation window: lists built in
 MUSIC_LIST_ADOPT_SHARE = 0.5     # SH-59 — another day's list is the run's list when it holds at least this share of the songs played (and two)
 MUSIC_ENTRAIN_PCT = 0.01       # §BEAT7 — a song run within this of its tempo: the legs followed it.
 #                                §BEAT11: the picker's first rung — fill from here before the basin
-CADENCE_SENSOR_BIAS_SPM = 2.4  # §BEAT12 (0.68.9) — the watch's per-second cadence field reads this many
-#                                spm under its own stride counter (three original Suunto FITs, 23 Aug /
-#                                6 Sep / 16 Sep 2026: 2.1 / 2.3 / 2.7). Every cadence the app holds is in
-#                                that unit; song tempos are not. Applied only where legs meet songs (the
-#                                picker's tempo gate, the read-back's entrainment) and nowhere else — the
-#                                curve, the targets and the rung compare legs with legs. Re-measure from an
-#                                original Suunto FIT (Runalyze's re-export drops the counter).
+CADENCE_SENSOR_BIAS_SPM = 0.0  # §BEAT12 (0.68.9) measured 2.4 spm: the wrist watch's per-second cadence field
+#                                read that far under its own stride counter (three original Suunto FITs,
+#                                23 Aug / 6 Sep / 16 Sep 2026: 2.1 / 2.3 / 2.7). SH-78 (0.77.1): from
+#                                24 Sep 2026 the Smart HR Belt 2 supplies cadence and the field matches
+#                                the stride counter (29 original FITs: +2.1 spm median before, ≈0.0
+#                                after), so the correction is 0. The mechanism stays — added to the
+#                                cadence only where legs meet songs (the picker's tempo gate, the
+#                                read-back's entrainment, library_tempo_read) and nowhere else, so a
+#                                sensor that reads off can set a value again. Re-measure from an original
+#                                Suunto FIT (stride counter total_strides ÷ total_timer_time against the
+#                                mean non-zero per-second cadence); Runalyze's re-export drops the counter.
 MUSIC_DIP_SPM = 4.0            # §BEAT7 — a cadence drop under the song's median by at least this…
 MUSIC_DIP_MIN_S = 4            # …lasting at least this long is a dip: the beat lost the legs
 MUSIC_STEADY_SPM = 3.0         # §BEAT7 — samples within this of the song's median are steady
@@ -420,6 +430,9 @@ def target_spm(curve, pace_sec, step_pct=None, ramp=None, work=False):
              (cap, "trained curve" if tr >= rec else "recent line — already above the trained curve")]
     asked, ramped, why_asked = lifted, None, why_step
     f = float((ramp or {}).get("fraction") or 0.0)
+    landed = (ramp or {}).get("landed_by_legs")
+    if ramp and landed and tr > rec:
+        f = 1.0                                   # SH-80 — the legs have shown the trained line
     if ramp and f > 0 and tr > rec:
         ramped = rec + f * (tr - rec)
         rung = ramp.get("rung")
@@ -435,8 +448,10 @@ def target_spm(curve, pace_sec, step_pct=None, ramp=None, work=False):
         if ramped > lifted:
             asked = ramped
             if f >= 1.0:
-                cands[1] = (cap, "trained curve — the ramp has landed")
-                why_asked = "trained curve — the ramp has landed"
+                lbl = ("trained curve — the legs reached it on %d of the last %d runs" % (landed["runs"], landed["of"])
+                       if landed and ramp.get("fraction", 0) < 1.0 else "trained curve — the ramp has landed")
+                cands[1] = (cap, lbl)
+                why_asked = lbl
             else:
                 why_asked = f"ramp — week {ramp.get('week')} of {ramp.get('weeks')} to the trained curve"
     target = min([asked] + [v for v, _ in cands])
@@ -515,43 +530,80 @@ def held_rung(readbacks, curve):
     §BEAT9 — a song inside a reps block weighs its rep seconds, and a song that fell on the
     recoveries proves nothing about the rung."""
     for rb in readbacks or []:
-        target = rb.get("target_spm")
-        songs = [sg for sg in (rb.get("songs") or []) if sg.get("spm") and (sg.get("read_s") or 0) > 0]
-        km, minutes = float(rb.get("km") or 0), float(rb.get("minutes") or 0)
-        if not target or not songs or km <= 0 or minutes <= 0:
-            continue
-        # §BEAT5 — the PLAYLIST's songs, each against ITS segment's target. A run's plays include
-        # whatever the phone went on to after the list ended (autoplay, the 09-08 tempo: seven
-        # minutes of random tempos the legs fought), and a warm-up song and a work song were not
-        # asked for the same cadence. A read-back that tags no song (an older payload) reads every
-        # song against the run's target as before; one whose plays were all off the playlist proves
-        # nothing about the rung and is skipped.
-        tagged = [sg for sg in songs if sg.get("seg_target")]
-        if not tagged and any(sg.get("in_playlist") is not None for sg in songs):
-            continue
-        weight = lambda sg: sg["work_s"] if "work_s" in sg else sg["read_s"]     # §BEAT9
-        pool = [sg for sg in (tagged or songs) if weight(sg) > 0 and not sg.get("jogs_only")]
-        if not pool:
-            continue
-        kmh = km / (minutes / 60.0)
-        rec_run = _line_at(curve["recent"], kmh)
-        if rec_run <= 0:
-            continue
+        r = _rung_of(rb, curve)
+        if r is not None:
+            return {k: v for k, v in r.items() if k not in ("lift_trained", "reached")}
+    return None
 
-        def _rec(sg):
-            p = sg.get("pace_sec")
-            r = _line_at(curve["recent"], 3600.0 / p) if p and p > 0 else rec_run
-            return r if r > 0 else rec_run
-        w = sum(weight(sg) for sg in pool)
-        ran = sum(sg["spm"] * weight(sg) for sg in pool) / w
-        tgt = sum(float(sg.get("seg_target") or target) * weight(sg) for sg in pool) / w
-        lift_ran = sum((sg["spm"] / _rec(sg) - 1) * weight(sg) for sg in pool) / w
-        lift_target = sum((float(sg.get("seg_target") or target) / _rec(sg) - 1) * weight(sg) for sg in pool) / w
-        return {"date": rb.get("date"), "run_id": rb.get("run_id"), "kmh": round(kmh, 2),
-                "target": round(tgt, 1), "ran": round(ran, 1),
-                "held": ran >= tgt * (1 - MUSIC_TEMPO_WINDOW),
-                "lift_ran": round(lift_ran, 4), "lift_target": round(lift_target, 4),
-                "songs": len(pool), "off_playlist": (len(songs) - len(pool)) if tagged else 0}
+
+def _rung_of(rb, curve):
+    """PURE — one read-back's rung (the dict `held_rung` returns) plus `lift_trained` (the trained line
+    over the recent line at the same song paces, weighted alike; 0 without a trained line) and
+    `reached` (the legs' lift came within the tempo window of it, SH-80). None when the read-back
+    proves nothing about the rung."""
+    target = rb.get("target_spm")
+    songs = [sg for sg in (rb.get("songs") or []) if sg.get("spm") and (sg.get("read_s") or 0) > 0]
+    km, minutes = float(rb.get("km") or 0), float(rb.get("minutes") or 0)
+    if not target or not songs or km <= 0 or minutes <= 0:
+        return None
+    # §BEAT5 — the PLAYLIST's songs, each against ITS segment's target. A run's plays include
+    # whatever the phone went on to after the list ended (autoplay, the 09-08 tempo: seven
+    # minutes of random tempos the legs fought), and a warm-up song and a work song were not
+    # asked for the same cadence. A read-back that tags no song (an older payload) reads every
+    # song against the run's target as before; one whose plays were all off the playlist proves
+    # nothing about the rung and is skipped.
+    tagged = [sg for sg in songs if sg.get("seg_target")]
+    if not tagged and any(sg.get("in_playlist") is not None for sg in songs):
+        return None
+    weight = lambda sg: sg["work_s"] if "work_s" in sg else sg["read_s"]     # §BEAT9
+    pool = [sg for sg in (tagged or songs) if weight(sg) > 0 and not sg.get("jogs_only")]
+    if not pool:
+        return None
+    kmh = km / (minutes / 60.0)
+    rec_run = _line_at(curve["recent"], kmh)
+    if rec_run <= 0:
+        return None
+
+    def _rec(sg):
+        p = sg.get("pace_sec")
+        r = _line_at(curve["recent"], 3600.0 / p) if p and p > 0 else rec_run
+        return r if r > 0 else rec_run
+    w = sum(weight(sg) for sg in pool)
+    ran = sum(sg["spm"] * weight(sg) for sg in pool) / w
+    tgt = sum(float(sg.get("seg_target") or target) * weight(sg) for sg in pool) / w
+    lift_ran = sum((sg["spm"] / _rec(sg) - 1) * weight(sg) for sg in pool) / w
+    lift_target = sum((float(sg.get("seg_target") or target) / _rec(sg) - 1) * weight(sg) for sg in pool) / w
+    trained = curve.get("trained")
+
+    def _lift_trained(sg):
+        if not trained:
+            return 0.0
+        p = sg.get("pace_sec")
+        kh = 3600.0 / p if p and p > 0 else kmh
+        return _line_at(trained, kh) / _rec(sg) - 1
+    lift_trained = sum(_lift_trained(sg) * weight(sg) for sg in pool) / w
+    return {"date": rb.get("date"), "run_id": rb.get("run_id"), "kmh": round(kmh, 2),
+            "target": round(tgt, 1), "ran": round(ran, 1),
+            "held": ran >= tgt * (1 - MUSIC_TEMPO_WINDOW),
+            "lift_ran": round(lift_ran, 4), "lift_target": round(lift_target, 4),
+            "lift_trained": round(lift_trained, 4), "reached": lift_ran >= lift_trained - MUSIC_TEMPO_WINDOW,
+            "songs": len(pool), "off_playlist": (len(songs) - len(pool)) if tagged else 0}
+
+
+def legs_landed(readbacks, curve):
+    """PURE (SH-80) — the ramp has landed early when the legs reached the trained line (within the
+    tempo window) on MUSIC_LAND_RUNS of the newest MUSIC_LAND_OF usable read-backs. `readbacks`
+    newest first. {runs, of, dates} or None."""
+    seen = []
+    for rb in readbacks or []:
+        r = _rung_of(rb, curve)
+        if r is not None:
+            seen.append(r)
+        if len(seen) >= MUSIC_LAND_OF:
+            break
+    hit = [r for r in seen if r["reached"]]
+    if len(hit) >= MUSIC_LAND_RUNS:
+        return {"runs": len(hit), "of": len(seen), "dates": [r["date"] for r in hit]}
     return None
 
 
@@ -565,7 +617,7 @@ def ramp_state(plan, curve, today, conn=None):
     conn = conn or _mdb()
     try:
         rows = []
-        for r in conn.execute("SELECT run_id, date, payload FROM readback ORDER BY date DESC, run_id DESC LIMIT 8"):
+        for r in conn.execute("SELECT run_id, date, payload FROM readback ORDER BY date DESC, run_id DESC LIMIT 12"):
             try:
                 p = json.loads(r["payload"] or "{}")
             except ValueError:
@@ -576,6 +628,7 @@ def ramp_state(plan, curve, today, conn=None):
         if own:
             conn.close()
     clock["rung"] = held_rung(rows, curve)
+    clock["landed_by_legs"] = legs_landed(rows, curve)
     return clock
 
 
@@ -1839,7 +1892,7 @@ def choose_list(rows, run_date, songs):
 def library_tempo_read(tempo, spm):
     """PURE — SH-59: a song read with no list entry has only its library tempo, and a running song's
     library tempo is often the half-time beat (87 for 174). Read it at double when double sits nearer
-    the legs (the watch's cadence plus CADENCE_SENSOR_BIAS_SPM) and is still a cadence
+    the legs (the watch's cadence plus CADENCE_SENSOR_BIAS_SPM, 0 since SH-78) and is still a cadence
     (≤ MUSIC_CAD_SPM_RANGE[1]); else as it is. Returns (tempo, doubled)."""
     if not tempo or not spm:
         return tempo, False
@@ -2807,7 +2860,7 @@ def build_playlist(db, key, write=True):
             res.update(written=False, error=f"Spotify refused the playlist: {e}"[:300])
             return res
         spec = json.dumps({"target_spm": res["target_spm"], "sensor_bias_spm": CADENCE_SENSOR_BIAS_SPM,  # §BEAT12
-                           "ramp": {k: ramp[k] for k in ("fraction", "week", "weeks", "phase")} if ramp else None,
+                           "ramp": {k: ramp.get(k) for k in ("fraction", "week", "weeks", "phase", "landed_by_legs")} if ramp else None,
                            "rung": ramp.get("rung") if ramp else None, "segments": [
             {"label": s["label"], "effort": s.get("effort"), "minutes": s["minutes"], "target_spm": s["target_spm"],
              "reps": s.get("reps"),

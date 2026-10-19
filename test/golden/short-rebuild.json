@@ -19,9 +19,9 @@
           "governor_basis": "intent_km",
           "intent_km": 45.0,
           "note": "the long run keeps its rung and the days ahead keep their lay; the sheet runs over the bar by what the lived days ran over",
-          "ratio": 0.649,
-          "sheet_km": 29.2,
-          "training_km": 29.2
+          "ratio": 0.653,
+          "sheet_km": 29.4,
+          "training_km": 29.4
         },
         "clipped": false,
         "day_share": true,
@@ -32,8 +32,8 @@
         "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
         "intent_km": 45.0,
         "intent_runs": 5,
-        "km": 29.2,
-        "km_ahead": 29.2,
+        "km": 29.4,
+        "km_ahead": 29.4,
         "km_done": 0,
         "limits": {
           "acwr": {
@@ -49,8 +49,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 5.0,
-            "headroom": 8.5,
-            "laid": -3.5,
+            "headroom": 8.49,
+            "laid": -3.49,
             "unit": "CTL/wk"
           },
           "eq_session": {
@@ -65,8 +65,8 @@
             "basis": "A",
             "binds": false,
             "ceiling": 62.04,
-            "headroom": 17.14,
-            "laid": 44.9,
+            "headroom": 16.94,
+            "laid": 45.1,
             "unit": "eq-km"
           },
           "long_step": {
@@ -125,12 +125,12 @@
           {
             "date": "2026-07-02",
             "kind": "easy",
-            "km": 9.3,
-            "minutes": 47,
+            "km": 9.5,
+            "minutes": 48,
             "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
             "strides": 2,
-            "trimp": 78.3
+            "trimp": 78.4
           },
           {
             "date": "2026-07-04",
@@ -155,7 +155,7 @@
         ],
         "start": "2026-06-29",
         "strides": 2,
-        "trimp_total": 373.8,
+        "trimp_total": 373.9,
         "volume_met": false,
         "wk": 1
       },
@@ -257,7 +257,7 @@
             "minutes": 44,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 73.0
+            "trimp": 72.9
           },
           {
             "date": "2026-07-07",
@@ -300,7 +300,7 @@
         ],
         "start": "2026-07-06",
         "strides": 2,
-        "trimp_total": 442.7,
+        "trimp_total": 442.6,
         "wk": 2
       },
       {
@@ -612,12 +612,12 @@
             "minutes": 84,
             "note": "long easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 138.3
+            "trimp": 138.2
           }
         ],
         "start": "2026-07-13",
         "strides": 2,
-        "trimp_total": 476.5,
+        "trimp_total": 476.4,
         "wk": 3
       },
       {
@@ -705,9 +705,9 @@
           }
         },
         "long": 4,
-        "peak_acwr": 1.3,
+        "peak_acwr": 1.299,
         "phase": "base",
-        "proj_acwr": 1.146,
+        "proj_acwr": 1.145,
         "proj_acwr_flat": 1.085,
         "proj_acwr_soft": 1.085,
         "proj_ctl": 56.2,
@@ -759,12 +759,12 @@
             "minutes": 69,
             "note": "long easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 114.4
+            "trimp": 114.3
           }
         ],
         "start": "2026-07-20",
         "strides": 0,
-        "trimp_total": 381.2,
+        "trimp_total": 381.1,
         "wk": 4
       },
       {
@@ -773,9 +773,9 @@
           "adherence_basis": "sheet_km",
           "diverge": false,
           "governor_basis": "intent_km",
-          "intent_km": 61.6,
+          "intent_km": 61.5,
           "note": null,
-          "ratio": 0.966,
+          "ratio": 0.967,
           "sheet_km": 59.5,
           "training_km": 59.5
         },
@@ -784,7 +784,7 @@
         "eq_km": 68.44,
         "frozen": false,
         "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
-        "intent_km": 61.6,
+        "intent_km": 61.5,
         "intent_runs": 5,
         "km": 59.5,
         "limits": {
@@ -847,12 +847,12 @@
           }
         },
         "long": 6,
-        "peak_acwr": 1.358,
+        "peak_acwr": 1.357,
         "phase": "base",
         "prog_ridden": true,
         "proj_acwr": 1.308,
-        "proj_acwr_flat": 1.136,
-        "proj_acwr_soft": 1.136,
+        "proj_acwr_flat": 1.135,
+        "proj_acwr_soft": 1.135,
         "proj_ctl": 61.2,
         "quality": [
           {
@@ -882,7 +882,7 @@
             "minutes": 61,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 100.6
+            "trimp": 100.5
           },
           {
             "component": "ssmax",
@@ -996,7 +996,7 @@
         ],
         "start": "2026-07-27",
         "strides": 2,
-        "trimp_total": 511.1,
+        "trimp_total": 511.0,
         "wk": 5
       },
       {
@@ -1308,12 +1308,12 @@
             "minutes": 96,
             "note": "long easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 158.1
+            "trimp": 158.0
           }
         ],
         "start": "2026-08-03",
         "strides": 2,
-        "trimp_total": 542.4,
+        "trimp_total": 542.3,
         "wk": 6
       }
     ]
@@ -1322,7 +1322,8 @@
     "builds": [
       "vo2max",
       "resilience",
-      "economy"
+      "economy",
+      "ssmax"
     ],
     "clipped_by_acwr": false,
     "end_atl": 120.2,
@@ -1354,8 +1355,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.06,
-            "laid": 1.19,
+            "headroom": 0.07,
+            "laid": 1.18,
             "unit": "ratio"
           },
           "binding": "chronic",
@@ -1409,12 +1410,12 @@
           }
         },
         "long": 18,
-        "peak_acwr": 1.392,
+        "peak_acwr": 1.391,
         "phase": "build",
         "prog_ridden": true,
         "proj_acwr": 1.322,
-        "proj_acwr_flat": 1.185,
-        "proj_acwr_soft": 1.185,
+        "proj_acwr_flat": 1.184,
+        "proj_acwr_soft": 1.184,
         "proj_ctl": 71.2,
         "quality": [
           {
@@ -1424,6 +1425,7 @@
             "label": "VO\u2082 intervals",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 6,
             "structure": "intervals",
             "zone": "interval"
           },
@@ -1613,7 +1615,7 @@
             "minutes": 50,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 82.0
+            "trimp": 82.1
           },
           {
             "component": "resilience",
@@ -1649,7 +1651,7 @@
         ],
         "start": "2026-08-10",
         "strides": 2,
-        "trimp_total": 577.2,
+        "trimp_total": 577.3,
         "wk": 1
       },
       {
@@ -1686,8 +1688,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 5.0,
-            "headroom": 0.95,
-            "laid": 4.05,
+            "headroom": 0.96,
+            "laid": 4.04,
             "unit": "CTL/wk"
           },
           "eq_session": {
@@ -1738,8 +1740,8 @@
         "prog_ridden": true,
         "proj_acwr": 1.317,
         "proj_acwr_flat": 1.136,
-        "proj_acwr_soft": 1.164,
-        "proj_ctl": 75.2,
+        "proj_acwr_soft": 1.163,
+        "proj_ctl": 75.3,
         "quality": [
           {
             "component": "vo2max",
@@ -1748,8 +1750,19 @@
             "label": "VO\u2082 intervals",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 5,
             "structure": "intervals",
             "zone": "interval"
+          },
+          {
+            "carve": true,
+            "component": "ssmax",
+            "frac": 0.08,
+            "kind": "tempo",
+            "label": "threshold run",
+            "rot": 5,
+            "structure": "continuous",
+            "zone": "threshold"
           },
           {
             "attach": "long",
@@ -1800,7 +1813,7 @@
             "minutes": 50,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 82.2
+            "trimp": 82.3
           },
           {
             "component": "resilience",
@@ -1836,7 +1849,7 @@
         ],
         "start": "2026-08-17",
         "strides": 2,
-        "trimp_total": 584.4,
+        "trimp_total": 584.5,
         "wk": 2
       },
       {
@@ -1927,7 +1940,7 @@
         "long": 16,
         "peak_acwr": 1.226,
         "phase": "build",
-        "proj_acwr": 1.191,
+        "proj_acwr": 1.19,
         "proj_acwr_flat": 1.025,
         "proj_acwr_soft": 1.025,
         "proj_ctl": 74.3,
@@ -1960,7 +1973,7 @@
             "minutes": 55,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 90.6
+            "trimp": 90.7
           },
           {
             "date": "2026-08-29",
@@ -1984,7 +1997,7 @@
         ],
         "start": "2026-08-24",
         "strides": 0,
-        "trimp_total": 488.3,
+        "trimp_total": 488.4,
         "wk": 3
       },
       {
@@ -2067,10 +2080,10 @@
           }
         },
         "long": 19,
-        "peak_acwr": 1.319,
+        "peak_acwr": 1.318,
         "phase": "build",
         "prog_ridden": true,
-        "proj_acwr": 1.319,
+        "proj_acwr": 1.318,
         "proj_acwr_flat": 1.102,
         "proj_acwr_soft": 1.102,
         "proj_ctl": 79.3,
@@ -2082,6 +2095,7 @@
             "label": "VO\u2082 intervals",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 4,
             "structure": "intervals",
             "zone": "interval"
           },
@@ -2336,18 +2350,18 @@
           "governor_basis": "intent_km",
           "intent_km": 79.6,
           "note": null,
-          "ratio": 0.954,
-          "sheet_km": 75.9,
-          "training_km": 75.9
+          "ratio": 0.94,
+          "sheet_km": 74.8,
+          "training_km": 74.8
         },
         "clipped": false,
         "elapsed": false,
-        "eq_km": 96.5,
+        "eq_km": 102.3,
         "frozen": false,
-        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance",
+        "intent": "Supportive \u2014 growing MP work + VO\u2082 maintenance + a threshold run",
         "intent_km": 79.6,
         "intent_runs": 5,
-        "km": 75.9,
+        "km": 74.8,
         "limits": {
           "acwr": {
             "basis": "L",
@@ -2378,8 +2392,8 @@
             "basis": "A",
             "binds": false,
             "ceiling": 118.09,
-            "headroom": 21.59,
-            "laid": 96.5,
+            "headroom": 15.79,
+            "laid": 102.3,
             "unit": "eq-km"
           },
           "long_step": {
@@ -2423,8 +2437,19 @@
             "label": "VO\u2082 intervals",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 3,
             "structure": "intervals",
             "zone": "interval"
+          },
+          {
+            "carve": true,
+            "component": "ssmax",
+            "frac": 0.08,
+            "kind": "tempo",
+            "label": "threshold run",
+            "rot": 3,
+            "structure": "continuous",
+            "zone": "threshold"
           },
           {
             "attach": "long",
@@ -2632,14 +2657,45 @@
             "zone": "interval"
           },
           {
+            "component": "ssmax",
             "date": "2026-09-10",
-            "kind": "easy",
-            "km": 12.5,
-            "minutes": 63,
-            "note": "easy run + 2\u00d74\u20136 strides",
-            "pace_zone": "5:02/km easy",
-            "strides": 2,
-            "trimp": 104.2
+            "kind": "tempo",
+            "km": 11.4,
+            "minutes": 53,
+            "note": "threshold run \u2014 10min easy wu + 19min @ threshold + 24min easy to finish",
+            "pace_zone": "4:07/km threshold",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 2.0,
+                "minutes": 10,
+                "pace_zone": "5:02/km easy",
+                "trimp": 16.5,
+                "zone": "easy"
+              },
+              {
+                "detail": "19min continuous @ threshold",
+                "effort": "work",
+                "km": 4.6,
+                "minutes": 19,
+                "pace_zone": "4:07/km threshold",
+                "trimp": 48.4,
+                "zone": "threshold"
+              },
+              {
+                "detail": "easy to the end of the run",
+                "effort": "cooldown",
+                "km": 4.8,
+                "minutes": 24,
+                "pace_zone": "5:02/km easy",
+                "trimp": 39.3,
+                "zone": "easy"
+              }
+            ],
+            "rot": 3,
+            "trimp": 104.2,
+            "zone": "threshold"
           },
           {
             "date": "2026-09-12",
@@ -2721,8 +2777,8 @@
             "basis": "L",
             "binds": true,
             "ceiling": 5.0,
-            "headroom": 0.02,
-            "laid": 4.98,
+            "headroom": 0.03,
+            "laid": 4.97,
             "unit": "CTL/wk"
           },
           "eq_session": {
@@ -2736,8 +2792,8 @@
           "eq_week": {
             "basis": "A",
             "binds": false,
-            "ceiling": 125.45,
-            "headroom": 24.79,
+            "ceiling": 132.99,
+            "headroom": 32.33,
             "laid": 100.66,
             "unit": "eq-km"
           },
@@ -2782,6 +2838,7 @@
             "label": "VO\u2082 intervals",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 2,
             "structure": "intervals",
             "zone": "interval"
           },
@@ -3053,7 +3110,7 @@
       "date": "2026-10-20",
       "feasibility": "finish",
       "label": "Demo Marathon",
-      "proj_ctl": 99.3,
+      "proj_ctl": 99.2,
       "role": "goal",
       "type": "marathon"
     }
@@ -3068,15 +3125,15 @@
         "components": {
           "calibration": 0.0566,
           "disp_a": 1.12,
-          "horizon": 0.032,
+          "horizon": 0.0318,
           "race": 0.08
         },
-        "hi_hms": "2:55:22",
-        "hi_seconds": 10522,
+        "hi_hms": "2:55:21",
+        "hi_seconds": 10521,
         "level": 80,
-        "lo_hms": "2:14:39",
-        "lo_seconds": 8079,
-        "sigma_log": 0.1031
+        "lo_hms": "2:14:40",
+        "lo_seconds": 8080,
+        "sigma_log": 0.103
       },
       "correction": 1.0,
       "curve": [
@@ -3113,7 +3170,7 @@
         "seconds": 12162
       }
     },
-    "note": "Projected fitness by race day \u2248 CTL 99 (from 46 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 45 a healthy marathon finish needs. That supports **finishing Demo Marathon healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **2:14:39\u20132:55:22** (median 2:33:40) \u2014 the range narrows as runs land.",
+    "note": "Projected fitness by race day \u2248 CTL 99 (from 46 now, via the engine's projection through the planned blocks (ACWR-capped)) \u2014 at/above the ~CTL 45 a healthy marathon finish needs. That supports **finishing Demo Marathon healthy**; the engine re-reads this each block as measured fitness moves. Projected finish **2:14:40\u20132:55:21** (median 2:33:40) \u2014 the range narrows as runs land.",
     "projected_ctl": 99,
     "verdict": "finish"
   },
@@ -3140,11 +3197,12 @@
   "peak": {
     "builds": [
       "vo2max",
+      "ssmax",
       "resilience"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 136.3,
-    "end_ctl": 99.3,
+    "end_atl": 136.2,
+    "end_ctl": 99.2,
     "start": "2026-09-21",
     "weeks": [
       {
@@ -3155,50 +3213,50 @@
           "governor_basis": "intent_km",
           "intent_km": 87.2,
           "note": null,
-          "ratio": 0.958,
-          "sheet_km": 83.5,
-          "training_km": 83.5
+          "ratio": 0.937,
+          "sheet_km": 81.7,
+          "training_km": 81.7
         },
         "clipped": false,
         "elapsed": false,
-        "eq_km": 104.62,
+        "eq_km": 110.69,
         "frozen": false,
-        "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance",
+        "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance + a threshold run",
         "intent_km": 87.2,
         "intent_runs": 5,
-        "km": 83.5,
+        "km": 81.7,
         "limits": {
           "acwr": {
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
             "headroom": 0.12,
-            "laid": 1.13,
+            "laid": 1.12,
             "unit": "ratio"
           },
-          "binding": "chronic",
+          "binding": "long_step",
           "chronic": {
             "basis": "L",
-            "binds": true,
+            "binds": false,
             "ceiling": 5.0,
-            "headroom": 0.0,
-            "laid": 5.0,
+            "headroom": 0.08,
+            "laid": 4.92,
             "unit": "CTL/wk"
           },
           "eq_session": {
             "basis": "S",
             "binds": false,
             "ceiling": 43.11,
-            "headroom": 6.79,
-            "laid": 36.32,
+            "headroom": 6.87,
+            "laid": 36.24,
             "unit": "eq-km"
           },
           "eq_week": {
             "basis": "A",
             "binds": false,
-            "ceiling": 130.86,
-            "headroom": 26.24,
-            "laid": 104.62,
+            "ceiling": 132.99,
+            "headroom": 22.3,
+            "laid": 110.69,
             "unit": "eq-km"
           },
           "long_step": {
@@ -3229,12 +3287,12 @@
           }
         },
         "long": 24,
-        "peak_acwr": 1.36,
+        "peak_acwr": 1.358,
         "phase": "peak",
-        "proj_acwr": 1.36,
-        "proj_acwr_flat": 1.126,
-        "proj_acwr_soft": 1.126,
-        "proj_ctl": 94.3,
+        "proj_acwr": 1.358,
+        "proj_acwr_flat": 1.125,
+        "proj_acwr_soft": 1.125,
+        "proj_ctl": 94.2,
         "quality": [
           {
             "component": "vo2max",
@@ -3243,8 +3301,19 @@
             "label": "VO\u2082 intervals \u2014 maintenance",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 1,
             "structure": "intervals",
             "zone": "interval"
+          },
+          {
+            "carve": true,
+            "component": "ssmax",
+            "frac": 0.08,
+            "kind": "tempo",
+            "label": "threshold run",
+            "rot": 1,
+            "structure": "continuous",
+            "zone": "threshold"
           },
           {
             "attach": "long",
@@ -3265,7 +3334,7 @@
             "minutes": 60,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 99.3
+            "trimp": 98.8
           },
           {
             "component": "vo2max",
@@ -3452,23 +3521,54 @@
             "zone": "interval"
           },
           {
+            "component": "ssmax",
             "date": "2026-09-24",
-            "kind": "easy",
-            "km": 13.5,
-            "minutes": 68,
-            "note": "easy run + 2\u00d74\u20136 strides",
-            "pace_zone": "5:02/km easy",
-            "strides": 2,
-            "trimp": 111.6
+            "kind": "tempo",
+            "km": 11.9,
+            "minutes": 55,
+            "note": "threshold run \u2014 10min easy wu + 22min @ threshold + 23min easy to finish",
+            "pace_zone": "4:07/km threshold",
+            "reps": [
+              {
+                "detail": "easy warm-up",
+                "effort": "warmup",
+                "km": 2.0,
+                "minutes": 10,
+                "pace_zone": "5:02/km easy",
+                "trimp": 16.5,
+                "zone": "easy"
+              },
+              {
+                "detail": "22min continuous @ threshold",
+                "effort": "work",
+                "km": 5.3,
+                "minutes": 22,
+                "pace_zone": "4:07/km threshold",
+                "trimp": 56.1,
+                "zone": "threshold"
+              },
+              {
+                "detail": "easy to the end of the run",
+                "effort": "cooldown",
+                "km": 4.6,
+                "minutes": 23,
+                "pace_zone": "5:02/km easy",
+                "trimp": 38.4,
+                "zone": "easy"
+              }
+            ],
+            "rot": 1,
+            "trimp": 111.0,
+            "zone": "threshold"
           },
           {
             "date": "2026-09-26",
             "kind": "easy",
-            "km": 10.5,
-            "minutes": 53,
+            "km": 10.3,
+            "minutes": 52,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 87.1
+            "trimp": 86.6
           },
           {
             "component": "resilience",
@@ -3476,35 +3576,35 @@
             "kind": "long_mp",
             "km": 33.2,
             "minutes": 163,
-            "note": "long-fast resilience run \u2014 128min easy base + 35min @ MP finish",
+            "note": "long-fast resilience run \u2014 129min easy base + 34min @ MP finish",
             "pace_zone": "4:28/km marathon",
             "reps": [
               {
                 "detail": "easy aerobic base",
                 "effort": "easy_base",
-                "km": 25.4,
-                "minutes": 128,
+                "km": 25.6,
+                "minutes": 129,
                 "pace_zone": "5:02/km easy",
-                "trimp": 211.2,
+                "trimp": 212.8,
                 "zone": "easy"
               },
               {
-                "detail": "35min @ marathon pace finish",
+                "detail": "34min @ marathon pace finish",
                 "effort": "work",
-                "km": 7.8,
-                "minutes": 35,
+                "km": 7.6,
+                "minutes": 34,
                 "pace_zone": "4:28/km marathon",
-                "trimp": 73.5,
+                "trimp": 71.4,
                 "zone": "marathon"
               }
             ],
-            "trimp": 284.7,
+            "trimp": 284.2,
             "zone": "marathon"
           }
         ],
         "start": "2026-09-21",
         "strides": 2,
-        "trimp_total": 725.8,
+        "trimp_total": 723.7,
         "wk": 1
       },
       {
@@ -3513,9 +3613,9 @@
           "adherence_basis": "sheet_km",
           "diverge": false,
           "governor_basis": "intent_km",
-          "intent_km": 91.1,
+          "intent_km": 91.0,
           "note": null,
-          "ratio": 0.951,
+          "ratio": 0.952,
           "sheet_km": 86.6,
           "training_km": 86.6
         },
@@ -3524,7 +3624,7 @@
         "eq_km": 110.8,
         "frozen": false,
         "intent": "Peak \u2014 marathon-specific: long-fast resilience + VO\u2082 maintenance",
-        "intent_km": 91.1,
+        "intent_km": 91.0,
         "intent_runs": 5,
         "km": 86.6,
         "limits": {
@@ -3548,16 +3648,16 @@
           "eq_session": {
             "basis": "S",
             "binds": false,
-            "ceiling": 47.22,
-            "headroom": 6.52,
+            "ceiling": 47.11,
+            "headroom": 6.41,
             "laid": 40.7,
             "unit": "eq-km"
           },
           "eq_week": {
             "basis": "A",
             "binds": false,
-            "ceiling": 136.01,
-            "headroom": 25.21,
+            "ceiling": 143.9,
+            "headroom": 33.1,
             "laid": 110.8,
             "unit": "eq-km"
           },
@@ -3594,7 +3694,7 @@
         "proj_acwr": 1.373,
         "proj_acwr_flat": 1.119,
         "proj_acwr_soft": 1.119,
-        "proj_ctl": 99.3,
+        "proj_ctl": 99.2,
         "quality": [
           {
             "component": "vo2max",
@@ -3603,6 +3703,7 @@
             "label": "VO\u2082 intervals \u2014 maintenance",
             "rec_min": 2,
             "rep_min": 3,
+            "rot": 0,
             "structure": "intervals",
             "zone": "interval"
           },
@@ -3625,7 +3726,7 @@
             "minutes": 58,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 95.6
+            "trimp": 95.3
           },
           {
             "component": "vo2max",
@@ -3837,7 +3938,7 @@
             "note": "easy run + 2\u00d74\u20136 strides",
             "pace_zone": "5:02/km easy",
             "strides": 2,
-            "trimp": 107.4
+            "trimp": 107.1
           },
           {
             "date": "2026-10-03",
@@ -3846,7 +3947,7 @@
             "minutes": 51,
             "note": "easy run",
             "pace_zone": "5:02/km easy",
-            "trimp": 83.8
+            "trimp": 83.6
           },
           {
             "component": "resilience",
@@ -3882,7 +3983,7 @@
         ],
         "start": "2026-09-28",
         "strides": 2,
-        "trimp_total": 757.3,
+        "trimp_total": 756.5,
         "wk": 2
       }
     ]
@@ -3940,13 +4041,19 @@
     "reason": "no symptom or medical event in 56 days \u2014 the plan follows your measured form"
   },
   "shape": {
-    "atl": 48.045,
-    "ctl": 45.538604651162785,
+    "atl": 48.04426831960777,
+    "ctl": 45.54129431141515,
     "effective_vo2max": 53.6,
     "seed": {
       "bridged_days": 1,
       "fallback": null,
       "from": "2026-06-29",
+      "own_gap": 0.005,
+      "runalyze": [
+        45.54,
+        48.05
+      ],
+      "source": "reconstruction",
       "stale_skipped": 0,
       "tainted_skipped": 0
     }
@@ -4002,8 +4109,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 5.0,
-            "headroom": 11.12,
-            "laid": -6.12,
+            "headroom": 11.09,
+            "laid": -6.09,
             "unit": "CTL/wk"
           },
           "eq_session": {
@@ -4051,9 +4158,9 @@
         "peak_acwr": 1.294,
         "phase": "taper",
         "proj_acwr": 0.983,
-        "proj_acwr_flat": 1.013,
-        "proj_acwr_soft": 1.013,
-        "proj_ctl": 93.2,
+        "proj_acwr_flat": 1.014,
+        "proj_acwr_soft": 1.014,
+        "proj_ctl": 93.1,
         "quality": [
           {
             "component": "ssmax",
@@ -4313,8 +4420,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 5.0,
-            "headroom": 14.5,
-            "laid": -9.5,
+            "headroom": 14.48,
+            "laid": -9.48,
             "unit": "CTL/wk"
           },
           "eq_session": {
@@ -4361,10 +4468,10 @@
         "long": 15,
         "peak_acwr": 0.96,
         "phase": "taper",
-        "proj_acwr": 0.814,
+        "proj_acwr": 0.815,
         "proj_acwr_flat": 0.796,
         "proj_acwr_soft": 0.796,
-        "proj_ctl": 83.7,
+        "proj_ctl": 83.6,
         "quality": [
           {
             "component": "ssmax",
@@ -4588,8 +4695,8 @@
             "basis": "L",
             "binds": false,
             "ceiling": 5.0,
-            "headroom": 4.27,
-            "laid": 0.73,
+            "headroom": 4.26,
+            "laid": 0.74,
             "unit": "CTL/wk"
           },
           "eq_session": {
@@ -4635,11 +4742,11 @@
           }
         },
         "long": 10,
-        "peak_acwr": 1.511,
+        "peak_acwr": 1.512,
         "phase": "taper",
-        "proj_acwr": 0.835,
+        "proj_acwr": 0.836,
         "proj_acwr_flat": 1.013,
-        "proj_acwr_soft": 0.647,
+        "proj_acwr_soft": 0.648,
         "proj_ctl": 84.4,
         "quality": [],
         "role": "race",

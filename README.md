@@ -360,7 +360,12 @@ so the label cannot drift from the prescription.
 On the assertive regime the plan also periodizes by component. VO₂max is developed early (a short
 interval touch already in the base phase, sized to fit the biomechanical budget of a volume rebuild) and
 then held in a maintenance role: the session never grows, but it keeps its size, because a smaller
-mid-week session concentrates the week and lowers its total safe load. Marathon-pace work grows through
+mid-week session concentrates the week and lowers its total safe load. Every other quality week in
+build and peak also carries a threshold run: a continuous block at threshold pace, cut out of the
+week's freshest easy day (Thursday on most layouts) with ten easy minutes before it and easy running
+after. It replaces that day's easy running at the same training load, so the rest of the week is
+unchanged, and it is sized to what the polarized floor of easy running allows. The last quality week
+before the taper does not carry it. Marathon-pace work grows through
 the build (SSmax plus near-race-pace economy), and the peak pivots to resilience: the long run's
 marathon-pace segment extends week over week at constant speed, longer, not faster. The conservative
 regime keeps its gentler classic mix; only the tags show there.

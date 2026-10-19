@@ -45,13 +45,19 @@
     "reason": "no symptom or medical event in 56 days \u2014 the plan follows your measured form"
   },
   "shape": {
-    "atl": 81.5775,
-    "ctl": 84.22162790697675,
+    "atl": 81.57492651410466,
+    "ctl": 84.22592333323955,
     "effective_vo2max": 53.6,
     "seed": {
       "bridged_days": 1,
       "fallback": null,
       "from": "2026-06-29",
+      "own_gap": 0.005,
+      "runalyze": [
+        84.22,
+        81.58
+      ],
+      "source": "reconstruction",
       "stale_skipped": 0,
       "tainted_skipped": 0
     }

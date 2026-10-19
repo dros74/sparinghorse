@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.74.6"
+ENGINE_VERSION = "0.78.3"
 
 
 def _zones_asof(db, date_iso=None):
@@ -350,9 +350,26 @@ def latest_snapshot(db):
 # ⚠ Direction of the correction is NOT uniformly safe-ward, so it is measured, never assumed: pre-run
 # it RAISES the seed ATL (tightens the governor), post-run it lowers it by one day's decay while also
 # stopping the roll from double-decaying that day. See PROJECT_LOG §55 for the measured before/after.
+# §SEED6 (0.78.3) — the seed is a snapshot only while the local history disagrees with it: see `plan_seed`.
 # eVO₂max deliberately still comes from the NEWEST snapshot: it is a fitness read, not a load EWMA
 # the roll re-applies, so the freshest is the right one — and pace zones (a pure function of it)
 # stay put, keeping this change confined to the load axis.
+def _own_load_state(daily, end):
+    """§SEED6 — the engine's own CTL/ATL at the end of every day from the first day with TRIMP through `end`,
+    at full precision: {iso: (ctl, atl)}. The same `_ewma_step` walk `reconstruct_history` does, unrounded.
+    {} when there is no history or `end` precedes it."""
+    if not daily:
+        return {}
+    cur, out, c, a = min(_date(d) for d in daily), {}, 0.0, 0.0
+    while cur <= end:
+        iso = cur.isoformat()
+        t = daily.get(iso, 0.0)
+        c, a = _ewma_step(c, t, TAU_CTL), _ewma_step(a, t, TAU_ATL)
+        out[iso] = (c, a)
+        cur += timedelta(days=1)
+    return out
+
+
 def plan_seed(db, today):
     """§PRO20 — the (vo2, ctl0, atl0, meta) a plan generated on `today` must be seeded from: the load
     state at the END OF YESTERDAY, which is what generate_block's roll-from-today-inclusive needs.
@@ -361,6 +378,12 @@ def plan_seed(db, today):
     daily TRIMP with the same `_ewma_step` the projector is validated on — never by reading an older
     row as if it were "now". `meta` records the day seeded from and how many days were bridged, so the
     plan can say so instead of asserting freshness it can't know.
+
+    §SEED6 — Runalyze publishes CTL/ATL as integers, so the seed jittered by up to ±0.5 from one day's
+    row to the next. While the cleaned Runalyze rows agree with the engine's own EWMA over the local
+    daily TRIMP to within SEED_OWN_TOL (rounding), the seed is the engine's own end-of-yesterday state at
+    full precision, and meta["source"] reads "reconstruction"; when they disagree the seed is the cleaned
+    Runalyze seed as before ("runalyze"). meta["own_gap"] is the largest disagreement in the window.
 
     Returns None when there is no snapshot at all (the caller's §FT5 cold-start path owns that case).
     When there is no snapshot dated BEFORE today (a first day / fresh install), falls back to the
@@ -374,7 +397,7 @@ def plan_seed(db, today):
         "ORDER BY snapshot_date DESC LIMIT ?", (today.isoformat(), SEED_STALE_LOOKBACK_DAYS)).fetchall()
     if not rows:
         return (vo2, newest["fitness"] or 0.0, newest["fatigue"] or 0.0,
-                {"from": newest["snapshot_date"], "bridged_days": 0,
+                {"from": newest["snapshot_date"], "bridged_days": 0, "source": "runalyze",
                  "fallback": "no snapshot before today — seeded from the newest row"})
     # §SEED2 (0.63.2) — a snapshot captured BEFORE a run of its own day reached Runalyze is stale: it
     # describes a day that had not finished landing. The live case: the nightly captured Sunday's
@@ -420,13 +443,31 @@ def plan_seed(db, today):
     # says so). Measured on the live copy: 22 and 23 Sep unchanged (the oldest row, 1 tainted);
     # 24 Sep anchors on 09-11, seeds 09-23 verbatim, 1 tainted.
     chain = list(reversed(live if live else rows))
-    daily = daily_trimp_series(db) if len(chain) > 1 else None
+    # §SEED6 (0.78.3) — THE SEED IS THE ENGINE'S OWN LOAD STATE WHILE RUNALYZE AGREES TO ROUNDING.
+    # Runalyze publishes CTL and ATL as integers and each day's row carries its own ±0.5 rounding
+    # error, so a seed read from the rows jittered day to day and the jitter reached sessions weeks
+    # ahead: on a follow-the-plan simulation from the live copy (19 Oct → 5 Dec 2026) the 3 Nov
+    # interval session flipped 12.8 ↔ 13.7 km on up to 7 regenerations, the 5 Nov threshold run fell
+    # to easy once, and 110–173 sessions moved by 0.1–0.5 km per run, with no new input. Measured on
+    # the same copy, the engine's own EWMA over the de-duplicated daily TRIMP (from the first
+    # activity, 2021-10-17) matches all 125 Runalyze rows (15 Jun–18 Oct 2026) within ±0.50 except
+    # 2026-09-06 (stale row) and 2026-09-10 (doubled upload), both of which §SEED2/§SEED3 already
+    # skip; the largest residual over the 123 clean rows is 0.499. Runalyze's number is the engine's
+    # own number rounded. So when every row the walk trusts sits within SEED_OWN_TOL of the engine's
+    # state on its own date, the seed is that state, unrounded. The test is over the WINDOW (the
+    # trusted rows of the last 14), not one day: the decision then changes only when a disagreeing
+    # row enters or leaves the window, so an episode costs at most two switches (a single-day test
+    # was measured to toggle six times on an injected disagreement). §SEED2–5 still choose and clean
+    # the rows; when Runalyze disagrees beyond rounding (a run the local data lacks, a correction
+    # Runalyze made) the plan is seeded exactly as before. The cost: the seed now also depends on
+    # the local history being complete from the first activity.
+    daily = daily_trimp_series(db)
     best = None
     for k in range(min(SEED_ANCHOR_CANDIDATES, len(chain))):
-        trusted, tainted, contested = _seed_walk(chain, k, daily)
+        trusted, tainted, contested, kept = _seed_walk(chain, k, daily)
         if best is None or contested < best[2]:
-            best = (trusted, tainted + k, contested)
-    prior, tainted = best[0], best[1]
+            best = (trusted, tainted + k, contested, kept)
+    prior, tainted, kept = best[0], best[1], best[3]
     ctl, atl = prior["fitness"] or 0.0, prior["fatigue"] or 0.0
     seeded_from, yday = _date(prior["snapshot_date"]), today - timedelta(days=1)
     bridged = 0
@@ -437,10 +478,24 @@ def plan_seed(db, today):
             t = daily.get(cur.isoformat(), 0.0)
             ctl, atl = _ewma_step(ctl, t, TAU_CTL), _ewma_step(atl, t, TAU_ATL)
             cur, bridged = cur + timedelta(days=1), bridged + 1
-    return (vo2, ctl, atl,
-            {"from": prior["snapshot_date"], "bridged_days": bridged, "fallback": None,
-             "stale_skipped": skipped, "tainted_skipped": tainted,
-             **({"stale_unresolved": True} if unresolved and skipped else {})})
+    meta = {"from": prior["snapshot_date"], "bridged_days": bridged, "fallback": None,
+            "stale_skipped": skipped, "tainted_skipped": tainted,
+            **({"stale_unresolved": True} if unresolved and skipped else {})}
+    own = _own_load_state(daily, yday)
+    res = []
+    for r in kept:
+        if r["fitness"] is None or r["fatigue"] is None:
+            continue
+        oc, oa = own.get(r["snapshot_date"], (0.0, 0.0))
+        res.append(max(abs(r["fitness"] - oc), abs(r["fatigue"] - oa)))
+    own_gap = max(res) if res else None
+    if yday.isoformat() in own and own_gap is not None and own_gap <= SEED_OWN_TOL:
+        meta.update({"source": "reconstruction", "runalyze": [round(ctl, 2), round(atl, 2)],
+                     "own_gap": round(own_gap, 3)})
+        ctl, atl = own[yday.isoformat()]
+    else:
+        meta.update({"source": "runalyze", "own_gap": round(own_gap, 3) if own_gap is not None else None})
+    return (vo2, ctl, atl, meta)
 
 
 def _seed_walk(chain, start, daily):
@@ -448,13 +503,16 @@ def _seed_walk(chain, start, daily):
     forward over the measured daily TRIMP between them and skipped when it sits further than
     SEED_TAINT_TOL away on either axis; a row without a load reading is adopted as it stands.
     Returns (last trusted row, rows skipped, rows skipped among those every anchor candidate judges —
-    chain index SEED_ANCHOR_CANDIDATES onward — which is what §SEED5 compares the candidates on)."""
+    chain index SEED_ANCHOR_CANDIDATES onward — which is what §SEED5 compares the candidates on, every
+    row the walk trusted in order — what §SEED6 compares with the engine's own state)."""
     trusted, tainted, contested = chain[start], 0, 0
+    kept = [chain[start]]
     for i in range(start + 1, len(chain)):
         r = chain[i]
         if (trusted["fitness"] is None or trusted["fatigue"] is None
                 or r["fitness"] is None or r["fatigue"] is None):
             trusted = r
+            kept.append(r)
             continue
         ctl, atl = trusted["fitness"], trusted["fatigue"]
         cur, rd = _date(trusted["snapshot_date"]) + timedelta(days=1), _date(r["snapshot_date"])
@@ -464,11 +522,12 @@ def _seed_walk(chain, start, daily):
             cur += timedelta(days=1)
         if abs(r["fitness"] - ctl) <= SEED_TAINT_TOL and abs(r["fatigue"] - atl) <= SEED_TAINT_TOL:
             trusted = r
+            kept.append(r)
         else:
             tainted += 1
             if i >= SEED_ANCHOR_CANDIDATES:
                 contested += 1
-    return trusted, tainted, contested
+    return trusted, tainted, contested, kept
 
 
 SEED_STALE_LOOKBACK_DAYS = 14   # §SEED2 — how far back a trustworthy snapshot is looked for
@@ -476,6 +535,10 @@ SEED_TAINT_TOL = 3.0            # §SEED3 — a snapshot further than this from 
 #                                 trusted row, on CTL or ATL, is tainted and skipped (Runalyze rounds both to integers)
 SEED_ANCHOR_CANDIDATES = 3      # §SEED5 — how many of the window's oldest rows are tried as the walk's base; the one
 #                                 the rest of the window agrees with best wins (fewest skipped rows), ties to the oldest
+SEED_OWN_TOL = 0.6              # §SEED6 — a trusted row further than this from the engine's own load state on its
+#                                 own date, on CTL or ATL, means Runalyze knows something the local data does not;
+#                                 Runalyze rounds both to integers, so rounding alone stays within 0.5 (max 0.499
+#                                 measured over 123 clean rows, Jun–Oct 2026)
 
 
 def _snapshot_stale(db, snapshot_date, captured_at):
@@ -1579,6 +1642,108 @@ DAVIS_INT_FRAC = 0.12        # Build+Peak mid-week interval session — FULL siz
                              # peakier and cost ~8% of total safe load (race CTL 42→36) with no
                              # offsetting benefit. The session's ROLE still shifts dev→maintenance
                              # (it never grows); only its size stays. Excess VO₂ stimulus is benign.
+# §ROT — A THRESHOLD RUN ON THE FRESHEST MID-WEEK DAY, EVERY OTHER QUALITY WEEK, Build and Peak. The
+# athlete's call (SH-46), after a Thursday easy day run as 6.4 km at threshold on 2026-10-15: Build and
+# Peak laid one mid-week session (VO₂) beside the MP long run, and the threshold zone sat unused after
+# Base. The VO₂ session keeps its day and its size in every quality week; on alternate weeks the week's
+# freshest easy day becomes a THIRD quality session, a continuous threshold run. (The 15 Oct ruling was
+# first built as a swap of the VO₂ session; the athlete corrected it before it shipped, 2026-10-16:
+# "every other Thursday a speed session … leaving Tuesdays as they were".)
+# WHICH WEEKS. A segment's Build (or Bridge) and the Peak after it are one run of quality weeks, counted
+# BACK from the last one before the taper: r = 0 is the last. Odd r carries the threshold run, so the
+# last week before the taper, which holds the block's longest long run, keeps two hard days. Down weeks
+# carry no quality and take no position. Phase week counts are anchored on `block_start` and the race
+# dates, so the same inputs lay the same weeks on every regeneration day.
+# ⚠ A PULL REORDERS THE QUALITY WEEKS. `_swap_week_fields` (§PRO11's pull, §PULL's replay) exchanges two
+# weeks' fields, `quality` included, so a down week pulled from week 4 to week 2 would carry week 2's
+# threshold run to week 4. Each VO₂ spec carries its position (`rot`), and `_reseat_specific` hands the
+# positions back out in date order after every pull: the same swap, the same re-seat, whichever day the
+# plan is regenerated on.
+# WHICH DAY. The strides' day: the short easy run furthest from every heavy session (this week's quality
+# days and long run, last week's long run), ties to the later day. That is Thursday on the athlete's
+# Tue/Wed/Thu/Sat/Sun week and on the stock 4- and 5-run layouts, and Friday on the stock 6-run one. It
+# must sit ≥ 2 days from each heavy day and leave the week another short easy run, or the week has no
+# threshold run. The run takes the strides' place: they rode that day, and the run is the week's third
+# fast touch.
+# HOW. CARVED OUT OF THAT DAY'S EASY RUN, AT THE SAME TRIMP: 10 min easy, the threshold block, then easy
+# to the end of the load the day already held. The day's TRIMP, and so every CTL/ATL/ACWR the governors
+# project, is unchanged by construction, and the rest of the week is laid exactly as without it. The
+# search that sizes the week sees the carved day (§PRO17: search the week that will be laid), so the one
+# axis the run can move is the §3.1 week eq_km, where its threshold km count 2.5×.
+# HOW BIG: WHAT THE POLARIZED FLOOR LEAVES. §H2 strips a week's quality when its hard share (threshold +
+# interval work TRIMP) passes 1 − POLARIZED_EASY_MIN = 0.20, and the VO₂ session takes DAVIS_INT_FRAC =
+# 0.12, so DAVIS_THU_FRAC = 0.08 of the week's TRIMP. That slice is then clipped to:
+#   · the room the VO₂ session's ROUNDED reps actually leave (11 × 3 min is 0.1236 of the 19 Oct 2026
+#     week, not 0.12);
+#   · the easy run's own TRIMP, less the warm-up and a QUALITY_CD_MIN cool-down;
+#   · DAVIS_THU_T_SHARE of the week's km (Daniels: one session's T-pace running ≤ 10 % of the week's).
+# Under DAVIS_THU_MIN_MIN the day stays easy. Live (copy of 15 Oct, regenerated 16 Oct): 22 Oct and 5 Nov
+# hold 24 and 27 min at 5:08, each inside a run of about 10 km.
+# ⚠ The athlete first asked for 10 min easy and "the rest at 5:08" to 10 km, ≈ 43 min. On the 19 Oct
+# week that is a hard share of 25.6 %, and measured on that week §H2 then stripped ALL its quality: the
+# VO₂ session, the threshold run and the MP finish. Offered the floor's ~24 min, a smaller VO₂ session or
+# a lower floor, the athlete chose the floor (2026-10-16).
+# ⚠ The run sits at the floor, so a later cut to the week's easy load can tip the share over it (a
+# check-in that eases the weekend). §H2 and the §3.1 week check then UN-CARVE FIRST (`_uncarve`): the
+# threshold run goes back to the easy run it was cut from, at the same TRIMP, with nothing to re-govern.
+# Only a week still over the floor loses the rest of its quality.
+# ⚠ The PER-SESSION step does not measure the run (`_bout_eq_km`, §AARHUS): a session sized as a share of
+# the week, governed by a step built for the long run, locks the block. The week ceiling still prices
+# every threshold km.
+# ⚠ THE LONG RUN'S SHARE IS HELD ON THE WEEK AS LAID BEFORE THE CARVE. At the same TRIMP the threshold
+# run covers fewer km (Δkm = −work_min × (1.545 × easy speed − threshold speed), −1.2 km for 24 min at
+# this athlete's paces), so the week's km falls and the long run is a slightly larger share of it: 25 Oct
+# 2026 is 28.6 of 74.1 km = 38.6 % against LONG_RUN_MAX_FRAC_BY_PHASE["build"] 0.38, where the pre-carve
+# week of 75.3 km reads 38.0 %. Bounding the long run on the post-carve km would cut it 0.45 km and hand
+# the load to other days — the option the athlete chose was "the other days don't change". The share is a
+# doctrine bound on how the week's VOLUME is split (no limits axis publishes it), the load is unchanged,
+# and the drift is at most the run's km saving (≈ 1 point of share at a 40-min block). Held deliberately;
+# det/specific-rotation checks the long run against the share of the pre-carve week.
+DAVIS_THU_FRAC = round((1.0 - POLARIZED_EASY_MIN) - DAVIS_INT_FRAC, 3)   # 0.08 — the floor's slice
+DAVIS_THU_T_SHARE = 0.10        # Daniels: T-pace running in one session ≤ 10 % of the week's km
+DAVIS_THU_MIN_MIN = 15          # a shorter block is a token stimulus, not worth a third hard day
+
+
+def _specific_mid(r, peak=False):
+    """§ROT — the mid-week VO₂ spec of an assertive Build/Peak quality week whose position, counted back
+    from the last quality week before the taper, is `r` (0 = the last). The spec keeps `r` as `rot` for
+    `_reseat_specific`; the session it lays does not carry it."""
+    return {"kind": "interval", "zone": "interval", "frac": DAVIS_INT_FRAC, "structure": "intervals",
+            "rep_min": 3, "rec_min": 2, "label": "VO₂ intervals — maintenance" if peak else "VO₂ intervals",
+            "component": "vo2max", "rot": r}
+
+
+def _thu_spec(r):
+    """§ROT — the threshold run of an odd-position week. `carve`: `_distribute_week` lays it LAST, out of
+    the week's freshest easy run at that run's TRIMP (`_carve_threshold`), instead of out of the budget."""
+    return {"kind": "tempo", "zone": "threshold", "frac": DAVIS_THU_FRAC, "structure": "continuous",
+            "carve": True, "label": "threshold run", "component": "ssmax", "rot": r}
+
+
+def _specific_intent(phase, thr):
+    """§ROT — the intent sentence of an assertive Build/Peak building week; `thr` names the threshold run."""
+    tail = "VO₂ maintenance + a threshold run" if thr else "VO₂ maintenance"
+    return (f"Peak — marathon-specific: long-fast resilience + {tail}" if phase == "peak"
+            else f"Supportive — growing MP work + {tail}")
+
+
+def _reseat_specific(shape, start=0):
+    """§ROT — after a pull has swapped two weeks' fields, hand the rotation positions back out in DATE
+    order from `start` on: the k-th quality week takes the k-th largest `rot`, so the run still ends on
+    a week without the threshold run and alternates. A week whose position changes gets fresh specs and
+    intent (new objects: the shape's lists can be shared with the caller's). No `rot` in the shape
+    (caution, Base, Taper) or no swap ⇒ nothing moves."""
+    idx = [i for i in range(start, len(shape))
+           if (shape[i].get("quality") or [{}])[0].get("rot") is not None]
+    for i, r in zip(idx, sorted((shape[i]["quality"][0]["rot"] for i in idx), reverse=True)):
+        w = shape[i]
+        if w["quality"][0]["rot"] != r:
+            rest = [q for q in w["quality"][1:] if not q.get("carve")]
+            w["quality"] = ([_specific_mid(r, peak=w.get("phase") == "peak")]
+                            + ([_thu_spec(r)] if r % 2 else []) + rest)
+            w["intent"] = _specific_intent(w.get("phase"), r % 2 == 1)
+
+
 DAVIS_BUILD_MP_START, DAVIS_BUILD_MP_END = 0.07, 0.10   # MP finish grows across Build's non-down weeks
 DAVIS_PEAK_MP_START, DAVIS_PEAK_MP_END = 0.10, 0.13     # …and keeps extending through Peak (resilience).
                              # Work tops at .12+.13=.25 — fine: the polarized easy floor is MP-EXEMPT
@@ -1812,7 +1977,7 @@ TAPER_SHARP_FRAC = 0.06      # short race-pace touch (threshold), neuromuscular 
 TAPER_TOP, TAPER_BOTTOM = 0.75, 0.40   # week-1 vs race-week volume as a fraction of the peak end
 
 
-def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
+def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False, q_after=0):
     """Parametric Build-phase shape (§6f Step D): lightly-growing specific work off the Base end
     volume, with a 3:1 down-week cadence. Each build week carries two quality sessions — VO₂
     intervals (mid-week) and a marathon-pace finish on the long run — as a small polarized slice;
@@ -1821,7 +1986,10 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     the interval slot shifts to a MAINTENANCE role — same full session size (shrinking it made the
     week peakier and cost total safe load; see DAVIS_INT_FRAC), it just never grows — while the MP
     finish GROWS across the phase's non-down weeks (SSmax + near-MP economy) — more minutes at the
-    same pace, never a faster pace."""
+    same pace, never a faster pace. §ROT: every other quality week, counted back from the last one
+    before the taper, adds a threshold run carved out of the freshest easy day; `q_after` is the number
+    of quality weeks the Peak after this phase lays (0 when the segment has none), so the count runs on
+    across the hand-over (see DAVIS_THU_FRAC)."""
     shape, km = [], float(start_km)
     nd_total = sum(1 for i in range(n_weeks) if (i + 1) % BUILD_DOWN_EVERY != 0)
     nd_seen = 0
@@ -1835,15 +2003,16 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
             this_km = max(1, round(km))
             km_level = None
             km *= (1 + BUILD_WEEKLY_RAMP)
+        thr = False
         if down:
             quality = []
         elif davis:
             mp = _mp_prog(nd_seen, nd_total, DAVIS_BUILD_MP_START, DAVIS_BUILD_MP_END)
+            _r = (nd_total - 1 - nd_seen) + q_after                    # §ROT
+            thr = _r % 2 == 1
             nd_seen += 1
             quality = [
-                {"kind": "interval", "zone": "interval", "frac": DAVIS_INT_FRAC,
-                 "structure": "intervals", "rep_min": 3, "rec_min": 2,
-                 "label": "VO₂ intervals", "component": "vo2max"},
+                _specific_mid(_r), *([_thu_spec(_r)] if thr else []),
                 {"kind": "long_mp", "zone": "marathon", "frac": mp,
                  "attach": "long", "label": "marathon-pace long run (progressive)",
                  "component": "resilience"}]
@@ -1869,7 +2038,7 @@ def build_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                       "strides": 0 if down else 2, "quality": quality, **({"km_level": km_level} if down else {}),
                       "phase": "build", "role": "down" if down else "build",   # §P1
                       "intent": "Down week — absorb the block" if down
-                      else ("Supportive — growing MP work + VO₂ maintenance" if davis
+                      else (_specific_intent("build", thr) if davis
                             else "Build — specific: VO₂ intervals + marathon-pace long run")})
     return shape
 
@@ -1880,21 +2049,24 @@ def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
     The long run is bounded by LONG_RUN_MAX_FRAC + the ACWR ceiling — the runway, not a textbook
     peak-long-run number, decides its length. `davis` (§T2, assertive-only — caution byte-identical):
     the phase pivots to RESILIENCE — the long run's MP segment keeps extending at constant speed
-    while the interval slot stays a maintenance touch."""
+    while the interval slot stays a maintenance touch. §ROT: every Peak week is a quality week, so its
+    position back from the taper is n_weeks − 1 − i; the last Peak week has no threshold run and the
+    weeks before it alternate (see DAVIS_THU_FRAC)."""
     shape, km = [], float(start_km)
     for i in range(n_weeks):
         wk = i + 1
         this_km = max(1, round(km))
         km *= (1 + PEAK_WEEKLY_RAMP)
+        thr = False
         if davis:
             # §T2 marathon-specific: the long-fast run IS the workout — the MP segment keeps
             # extending at constant speed (resilience: economy decay resistance). The mid-week
             # interval session keeps its FULL size in a maintenance ROLE: shrinking it made the
             # week peakier and cost total safe load (see DAVIS_INT_FRAC), verified on my corpus.
+            _r = n_weeks - 1 - i                                       # §ROT
+            thr = _r % 2 == 1
             quality = [
-                {"kind": "interval", "zone": "interval", "frac": DAVIS_INT_FRAC,
-                 "structure": "intervals", "rep_min": 3, "rec_min": 2,
-                 "label": "VO₂ intervals — maintenance", "component": "vo2max"},
+                _specific_mid(_r, peak=True), *([_thu_spec(_r)] if thr else []),
                 {"kind": "long_mp", "zone": "marathon",
                  "frac": _mp_prog(i, n_weeks, DAVIS_PEAK_MP_START, DAVIS_PEAK_MP_END),
                  "attach": "long", "label": "long-fast resilience run", "component": "resilience"}]
@@ -1916,7 +2088,7 @@ def peak_shape(n_weeks, start_km, runs=BASE_RUNS, davis=False):
                       # sentence below (the peak rides into the taper; the taper IS its recovery).
                       # `phase` carries that now, so the sentence is free to be reworded.
                       "phase": "peak", "role": "build",
-                      "intent": ("Peak — marathon-specific: long-fast resilience + VO₂ maintenance" if davis
+                      "intent": (_specific_intent("peak", thr) if davis
                                  else "Peak — race specificity: race-pace long run + sharpening")})
     return shape
 
@@ -2063,7 +2235,7 @@ def _build_quality(spec, work_trimp, start_date, dow, zones, easy_pace_sec):
             reps.append(_qblock("work", zone, rep_min, zpace, f"{rep_min}min @ {zone}"))
             if i < n_reps - 1:
                 reps.append(_qblock("recovery", "easy", rec_min, easy_pace_sec, "easy jog recovery"))
-        desc = f"{n_reps}×{rep_min}min @ {zone} w/ {rec_min}min jog"
+        desc = f"{n_reps}×{rep_min}min @ {zone}" + (f" w/ {rec_min}min jog" if n_reps > 1 else "")
     else:
         reps.append(_qblock("work", zone, work_min, zpace, f"{work_min}min continuous @ {zone}"))
         desc = f"{work_min}min @ {zone}"
@@ -2125,7 +2297,7 @@ def _race_spec(date_iso, rtype, zones, label, tune_up=False):
     return spec
 
 
-def _place_race(sessions, day_trimps, race, week_start):
+def _place_race(sessions, day_trimps, race, week_start, easy_pace_sec=None, strides=0):
     """§RACE — put the RACE on race day, and charge what it actually costs.
 
     The engine knew a race as a phase label, a week ROLE ("race week") and a row in `objectives` —
@@ -2155,6 +2327,7 @@ def _place_race(sessions, day_trimps, race, week_start):
     # which week a date lands in. Ties are broken A-race first, then by date: deterministic, and an
     # A-race is never displaced by a tune-up that happens to share its week.
     _cands = [race] if isinstance(race, dict) else [r for r in race if r]
+    _cands = [r for r in _cands if not r.get("past")]   # §ROT — a race already run is not laid again
     _in_week = [r for r in _cands if _ws <= _date(r["date"]) <= _ws + timedelta(days=6)]
     if not _in_week:
         return sessions, day_trimps
@@ -2169,11 +2342,17 @@ def _place_race(sessions, day_trimps, race, week_start):
     cleared = []
     if race.get("tune_up"):
         _lo = _date(d) - timedelta(days=TUNEUP_CLEAR_DAYS)
-        cleared = [x for x in kept
-                   if x.get("kind") in QUALITY_KINDS and _lo <= _date(x["date"]) < _date(d)]
-        if cleared:
+        _win = [x for x in kept
+                if x.get("kind") in QUALITY_KINDS and _lo <= _date(x["date"]) < _date(d)]
+        # §ROT — a carved threshold run is an easy day with a block cut into it: the run-up loses the
+        # block and keeps the easy run (same TRIMP), as the week without the run would have laid it.
+        # Clearing it whole deleted the easy load too (a Saturday tune-up took 117.7 TRIMP off 19 Oct).
+        _back = ({id(x): _uncarve(x, easy_pace_sec, strides=strides) for x in _win if x.get("rot") is not None}
+                 if easy_pace_sec else {})
+        cleared = [x for x in _win if id(x) not in _back]
+        if cleared or _back:
             _drop = {id(x) for x in cleared}
-            kept = [x for x in kept if id(x) not in _drop]
+            kept = [_back.get(id(x), x) for x in kept if id(x) not in _drop]
     minutes = int(round(race["km"] * race["pace_sec"] / 60.0))
     trimp = est_trimp(minutes, race["zone"])
     kept.append({"date": d, "kind": "race", "km": round(race["km"], 1), "minutes": minutes,
@@ -2188,9 +2367,152 @@ def _place_race(sessions, day_trimps, race, week_start):
     return kept, dt
 
 
+def _carve_threshold(spec, sessions, day_trimps, start_monday, week_trimp, long_off, zones, easy_pace_sec,
+                     pin=None, eq_cap=None, basis_trimp=None, max_min=None, race_offs=None):
+    """§ROT — cut the threshold run out of the week's freshest easy run, at that run's TRIMP (see
+    DAVIS_THU_FRAC): 10 min easy, the threshold block, then easy to the end of the day's load. `pin` is a
+    day offset the caller fixed (the straddle remainder keeps the run on the day the full lay carved);
+    otherwise the day is the strides' rule's, which also keeps clear of NEXT week's long run. `eq_cap` is
+    the §3.1 week ceiling the lay must stay under: the search sized the week without the run, so the
+    block shrinks until the week's eq_km fits, or the day stays easy. `basis_trimp`/`max_min` (the
+    clipped straddle remainder) size the block off the WHOLE week and hold it to the full lay's minutes.
+    `race_offs` are race days (offsets from `start_monday`, any week): no run in a race's run-up
+    (TUNEUP_CLEAR_DAYS before, the window §TT2 clears) nor in the two days after it. Returns `sessions`
+    with that one run replaced, or unchanged when no day qualifies or the block would
+    be under DAVIS_THU_MIN_MIN. `day_trimps` stays exact: the cool-down takes the day's remaining TRIMP
+    to the decimal, so nothing the governors project moves."""
+    def _off(x):
+        return (_date(x["date"]) - start_monday).days
+
+    def _near_race(o):
+        return any(r - TUNEUP_CLEAR_DAYS <= o <= r + 2 for r in (race_offs or ()))
+    shorts = [x for x in sessions if x.get("kind") == "easy" and (x.get("km") or 0) > 0]
+    if pin is not None:
+        target = next((x for x in shorts if _off(x) == pin), None)
+        if target is None or _near_race(pin):
+            return sessions
+    else:
+        if len(shorts) < 2:                    # the week keeps a short easy run
+            return sessions
+        heavy = ([_off(x) for x in sessions if x.get("kind") in QUALITY_KINDS]
+                 + [long_off, long_off - 7, long_off + 7])
+        cands = [x for x in shorts if not _near_race(_off(x))]
+        if not cands:
+            return sessions
+        target = max(cands, key=lambda x: (min(abs(_off(x) - h) for h in heavy), _off(x)))
+        if min(abs(_off(target) - h) for h in heavy) < 2:
+            return sessions
+    zone = spec["zone"]
+    rate = trimp_per_min(zone)
+    zpace = (zones or {}).get(zone) or easy_pace_sec
+    day_tr = float(target.get("trimp") or 0.0)
+    hard = sum(r["trimp"] for x in sessions for r in (x.get("reps") or [])
+               if r.get("effort") == "work" and r.get("zone") in HARD_ZONES)
+    room = (1.0 - POLARIZED_EASY_MIN) * sum(day_trimps.values()) - hard - 0.1   # 0.1: the rep's own rounding
+    week_km = sum((x.get("km") or 0.0) for x in sessions)
+    work_min = min(int(spec["frac"] * (basis_trimp or week_trimp) / rate),
+                   int(room / rate),
+                   int((day_tr - (QUALITY_WU_MIN + QUALITY_CD_MIN) * EASY_TRIMP_PER_MIN) / rate),
+                   int(DAVIS_THU_T_SHARE * week_km * zpace / 60.0))
+    if max_min is not None:
+        work_min = min(work_min, int(max_min))
+
+    def _build(w):
+        reps = [_qblock("warmup", "easy", QUALITY_WU_MIN, easy_pace_sec, "easy warm-up"),
+                _qblock("work", zone, w, zpace, f"{w}min continuous @ {zone}")]
+        cd_tr = round(day_tr - reps[0]["trimp"] - reps[1]["trimp"], 1)
+        cd = _qblock("cooldown", "easy", round(cd_tr / EASY_TRIMP_PER_MIN), easy_pace_sec,
+                     "easy to the end of the run")
+        cd["trimp"] = cd_tr                    # the day keeps its TRIMP to the decimal
+        reps.append(cd)
+        note = (f"{spec.get('label', spec['kind'])} — {QUALITY_WU_MIN}min easy wu + {w}min @ {zone} + "
+                f"{cd['minutes']}min easy to finish")
+        out = _session_from_reps(target["date"], spec["kind"], zone, zpace, reps, note)
+        out["trimp"] = day_tr
+        out["component"] = spec.get("component") or COMPONENT_BY_KIND.get(spec["kind"])
+        out["rot"] = spec["rot"]               # §ROT — `_bout_eq_km` and `_uncarve` read it
+        for k in ("rest_gated", "rest_shed_km"):   # a week-level marker riding this run stays on it
+            if k in target:
+                out[k] = target[k]
+        return out
+
+    _eq_rest = (_week_eq_km(sessions) - _session_eq_km(target)) if eq_cap is not None else None
+    while work_min >= DAVIS_THU_MIN_MIN:
+        sess = _build(work_min)
+        if _eq_rest is None or _eq_rest + _session_eq_km(sess) <= eq_cap + 1e-9:
+            return [sess if x is target else x for x in sessions]
+        work_min -= 1                          # §3.1 — the week ceiling: a shorter block, or none
+    return sessions
+
+
+def _rot_intent(week):
+    """§ROT — a week whose shape asked for the threshold run but whose sessions carry none (the block fell
+    under DAVIS_THU_MIN_MIN, no day qualified, §H2 un-carved it) does not name the run in its intent.
+    Measured on the cold-start golden: three 36–47 km Build weeks said "+ a threshold run" and laid an
+    easy Thursday. A forced deload keeps its own sentence."""
+    if (week.get("deload_forced") or _is_down(week)
+            or not any(q.get("carve") for q in (week.get("quality") or []))
+            or any(x.get("rot") is not None and x.get("kind") == "tempo" for x in (week.get("sessions") or []))):
+        return week
+    week["intent"] = _specific_intent(_week_phase(week), False)
+    return week
+
+
+def _uncarve(sess, easy_pace_sec, strides=0):
+    """§ROT — the easy run a threshold run was carved from: same day, same TRIMP, laid the way
+    `_distribute_week` lays an easy run (whole minutes, km off the minutes). `strides` puts back the
+    strides the run displaced (the caller passes the week's count when no other run carries them); an
+    "eased — " note and a week-level marker riding the run are kept. Sessions without `rot` pass through;
+    one a check-in already turned easy only loses the marker."""
+    if sess.get("rot") is None:
+        return sess
+    if sess.get("kind") != "tempo":
+        return {k: v for k, v in sess.items() if k != "rot"}
+    tr = float(sess.get("trimp") or 0.0)
+    mins = round(tr / EASY_TRIMP_PER_MIN)
+    note = "easy run" + (f" + {strides}×4–6 strides" if strides else "")
+    if str(sess.get("note") or "").startswith("eased — "):
+        note = "eased — " + note
+    out = {"date": sess["date"], "kind": "easy", "km": round(mins * 60 / easy_pace_sec, 1),
+           "minutes": mins, "trimp": tr, "pace_zone": f"{fmt_pace(easy_pace_sec)}/km easy", "note": note}
+    if strides:
+        out["strides"] = strides
+    for k in ("rest_gated", "rest_shed_km"):
+        if k in sess:
+            out[k] = sess[k]
+    return out
+
+
+def _race_offsets(race, week_start):
+    """§ROT — each race's day offset from `week_start` (`race` is one spec, a list of specs, or None)."""
+    _ws = _date(week_start) if isinstance(week_start, str) else week_start
+    cands = [race] if isinstance(race, dict) else [r for r in (race or []) if r]
+    return [(_date(r["date"]) - _ws).days for r in cands if r.get("date")]
+
+
+def _uncarve_eased(sessions, adjust, wk, easy_pace_sec):
+    """§ROT — a check-in whose window covers the run's day takes the run back to its easy run BEFORE
+    `_apply_adjustment` eases the day, so the day reads as the easy run eased (what the week without the
+    run would show), not a threshold run with its structure stripped or an "easy only" day at the carved
+    km. Measured before: an easy-only check-in on 22 Oct left `easy` 10.1 km still carrying `rot`,
+    without strides, under an intent naming the run."""
+    lo, hi = (adjust or {}).get("applies_from"), (adjust or {}).get("applies_until")
+    if not lo or not hi or not any(x.get("rot") is not None and lo <= x["date"] <= hi for x in sessions):
+        return sessions
+    n = _displaced_strides(wk, sessions)
+    return [(_uncarve(x, easy_pace_sec, strides=n) if (x.get("rot") is not None and lo <= x["date"] <= hi)
+             else x) for x in sessions]
+
+
+def _displaced_strides(wk, sessions):
+    """§ROT — the strides an un-carved run gets back: the week's count when no other run carries them."""
+    return 0 if any(x.get("strides") for x in sessions) else int(wk.get("strides") or 0)
+
+
 def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
                      long_km_cap=None, av_blocked=None, q_days=None, long_km_aim=None,
-                     free_from=None, ladder=False, fixed_days=None, prev_tail=0, _relay_runs=None):
+                     free_from=None, ladder=False, fixed_days=None, prev_tail=0, _relay_runs=None,
+                     carve=True, carve_eq_cap=None, carve_basis=None, carve_max_min=None, carve_race_offs=None):
     """Lay `week_trimp` across the week's runs and converting each session's TRIMP back to
     minutes/km. The POLARIZED split (§6f Step C): a `quality` spec carves a small HARD slice of the
     governed weekly TRIMP for structured work (at zone pace), the rest stays easy/long — so total
@@ -2237,6 +2559,11 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # allowed there: mid-week the athlete isn't on a "first run back"). A list of offsets pins in
     # the shape's list order; since §QF2 (0.64.1) a dict {offset: kind} pins each day to the spec of
     # its own kind.
+    # §ROT — the threshold run is laid LAST, carved out of an easy run (`_carve_threshold`), so it takes
+    # no slot in the walk below and no slice of the budget.
+    carve_q = [q for q in mid_q if q.get("carve")]
+    mid_q = [q for q in mid_q if not q.get("carve")]
+    carve_pin = None
     if q_days is not None:
         # §QF2 (0.64.1) — `q_days` may carry each pinned day's KIND ({offset: kind}); a bare list
         # of offsets pins in the shape's list order as before. With kinds, each pinned day takes
@@ -2245,6 +2572,12 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         # regeneration with Tuesday's tempo run no longer hands Thursday a second tempo in place
         # of its progression run). A pin whose kind no spec matches falls back to list order.
         kinds = q_days if isinstance(q_days, dict) else {d: None for d in q_days}
+        if carve_q and not any(q.get("kind") == carve_q[0]["kind"] for q in mid_q):
+            # §ROT — a pinned day of the threshold run's kind IS the run (the full lay carved it there):
+            # it is carved again on that day, never handed to the VO₂ spec by the list-order fallback.
+            carve_pin = next((d for d in sorted(kinds) if kinds[d] == carve_q[0]["kind"]), None)
+            if carve_pin is not None:
+                kinds = {d: k for d, k in kinds.items() if d != carve_pin}
         pins = [(days.index(d), kinds[d]) for d in kinds if d in days and d != days[long_idx]]
         q_slots, picked, left = [], [], list(mid_q)
         for slot, kind in pins:
@@ -2331,8 +2664,15 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
     # 25–30 % is of weekly km (Daniels, Hansons); Davis's Breeze plan, my tier, lays 32–39 % on its
     # long-run weeks. Measured against the week, the ladder is the binder in base and the long run
     # climbs +10 %/wk. Converted once into the share of the easy budget that the same km mean: the
-    # week's km = the quality km already built + the MP km + the easy budget at easy pace. Only ever
-    # RAISES the bound (week km ≥ easy km), and only where the ladder exists to be reached — a FULL
+    # week's km = the quality km already built + the MP km + the easy budget at easy pace. ⚠ §ROT
+    # (0.77.0) — this used to read "only ever RAISES the bound (week km ≥ easy km)" and took
+    # max(long_cap, converted). That holds only while the MP finish is small beside the mid-week
+    # session: the converted share is long_cap + (long_cap·q_km − (1 − long_cap)·mp_km) / easy_km,
+    # below long_cap once mp_km > long_cap/(1 − long_cap) × q_km (0.613 × in Build). A 9.5-km threshold
+    # session under a 7-km MP finish crosses it, and the max() then let the raise to the ladder pass the
+    # week share: 25 Oct 2026, 29.9 of 76.8 km = 38.9 % against 0.38. The bound is now the converted
+    # share itself — a fraction of the WEEK, as its constant says. VO₂ and Base weeks sit above the line,
+    # so they keep the bound they had. Applied only where the ladder exists to be reached — a FULL
     # lay (`free_from is None`; the remainder is not the week, §PRO15's aim carries the full lay's long
     # there) of a BUILDING week (taper and down weeks keep the easy-budget bound: their long run is
     # meant to be short, and this lever is about reaching the rung, not lifting every week). Used by
@@ -2345,7 +2685,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         _q_km = sum((s.get("km") or 0.0) for s in sessions)              # mid-week quality, already built
         _week_km = _q_km + mp_km + easy_budget * _km_per_tr
         _cap_base_tr = max(0.0, long_cap * _week_km - mp_km) / _km_per_tr
-        long_cap_wk = min(1.0, max(long_cap, _cap_base_tr / easy_budget))
+        long_cap_wk = min(1.0, _cap_base_tr / easy_budget)              # §ROT — of the week, no floor
     # §PRO15 — the long run is sized off the WEEK, not off what is left of it. `long_w` is a SHARE
     # of the budget, so when the §6o remainder governs a fraction of the week (mid-week regeneration,
     # over-run early days) the long run takes the same proportional haircut as the easy days — the
@@ -2496,7 +2836,10 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                                             av_blocked=av_blocked, q_days=q_days,
                                             long_km_aim=long_km_aim, free_from=free_from,
                                             ladder=ladder, fixed_days=fixed_days,
-                                            prev_tail=prev_tail, _relay_runs=len(_tpl))
+                                            prev_tail=prev_tail, _relay_runs=len(_tpl),
+                                            carve=carve, carve_eq_cap=carve_eq_cap,
+                                            carve_basis=carve_basis, carve_max_min=carve_max_min,
+                                            carve_race_offs=carve_race_offs)
             free = [d for d in range(7) if d not in set(days)
                     and d not in (av_blocked or ())    # unused weekdays for extra easy runs (§AV:
                     #                                    an away day can never gain a run)
@@ -2739,6 +3082,14 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             sess["long_step_capped"] = True
         sessions.append(sess)
         day_trimps[date] = day_trimps.get(date, 0.0) + tr
+    # §ROT — the threshold run, last. Not in the governor's search (`carve=False`): the week is sized
+    # without it, and the run then fits inside that week's eq ceiling or is not laid. A remainder lay
+    # (`free_from`) carves only on the day the full lay carved (`carve_pin`), never a second day.
+    if carve and carve_q and zones and (carve_pin is not None or free_from is None):
+        sessions = _carve_threshold(carve_q[0], sessions, day_trimps, start_monday, week_trimp,
+                                    days[long_idx], zones, easy_pace_sec, pin=carve_pin,
+                                    eq_cap=carve_eq_cap, basis_trimp=carve_basis, max_min=carve_max_min,
+                                    race_offs=carve_race_offs)
     # §REST — the spacing gate refused a day this week wanted: mark it so the week card can say the
     # spacing was held out loud (never a silent lighter week). The marker rides the last session —
     # placement is irrelevant, it is a week-level fact.
@@ -2873,7 +3224,16 @@ def _project_week(ctl, atl, week_start, day_trimps, roll_from=None, actual_floor
     m_ctl = sum(p["ctl"] for p in _span) / len(_span) if _span else None
     m_atl = sum(p["atl"] for p in _span) / len(_span) if _span else None
     flat = round(m_atl / m_ctl, 3) if (m_ctl and m_atl is not None) else None
-    return curve[-1]["ctl"], curve[-1]["atl"], eow, peak, flat, m_ctl
+    # §SEED6 — the END STATE is what the next week chains from, so it is carried at full precision
+    # (the curve above stays rounded to 2 decimals: eow, the peak and the means read it for display).
+    # A Monday plan starts from the unrounded seed, so a 2-decimal hand-over moved sessions by 0.1 km.
+    _ec, _ea = ctl, atl
+    _dd = _date(start_iso)
+    while _dd <= end:
+        _t = day_trimps.get(_dd.isoformat(), 0.0) if day_trimps else 0.0
+        _ec, _ea = _ewma_step(_ec, _t, TAU_CTL), _ewma_step(_ea, _t, TAU_ATL)
+        _dd += timedelta(days=1)
+    return _ec, _ea, eow, peak, flat, m_ctl
 
 
 def _eow_soft(eow, eow_flat, m_ctl, endctl, endatl, shape_neutral, soft_ctl_floor):
@@ -2957,8 +3317,13 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
                                      #                      that will actually be laid, ladder and all
                                      free_from=free_from,      # §STRAD3 — …and only the days it may
                                      long_km_aim=long_km_aim,  # place, at the long-run size it aims for
-                                     fixed_days=fixed_days, prev_tail=prev_tail)   # §REST — and its
+                                     fixed_days=fixed_days, prev_tail=prev_tail,   # §REST — and its
                                      #                                                spacing gate too
+                                     carve=False)   # §ROT — the week is sized without the threshold
+        #   run: the run is TRIMP-neutral, so every axis but eq_km reads the same either way, and the
+        #   final lay fits the run inside this week's eq ceiling (`carve_eq_cap`) or leaves the day
+        #   easy. Searching the carved lay instead made the run's eq step a cliff the search parked
+        #   under, and let its km saving buy the week more TRIMP under §PRO23's coupling.
         # §PRO20b — the search must charge today's ACTUAL load, or the allowance it hands back is
         # bounded against a week the athlete has already partly outrun. Floor-only ⇒ it can only tighten.
         # §H1b — the PEAK is read over the days this search can still place. `actual_floor` charges
@@ -3050,7 +3415,8 @@ def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_fr
             _s9, dt9 = _distribute_week(wk, _date(start), mid * 0.9, easy_pace_sec, zones,
                                         days_override=days_override, av_blocked=av_blocked,
                                         q_days=q_days, long_km_cap=long_km_cap,
-                                        ladder=ladder, fixed_days=fixed_days, prev_tail=prev_tail)
+                                        ladder=ladder, fixed_days=fixed_days, prev_tail=prev_tail,
+                                        carve=False)   # §ROT — as above
             held_bad = sum(dt9.values()) >= sum(dt.values()) - 1.0
         if held_bad or soft_bad or bio_bad or shape_bad or (_peak_governs and peak and peak > ACWR_HARD) or too_fast:
             hi = mid
@@ -3245,8 +3611,11 @@ def _bout_eq_km(sess):
     it never carries the 3.5 anchor: measured on my own data the seed reads [14.61, 13.54, 17.81,
     13.93] against long runs of [11.3, 10.1, 12.3, 13.6] km — the long runs, at ~1.3 apiece. It is
     already the largest sustained bout. Filtering there would be filtering something that is not there.
+    §ROT — the Build/Peak threshold run (the one session carrying `rot`) is exempt for the same reason:
+    a session sized as a share of the week, which the step built for the long run would otherwise
+    govern. The §3.1 week ceiling still prices its threshold km.
     """
-    return 0.0 if (sess.get("kind") == "interval") else _session_eq_km(sess)
+    return 0.0 if (sess.get("kind") == "interval" or sess.get("rot") is not None) else _session_eq_km(sess)
 
 
 def _week_eq_km(sessions):
@@ -4096,6 +4465,7 @@ def _replay_pulled_deloads(shape, phase_start, prior_by_start, today):
         nxt = next((j for j in range(i + 1, len(shape)) if _is_down(shape[j])), None)
         if nxt is not None:
             _swap_week_fields(w, shape[nxt])
+            _reseat_specific(shape)            # §ROT — the swap reordered the quality weeks
 
 
 def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, zones=None, today=None,
@@ -4227,6 +4597,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                         if _is_down(shape[j])), None)
             if nxt is not None:
                 _swap_week_fields(wk, shape[nxt])
+                _reseat_specific(shape, wi)        # §ROT — the swap reordered the quality weeks
                 is_down, forced_deload, deload_pulled = True, False, True
                 intent_trimp = wk["km"] * TRIMP_PER_KM      # re-derive from the swapped-in down week
                 if av_off:                                  # §AV — day slots follow the new run count
@@ -4257,9 +4628,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # up, `prorate` drops its share) nor floored (a skipped lay is not fiction against the
             # ceiling — a floor on the straddle-regen-day fixture cut Sunday's long run to 10.4 km for a
             # Monday run the athlete never did); the remainder search prices what was actually run
-            # (real seed, `roll_from=today`, `act_floor`, `lived_trimps`, all unchanged below). Note the
-            # seed is Runalyze's integer, so the un-stepped anchor carries the same ±0.5 CTL the Monday
-            # seed does. `lived` is None when the caller has no series ⇒ byte-identical.
+            # (real seed, `roll_from=today`, `act_floor`, `lived_trimps`, all unchanged below). Since §SEED6
+            # the seed is the engine's own state while Runalyze agrees to rounding, so the un-stepped
+            # anchor is the Sunday state to float precision (measured: un-stepping vs reading the Sunday
+            # state directly differed by 0.0 over 3 days). `lived` is None when the caller has no series ⇒ byte-identical.
             ws_ctl, ws_atl = ctl, atl
             if lived:
                 for _d in sorted(lived, reverse=True):
@@ -4370,13 +4742,27 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # remainder still at 14.7). The straddle week is the one week whose days are already
             # fixed by history; it does not re-lay, exactly as `free_from`/`fixed_days` keep the
             # remainder itself from re-laying.
-            full, _ = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec,
-                                       (None if forced_deload else zones),   # §PULL — §PRO6/E
-                                       days_override=(av_days if av_days is not None
-                                                      else _run_days(wk["runs"])),
-                                       av_blocked=av_off,
-                                       long_km_cap=long_km_cap, ladder=assertive,   # §PRO24
-                                       prev_tail=prev_tail)   # §REST
+            full, _full_dt = _distribute_week(wk, wk_start_d, wk_intent_trimp, easy_pace_sec,
+                                              (None if forced_deload else zones),   # §PULL — §PRO6/E
+                                              days_override=(av_days if av_days is not None
+                                                             else _run_days(wk["runs"])),
+                                              av_blocked=av_off,
+                                              long_km_cap=long_km_cap, ladder=assertive,   # §PRO24
+                                              prev_tail=prev_tail,   # §REST
+                                              carve_eq_cap=_bio_cap,   # §ROT — the ceiling Monday's lay had
+                                              carve_race_offs=_race_offsets(race, wk_start_d))
+            full = _uncarve_eased(full, adjust, wk, easy_pace_sec)   # §ROT — as Monday's lay does
+            if zones and not forced_deload and any(x.get("rot") is not None for x in full):
+                # §ROT — `full` is Monday's lay, so it takes Monday's un-carve decision too (§H2 below:
+                # the check-in applied, then the floor). Everything downstream reads `full` — the
+                # §DAYSHARE copies, the q_ahead pins, and the re-laid elapsed day of a run-today, which
+                # becomes the day's HISTORY at night (`_pinned_sessions` takes the newest plan made on
+                # or before the date). Un-carving only the remainder showed a Thursday run easy all
+                # morning as a threshold run that evening, and saved it so.
+                _fa = _apply_adjustment([dict(x) for x in full], dict(_full_dt), adjust)
+                if _hard_share(_fa["sessions"], sum(_fa["dt"].values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9:
+                    _n = _displaced_strides(wk, full)
+                    full = [_uncarve(x, easy_pace_sec, strides=_n) for x in full]
             # §LRH (0.60.5) — THE LONG RUN'S RUNG IS THE DISTANCE THE FULL WEEK JUST LAID FOR IT. §PRO15
             # defined the aim as "the distance the full-week path would lay at this intent" and then
             # approximated it with the skeleton's share × intent, which sits under the ladder whenever
@@ -4583,12 +4969,27 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     dt = {}
                     for _s in rem_s:                     # keyed by date, as the lay's own day_trimps are
                         dt[_s["date"]] = dt.get(_s["date"], 0.0) + float(_s.get("trimp") or 0.0)
+                    if (_rem_eq_cap is not None and any(_s.get("rot") is not None for _s in rem_s)
+                            and _week_eq_km(rem_s) > _rem_eq_cap + 1e-9):
+                        # §ROT — the search above sized the remainder without the run; the copied run
+                        # must still fit what the week has left of its eq ceiling (early over-runs spend
+                        # it), or it goes back to its easy run — same TRIMP, nothing to re-govern.
+                        _n = _displaced_strides(wk, elapsed + rem_s)
+                        rem_s = [_uncarve(_s, easy_pace_sec, strides=_n) for _s in rem_s]
                 else:
+                    # §ROT — a clipped remainder is re-laid off ITS budget; the threshold run keeps
+                    # the size the full lay gave it (basis = the week's intent, capped at the full
+                    # lay's minutes), so a lived day does not shrink the run ahead of it.
+                    _full_thu = next((r["minutes"] for _s in full if _s.get("rot") is not None
+                                      for r in (_s.get("reps") or []) if r.get("effort") == "work"), None)
                     rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, use_zones,
                                                  days_override=rem, av_blocked=av_off, q_days=q_ahead,
                                                  long_km_cap=long_km_cap, long_km_aim=long_km_aim,
                                                  free_from=today_off,   # §PRO24 — no ladder (remainder)
-                                                 fixed_days=elapsed_offs, prev_tail=prev_tail)   # §REST
+                                                 fixed_days=elapsed_offs, prev_tail=prev_tail,   # §REST
+                                                 carve=_full_thu is not None, carve_eq_cap=_rem_eq_cap,
+                                                 carve_basis=wk_intent_trimp, carve_max_min=_full_thu,
+                                                 carve_race_offs=_race_offsets(race, wk_start_d))
                     if q_ahead and sum(dt.values()) > chosen + 1.0:
                         # §6o-QF fallback — the governed remainder can't carry the quality session's
                         # fixed TRIMP floor (late week / tiny budget): keep the honest easy-only lay
@@ -4625,8 +5026,19 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 chosen, dt = 0.0, {}
             else:                                          # today is past this week's last run → only decay
                 chosen, rem_s, dt = 0.0, [], {}
+            rem_s = _uncarve_eased(rem_s, adjust, wk, easy_pace_sec)   # §ROT — before the check-in eases it
             adjusted = _apply_adjustment(rem_s, dt, adjust)
             rem_s, dt = adjusted["sessions"], adjusted["dt"]
+            if zones and any(_s.get("rot") is not None for _s in rem_s):
+                # §ROT — the full-week path's un-carve test (below, at §H2), on the week as published:
+                # elapsed + remainder. Without it a check-in easing the weekend un-carved Thursday on
+                # Monday's regeneration and carved it again from Tuesday's — the straddle path never ran
+                # §H2, which at the VO₂ session's 0.12 never mattered and at the run's floor does.
+                _wk_s = elapsed + rem_s
+                _wk_tr = sum(float(_s.get("trimp") or 0.0) for _s in elapsed) + sum(dt.values())
+                if _hard_share(_wk_s, _wk_tr) > 1.0 - POLARIZED_EASY_MIN + 1e-9:
+                    _n = _displaced_strides(wk, _wk_s)
+                    rem_s = [_uncarve(_s, easy_pace_sec, strides=_n) for _s in rem_s]
             ctl, atl, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
                                                              roll_from=today.isoformat(),
                                                              actual_floor=act_floor,
@@ -4758,6 +5170,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 pweek["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
             elif deload_pulled:
                 pweek["deload_pulled"] = True
+            _rot_intent(pweek)                             # §ROT — the sentence names only a run that is laid
             # §PRO6 (0.26.1) — fold the straddling week into the near-ceiling streak + trough
             # anchor, judged exactly as the frozen fold will judge this same week next Monday
             # (down/taper intent resets; otherwise its proj_acwr counts against NEAR_CEILING_ACWR
@@ -4844,7 +5257,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # block's earlier weeks). Assertive-only; caution passes no cap ⇒ byte-identical.
         sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, wk_zones,
                                         long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off,
-                                        ladder=assertive, prev_tail=prev_tail)   # §PRO24/§REST
+                                        ladder=assertive, prev_tail=prev_tail,   # §PRO24/§REST
+                                        carve_eq_cap=bio_cap,   # §ROT — the run fits the week's eq ceiling
+                                        carve_race_offs=_race_offsets(race, wk_start))   # …and keeps off races
+        sessions = _uncarve_eased(sessions, adjust, wk, easy_pace_sec)   # §ROT — before the check-in eases it
         adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
         sessions, dt = adjusted["sessions"], adjusted["dt"]
         _race_seed = (ctl, atl)   # §RACE — the seed to re-publish from once the race is laid
@@ -4889,6 +5305,16 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         week_km = sum((s.get("km") or 0.0) for s in sessions)
         bio_over = bool(zones and bio_cap and not breach and not eroded
                         and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
+        if (eroded or bio_over) and any(s.get("rot") is not None for s in sessions):
+            # §ROT — the threshold run sits at the floor, so it goes first: back to the easy run it was
+            # carved from, same TRIMP, `dt` untouched. Only a week still over loses the rest.
+            _n = _displaced_strides(wk, sessions)
+            sessions = [_uncarve(s, easy_pace_sec, strides=_n) for s in sessions]
+            eroded = bool(zones and not breach
+                          and _hard_share(sessions, sum(dt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
+            week_km = sum((s.get("km") or 0.0) for s in sessions)
+            bio_over = bool(zones and bio_cap and not breach and not eroded
+                            and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
         if breach or eroded or bio_over:
             pre_total = sum(dt.values())
             # §FORM1 — the re-govern search runs under the SAME governor contract as the primary call
@@ -4956,7 +5382,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # would make the one field whose job is to be checkable un-checkable on the one week that
         # matters. Same reasoning for `prog_ridden` below, which reads `atl_n`/`ctl_n`.
         _gov_eow, _gov_flat = eow, eow_flat      # §PRO23 — what the governor actually compared
-        _sess_r, _dt_r = _place_race(sessions, dt, race, wk_start)
+        _sess_r, _dt_r = _place_race(sessions, dt, race, wk_start, easy_pace_sec=easy_pace_sec,
+                                     strides=_displaced_strides(wk, sessions))   # §ROT
         if _sess_r is not sessions:
             sessions, dt = _sess_r, _dt_r
             ctl, atl, eow, peak, eow_flat, _ = _project_week(_race_seed[0], _race_seed[1],
@@ -5024,6 +5451,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             week["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
         elif deload_pulled:                        # §PRO11 — the shape's own down week, arrived early
             week["deload_pulled"] = True
+        _rot_intent(week)                          # §ROT — the sentence names only a run that is laid
         if long_km_cap and any(s.get("long_step_capped") for s in sessions):
             week["long_step_capped"] = long_km_cap   # §PRO9 — the +10% ceiling that bound this week's long
         week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
@@ -5059,7 +5487,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
     out_longs = (seed_longs + blk_longs)[-LONG_RUN_STEP_WINDOW:]
     out_eq = (seed_eq + blk_eqs)[-BIO_EQ_WINDOW:]
     return weeks, {"clipped_by_acwr": clipped_any,
-                   "end_ctl": round(ctl, 1), "end_atl": round(atl, 1),
+                   "end_ctl": ctl, "end_atl": atl,   # §SEED6 — full precision; generate_plan rounds the displayed block
                    "consec_hard": consec_hard, "last_nondown": last_nondown,   # §PRO6 carry-out
                    "recent_longs": out_longs, "recent_eq": out_eq,
                    "recent_session_eq": (seed_seq + blk_seq)[-BIO_EQ_WINDOW:],   # §PRO9/§3.1/§PRO17
@@ -6402,9 +6830,13 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
                     # §PAST — the same window, read off PLAN HISTORY: what each already-lived day of
                     # this week was actually prescribed. `ws_d < today` is exactly the elapsed-days
                     # condition, so a regeneration on the week's own Monday asks for nothing.
+                    # §ROT/§PAST — and a day run TODAY is lived (§LRH-2), so it is history as well: its
+                    # record is what the morning's plan told, not the evening's re-lay of the week. With
+                    # it excluded, a check-in eased day was saved at its un-eased size (told 7.6 km,
+                    # recorded 12.7) and the next morning's floor test read the week as never eased.
                     pinned_past = _pinned_sessions(
                         db, [(ws_d + timedelta(days=i)).isoformat()
-                             for i in range((today - ws_d).days)])
+                             for i in range((today - ws_d).days + (1 if today_run else 0))])
                     break
         fweeks, fbound = generate_block(future_sub, phase_start, end_ctl, end_atl,
                                         easy_pace_sec, adjust, zones, today=today,   # §6o partial week
@@ -6432,7 +6864,7 @@ def _split_freeze(shape, phase_start, gen_seed, easy_pace_sec, adjust, zones, pr
         carried_longs, carried_eq = fresh_seed, fresh_seed_eq    # weeks' actuals ARE the hand-over (a backfill's
         carried_seq = fresh_seed_seq                             # planned weeks stand in only without a db)
     weeks = sorted(frozen + backfilled + fresh, key=lambda w: w["start"])
-    return (weeks, round(end_ctl, 1), round(end_atl, 1), generated_any, consec_hard, last_nondown,
+    return (weeks, end_ctl, end_atl, generated_any, consec_hard, last_nondown,
             carried_longs, carried_eq, carried_seq, prev_tail)
 
 
@@ -6574,6 +7006,14 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
     objs = [dict(r) for r in db.execute(
         "SELECT * FROM objectives WHERE status='upcoming' ORDER BY date").fetchall()]
     chain, tune_ups = select_chain(objs, today)   # §6q — full A-race chain toward the FINAL peak
+    # §ROT — races of the last 3 days, whatever their status now. `select_chain` sees today onward only,
+    # and the threshold run keeps the two days AFTER a race clear as well as its run-up: with a 10k on a
+    # Wednesday, Thursday morning's regeneration no longer saw the race and carved the run the day after
+    # it. Carried as `past` specs, which only the run's day rule reads (`_place_race` skips them).
+    from datetime import timedelta as _td      # (`timedelta` is bound later in this function)
+    _recent_races = [{"date": str(r["date"])[:10], "past": True} for r in db.execute(
+        "SELECT date FROM objectives WHERE status != 'removed' AND date < ? AND date >= ?",
+        (today.isoformat(), (today - _td(days=3)).isoformat())).fetchall()]
     anchor = chain[-1] if chain else None
 
     prior = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
@@ -6676,7 +7116,7 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         live["prev_tail"] = pt                               # §REST — same, the run-day seam
         if rsq:
             live["recent_session_eq"] = rsq                  # §PRO17 — same, at session grain
-        blk = {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": ec, "end_atl": ea,
+        blk = {"start": phase_start.isoformat(), "weeks": weeks_, "end_ctl": round(ec, 1), "end_atl": round(ea, 1),
                "clipped_by_acwr": any(w.get("clipped") for w in weeks_)}
         comps = _phase_builds(weeks_)                 # §T2 — what this phase builds (from the tags)
         if comps:
@@ -6764,10 +7204,14 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         pre_taper_km = cur_km   # §CHAIN2 — the last building/peak block's chained volume, held across
         #                          a taper (and then a recovery) so recovery_shape's fractions key off
         #                          the PRE-taper peak, never the taper's own shrunk cur_km
-        for ph in phases:
+        for _pi, ph in enumerate(phases):
             kind, key, n_wk = ph["kind"], ph["key"], ph["weeks"]
             if kind == "rebase" or n_wk <= 0:
                 continue   # the re-base block is already generated above as `rb`
+            # §ROT — a Build/Bridge counts its quality weeks on from the Peak that follows it in the same
+            # segment (every Peak week is a quality week), so the rotation runs across the hand-over.
+            _nx = phases[_pi + 1] if _pi + 1 < len(phases) else None
+            _q_after = _nx["weeks"] if (_nx and _nx["kind"] == "peak") else 0
             if kind not in ("taper", "recovery"):
                 pre_taper_km = cur_km   # §CHAIN2 — refreshed on every building/peak/bridge phase;
                 #                          left untouched through a taper and the recovery after it
@@ -6786,7 +7230,8 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
                   # §CHAIN2 — recovery isn't in SHAPERS: it's laid off the PRE-taper peak, not cur_km
                   # (which the taper just shrank), and keyed on the race just run, not the race ahead.
                   else recovery_shape(n_wk, pre_taper_km, ph.get("after_type")) if kind == "recovery"
-                  else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive")))
+                  else SHAPERS[kind](n_wk, cur_km, davis=(regime == "assertive"),
+                                     **({"q_after": _q_after} if kind in ("build", "bridge") else {})))
             _replay_pulled_deloads(sh, cur_start, prior_all, today)   # §PULL — lived pulls first
             # §C (0.59.0) — "this deload isn't owed". The shape has laid its positional down weeks;
             # the governor judges the ONE that contains today (its block has fully elapsed, so
@@ -6842,7 +7287,7 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
                 if _ts:
                     _tus.append(_ts)
             block, end_ctl = _gen_phase(key, cur_start, sh, zones, regime, ride_cap, soft_floor,
-                                        race_=(([_race] if _race else []) + _tus) or None)
+                                        race_=(([_race] if _race else []) + _tus + _recent_races) or None)
             plan[key] = block
             cur_start = cur_start + timedelta(weeks=n_wk)
             # §PRO4 — chain the next phase off the volume this phase actually REACHED. In caution that's

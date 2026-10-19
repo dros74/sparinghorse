@@ -1331,6 +1331,13 @@ function objManager(p){
     ? `<span class="odate-ro mono">${esc(o.date)}</span>`
     : `<input type="date" class="odate" data-oid="${o.id}" value="${esc(o.date)}"
         aria-label="date of ${esc(o.label)}" title="Move this race — the plan re-periodizes around the new day">`;
+  // §GUN — the gun time is display-only (the engine periodizes to the DAY), so editing it is a
+  // light write: POST /time, update the local row, re-render — no re-plan. Public: text, like the
+  // date (0.55.1 — no dead controls on the read-only box).
+  const timeCell = o => SH_READONLY
+    ? (o.start_time ? ` · <span class="otime-ro mono">${esc(o.start_time)}</span>` : "")
+    : ` · <input type="time" class="otime" data-oid="${o.id}" value="${esc(o.start_time||"")}"
+        aria-label="gun time of ${esc(o.label)}" title="Gun time (optional) — the countdown in the bar above targets it; leave empty for midnight">`;
   const rows = OBJECTIVES.filter(o=>o.status==='upcoming').map(o=>{
     // §CHAIN4b — the highlighted row is the race the console is SHOWING (viewRaceOf: the tapped leg,
     // else the next race ahead), not the engine's terminal anchor; it re-renders with every strip tap.
@@ -1339,7 +1346,7 @@ function objManager(p){
     return `<div class="obj ${isCurrent?'current':''}">
       ${priBadge(o)}
       <span>${esc(o.label)}${isCurrent?' <span class="muted mono" style="font-size:11px">· current</span>':''}</span>
-      <span class="od">${dateCell(o)} · ${esc(o.type)} · ${esc(o.target)}</span>
+      <span class="od">${dateCell(o)}${timeCell(o)} · ${esc(o.type)} · ${esc(o.target)}</span>
       ${SH_READONLY?'':`<button class="x" data-oid="${o.id}">remove</button>`}
     </div>`;}).join("") || `<div class="muted" style="font-size:13px">No objectives — maintenance mode.</div>`;
   if(SH_READONLY) return `<div class="objs">${rows}</div>`;   // public: list only, no controls
@@ -1390,6 +1397,7 @@ function objManager(p){
       <input id="ao_label" placeholder="race name" style="width:130px">
       <select id="ao_type" aria-label="Race type"><option>5k</option><option>10k</option><option>half</option><option selected>marathon</option><option>custom</option></select>
       <input id="ao_date" type="date" aria-label="Race date">
+      <input id="ao_time" type="time" aria-label="Start time (optional)" title="Gun time (optional) — the countdown targets it">
       <select id="ao_pri" aria-label="Priority"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
       <input id="ao_target" placeholder="goal (finish / 3:55)" style="width:120px">
       <button class="primary" id="ao_add" style="font-size:12px;padding:6px 11px">Add objective</button>
@@ -1461,7 +1469,8 @@ function wireObjActions(){
   if(add) add.addEventListener("click", async ()=>{
     if(add.disabled) return;   // §OBJ2 — a second click while a re-plan is in flight is a no-op
     const body={label:$("#ao_label").value||"Race", type:$("#ao_type").value,
-      date:$("#ao_date").value, priority:$("#ao_pri").value, target:$("#ao_target").value||"finish"};
+      date:$("#ao_date").value, priority:$("#ao_pri").value, target:$("#ao_target").value||"finish",
+      start_time:$("#ao_time").value||null};   // §GUN — optional gun time; empty counts to midnight
     if(!body.date){ await notice({title:"Pick a date", intro:"A race needs a day before it can be planned for."}); return; }
     const t=add.textContent; add.disabled=true; add.textContent="Planning…";
     try{
@@ -1485,6 +1494,27 @@ function wireObjActions(){
       if(!p.ok){ inp.value=was; inp.disabled=false;
         await notice({title:"Could not move the race", intro:p.error||"unknown", tone:"danger"}); return; }
       LASTDIFF=p.diff; await refreshPlan(p);
+    });
+  });
+  // §GUN — set/clear a race's gun time. DISPLAY-ONLY (no re-plan happens server-side), so unlike
+  // the date-mover this skips refreshPlan: update the local OBJECTIVES row and re-render off the
+  // plan already in hand — the bar's countdown re-arms onto the new target in the same pass.
+  document.querySelectorAll(".obj .otime").forEach(inp=>{
+    const was=inp.value;
+    inp.addEventListener("change", async ()=>{
+      if(inp.value===was) return;
+      inp.disabled=true;
+      let p;
+      try{
+        const r=await fetch(`/api/objectives/${inp.dataset.oid}/time`,{method:"POST",
+          headers:{"Content-Type":"application/json"},body:JSON.stringify({start_time:inp.value||null})});
+        p=await r.json();
+      }catch(e){ p={ok:false, error:"the server could not be reached — try again"}; }
+      if(!p.ok){ inp.value=was; inp.disabled=false;
+        await notice({title:"Could not set the gun time", intro:p.error||"unknown", tone:"danger"}); return; }
+      const o=OBJECTIVES.find(x=>String(x.id)===inp.dataset.oid);
+      if(o) o.start_time=p.start_time||null;
+      renderPlan(LAST_PLAN);
     });
   });
   document.querySelectorAll(".obj .x").forEach(btn=>btn.addEventListener("click", async ()=>{
@@ -1914,10 +1944,38 @@ function phaseSection(title,block,p,today,pk){
     ${weekStrip(block.weeks,pk,sel)}
     <div class="weekdetails">${block.weeks.map(w=>weekDetail(weekHtml(w,p,today),pk,w.wk,sel)).join("")}</div>`;
 }
+// ── §GUN — the live countdown in the objective bar ─────────────────────────
+// Ticks every second toward the race the console is SHOWING (the §CHAIN4 view race), at its gun
+// time when the objective carries one and at midnight when it doesn't. A self-rescheduling
+// setTimeout (the music.js pollJob pattern), aligned to the wall-clock second so the digits don't
+// drift; the element is re-queried every tick because renderPlan's innerHTML re-renders wipe it —
+// the next renderPlan re-arms. No aria-live: a per-second live region is hostile to screen readers.
+let CD_TIMER=null;
+function fmtCountdown(ms){
+  const s=Math.max(0,Math.round(ms/1000)), d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
+        m=Math.floor(s%3600/60), sec=s%60;
+  const pl=(n,w)=>`${n} ${w}${n===1?"":"s"}`;
+  return d>0 ? `${pl(d,"day")}, ${pl(h,"hour")}, ${pl(m,"minute")}, ${pl(sec,"second")}`
+             : `${pl(h,"hour")}, ${pl(m,"minute")}, ${pl(sec,"second")}`;
+}
+function armCountdown(dateIso, timeHM){
+  clearTimeout(CD_TIMER); CD_TIMER=null;
+  if(!dateIso) return;
+  const target=new Date(dateIso+"T"+(timeHM||"00:00")+":00");   // local time — a gun time IS local
+  if(isNaN(target)) return;   // an unreadable date/time shows no countdown, never a false "race day"
+  const tick=()=>{
+    const el=document.getElementById("objcount");
+    if(!el){ CD_TIMER=null; return; }   // a re-render wiped it; the next renderPlan re-arms
+    const ms=target-Date.now();
+    el.textContent=ms>0 ? " · in "+fmtCountdown(ms) : " · race day 🏁";
+    CD_TIMER=setTimeout(tick, 1000-(Date.now()%1000)+5);   // align to the second
+  };
+  tick();
+}
 function renderPlan(p){
   const host=$("#plan");
   // the public box removes the Generate button — its empty state must not point at it (UX-11)
-  if(!p){ host.innerHTML=`<div class="empty">${SH_READONLY
+  if(!p){ armCountdown(null); host.innerHTML=`<div class="empty">${SH_READONLY
       ? "No plan published yet."
       : `No plan yet — hit <b>Generate plan</b>.`}</div>`; return; }
   LAST_PLAN=p;   // §CHAIN3 — the race selector re-renders off this without re-fetching /api/plan
@@ -1926,20 +1984,31 @@ function renderPlan(p){
   const vr = viewRaceOf(p, today0);                       // §CHAIN4
   const vrOverride = !!(vr && !(o && vr.date===o.date));  // looking at a leg other than the headline
   const vrObj = vrOverride ? (OBJECTIVES.find(x=>x.label===vr.label && x.date===vr.date) || {}) : null;
+  // §GUN — the shown race's own objective row carries the gun time (the plan payload doesn't know
+  // it); the headline resolves through the same label+date match as the §CHAIN4 leg above.
+  const cdRace = vrOverride ? vr : o;
+  const cdObj = cdRace ? (vrOverride ? vrObj : (OBJECTIVES.find(x=>x.label===o.label && x.date===o.date) || {})) : null;
   // A-race pill bar at the top of the page (mockup Almanac) — driven by the plan's objective, or by
   // §CHAIN4's view race (the next leg still ahead) when the chain has more than one A-race.
+  // `.owhen` stays static (the ticker must never rewrite the date); `#objcount` is the tick's own.
   const ob=$("#objbar");
   if(ob) ob.innerHTML = vrOverride ? `<span class="objlabel">Current main objective</span>`+
       `<span class="arace">${esc(vrObj.priority||'A')}-race</span>`+
       `<span class="oname">${esc(vr.label)}</span>`+
       `<span class="owhen">${esc(vr.date)} · ${vr.weeks_away} weeks out</span>`+
+      `<span class="ocount" id="objcount"></span>`+
       ((vr.feasibility||vrObj.target)?`<span class="overdict">Verdict — <b style="color:var(--text)">${esc(vr.feasibility||vrObj.target)}</b></span>`:"")
     : o ? `<span class="objlabel">Current main objective</span>`+
       `<span class="arace">${esc(o.priority||'A')}-race</span>`+
       `<span class="oname">${esc(o.label)}</span>`+
       `<span class="owhen">${esc(o.date)} · ${o.weeks_away} weeks out</span>`+
+      `<span class="ocount" id="objcount"></span>`+
       ((p.feasibility&&(p.feasibility.verdict||o.target))?`<span class="overdict">Verdict — <b style="color:var(--text)">${esc(p.feasibility.verdict||o.target)}</b></span>`:"")
     : "";
+  // arm AFTER the innerHTML above lands the span; no shown race (or no bar) disarms the tick.
+  // Works identically on the public box — date + start_time are allowlisted and #objbar exists there.
+  if(ob && cdRace) armCountdown(cdRace.date, (cdObj&&cdObj.start_time)||null);
+  else armCountdown(null);
   const totalw=p.phases.reduce((s,x)=>s+x.weeks,0);
   const zoneChips=Object.entries(p.pace_zones).map(([k,v])=>
     `<span class="zone ${k==='easy_top'?'hl':''}">${k.replace('_',' ')} <b>${U.t(v)}</b></span>`).join("");
@@ -2180,8 +2249,8 @@ function renderPlan(p){
     ${seedStale?`<div class="stalebanner">⟳ <b>This plan was built from an older reading of your shape.</b>
       Generated ${p.generated_at?esc(new Date(p.generated_at).toLocaleString()):'earlier'}, seeded from
       your ${esc(SN.was_from||'earlier')} state (CTL ${esc(SN.was.ctl)} · ATL ${esc(SN.was.atl)}). Your
-      settled ${esc(SN.from)} state${SN.bridged_days?`, rolled forward ${SN.bridged_days}
-      day${SN.bridged_days>1?'s':''} by measurement,`:''}${SN.stale_unresolved?` (every snapshot in the window was taken before a later upload, so each was checked against your own runs instead),`:SN.stale_skipped?` (${SN.stale_skipped} snapshot${SN.stale_skipped>1?'s':''} taken before a later upload skipped),`:''}${SN.tainted_skipped?` (${SN.tainted_skipped} snapshot${SN.tainted_skipped>1?'s':''} that did not match your own runs skipped),`:''} now reads CTL ${esc(SN.ctl)} · ATL
+      ${SN.source==='reconstruction'?`end-of-yesterday state, summed from your own runs (it agrees with Runalyze's ${esc(SN.from)} reading to the rounding),`:`settled ${esc(SN.from)} state${SN.bridged_days?`, rolled forward ${SN.bridged_days}
+      day${SN.bridged_days>1?'s':''} by measurement,`:''}${SN.stale_unresolved?` (every snapshot in the window was taken before a later upload, so each was checked against your own runs instead),`:SN.stale_skipped?` (${SN.stale_skipped} snapshot${SN.stale_skipped>1?'s':''} taken before a later upload skipped),`:''}${SN.tainted_skipped?` (${SN.tainted_skipped} snapshot${SN.tainted_skipped>1?'s':''} that did not match your own runs skipped),`:''}`} now reads CTL ${esc(SN.ctl)} · ATL
       ${esc(SN.atl)}. ${SH_READONLY?"":`Hit <b>Generate plan</b> to re-read today off it.`}</div>`:''}
     ${diffBanner(LASTDIFF)}
     ${objManager(p)}
@@ -3102,15 +3171,48 @@ async function wireAway(){
     return x.toLocaleDateString(undefined,{weekday:"short",day:"numeric",month:"short"}); };
   async function render(){
     let rows=[]; try{ rows=await getJSON("/api/availability"); }catch(e){ rows=[]; }
-    list.innerHTML = rows.length ? rows.map(a=>`<li style="display:flex;gap:8px;align-items:center;padding:2px 0">
+    // SH-49 — a window cleared in the last 24 h stays listed, muted, with put back (§OBJ3's twin)
+    const rowHtml=a=> a.active===0
+      ? `<li class="muted" style="display:flex;gap:8px;align-items:center;padding:2px 0">
+        <span class="mono">${fmt(a.date_from)}${a.date_to!==a.date_from?" → "+fmt(a.date_to):""}</span>
+        ${a.note?`<span>${esc(a.note)}</span>`:""}<span>· cleared</span>
+        <button type="button" class="ghost avputback" data-avput="${a.id}" title="Put these away days back — the plan re-lays around them" style="margin-left:auto;padding:1px 8px">put back</button>
+      </li>`
+      : `<li style="display:flex;gap:8px;align-items:center;padding:2px 0">
         <span class="mono">${fmt(a.date_from)}${a.date_to!==a.date_from?" → "+fmt(a.date_to):""}</span>
         ${a.note?`<span class="muted">${esc(a.note)}</span>`:""}
         <button type="button" class="ghost" data-av="${a.id}" title="Clear — the plan re-lays" style="margin-left:auto;padding:1px 8px">✕</button>
-      </li>`).join("") : `<li class="muted" style="padding:2px 0">none — you're fully available</li>`;
+      </li>`;
+    list.innerHTML = rows.length ? rows.map(rowHtml).join("")
+      : `<li class="muted" style="padding:2px 0">none — you're fully available</li>`;
     list.querySelectorAll("[data-av]").forEach(b=>b.addEventListener("click",async()=>{
+      if(b.disabled) return;
+      const a=rows.find(x=>String(x.id)===b.dataset.av);
+      if(!await confirmDanger({title:"Clear these away days?",
+          intro:"The plan re-lays these days as days you can run.",
+          lines: a?[fmt(a.date_from)+(a.date_to!==a.date_from?" → "+fmt(a.date_to):"")+(a.note?" · "+a.note:"")]:[],   // confirmDanger escapes each line itself
+          alt:"They stay listed here for 24 hours with a put-back control, in case this was a slip.",
+          confirmLabel:"Clear"})) return;
       b.disabled=true;
-      const r=await fetch(`/api/availability/${b.dataset.av}/remove`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
-      const p=await r.json(); if(p.ok){ LASTDIFF=p.diff; await refreshPlan(p); } await render();
+      try{
+        const r=await fetch(`/api/availability/${b.dataset.av}/remove`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+        const p=await r.json();
+        if(!p.ok){ await notice({title:"Could not clear the away days", intro:p.error||"unknown", tone:"danger"}); }
+        else { LASTDIFF=p.diff; await refreshPlan(p); }
+      } finally{ b.disabled=false; }
+      await render();
+    }));
+    // SH-49 — put a cleared window back: the undo of ✕, no confirm.
+    list.querySelectorAll("[data-avput]").forEach(b=>b.addEventListener("click",async()=>{
+      if(b.disabled) return;
+      b.disabled=true;
+      try{
+        const r=await fetch(`/api/availability/${b.dataset.avput}/restore`,{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"});
+        const p=await r.json();
+        if(!p.ok){ await notice({title:"Could not put the away days back", intro:p.error||"unknown", tone:"danger"}); }
+        else { LASTDIFF=p.diff; await refreshPlan(p); }
+      } finally{ b.disabled=false; }
+      await render();
     }));
   }
   $("#avadd").addEventListener("click",async()=>{

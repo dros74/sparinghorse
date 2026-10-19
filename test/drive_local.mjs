@@ -74,6 +74,13 @@ async function runFull() {
     () => { const o = document.querySelector('#objbar'); return o && o.innerText.trim().length > 0; },
     { timeout: 15000 });
   ok('objective pill rendered (Demo Marathon)', /Demo Marathon/.test(await page.locator('#objbar').innerText()));
+  // 0.76.0 (§GUN) — the bar carries a live countdown to the shown race; the seeded objective has no
+  // gun time, so the midnight fallback is what must tick.
+  const cd1 = await page.evaluate(() => document.querySelector('#objbar #objcount')?.textContent ?? null);
+  await page.waitForTimeout(1200);
+  const cd2 = await page.evaluate(() => document.querySelector('#objbar #objcount')?.textContent ?? null);
+  ok(`objective bar countdown present and ticking ("${cd1}" → "${cd2}")`,
+     cd1 !== null && /· in /.test(cd1) && cd2 !== null && cd2 !== cd1);
   ok('plan phase bar rendered', await page.locator('#plan .phaseseg').count() >= 1);
   // 0.60.1 — the limits block must span the week card, not fall into its 30px number gutter (a
   // real defect the owner saw first: every word on its own line). Open the first one and measure it.
@@ -760,6 +767,54 @@ async function runFull() {
   ok('put-back restores the upcoming count',
      objAfterRestore.filter(o => o.status === 'upcoming').length === upcomingBefore.length);
 
+  // ── SH-49 — the away-window ✕ asks first, and a cleared window can be put back within 24h ──────
+  {
+    const avDay = new Date(Date.now() + 49 * 86400000).toISOString().slice(0, 10);
+    const avNote = 'sh49 probe';
+    if (!(await page.evaluate(() => document.getElementById('settingsDialog').open))) {
+      await page.click('#settingsBtn');
+    }
+    await page.evaluate(() => window.SHSettings.show('athlete'));
+    await page.waitForSelector('#avlist', { timeout: 15000 });
+    await page.fill('#avfrom', avDay); await page.fill('#avto', avDay); await page.fill('#avnote', avNote);
+    await page.click('#avadd');
+    await page.waitForFunction(n => [...document.querySelectorAll('#avlist li')].some(li => li.innerText.includes(n)),
+                               avNote, { timeout: 90000 });   // a full re-plan
+    const avRow = () => page.locator('#avlist li', { hasText: avNote });
+    ok('SH-49: the added away window is listed with a ✕', await avRow().locator('[data-av]').count() === 1);
+    const genBefore49 = (await page.evaluate(() => fetch('/api/plan').then(r => r.json()))).generated_at;
+    await avRow().locator('[data-av]').click();
+    await page.waitForSelector('#confirmDialog[open]', { timeout: 15000 });
+    const cf49 = await page.evaluate(() => document.getElementById('cfOk').textContent.trim());
+    ok(`SH-49: ✕ asks first (confirm button "${cf49}")`, cf49 === 'Clear');
+    await page.locator('#cfCancel').click();
+    await page.waitForFunction(() => !document.getElementById('confirmDialog').open, { timeout: 5000 });
+    const genCancel49 = (await page.evaluate(() => fetch('/api/plan').then(r => r.json()))).generated_at;
+    ok('SH-49: a cancelled ✕ leaves the window listed', await avRow().locator('[data-av]').count() === 1);
+    ok('SH-49: a cancelled ✕ re-plans nothing (generated_at unchanged)', genCancel49 === genBefore49);
+
+    await avRow().locator('[data-av]').click();
+    await page.waitForSelector('#confirmDialog[open]', { timeout: 15000 });
+    await page.locator('#cfOk').click();
+    await page.waitForSelector('#avlist .avputback', { timeout: 90000 });   // a full re-plan
+    ok('SH-49: a cleared window stays listed with put back', await avRow().locator('.avputback').count() === 1);
+
+    await avRow().locator('.avputback').click();
+    await page.waitForFunction(() => document.querySelectorAll('#avlist .avputback').length === 0, { timeout: 90000 });
+    ok('SH-49: put back makes the row active again (✕ present, no put back)',
+       await avRow().locator('[data-av]').count() === 1 && await avRow().locator('.avputback').count() === 0);
+
+    // finally clear it for real, so later steps see the seed's state
+    await avRow().locator('[data-av]').click();
+    await page.waitForSelector('#confirmDialog[open]', { timeout: 15000 });
+    await page.locator('#cfOk').click();
+    await page.waitForSelector('#avlist .avputback', { timeout: 90000 });
+    const avEnd = await page.evaluate(() => fetch('/api/availability').then(r => r.json()));
+    ok('SH-49: no active window is left on the probe date',
+       !avEnd.some(x => x.date_from === (new Date(Date.now() + 49 * 86400000).toISOString().slice(0, 10)) && x.active === 1));
+    await page.evaluate(() => { const d = document.getElementById('settingsDialog'); if (d.open) d.close(); });
+  }
+
   // ── §CHAIN4 — the console defaults to the NEXT race ahead, not the chain's terminal anchor ──
   // near = the earliest upcoming A-race (only an A-race ever chains — a B/C tune-up can't be the
   // "next race ahead" the resolver would land on once another A-race is added below). By this
@@ -911,7 +966,13 @@ async function runSettled() {
   // clock on the gantry, so the read must be 3:52:30 / missed by 7:30 — reading 7:00 here would
   // mean the reckoning had quietly gone back to moving time.
   ok('result missed-the-goal read is on the gun clock', /missed by 7:30/i.test(txt));
-  ok('fitness reckoning present', /arrived at CTL/i.test(txt));
+  // SH-58 — the reckoning has two wordings: "arrived at CTL N, X short of/above the plan's target" past
+  // ±2, and "arrived right on the plan's target (CTL N)" inside it. The fixture is laid relative to the
+  // run's own date and its gap cycles weekly (−0.9 on a Thursday), so matching only the first wording
+  // failed every Thursday's CI run (24 Sep, 35982559160). Either wording passes; the fallback
+  // ("can't be reconstructed") still fails.
+  ok('fitness reckoning present',
+     /arrived (at CTL \d+|right on the plan's target \(CTL \d+\))/i.test(txt));
   await page.screenshot({ path: `${SHOTS}/07-reckoning.png`, fullPage: true });
 }
 
