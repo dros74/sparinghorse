@@ -3213,6 +3213,69 @@ def _stc_demo_guard():
                got={**detail, "failures": fails or "none"})
 
 
+def _stc_demo_past_builds():
+    """SH-96 — the demo seed's two PAST marathon builds feed the SH-94 compare view. The demo athlete
+    had no race_result activity at all, so the durability card's "compare with earlier builds" showed
+    only "… · now". Seeds a throwaway DB with demo=True and reads it back through the real
+    durability_builds: two past builds, oldest first, EACH with a fit line and a 5 % horizon near
+    24 km (build 1) / 30 km (build 2) — the newer build is the more durable one, and its faster race
+    (3:44 vs 3:58) is the PB — with race-day decoupling 11.5 % / 7.0 %. The revert (dropping the
+    helper's call from the seed) fails the first half on zero past builds. And the demo=False CI
+    fixture must stay race-less — every golden is pinned to it. In-memory."""
+    import sqlite3 as _sq
+    def mkdb(demo):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(S.SCHEMA)
+        S.seed_synthetic_db(mem, demo=demo)
+        mem.executescript(S.RUN_METRICS_VIEW)
+        mem.commit()
+        return mem
+    fails, detail = [], {}
+    mem = mkdb(demo=True)
+    try:
+        B = S.durability_builds(mem, S.run_metrics(mem, with_projection=False))
+        past = B["past"]
+        detail["past"] = [{"label": b["label"], "horizon_km": b["horizon_km"], "pb": b["pb"],
+                           "race_pct": b["race_pct"], "fit": b["fit"]} for b in past]
+        if len(past) != 2:
+            fails.append(f"past builds: {len(past)} — the demo should carry two earlier marathon "
+                         f"builds (got {[b['label'] for b in past]})")
+        else:
+            b1, b2 = past
+            for b, want_h, want_pct in ((b1, 24, 11.5), (b2, 30, 7.0)):
+                if not b["fit"]:
+                    fails.append(f"{b['label']}: no fit line — the card draws nothing for it")
+                h = b["horizon_km"]
+                if h is None or abs(h - want_h) > 3:
+                    fails.append(f"{b['label']}: horizon {h} km — want ≈{want_h} (±3)")
+                rp = b["race_pct"]
+                if rp is None or abs(rp - want_pct) > 0.1:
+                    fails.append(f"{b['label']}: race_pct {rp} — want {want_pct}")
+            if not b2["pb"] or b1["pb"]:
+                fails.append(f"PB pick off: b1={b1['pb']} b2={b2['pb']} — the newer, faster race "
+                             f"(3:44 vs 3:58) is the PB")
+    finally:
+        mem.close()
+    bare = mkdb(demo=False)
+    try:
+        n = bare.execute("SELECT COUNT(*) FROM activities "
+                         "WHERE json_extract(raw,'$.race_result') IS NOT NULL").fetchone()[0]
+        if n:
+            fails.append(f"the demo=False fixture grew {n} race_result activities — the shared CI "
+                         f"fixture must stay race-less (goldens are pinned to it)")
+    finally:
+        bare.close()
+    return _st("det", "demo-past-builds",
+               "SH-96 the demo seed carries two past marathon builds the SH-94 card can compare "
+               "against: both with a fit line, 5 % horizons ≈24/30 km, race-day decoupling "
+               "11.5/7.0 %, the newer (faster) one the PB — and the demo=False CI fixture stays "
+               "race-less",
+               passed=not fails,
+               expect="2 past builds · horizons ≈24/30 km · race_pct 11.5/7.0 · newer is PB · "
+                      "demo=False: no race_result",
+               got={**detail, "failures": fails or "none"})
+
+
 def _stc_public_allowlist():
     """§PV/TECH-3 — the public projection is an ALLOWLIST. The old posture served the private payload
     and popped what someone remembered was personal, which had already failed in the field (the §AV
@@ -21301,7 +21364,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_demo_guard(), lambda: _stc_auth(), lambda: _stc_ai_gates(), lambda: _stc_limits(db),
                  lambda: _stc_denominators(), lambda: _stc_permission(), lambda: _stc_deload_retire(), lambda: _stc_access_seen(),
                  lambda: _stc_abuse_limits(), lambda: _stc_public_activity_gate(),
-                 lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_public_view_coverage_all(db), lambda: _stc_runtime_config(),
+                 lambda: _stc_plan_generate_dedupe(), lambda: _stc_demo_track(), lambda: _stc_demo_route(), lambda: _stc_demo_past_builds(), lambda: _stc_csp_worker(), lambda: _stc_public_allowlist(), lambda: _stc_public_view_coverage(db), lambda: _stc_public_view_coverage_all(db), lambda: _stc_runtime_config(),
                  lambda: _stc_api_validation(db), lambda: _stc_objective_dedupe(db),
                  lambda: _stc_objective_restore(db), lambda: _stc_objective_time(db), lambda: _stc_availability_restore(db),
                  lambda: _stc_card_truth(db), lambda: _stc_plan_structure(db),

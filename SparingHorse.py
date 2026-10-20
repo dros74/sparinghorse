@@ -10871,6 +10871,11 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
             "vo2max": 54.0, "use_vo2max": True,
             "source": "synthetic",
         })
+    if demo:
+        # SH-96 — the demo athlete's PAST: two earlier marathon builds behind this block, so the
+        # SH-94 durability card has earlier builds to compare against. Own random stream, ids
+        # continuing from this block's last — the 24 weeks above stay byte-identical.
+        aid = _demo_past_builds(db, today, start_monday, aid, seed)
     db.commit()
 
     # derive the shape time-series with the engine's OWN reconstruction (no token needed),
@@ -10950,6 +10955,159 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
     plan = regenerate(db, today=today) if (with_objective or past_race) else None
     return {"activities": aid, "snapshots": len(hist), "plan_ok": bool(plan and plan.get("ok")),
             "from": start_monday.isoformat(), "to": last_day.isoformat()}
+
+
+def _demo_past_builds(db, today, first_monday, aid, seed):
+    """§DEMO/SH-96 — the demo athlete's PAST: two earlier marathon builds behind the current block,
+    so the SH-94 durability card's compare-with-earlier-builds has two chips to draw (without them
+    the demo held no `race_result` activity at all, and the card showed only "… · now").
+
+    Called from seed_synthetic_db ONLY on demo=True, after the current block's loop, drawing from
+    its OWN random stream (seed + 1) — the current block's 24 weeks stay byte-identical, and the
+    past's activity ids continue from the block's last. The history is CONTINUOUS from the week of
+    build 1's start to the week before first_monday (build → 2 recovery weeks → base weeks → the
+    next build), so CTL and the charts have no hole to fall into. Same weekday layout, zones and
+    payload shape as the current block. Returns the last activity id used."""
+    import random
+    rnd = random.Random(seed + 1)
+    DEMO_PAST_R1_BACK_W = 104       # the older race, this many weeks before the demo A race
+    DEMO_PAST_R2_BACK_W = 52        # the newer one — and the demo's marathon PB
+    DEMO_PAST_BUILD_WEEKS = 20      # each build: the weeks ending ON its race (the card's own window)
+    DEMO_PAST_VOL0_KM = 40.0        # build volume ramps from here …
+    DEMO_PAST_VOL_PEAK_KM = 70.0    # … to here, a cut-back every 4th week
+    DEMO_PAST_LONG0_KM = 16.0       # the long run ramps from ~16 km …
+    DEMO_PAST_LONG_PEAK_KM = 32.0   # … to this peak 3 weeks out, then a 2-week taper
+    DEMO_PAST_REC_KM = (20.0, 25.0)     # the two post-race recovery weeks …
+    DEMO_PAST_BASE_KM = 37.0            # … then base weeks at ~35–40 km (long runs ≤ 16 km)
+    # Decoupling on a build's runs ≥ 16 km: b0 % at 18 km plus this slope per km beyond, stored ×100
+    # like the current block's (no created_at → decoupling_pct reads it by magnitude). b0 3.5 ⇒ a
+    # ~24 km 5 % horizon on build 1, 2.0 ⇒ ~30 km on build 2 — the newer build IS the more durable
+    # one; that improvement is the story the compare view tells.
+    DEMO_PAST_DECOUP_B0 = (3.5, 2.0)
+    DEMO_PAST_DECOUP_PER_KM = 0.25
+    DEMO_PAST_RACE_RESULTS = (("3:58:00", 164, 11.5),   # build 1: finish, hr_avg, race decoupling %
+                              ("3:44:00", 166, 7.0))    # build 2 — the PB
+    ZONES = {   # the current block's own table (seed_synthetic_db above) — the same athlete earlier
+        "easy":      {"pace": 375, "hr": 136, "spread": 14, "title": "Easy run"},
+        "threshold": {"pace": 295, "hr": 166, "spread": 16, "title": "Threshold"},
+        "long":      {"pace": 390, "hr": 146, "spread": 18, "title": "Long run"},
+    }
+
+    a_date = today + timedelta(weeks=16)                 # the demo A race (this block's objective)
+    def _sunday(d):
+        return d + timedelta(days=(6 - d.weekday()))     # … moved to its week's Sunday
+    races = [_sunday(a_date - timedelta(weeks=DEMO_PAST_R1_BACK_W)),
+             _sunday(a_date - timedelta(weeks=DEMO_PAST_R2_BACK_W))]
+    # build b = the DEMO_PAST_BUILD_WEEKS Mondays ending on its race's week (race day replaces that
+    # Sunday's long run); one plain week ahead of build 1 lands the history's first day on a Monday
+    build_monday = [r - timedelta(days=6, weeks=DEMO_PAST_BUILD_WEEKS - 1) for r in races]
+    hist_start = build_monday[0] - timedelta(weeks=1)
+    hist_span = max(1, (first_monday - hist_start).days)
+
+    def _vo2(day, zone):
+        # the past athlete's per-run vo2max: a touch under the current block's 46→54, rising across
+        # the two years (~44→50) with the same zone bump and noise
+        prog = (day - hist_start).days / hist_span
+        return round(44.0 + 6.0 * prog + {"easy": 0.0, "threshold": 1.5, "long": 0.5}[zone]
+                     + rnd.uniform(-0.8, 0.8), 1)
+
+    def _extras(day, km, zone, bidx):
+        # the demo payload fields the cards read — decoupling (the §3.3 durability read), a seasonal
+        # temperature (§EF's weather panel), the 1–5 subjective feel — same shape as the block's
+        extra = {}
+        if bidx is not None and km >= 16.0:
+            # the build's long runs carry the card's signal: pct = b0 + slope × (km − 18)
+            extra["aerobic_decoupling_pace"] = round(max(0.8, DEMO_PAST_DECOUP_B0[bidx]
+                + DEMO_PAST_DECOUP_PER_KM * (km - 18.0) + rnd.uniform(-0.3, 0.3)) * 100.0, 1)
+        else:
+            # shorter and non-build runs: the current block's own formula, mid-adaptation
+            extra["aerobic_decoupling_pace"] = round(max(120.0, 780.0 - 480.0 * 0.5
+                + 18.0 * (km - DURABILITY_MIN_KM) + rnd.uniform(-22, 22)), 1)
+        doy = day.timetuple().tm_yday
+        extra["temperature"] = round(12.0 + 11.0 * math.sin(2 * math.pi * (doy - 110) / 365.0)
+                                     + rnd.uniform(-2.0, 2.0), 1)
+        extra["subjective_feeling"] = max(1, min(5, (3 if zone == "long" else 4)
+                                                 + rnd.choice([-1, 0, 0, 1])))
+        return extra
+
+    monday = hist_start
+    while monday < first_monday:
+        bidx = wi = None                                  # which build, which of its 20 weeks
+        for b, m0 in enumerate(build_monday):
+            if m0 <= monday < m0 + timedelta(weeks=DEMO_PAST_BUILD_WEEKS):
+                bidx, wi = b, (monday - m0).days // 7
+        rec_wi = next((k for r in races                       # a post-race recovery week?
+                       for k, m in enumerate((r + timedelta(days=1), r + timedelta(days=8)))
+                       if monday == m), None)
+        if bidx is not None:
+            ramp = DEMO_PAST_VOL0_KM + (DEMO_PAST_VOL_PEAK_KM - DEMO_PAST_VOL0_KM) \
+                * (wi / (DEMO_PAST_BUILD_WEEKS - 1))
+            down = 0.7 if wi % 4 == 3 else 1.0                 # a cut-back every 4th week
+            taper = {17: 0.6, 18: 0.45, 19: 0.3}.get(wi, 1.0)    # the 2-week taper + a light race week
+            week_km = ramp * down * taper
+            if wi == DEMO_PAST_BUILD_WEEKS - 1:                # race week: light weekdays, …
+                long_km, quality_km = 0.0, 0.0                 # … the race IS Sunday's long run
+            elif wi >= 16:
+                long_km = {16: DEMO_PAST_LONG_PEAK_KM, 17: 14.0, 18: 10.0}[wi]
+                quality_km = week_km * 0.18
+            else:
+                long_km = (DEMO_PAST_LONG0_KM + (DEMO_PAST_LONG_PEAK_KM - DEMO_PAST_LONG0_KM)
+                           * (wi / 16.0)) * down
+                quality_km = week_km * 0.18
+        elif rec_wi is not None:
+            week_km, long_km, quality_km = DEMO_PAST_REC_KM[rec_wi], 10.0, 0.0
+        else:                                                  # base between builds
+            week_km = DEMO_PAST_BASE_KM + rnd.uniform(-2.0, 2.0)
+            long_km, quality_km = 15.0, week_km * 0.18
+        race_week = bidx is not None and wi == DEMO_PAST_BUILD_WEEKS - 1
+        slots = [(1, "easy"), (2, "easy" if (rec_wi is not None or race_week) else "threshold"),
+                 (3, "easy"), (5, "easy")]
+        if not race_week:
+            slots.append((6, "long"))
+        n_easy = sum(1 for _, z in slots if z == "easy")     # the easy slots share what quality + long leave
+        per = (week_km - long_km - quality_km) / n_easy
+        for dow, zone in slots:
+            km = quality_km if zone == "threshold" else (long_km if zone == "long" else per)
+            day = monday + timedelta(days=dow)
+            km = max(3.0, round(km + rnd.uniform(-0.6, 0.6), 1))
+            z = ZONES[zone]
+            dur = int(km * z["pace"])
+            hr_avg = z["hr"] + rnd.randint(-4, 4)
+            hr_max = hr_avg + z["spread"] + rnd.randint(0, 6)
+            aid += 1
+            upsert_activity(db, {
+                "id": aid, "date_time": f"{day.isoformat()}T18:30:00", "title": z["title"],
+                "sport": {"id": 1, "name": RUNNING_SPORT},
+                "distance": km, "duration": dur, "elapsed_time": dur + rnd.randint(20, 90),
+                "hr_avg": hr_avg, "hr_max": hr_max, "trimp": est_trimp(dur / 60.0, zone),
+                "cadence": rnd.randint(168, 176), "elevation_up": round(km * 6),
+                "vo2max": _vo2(day, zone), "use_vo2max": True,
+                "source": "synthetic", **_extras(day, km, zone, bidx),
+            })
+        if race_week:
+            finish, race_hr, race_dec = DEMO_PAST_RACE_RESULTS[bidx]
+            hh, mm, ss = (int(x) for x in finish.split(":"))
+            dur = hh * 3600 + mm * 60 + ss
+            race_day = races[bidx]
+            aid += 1
+            upsert_activity(db, {
+                "id": aid, "date_time": f"{race_day.isoformat()}T09:00:00", "title": "Demo Marathon",
+                "sport": {"id": 1, "name": RUNNING_SPORT}, "distance": 42.2,
+                "duration": dur, "elapsed_time": dur + 30,
+                "hr_avg": race_hr, "hr_max": race_hr + 16,
+                "trimp": est_trimp(dur / 60.0, "marathon"),
+                "cadence": 172, "elevation_up": 120,
+                "vo2max": _vo2(race_day, "long"), "use_vo2max": True,
+                "source": "synthetic",
+                "race_result": {                            # the shape real Runalyze rows carry
+                    "date": race_day.isoformat(), "activity_id": aid,
+                    "official_distance": 42200.0, "officially_measured": False,
+                    "name": "Demo Marathon", "priority_level": "unknown", "status": "completed"},
+                **_extras(race_day, 42.2, "long", None),
+                "aerobic_decoupling_pace": race_dec * 100.0,   # ×100 like the block's; no created_at
+            })
+        monday += timedelta(weeks=1)
+    return aid
 
 
 # ── §DEMO — keeping the demo demonstrable ───────────────────────────────────

@@ -10,6 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.82.1] - 2026-10-20
+
+### Fixed
+
+- **The demo athlete carries two earlier marathon builds, so the durability card has builds to compare.**
+  The 0.82.0 card finds past builds as running activities whose raw data carries `race_result`. The demo
+  athlete had none, so the card on the demo box showed only the current build and `/api/durability` returned
+  `past: []`. The demo seed now writes two earlier marathon builds behind the current 24-week block, raced
+  104 and 52 weeks before the demo's A race (moved to their Sunday), finishing 3:58:00 and 3:44:00. History is
+  continuous from 20 weeks before the first race to the current block: 20-week builds ramping from about 40 to
+  66 km a week with a cut-back every 4th week, long runs from 16 to 32 km, a 2-week taper, 2 recovery weeks
+  and base weeks of 35 to 40 km. Long-run decoupling rises 0.25 % per km beyond 18 km, so the 5 % horizons
+  read about 24 km and 30 km, and the race-day decoupling is 11.5 % and 7.0 %. The `race_result` block has the
+  shape of the real Runalyze rows. The card now shows the chips "2025" and "2026 (PB)", both horizon tiles and
+  filled Table bands.
+- **Side effects on the demo.** The plan is the same (week 1 79.1 km, phases Base 6 / Build 6 / Peak 2 /
+  Taper 3). The predicted marathon time moves from 2:25:43 to 2:47:30, because the engine now has race PBs to
+  correct against. The VO2max and efficiency charts span about two more years. The track record card is
+  unchanged: it reads scored forecasts, not race results. The hourly demo reset takes 1.5 s, up from 0.45 s.
+- The extra history comes from a separate random stream, with ids after the current block's, so the current
+  block is byte-identical. It is written only for the demo; the CI fixture is unchanged.
+
+Self-test: new `det/demo-past-builds` checks 2 past builds, each with a fit, horizons within 3 km of 24 and
+30, race decoupling 11.5 % and 7.0 %, the newer build as the PB, and that the plain fixture carries no
+`race_result`. It fails with the call removed. Battery 255 of 261 PASS · 0 FAIL · 5 skipped; golden plans
+unchanged; `test/run_local_test.sh` passes all modes. No engine change.
+
 ## [0.82.0] - 2026-10-20
 
 ### Changed
