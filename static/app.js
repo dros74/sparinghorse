@@ -1069,63 +1069,167 @@ async function loadDurability(){
   try{ renderDurability(await getJSON("/api/durability")); }
   catch(e){ tileFail(body, "Durability", loadDurability, e); }
 }
-// one bar per long run, height = decoupling %, coloured by its fade band; the dashed lines are the
-// engine's own thresholds. preserveAspectRatio="none" stretches the chart to the tile — fine for
-// bars, and the threshold dashes carry vector-effect:non-scaling-stroke so they stay hairlines.
-function durChartSvg(series, goodPct, highPct){
-  const pts=[...series].reverse();                 // chronological, oldest → newest
-  if(!pts.length) return "";
-  const W=1000,H=96,pad=4;
-  const vmax=Math.max(15, ...pts.map(p=>p.decoupling_pct))*1.08;
-  const y=v=>H-pad-(H-2*pad)*Math.min(v,vmax)/vmax;
-  const slot=(W-2*pad)/pts.length, bw=Math.max(2,slot*0.52);
-  const band=v=>v<goodPct?"ok":v<highPct?"warn":"danger";
-  const bars=pts.map((p,i)=>{
-    const x=pad+slot*i+(slot-bw)/2, top=y(p.decoupling_pct);
-    return `<rect class="${band(p.decoupling_pct)}" x="${x.toFixed(1)}" y="${top.toFixed(1)}" width="${bw.toFixed(1)}" height="${(H-pad-top).toFixed(1)}">`+
-      `<title>${esc(p.date)} · ${U.d(p.km)} ${U.unit} · ${p.decoupling_pct}%</title></rect>`;
+// ── Durability, build vs build (SH-94) ─────────────────────────────────────
+// One card, a Chart/Table switch. CHART: decoupling % (y) against distance km (x) — the current
+// build in accent with a solid fit line, ONE past build (chips) in blue dashed, the other past
+// builds small and pale; race runs as rings; dashes at 5 % / 10 %; a "5 % horizon" tile per build.
+// TABLE: distance-band medians × builds, the race's own decoupling as the last row. The headline
+// reads the current build's horizon. PRIVATE-only, like before. View remembered in sh.durView.
+let DUR = null;                                 // the last /api/durability payload (clicks re-render)
+const durState = {view: null, cmp: null};       // view "chart"|"table"; cmp = the compared past build's key
+
+function durViewPref(){
+  try{ const v = localStorage.getItem("sh.durView"); if(v === "chart" || v === "table") return v; }catch(e){}
+  return (window.matchMedia && matchMedia("(max-width: 640px)").matches) ? "table" : "chart";
+}
+function durSetView(v){
+  durState.view = v;
+  try{ localStorage.setItem("sh.durView", v); }catch(e){}
+  drawDurability();
+}
+// one inline SVG for the marks, HTML for every label (det/axis-legibility's flat rule: no <text>
+// in an app.js SVG). The SVG scales by viewBox ONLY (uniform — the dots stay round), so the label
+// layer positions in % of the plot box and the 11px type keeps its size at any width. Axes fixed at
+// 18–44 km / −4–18 % (the canvas's frame); runs under −4 % clamp onto the axis, counted in the footnote.
+function durChartHtml(B, cmpKey){
+  const X = km => 44 + (Math.min(Math.max(km, 18), 44) - 18) / 26 * 486;
+  const Y = p  => (18 - Math.min(Math.max(p, -4), 18)) / 22 * 260;
+  const builds = [...B.past, B.current];
+  let clamped = 0;
+  const ticksY = [15, 10, 5, 0].map(v =>
+    `<span class="durtick y" style="top:${(Y(v) / 300 * 100).toFixed(2)}%">${v} %</span>`).join("");
+  const ticksX = [18, 22, 26, 30, 34, 38, 42].map(v =>
+    `<span class="durtick x" style="left:${(X(v) / 540 * 100).toFixed(2)}%">${v}</span>`).join("");
+  const fitLine = (b, cls) => {
+    if(!b.fit) return "";
+    const train = b.runs.filter(r => !r.race);
+    if(!train.length) return "";
+    const a = Math.max(18, Math.min(...train.map(r => r.km))), z = Math.min(44, Math.max(...train.map(r => r.km)));
+    return `<line class="${cls}" x1="${X(a).toFixed(1)}" y1="${Y(b.fit.slope * a + b.fit.intercept).toFixed(1)}" x2="${X(z).toFixed(1)}" y2="${Y(b.fit.slope * z + b.fit.intercept).toFixed(1)}"/>`;
+  };
+  const dots = ["pale", "cmp", "now"].map(role => builds.filter(b =>
+    role === "now" ? b.is_current : role === "cmp" ? b.key === cmpKey : !b.is_current && b.key !== cmpKey
+  ).map(b => b.runs.map(r => {
+    if(r.pct < -4) clamped++;
+    const rad = role === "now" ? 5.5 : role === "cmp" ? 4.5 : 3.5;
+    const cy = Math.max(Y(r.pct), rad + 0.5);         // over-frame runs pin to the ceiling, not half off it
+    return `<circle class="durdot ${role}${r.race ? " ring" : ""}" cx="${X(r.km).toFixed(1)}" cy="${cy.toFixed(1)}" r="${rad}">` +
+      `<title>${esc(b.label)} · ${r.km.toFixed(1)} km · ${r.pct.toFixed(1)} %</title></circle>`;
+  }).join("")).join("")).join("");
+  const cmp = B.past.find(b => b.key === cmpKey);
+  const svg = `<svg viewBox="0 0 540 300" aria-hidden="true">`
+    + `<line class="durzero" x1="44" x2="530" y1="${Y(0).toFixed(1)}" y2="${Y(0).toFixed(1)}"/>`
+    + `<line class="durband5" x1="44" x2="530" y1="${Y(5).toFixed(1)}" y2="${Y(5).toFixed(1)}"/>`
+    + `<line class="durband10" x1="44" x2="530" y1="${Y(10).toFixed(1)}" y2="${Y(10).toFixed(1)}"/>`
+    + `<line class="duraxis" x1="44" x2="44" y1="0" y2="260"/><line class="duraxis" x1="44" x2="530" y1="260" y2="260"/>`
+    + (cmp ? fitLine(cmp, "durfit-cmp") : "") + fitLine(B.current, "durfit-now")
+    + dots + `</svg>`;
+  return {clamped, html: `<div class="durplot">${svg}${ticksY}${ticksX}<span class="durtick km">km</span></div>`};
+}
+function durTableHtml(B){
+  const builds = [...B.past, B.current];
+  const head = builds.map(b =>
+    `<div class="h${b.is_current ? " cur" : ""}">${esc(b.label)}${b.pb ? " · PB" : ""}</div>`).join("");
+  const cell = (b, v, sub, tint) =>
+    `<div class="durcell${b.is_current ? " cur" : ""}${tint ? " " + tint : ""}"><div class="v">${v}</div><div class="n">${sub}</div></div>`;
+  const tintOf = v => v < 5 ? "ok" : v < 10 ? "warn" : "danger";
+  const rows = B.bands.map((label, i) => `<div class="bandlabel">${esc(label)}</div>` + builds.map(b => {
+    const c = b.bands[i];
+    return c ? cell(b, `${c.median.toFixed(1)} %`, `${c.n} run${c.n === 1 ? "" : "s"}`, tintOf(c.median))
+             : cell(b, "—", "none yet", "empty");
+  }).join("")).join("");
+  const race = `<div class="bandlabel">Race</div>` + builds.map(b => {
+    if(b.race_pct != null) return cell(b, `${b.race_pct.toFixed(1)} %`, "race", tintOf(b.race_pct));
+    if(b.is_current && b.race_date){
+      const d = new Date(b.race_date + "T00:00:00");
+      return cell(b, esc(d.toLocaleDateString(undefined, {day: "numeric", month: "short"})), "race day", "empty");
+    }
+    return cell(b, "—", "none yet", "empty");
   }).join("");
-  const dash=(v,cls)=>vmax>v?`<line class="thresh ${cls}" x1="${pad}" x2="${W-pad}" y1="${y(v).toFixed(1)}" y2="${y(v).toFixed(1)}"/>`:"";
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${dash(goodPct,"ok")}${dash(highPct,"danger")}${bars}</svg>`;
+  return `<div class="durtblwrap"><div class="durtbl" style="grid-template-columns:84px repeat(${builds.length},minmax(0,1fr))">`
+    + `<div></div>${head}${rows}${race}</div></div>`
+    + `<div class="durtints"><span><i class="sw" style="background:color-mix(in oklab,var(--ok),var(--surface) 84%)"></i> under 5 %</span>`
+    + `<span><i class="sw" style="background:color-mix(in oklab,var(--warn),var(--surface) 84%)"></i> 5–10 %</span>`
+    + `<span><i class="sw" style="background:color-mix(in oklab,var(--danger),var(--surface) 86%)"></i> over 10 %</span></div>`;
+}
+function drawDurability(){
+  const host = $("#durbody"); if(!host || !DUR || !DUR.builds) return;
+  const B = DUR.builds, cur = B.current, past = B.past || [];
+  const sw = $("#durswitch");
+  if(sw) sw.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === durState.view)));
+  const cmp = past.find(b => b.key === durState.cmp) || past[past.length - 1] || null;
+  const nTrain = cur.runs.filter(r => !r.race).length;
+  const below = b => b.horizon_km != null && b.horizon_km < B.min_km;   // 5 % already passed on the shortest runs
+  const headline = below(cur)
+    ? `This build passes 5 % before ${Math.round(B.min_km)} km`
+    : cur.horizon_km != null
+    ? `This build holds under 5 % to about ${cur.horizon_km} km`
+    : `${nTrain} long run${nTrain === 1 ? "" : "s"} this build — the line needs 4`;
+  let body = "", clamped = 0;
+  if(durState.view === "table"){
+    body = `<p class="durintro">Median fade of the long runs in each distance band, build by build.
+      Read across a row: same distance, different year.</p>` + durTableHtml(B);
+  }else{
+    const chart = durChartHtml(B, cmp && cmp.key);
+    clamped = chart.clamped;
+    const chips = past.length ? `<div class="durchips"><span>Compare with</span>` + past.map(b =>
+      `<button type="button" data-k="${esc(b.key)}" aria-pressed="${String(cmp && b.key === cmp.key)}">${esc(b.label)}${b.pb ? " (PB)" : ""}</button>`).join("") + `</div>` : "";
+    const legend = `<div class="durlegend"><span><i class="sw" style="background:var(--accent)"></i> This build</span>`
+      + (cmp ? `<span><i class="sw" style="background:var(--durcmp)"></i> ${esc(cmp.label)} build</span>` : "")
+      + `<span><i class="sw ring"></i> race</span><span>dashed: 5 % and 10 %</span></div>`;
+    const tiles = [cur, ...past].map(b => {
+      const v = below(b) ? `before ${Math.round(B.min_km)} km` : b.horizon_km != null
+        ? (b.extrapolated && b.longest_km != null ? `beyond ${Math.round(b.longest_km)} km` : `${b.horizon_km} km`) : "—";
+      const nt = b.is_current ? `${nTrain} run${nTrain === 1 ? "" : "s"} so far` : b.pb ? "PB build" : "";
+      return `<div class="durhz-t${b.is_current ? " now" : cmp && b.key === cmp.key ? " cmp" : ""}">`
+        + `<div class="yr">${esc(b.label)}</div><div class="km">${v}</div><div class="nt">${nt}</div></div>`;
+    }).join("");
+    body = `<p class="durintro">Fade (aerobic decoupling) against the distance of each run of
+      ${Math.round(B.min_km)} km or more. Longer runs fade more, so compare at the same distance:
+      a line further right holds longer.</p>`
+      + chips + chart.html + legend
+      + `<div class="durhz" style="grid-template-columns:repeat(${past.length + 1},minmax(0,1fr))">${tiles}</div>`;
+  }
+  // the canvas footnote, numbers computed: the current line's base, the effort context against the
+  // oldest past build (median HR decides "easier"/"harder"), and the count clamped off the chart.
+  let foot = `Runs of ${Math.round(B.min_km)} km or more in the 20 weeks before each race.`;
+  if(nTrain) foot += ` The ${esc(cur.label.replace(" · now", ""))} line rests on ${nTrain} run${nTrain === 1 ? "" : "s"}`;
+  const hrs = b => b.runs.filter(r => !r.race && r.hr).map(r => r.hr);
+  const old = past[0], ch = hrs(cur), oh = old ? hrs(old) : [];
+  if(nTrain && old && ch.length && oh.length){
+    const med = a => a.slice().sort((x, y) => x - y)[Math.floor((a.length - 1) / 2)];
+    foot += `, run ${med(ch) <= med(oh) ? "easier" : "harder"} (HR ${Math.min(...ch)}–${Math.max(...ch)}) than ${esc(old.label)}'s (${Math.min(...oh)}–${Math.max(...oh)})`;
+  }
+  if(nTrain) foot += ".";
+  if(clamped) foot += ` ${clamped} run${clamped === 1 ? "" : "s"} below −4 % sit${clamped === 1 ? "s" : ""} on the chart's floor.`;
+  host.innerHTML = `<h2 class="durhead">${esc(headline)}</h2>${body}<p class="durfoot">${foot}</p>`;
+  host.querySelectorAll(".durchips button[data-k]").forEach(b =>
+    b.addEventListener("click", () => { durState.cmp = b.dataset.k; drawDurability(); }));
 }
 function renderDurability(d){
-  const host=$("#durbody"); if(!host) return;
+  const host = $("#durbody"); if(!host) return;
   if(!d || d.ok===false){
     host.innerHTML=`<div class="empty">No long runs with decoupling yet — the tracker starts once a run of ${Math.round(U.d(d&&d.min_km?d.min_km:16))}&nbsp;${U.unit} or more lands with HR data.</div>`;
     return;
   }
-  const SCALE=15;                                    // % full-scale — gauge, scale and chart agree (the one-definition rule)
-  const good=d.good_below_raw/100, high=d.high_above_raw/100, med=d.recent_median_pct;
-  const pct=x=>Math.max(0,Math.min(100, x/SCALE*100));
-  const pillCls=d.verdict==="durable"?"inb":d.verdict==="high fade"?"out":"mid";
-  const wordCls=d.verdict==="durable"?"ok":d.verdict==="high fade"?"danger":"warn";
-  const pts=d.series||[];
-  const vTrend=d.trend==null?"collecting":d.trend.startsWith("distance mix")?"mix shifted":d.trend;
-  const trendCap={improving:"economy decay shrinking across your recent long runs — getting more durable",
-    steady:"holding steady across your recent long runs",
-    declining:"economy decay growing across your recent long runs — watch the fade",
-    collecting:"the trend reads once about twelve long runs are banked (recent six vs prior six)",
-    "mix shifted":"your recent long-run distances changed, so the trend is unreliable — compare like distances"}[vTrend]||"";
-  const datesTxt=pts.length>1?` · ${monYr(pts[pts.length-1].date)}–${monYr(pts[0].date)}`:"";
-  const priorTxt=d.prior_median_raw==null?"":`; prior 6-run median ${(d.prior_median_raw/100).toFixed(1)}%`;
-  host.innerHTML=`
-    <div class="gauge"><div class="band" style="left:0;width:${pct(good)}%"></div>
-      <div class="band danger" style="left:${pct(high)}%;width:${100-pct(high)}%"></div>
-      <div class="mark" style="left:${pct(med)}%"></div>
-      <div class="gyou" style="--gx:${pct(med)}%"><span class="${pillCls}">you: ${med.toFixed(1)}%</span></div></div>
-    <div class="gauge-scale"><span>0%</span><span><b>${good}%</b></span><span><b>${high}%</b></span><span>${SCALE}%</span></div>
-    <p class="durverdict"><b class="${wordCls}">${esc(d.verdict)}</b> — median of your last 6 long runs
-      (≥${Math.round(U.d(d.min_km))} ${U.unit})${esc(priorTxt)} · ${d.n_long} tracked</p>
-    <p class="explain">Aerobic decoupling — how much your
-      pace:HR drifts from the first half of a long run to the second. Low means your running economy holds up over
-      the distance; high or rising means it decays. Measure-first: tracked and trended, governing nothing. Compare
-      like distances — decoupling drifts with distance, so the trend voids itself when the long-run mix changes.</p>
-    <div class="acwr-foot">
-      <span class="k">Long-run tracker · ${pts.length} runs ≥${Math.round(U.d(d.min_km))} ${U.unit}${datesTxt}</span>
-      <div class="durchart">${durChartSvg(pts,good,high)}</div>
-      <span class="v">${esc(vTrend)}</span>
-      <span class="cap">${esc(trendCap)} · dashes at ${good}% / ${high}% · hover a bar for its distance</span>
-    </div>`;
+  DUR = d;
+  if(!durState.view) durState.view = durViewPref();
+  if(!durState.cmp){
+    const past = (d.builds && d.builds.past) || [];
+    durState.cmp = ((past.find(b => b.pb) || past[past.length - 1] || {}).key) || null;
+  }
+  // the Chart/Table switch rides in the card's title row (index.html owns the title; built once)
+  const title = document.querySelector("#durcard .acwr-title");
+  if(title && !$("#durswitch")){
+    const swEl = document.createElement("span");
+    swEl.id = "durswitch"; swEl.setAttribute("role", "group"); swEl.setAttribute("aria-label", "View");
+    swEl.innerHTML = `<button type="button" data-v="chart" aria-pressed="true">Chart</button><button type="button" data-v="table" aria-pressed="false">Table</button>`;
+    swEl.addEventListener("click", e => {
+      const b = e.target.closest("button[data-v]"); if(b) durSetView(b.dataset.v);
+    });
+    title.appendChild(swEl);
+  }
+  drawDurability();
 }
 // Opportunistic page-load sync (private only): pull any activities synced to Runalyze since the
 // last sync — throttled server-side — so a run finished earlier today lands without the manual

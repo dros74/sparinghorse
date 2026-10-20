@@ -4200,6 +4200,7 @@ def run_metrics_analysis(db):
 # second half). MEASURE-FIRST (🔵): we SURFACE the signal + a trend and accumulate cases — it governs NO
 # prescription until my corpus shows it predicts my race fade (the heat-coefficient discipline, §0).
 DURABILITY_MIN_KM = 16.0       # a run long enough for economy decay to manifest (durability is a long-run trait)
+DURABILITY_BUILD_MIN_KM = 18.0  # the build-vs-build read's floor (SH-94) — the 16 km tracker floor stays
 DURABILITY_GOOD_RAW = 500.0    # decoupling below this on a long run ≈ durable (economy held); Runalyze raw units
 DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the distance
 # Runalyze changed the unit of aerobic_decoupling_pace on 31 Jul 2025: activities created before it carry
@@ -4383,6 +4384,8 @@ def durability_signal(db, recent_n=6):
         "prior_median_raw": med_prior, "trend": trend, "verdict": verdict,
         "good_below_raw": DURABILITY_GOOD_RAW, "high_above_raw": DURABILITY_HIGH_RAW,
         "recent": recent,
+        # SH-94 — the build-vs-build read the card now draws (chart + table). Rides the same rows.
+        "builds": durability_builds(db, rows),
         # the readiness-section tracker chart's points (0.32.0): newest-first long runs with km on
         # every point, so duration is never hidden behind the decoupling trace (the §55d caveat —
         # on my corpus longer runs decouple LESS; a chart that hides distance lies). Capped for the wire.
@@ -4396,8 +4399,123 @@ def durability_signal(db, recent_n=6):
             "mix shifts. Exploratory.",
             "Runalyze stores decoupling as percent ×100 before 31 Jul 2025 and as plain percent after; both are "
             "normalised to percent, and the raw figure here is that percent ×100.",
+            "The 5 % horizon is a straight line through few runs, and it comes from easier or harder long "
+            "runs build to build — a sketch to compare, not a prediction.",
         ],
     }
+
+
+# SH-94 — the build-vs-build read. A BUILD = the 140 days ending ON a race day (race day included);
+# the card lines the current build up against the same-distance past builds, because decoupling only
+# compares like for like when the distance axis stays visible.
+DURABILITY_BANDS = ((18.0, 22.0, "18–22 km"), (22.0, 26.0, "22–26 km"),
+                    (26.0, 29.5, "26–30 km"), (29.5, None, "30 km +"))
+_MONTH_ABBR = (None, "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def durability_builds(db, rows, today=None):
+    """SH-94 durability, build vs build. `rows` = run_metrics(db, with_projection=False) (decoupling
+    already percent). Returns {"min_km", "current", "past" (oldest first), "bands" (labels)}; each
+    build {"key", "label", "race_date", "is_current", "pb", "runs": [{"date","km","pct","race","hr"}]
+    chronological, "fit": {"slope","intercept","n"}|None, "horizon_km", "extrapolated", "longest_km",
+    "bands": [{"median","n"}|None per band], "race_pct"}.
+
+    Current build = the earliest upcoming A objective (date ≥ today); without one, the 140 days ending
+    today ("Last 20 weeks"). Past builds = race_result activities at the current race's distance (the
+    ±15% match _race_day_activity uses; no current race → the longest race distance present), newest 3.
+    A run inside two windows belongs to the LATER race — except a build's own race run, which always
+    stays with its build. ANY run carrying a race result (a half raced inside a marathon build is a race
+    effort, not a long run) is flagged race, drawn as a ring, and stays out of the fit and the bands;
+    race_pct reports the build's OWN race only. Fit = OLS pct~km over the non-race runs, only when
+    n ≥ 4 and the slope is positive; horizon = the km where the fit crosses 5 %, flagged extrapolated
+    once it passes the build's longest non-race run by more than 3 km. Display-only, like the signal."""
+    import statistics as _st
+    import math as _m
+    from datetime import date as _d, timedelta as _td
+    today = today or _d.today()
+
+    try:
+        obj = db.execute(
+            "SELECT type, date FROM objectives WHERE priority='A' AND status='upcoming' "
+            "AND removed_at IS NULL AND date >= ? ORDER BY date LIMIT 1", (today.isoformat(),)).fetchone()
+    except Exception:                                   # minimal det fixtures carry no objectives table
+        obj = None
+    race_type, cur_date = (obj["type"], obj["date"]) if obj else (None, None)
+    cur_end = _d.fromisoformat(cur_date) if cur_date else today
+
+    target_km = RACE_KM.get(race_type) if race_type else None
+    races_all = db.execute(
+        "SELECT id, date, distance, duration FROM activities "
+        "WHERE LOWER(sport) LIKE '%run%' AND json_extract(raw,'$.race_result') IS NOT NULL").fetchall()
+    race_ids = {r["id"] for r in races_all}             # every race effort, whatever its distance
+    races = races_all
+    if not target_km and races:                         # no current A race → the longest race distance present
+        target_km = max(r["distance"] for r in races)
+    if target_km:
+        races = [r for r in races if abs(r["distance"] - target_km) / target_km <= 0.15]
+    races = sorted(races, key=lambda r: r["date"])[-3:]             # the newest 3 past builds
+
+    # windows: (race_date − 140d, race_date], race day included; a run inside two windows → the later
+    # race — except a race run itself, which always belongs to its OWN build (a 42 km race effort
+    # poached into the next build's training set would poison its fit and bands).
+    spans = [(_d.fromisoformat(r["date"]), r) for r in races] + [(cur_end, None)]
+    own_race = {r["id"]: _d.fromisoformat(r["date"]) for r in races}
+    builds_of = {}
+    for r in rows:
+        if (r.get("km") or 0) < DURABILITY_BUILD_MIN_KM or r.get("decoupling") is None:
+            continue
+        if r["id"] in own_race:
+            builds_of.setdefault(own_race[r["id"]], []).append(r)
+            continue
+        rd = _d.fromisoformat(r["date"])
+        for end, race in sorted(spans, key=lambda t: t[0], reverse=True):   # latest race first wins the overlap
+            if end - _td(days=140) <= rd <= end:
+                builds_of.setdefault(end, []).append(r)
+                break
+
+    def _build(end, race, is_current):
+        runs = sorted(builds_of.get(end, []), key=lambda r: r["date"])
+        entries = [{"date": r["date"], "km": round(r["km"], 2), "pct": round(r["decoupling"], 1),
+                    "race": r["id"] in race_ids, "hr": r.get("hr")} for r in runs]
+        train = [e for e in entries if not e["race"]]
+        fit = None
+        if len(train) >= 4:
+            xs = [e["km"] for e in train]                           # rounded km/pct: fit drift is < 0.05 km
+            ys = [e["pct"] for e in train]                          # on the horizon, invisible on the chart
+            mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+            sxx = sum((x - mx) ** 2 for x in xs)
+            slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx if sxx > 0 else 0.0
+            intercept = my - slope * mx
+            if slope > 0:
+                fit = {"slope": round(slope, 3), "intercept": round(intercept, 2), "n": len(train)}
+        longest = max((e["km"] for e in train), default=None)
+        horizon = None
+        if fit:
+            horizon = int(_m.floor((5.0 - fit["intercept"]) / fit["slope"] + 0.5))
+        bands = []
+        for lo, hi, _label in DURABILITY_BANDS:
+            cell = [e["pct"] for e in train if e["km"] >= lo and (hi is None or e["km"] < hi)]
+            bands.append({"median": round(_st.median(cell), 1), "n": len(cell)} if cell else None)
+        race_pct = next((e["pct"] for e, r in zip(entries, runs) if race and r["id"] == race["id"]), None)
+        return {"key": end.isoformat(), "label": "", "race_date": end.isoformat(),
+                "is_current": is_current, "pb": False, "runs": entries, "fit": fit,
+                "horizon_km": horizon,
+                "extrapolated": bool(fit and longest is not None and horizon > longest + 3),
+                "longest_km": longest, "bands": bands, "race_pct": race_pct}
+
+    past = [_build(end, race, False) for end, race in spans[:-1]]
+    current = _build(cur_end, None, True)
+    current["label"] = f"{cur_end.year} · now" if cur_date else "Last 20 weeks"
+    current["race_date"] = cur_date                    # None on the no-objective fallback
+    years = [_d.fromisoformat(b["race_date"]).year for b in past]
+    for b in past:
+        d = _d.fromisoformat(b["race_date"])
+        b["label"] = f"{_MONTH_ABBR[d.month]} {d.year}" if years.count(d.year) > 1 else str(d.year)
+    timed = [(r["duration"], b) for b, (_, r) in zip(past, spans[:-1]) if r["duration"]]
+    if timed:                                           # PB = the fastest finish among the kept past builds
+        min(timed, key=lambda t: t[0])[1]["pb"] = True
+    return {"min_km": DURABILITY_BUILD_MIN_KM, "current": current, "past": past,
+            "bands": [label for _, _, label in DURABILITY_BANDS]}
 
 
 WORKED_EXAMPLE_LOOKBACK = 21   # days back to find a same-route peer (terrain held, fitness ~held)

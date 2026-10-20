@@ -12849,6 +12849,161 @@ def _stc_durability_api():
                got={"failures": fails or "none"})
 
 
+def _stc_durability_builds():
+    """SH-94 — durability_builds: the build-vs-build read behind the durability card's chart/table.
+    Hand-computed fixture: three past marathon races (two sharing 2024 → 'Sep 2024'/'Dec 2024' labels,
+    the middle one the PB on fastest finish) + an upcoming A marathon objective. Locks: (a) window
+    membership — 140 days ending ON race day, an overlap run belongs to the LATER race, a race run
+    itself always stays with its own build; (b) the race run is flagged and kept OUT of fit and bands
+    (slope/bands are exact — including the race would move both); (c) fit only at n ≥ 4 with a positive
+    slope, horizon = (5 − intercept)/slope rounded to the km; (d) extrapolated past longest + 3 km;
+    (e) PB pick; (f) no objectives table (or no upcoming A) → 'Last 20 weeks' fallback. In-memory."""
+    import sqlite3 as _sq, json as _j
+    from datetime import date as _date
+    def mkdb(with_objectives=True, rows=None):
+        mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+        mem.executescript(
+            "CREATE TABLE activities(id INTEGER PRIMARY KEY, date_time TEXT, date TEXT, sport TEXT, "
+            "distance REAL, duration REAL, hr_avg INTEGER, hr_max INTEGER, trimp REAL, training_effect REAL, raw TEXT);"
+            "CREATE TABLE shape_snapshots(snapshot_date TEXT PRIMARY KEY, captured_at TEXT, effective_vo2max REAL, "
+            "effective_vo2max_progress REAL, fitness REAL, fatigue REAL, performance REAL, fitness_pct REAL, "
+            "acwr REAL, marathon_shape REAL, hrv_baseline REAL, monotony REAL, training_strain REAL, raw TEXT);"
+            "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
+            "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
+        if with_objectives:
+            mem.execute("CREATE TABLE objectives(id INTEGER PRIMARY KEY, type TEXT, label TEXT, date TEXT, "
+                        "target TEXT, priority TEXT, status TEXT, created_at TEXT, removed_at TEXT)")
+            mem.execute("INSERT INTO objectives(type,label,date,target,priority,status,created_at) "
+                        "VALUES('marathon','Fixture Marathon','2026-12-06','finish','A','upcoming','2026-01-01')")
+        # (date, km, decoupling %, duration s, race?) — decoupling stored as plain percent, no created_at
+        # (the magnitude fallback reads |v| < 50 as percent)
+        rows = rows or [("2024-06-01", 19.0, 3.0, 6840, 0), ("2024-07-01", 21.0, 4.0, 7560, 0),      # Sep-2024 build
+                ("2024-09-01", 42.5, 9.0, 14400, 1),                                        # R1 race (4:00)
+                ("2024-08-20", 20.0, 3.0, 7200, 0),        # inside BOTH the Sep- and Dec-2024 windows
+                ("2024-10-01", 18.0, 2.0, 6480, 0), ("2024-10-15", 22.0, 4.0, 7920, 0),
+                ("2024-11-01", 24.0, 5.0, 8640, 0),
+                ("2024-12-01", 42.7, 11.0, 14000, 1),                                       # R2 race (3:53 → PB)
+                ("2025-08-01", 18.0, 0.0, 6480, 0), ("2025-09-01", 20.0, 2.0, 7200, 0),
+                ("2025-10-01", 22.0, 4.0, 7920, 0), ("2025-11-01", 23.0, 5.0, 8280, 0),
+                ("2025-12-07", 42.7, 12.5, 15000, 1),                                       # R3 race (4:10)
+                ("2026-08-01", 18.0, -2.0, 6480, 0), ("2026-09-01", 19.0, -1.0, 6840, 0),
+                ("2026-10-01", 20.0, 0.0, 7200, 0), ("2026-11-01", 21.0, 1.0, 7560, 0),      # current build
+                ("2024-10-20", 21.1, 6.0, 6000, 1),         # a half raced inside the Dec-2024 build: race effort, not a long run
+                ("2023-11-01", 20.0, 3.0, 7200, 0), ("2023-12-03", 42.2, 8.0, 15500, 1)]   # a 4th past build: over the cap
+        for i, (d, km, dec, dur, race) in enumerate(rows, start=1):
+            raw = {"aerobic_decoupling_pace": dec}
+            if race:
+                raw["race_result"] = {"date": d, "activity_id": i, "official_distance": km * 1000}
+            mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,duration,hr_avg,raw) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (i, d + "T09:00", d, S.RUNNING_SPORT, km, dur, 150, _j.dumps(raw)))
+        mem.executescript(S.RUN_METRICS_VIEW)
+        mem.commit(); return mem
+    fails = []
+    today = _date(2026, 11, 15)
+    mem = mkdb()
+    B = S.durability_builds(mem, S.run_metrics(mem, with_projection=False), today=today)
+
+    cur, past = B["current"], B["past"]
+    if B["min_km"] != 18.0:
+        fails.append(f"min_km={B['min_km']} — the build read's floor is 18 km")
+    if B["bands"] != ["18–22 km", "22–26 km", "26–30 km", "30 km +"]:
+        fails.append(f"band labels off: {B['bands']}")
+
+    # current build: the upcoming A objective's window, fit (18..21 → −2..1): slope 1.0, intercept −20,
+    # horizon (5+20)/1 = 25 km, longest 21 → 25 > 21+3 ⇒ extrapolated
+    if not cur["is_current"] or cur["label"] != "2026 · now" or cur["race_date"] != "2026-12-06":
+        fails.append(f"current build identity off: {cur['label']} / {cur['race_date']}")
+    if cur["fit"] != {"slope": 1.0, "intercept": -20.0, "n": 4}:
+        fails.append(f"current fit off: {cur['fit']} — want slope 1.0 / intercept −20.0 / n 4")
+    if cur["horizon_km"] != 25 or cur["extrapolated"] is not True or cur["longest_km"] != 21.0:
+        fails.append(f"current horizon off: {cur['horizon_km']} km extrap={cur['extrapolated']} "
+                     f"(want 25 km, extrapolated past 21+3)")
+    if cur["race_pct"] is not None:
+        fails.append(f"current race_pct={cur['race_pct']} — the race has not been run")
+
+    if [b["label"] for b in past] != ["Sep 2024", "Dec 2024", "2025"]:
+        fails.append(f"past labels off: {[b['label'] for b in past]} — two 2024 races must disambiguate "
+                     f"to 'Sep 2024'/'Dec 2024', oldest first")
+    sep, dec, y25 = past
+    # (e) PB = the fastest finish: Dec 2024's 14000 s beats 14400 / 15000
+    if not dec["pb"] or sep["pb"] or y25["pb"]:
+        fails.append(f"PB pick off: Sep={sep['pb']} Dec={dec['pb']} 2025={y25['pb']} — Dec 2024 is fastest")
+    # (a) the overlap run (2024-08-20) sits in both the Sep-2024 and Dec-2024 windows → the LATER race
+    if any(r["date"] == "2024-08-20" for r in sep["runs"]):
+        fails.append("the overlap run landed in Sep 2024 — a run in two windows belongs to the later race")
+    if not any(r["date"] == "2024-08-20" for r in dec["runs"]):
+        fails.append("the overlap run is missing from Dec 2024 — the later race must claim it")
+    # (a') but a race run itself is never poached: Sep 2024 keeps its own 42.5 km race, flagged
+    srace = [r for r in sep["runs"] if r["race"]]
+    if len(srace) != 1 or srace[0]["date"] != "2024-09-01" or sep["race_pct"] != 9.0:
+        fails.append(f"Sep 2024 lost its race run: {srace} race_pct={sep['race_pct']}")
+    if any(r["km"] == 42.5 for r in dec["runs"]):
+        fails.append("Sep 2024's race run leaked into Dec 2024's build — it belongs to its own race")
+    # (c) n < 4 ⇒ no fit, no horizon (Sep 2024 has two training runs)
+    if sep["fit"] is not None or sep["horizon_km"] is not None:
+        fails.append(f"Sep 2024 fit/horizon should be None at n=2: {sep['fit']} / {sep['horizon_km']}")
+    if sep["bands"] != [{"median": 3.5, "n": 2}, None, None, None]:
+        fails.append(f"Sep 2024 bands off: {sep['bands']}")
+    # (b) Dec 2024: train (18,2)(20,3)(22,4)(24,5) → slope 0.5, intercept −7.0, horizon 24, longest 24
+    # ⇒ NOT extrapolated; the 42.7 km race (11.0 %) stays out of fit and bands (exact values catch both)
+    if dec["fit"] != {"slope": 0.5, "intercept": -7.0, "n": 4}:
+        fails.append(f"Dec 2024 fit off: {dec['fit']} — want slope 0.5 / intercept −7.0 / n 4 "
+                     f"(a race run in the fit would move this)")
+    if dec["horizon_km"] != 24 or dec["extrapolated"] is not False:
+        fails.append(f"Dec 2024 horizon off: {dec['horizon_km']} extrap={dec['extrapolated']} (want 24, held)")
+    if dec["bands"] != [{"median": 2.5, "n": 2}, {"median": 4.5, "n": 2}, None, None]:
+        fails.append(f"Dec 2024 bands off: {dec['bands']} — the race must not land in '30 km +'")
+    if dec["race_pct"] != 11.0:
+        fails.append(f"Dec 2024 race_pct={dec['race_pct']} — want the race's own 11.0")
+    # 2025: slope 1.0, intercept −18.0 → horizon 23
+    if y25["fit"] != {"slope": 1.0, "intercept": -18.0, "n": 4} or y25["horizon_km"] != 23:
+        fails.append(f"2025 fit/horizon off: {y25['fit']} / {y25['horizon_km']}")
+    if y25["race_pct"] != 12.5:
+        fails.append(f"2025 race_pct={y25['race_pct']}")
+
+    # (f) no objectives table at all (the minimal det fixtures) → the 140 days ending today
+    bare = mkdb(with_objectives=False)
+    B2 = S.durability_builds(bare, S.run_metrics(bare, with_projection=False), today=today)
+    if not B2["current"]["is_current"] or B2["current"]["label"] != "Last 20 weeks" \
+            or B2["current"]["race_date"] is not None:
+        fails.append(f"no-objective fallback off: {B2['current']['label']} / {B2['current']['race_date']}")
+    if len(B2["past"]) != 3:                        # longest race distance present still groups the past builds
+        fails.append(f"fallback past builds off: {len(B2['past'])} — the longest race distance should rule")
+    # (g) the half marathon raced inside Dec 2024 is flagged race and stays out of fit and bands, while
+    # race_pct stays the build's OWN race (11.0); the 2023 marathon is the 4th past build and is dropped
+    half = [r for r in dec["runs"] if r["km"] == 21.1]
+    if len(half) != 1 or half[0]["race"] is not True:
+        fails.append(f"the half marathon inside Dec 2024 should be flagged race: {half}")
+    if any(r["date"].startswith("2023") for b in past for r in b["runs"]) or len(past) != 3:
+        fails.append(f"past builds should be capped at the newest 3: {[b['label'] for b in past]}")
+    # (h) a build whose fit crosses 5 % below the 18 km floor reports that horizon (the card says "before 18 km");
+    # two past builds tied on finish time must not raise (the PB pick compares durations only)
+    low = mkdb(rows=[("2024-12-01", 42.2, 10.0, 14000, 1), ("2025-12-07", 42.2, 11.0, 14000, 1),
+                     ("2025-08-01", 18.0, 6.0, 6480, 0), ("2025-09-01", 20.0, 7.0, 7200, 0),
+                     ("2025-10-01", 22.0, 8.0, 7920, 0), ("2025-11-01", 24.0, 9.0, 8640, 0)])
+    try:
+        B3 = S.durability_builds(low, S.run_metrics(low, with_projection=False), today=today)
+        l25 = B3["past"][-1]
+        if l25["horizon_km"] is None or l25["horizon_km"] >= B3["min_km"]:
+            fails.append(f"below-floor horizon off: {l25['horizon_km']} (want 16, under {B3['min_km']})")
+        if sum(1 for b in B3["past"] if b["pb"]) != 1:
+            fails.append(f"a duration tie should still pick exactly one PB: {[b['pb'] for b in B3['past']]}")
+    except Exception as e:
+        fails.append(f"below-floor / PB-tie fixture raised {type(e).__name__}: {e}")
+    low.close()
+    mem.close(); bare.close()
+    return _st("det", "durability-builds",
+               "SH-94 build-vs-build durability read: 140-day windows ending on race day; overlap → later "
+               "race, but a race run stays with its own build and out of fit/bands; fit n≥4 + positive slope; "
+               "5 % horizon rounded to the km, extrapolated past longest + 3 km; PB = fastest finish; "
+               "no upcoming A objective → 'Last 20 weeks'",
+               passed=not fails,
+               expect="current 25 km extrapolated; Dec 2024 slope 0.5/intercept −7/horizon 24/PB; Sep 2024 "
+                      "no fit; overlap run to the later race; labels Sep/Dec 2024; fallback 'Last 20 weeks'",
+               got={"failures": fails or "none"})
+
+
 def _stc_worked_example():
     """The auto-generated controlled worked example: same-route deltas vs the nearest peer + the FACT of
     feel/objective divergence — and crucially NO per-case verdict (the n=1 trap this session disproved).
@@ -20460,10 +20615,11 @@ def _stc_axis_legibility():
             fails.append(f"(a) the SVG at app.js line {js.count(chr(10), 0, m.start()) + 1} stretches "
                          f"AND letters itself in <text> — those glyphs are squeezed with the trace")
     # 0.41.0: 6 → 7 for §EF's `effPlot`. ONE source literal, drawn TWICE (efficiency + temperature),
-    # so this count tracks chart BUILDERS, not rendered panels — label-free by construction like the
-    # durability tracker: dots, a fitted line, native <title> tooltips, every value HTML around it.
-    if stretched != 7:
-        fails.append(f"(a) expected the 7 stretched charts, found {stretched}")
+    # so this count tracks chart BUILDERS, not rendered panels. SH-94: 7 → 6 — the durability card's
+    # build chart left the stretched family: uniform-viewBox SVG marks + an HTML label layer in % of
+    # the plot box, so its dots stay round and its 11px type keeps its size at any width.
+    if stretched != 6:
+        fails.append(f"(a) expected the 6 stretched charts, found {stretched}")
     # …and the flat rule, which is what actually closes the accumulator hole
     for m in S.re.finditer(r"<text[\s>]", live_js):
         fails.append(f"(a) app.js line {live_js.count(chr(10), 0, m.start()) + 1} builds an SVG <text>: "
@@ -21105,7 +21261,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_seed_anchor(), lambda: _stc_seed_resync(),
                  lambda: _stc_today_actual(),
                  lambda: _stc_frequency_met(),
-                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_decoupling_units(), lambda: _stc_durability_api(), lambda: _stc_worked_example(),
+                 lambda: _stc_run_metrics(), lambda: _stc_durability(), lambda: _stc_decoupling_units(), lambda: _stc_durability_api(), lambda: _stc_durability_builds(), lambda: _stc_worked_example(),
                  lambda: _stc_diff_load_fingerprint(), lambda: _stc_cross_phase_freeze(),
                  lambda: _stc_cross_phase_freeze_integration(),
                  lambda: _stc_feasibility_floor(),

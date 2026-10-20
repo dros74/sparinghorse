@@ -664,15 +664,16 @@ async function runFull() {
   ok(`a snapshot whose field ≠ its ratio paints the RATIO (${pillTxt.trim()})`, /you: 0\.87/.test(pillTxt));
   await page.evaluate(() => loadShape());   // put the real snapshot back for the rest of the run
 
-  // ── 0.32.0 — the durability tracker (§3.3, private-only) ──────────────────
-  // On the seed no long run carries decoupling, so the card must reach its HONEST empty state —
+  // ── 0.32.0 / SH-94 — the durability card, build vs build (§3.3, private-only) ─────────────
+  // On the seed no long run carries decoupling, so the card must reach its true empty state —
   // then drive the REAL renderer with a synthetic populated payload (the gauge-ratio test's
-  // pattern) to watch the gauge, the verdict and the per-run bars actually render.
+  // pattern) to watch the chart, chips, horizon tiles and the Chart/Table switch actually render.
   await page.waitForFunction(
     () => { const b = document.querySelector('#durbody'); return b && !/Loading/.test(b.innerText); },
     { timeout: 15000 });
-  ok('durability card renders its honest empty state on the seed',
+  ok('durability card renders its true empty state on the seed',
      /No long runs with decoupling yet/.test(await page.locator('#durbody').innerText()));
+  const drun = (date, km, pct, race = false, hr = 146) => ({ date, km, pct, race, hr });
   const durPayload = {
     ok: true, min_km: 16, n_long: 12,
     recent_median_raw: 300, recent_median_pct: 3.0, recent_median_km: 20,
@@ -681,23 +682,68 @@ async function runFull() {
     series: Array.from({ length: 12 }, (_, i) => ({
       date: new Date(Date.now() - (i * 7 + 1) * 86400000).toISOString().slice(0, 10),
       km: 20 + (i % 3), decoupling_raw: 300 + i * 25, decoupling_pct: 3 + i * 0.25, hr: 146, feel: null })),
+    builds: {
+      min_km: 18, bands: ['18–22 km', '22–26 km', '26–30 km', '30 km +'],
+      current: { key: '2026-12-06', label: '2026 · now', race_date: '2026-12-06', is_current: true, pb: false,
+        runs: [drun('2026-09-20', 19.6, -1.1), drun('2026-09-27', 22.2, 0.3), drun('2026-10-04', 21.8, 0.2),
+               drun('2026-10-11', 25.3, 2.7), drun('2026-10-18', 28.1, 6.3)],
+        fit: { slope: 0.872, intercept: -18.72, n: 5 }, horizon_km: 27, extrapolated: false, longest_km: 28.1,
+        bands: [{ median: -0.5, n: 2 }, { median: 1.5, n: 2 }, { median: 6.3, n: 1 }, null], race_pct: null },
+      past: [
+        { key: '2024-12-01', label: '2024', race_date: '2024-12-01', is_current: false, pb: true,
+          runs: [drun('2024-09-28', 20.0, 0.6, false, 149), drun('2024-10-27', 27.0, 5.9, false, 144),
+                 drun('2024-11-03', 30.0, 10.9, false, 152), drun('2024-11-17', 30.0, 5.1, false, 154),
+                 drun('2024-12-01', 42.8, 15.5, true, 159)],
+          fit: { slope: 0.606, intercept: -9.57, n: 4 }, horizon_km: 24, extrapolated: false, longest_km: 30.0,
+          bands: [{ median: 0.6, n: 1 }, null, { median: 5.9, n: 1 }, { median: 8.0, n: 2 }], race_pct: 15.5 },
+        { key: '2025-12-07', label: '2025', race_date: '2025-12-07', is_current: false, pb: false,
+          runs: [drun('2025-08-16', 19.0, 9.6, false, 159), drun('2025-08-23', 21.1, -0.5, false, 148),
+                 drun('2025-10-05', 27.1, 4.8, false, 149), drun('2025-11-02', 30.0, 8.3, false, 149),
+                 drun('2025-12-07', 42.7, 17.4, true, 155)],
+          fit: { slope: 0.203, intercept: 0.53, n: 4 }, horizon_km: 22, extrapolated: false, longest_km: 30.0,
+          bands: [{ median: 4.6, n: 2 }, null, { median: 4.8, n: 1 }, { median: 8.3, n: 1 }], race_pct: 17.4 },
+      ] },
   };
   await page.route('**/api/durability', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify(durPayload) }));
   const dur = await page.evaluate(async () => { await loadDurability();
-    const pillEl = document.querySelector('#durbody .gyou span');
     return { txt: document.querySelector('#durbody').innerText,
-             pill: pillEl ? pillEl.textContent : '',
-             pillCls: pillEl ? pillEl.className : '',
-             bars: document.querySelectorAll('#durbody .durchart rect').length,
-             dashes: document.querySelectorAll('#durbody .durchart .thresh').length,
-             title: (document.querySelector('#durbody .durchart rect title') || {}).textContent || '' }; });
+             head: (document.querySelector('#durbody .durhead') || {}).textContent || '',
+             now: document.querySelectorAll('#durbody .durdot.now').length,
+             cmp: document.querySelectorAll('#durbody .durdot.cmp').length,
+             pale: document.querySelectorAll('#durbody .durdot.pale').length,
+             rings: document.querySelectorAll('#durbody .durdot.ring').length,
+             fits: document.querySelectorAll('#durbody .durfit-now').length + document.querySelectorAll('#durbody .durfit-cmp').length,
+             dashes: document.querySelectorAll('#durbody .durband5, #durbody .durband10').length,
+             chips: document.querySelectorAll('#durbody .durchips button').length,
+             pbOn: (document.querySelector('#durbody .durchips button[aria-pressed="true"]') || {}).textContent || '',
+             tiles: [...document.querySelectorAll('#durbody .durhz-t')].map(t => t.innerText.replace(/\n/g, ' ')),
+             tip: (document.querySelector('#durbody .durdot title') || {}).textContent || '' }; });
+  ok(`the headline reads the current build's 5 % horizon (${dur.head})`,
+     /holds under 5 % to about 27 km/.test(dur.head));
+  ok(`chart draws current 5 / compare 5 / pale 5 dots, races as rings (${dur.now}+${dur.cmp}+${dur.pale}, ${dur.rings} rings)`,
+     dur.now === 5 && dur.cmp === 5 && dur.pale === 5 && dur.rings === 2);
+  ok(`both fit lines + both band dashes render (${dur.fits} lines, ${dur.dashes} dashes)`,
+     dur.fits === 2 && dur.dashes === 2);
+  ok(`one chip per past build, the PB build selected by default (${dur.chips} · ${dur.pbOn})`,
+     dur.chips === 2 && /2024/.test(dur.pbOn));
+  ok(`a horizon tile per build, current first with its horizon, PB noted (${dur.tiles.length})`,
+     dur.tiles.length === 3 && /2026 · now 27 km/.test(dur.tiles[0]) && /PB build/.test(dur.tiles[1]));
+  ok(`a dot's tooltip carries its distance (${dur.tip})`, /km/.test(dur.tip) && /%/.test(dur.tip));
+  // the Chart/Table switch: real buttons, aria-pressed, remembered in localStorage (sh.durView)
+  await page.click('#durswitch button[data-v="table"]');
+  const tbl = await page.evaluate(() => ({
+             view: (() => { try { return localStorage.getItem('sh.durView'); } catch (e) { return null; } })(),
+             pressed: document.querySelector('#durswitch button[data-v="table"]').getAttribute('aria-pressed'),
+             heads: [...document.querySelectorAll('#durbody .durtbl .h')].map(h => h.textContent),
+             cells: document.querySelectorAll('#durbody .durcell').length,
+             tints: ['ok', 'warn', 'danger'].map(c => document.querySelectorAll(`#durbody .durcell.${c}`).length).join('/'),
+             txt: document.querySelector('#durbody').innerText }));
+  ok(`the switch is remembered (sh.durView=${tbl.view}) and pressed (aria-pressed=${tbl.pressed})`,
+     tbl.view === 'table' && tbl.pressed === 'true');
+  ok(`the table lines band medians × builds up, PB + now marked, race row carried (${tbl.cells} cells, tints ${tbl.tints})`,
+     tbl.cells === 15 && tbl.heads.join(' ').includes('2024 · PB') && tbl.heads.join(' ').includes('2026 · now')
+     && /15\.5 %/.test(tbl.txt) && /race day/.test(tbl.txt) && tbl.tints !== '0/0/0');
   await page.unroute('**/api/durability');
-  ok(`durability gauge paints the 6-run median (${dur.pill.trim()} · ${dur.pillCls})`,
-     /you: 3\.0%/.test(dur.pill) && dur.pillCls === 'inb');
-  ok('durability verdict + trend render', /durable/.test(dur.txt) && /improving/.test(dur.txt));
-  ok(`durability tracker draws one bar per long run (${dur.bars}) + both threshold dashes (${dur.dashes})`,
-     dur.bars === 12 && dur.dashes === 2);
-  ok(`a bar's tooltip carries its distance (${dur.title})`, /km/.test(dur.title));
   await page.evaluate(() => loadDurability());   // put the real (empty) state back
 
   // the health form's date is prefilled to today (local, not UTC)

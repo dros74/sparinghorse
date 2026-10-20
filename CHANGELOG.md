@@ -10,6 +10,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.82.0] - 2026-10-20
+
+### Changed
+
+- **The durability card is one card with a Chart / Table switch.** The gauge and the bar per long run are
+  gone: the old figures said how the last six long runs read, not whether the athlete is getting more
+  durable. The card now sets the current build against earlier ones. A build is the 140 days ending on a
+  race day. The current build is the one ending on the earliest upcoming A objective; with none, it is the
+  last 140 days, labelled "Last 20 weeks". Past builds are the runs that carry a Runalyze race result at the
+  current A race's distance (within 15 %, the match the race-day lookup uses; with no A race, the longest
+  race distance present), newest three. A run that falls in two windows goes to the later race; a race run
+  stays in its own build.
+- **Chart view.** Decoupling in percent against distance (18 to 44 km, -4 to 18 %). The current build is drawn
+  in the accent colour with its fit line; one past build, picked with chips (the fastest-finish build by
+  default), is drawn dashed in blue and the others pale; dashes mark 5 % and 10 %. One tile per build gives
+  its 5 % horizon: the distance where the least-squares line crosses 5 %. It needs at least 4 non-race runs
+  and a positive slope; it reads "beyond N km" when it passes the longest run by more than 3 km and
+  "before 18 km" when it falls below the floor. The headline reads "This build holds under 5 % to about N km",
+  "This build passes 5 % before 18 km" or "N long runs this build - the line needs 4".
+- **Table view.** Distance bands 18-22, 22-26, 26-30 and 30 km and over, against builds: the median and the
+  count of runs, tinted under 5 %, 5 to 10 % and over 10 %. The last row is the race's own decoupling; for
+  the current build it shows the race date.
+- **Race efforts stay out of the fit.** Every race-result run, including a shorter race inside a longer
+  build, is drawn as a ring and left out of the fit line and the bands. The build's `race_pct` is its own
+  race.
+- **Default view and memory.** The Table shows at 640 px and narrower, the Chart on wider screens. A click on
+  the switch is remembered per device (`sh.durView` in local storage).
+- **API.** `/api/durability`, and the durability block of `/api/run-metrics`, gain a `builds` key and one
+  caveat; the old fields stay. Display-only: nothing here feeds the plan. The card is private and demo only
+  (the public box removes it); the demo has no past races, so it shows the current build alone.
+
+### Added
+
+- **`DURABILITY_BUILD_MIN_KM = 18.0`**, the build view's distance floor. `DURABILITY_MIN_KM` (16) and the
+  trend fields are unchanged. The constant is listed in the calibration table of `ENGINE_SCIENCE.md`
+  (inventory 291 to 292, tabled 211 to 212).
+
+Self-test: new `det/durability-builds` covers window membership, the later-race rule for overlaps, race
+efforts out of the fit and the bands, the three-build cap, no horizon under 4 runs, the extrapolated flag,
+the below-floor horizon, the fastest-finish pick including a duration tie, and the no-objective fallback; it
+was checked against mutations. `det/axis-legibility` counts 6 stretched-SVG charts instead of 7 (the old bar
+chart is gone). The durability block of `test/drive_local.mjs` is rewritten for the new card. Battery 254
+PASS · 0 FAIL; golden plans unchanged; local UI suite 0 failures.
+
 ## [0.81.3] - 2026-10-20
 
 ### Fixed
