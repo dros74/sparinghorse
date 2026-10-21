@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.83.1] - 2026-10-21
+
+### Fixed
+
+- **The COROS push read the plan library as JSON, but COROS answers it as plain text.** The first push
+  therefore found no existing plan to take over, created a second one, could not read back the new plan's id
+  and failed, and the next push would have created yet another. The library reply is now parsed in its text
+  form (one numbered row per plan with its id, role, editable flag, dates and weeks), so an existing plan is
+  adopted and a new one is found again. The push endpoint answers 200 with `ok`/`error` in the body instead
+  of a 502, and the Settings button reports the HTTP status when a reply cannot be read, instead of
+  "network error". `det/coros-push-diff` gains a limb on the live reply text, seen to fail without the parser.
+
+## [0.83.0] - 2026-10-21
+
+### Added
+
+- **The plan mirrors onto a COROS watch as one training plan, through COROS's official MCP server.**
+  Settings → Connections & keys gains a COROS box: **Connect COROS** returns a sign-in link (a
+  device-style login — nothing to register, no keys to paste; the app holds only the tokens it
+  receives), and once signed in the plan's coming days land on the COROS calendar as structured
+  workouts, and from there on the watch after a sync in the COROS app. One plan owned by the app,
+  rewritten day by day: each nightly push (after the Suunto push) sends only the days that changed,
+  a day emptied by a re-plan is cleared with a rest entry, and a day whose workout was completed is
+  left alone. Work steps carry a pace range (±5 % around the prescribed pace), the other steps a
+  heart-rate band from the app's own zone grid, and identical work/recovery pairs become one
+  interval group with repeats; race day follows its own priced pace, not the easy band. COROS plans
+  run 4–16 weeks, so the app extends the plan as the road grows and starts the follow-on plan when
+  the ceiling comes within reach. **Push to COROS** runs the same push on demand; **Disconnect**
+  forgets the tokens and the stored plan. Private container only.
+
+Self-test: new `det/coros-course` (the converter against the live session shapes, the interval
+grouping, the clamps and the schema hygiene), `det/coros-plan-days` (rest entries, chunking,
+periodization, the plan-length fit, the rollover date) and `det/coros-push-diff` (create once,
+unchanged plan sends nothing, a changed day sends only that day, a skipped day is never retried) —
+each with a revert seen to fail. Battery 258 of 264 PASS · 0 FAIL · 5 skipped; golden plans
+unchanged; `test/run_local_test.sh` passes all modes.
+
 ## [0.82.1] - 2026-10-20
 
 ### Fixed

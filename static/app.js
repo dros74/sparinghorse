@@ -3741,6 +3741,7 @@ async function loadSystem(){
     ${row("Nightly", d.sched.last_ok ? `ok ${esc(when(d.sched.last_ok))}` : "no successful run yet", !d.sched.last_ok)}
     ${row("Failures in a row", String(d.sched.fail_count||0), (d.sched.fail_count||0)>0)}
     ${row("Watch push", d.suunto.connected ? (d.suunto.last_push ? `pushed ${esc(when(d.suunto.last_push))}` : "connected") : "not connected")}
+    ${row("COROS push", d.coros&&d.coros.connected ? (d.coros.last_push ? `pushed ${esc(when(d.coros.last_push))}` : "connected") : "not connected")}
     ${row("Newest backup", d.backup.latest ? `${esc(d.backup.latest)} · ${age(d.backup.age_h)}` : "none yet", !d.backup.latest || (d.backup.age_h||0)>48)}
     ${row("Backups kept in", esc(d.backup.dir||""))}
     ${row("Cloudflare Access", d.access&&d.access.bypass
@@ -3783,7 +3784,7 @@ async function loadSecrets(probe, justSaved){
   const main=d.secrets.filter(s=>!(musicHost && isMusic(s)));
   if(musicHost) musicHost.innerHTML=d.secrets.filter(isMusic).map(row).join("");
   host.innerHTML=`<div class="secblock"><div class="sectitle">Connections &amp; keys</div>
-    ${main.map(row).join("")}<div id="suuntoBox"></div>
+    ${main.map(row).join("")}<div id="suuntoBox"></div><div id="corosBox"></div>
     <div class="help aidisc" style="margin-top:6px"><b>What a Claude key sends to Anthropic</b> — plan narration: the computed plan summary and your athlete context; goal parsing: the goal text you type, and your objectives list for race advice; check-in judgment: your check-in note, energy and sleep answers, HRV state, today's session, and anything typed into “Tell the horse”. Each is a switch under <i>AI features</i> below; judgment is off until you turn it on.</div>
     <div class="help" style="margin-top:2px">Keys are write-only — the value never comes back to this
       page; paste a value and press the tab's Save. <code>fp</code> is the first 8 hex of its sha256, so you can confirm which value is stored:
@@ -3794,6 +3795,7 @@ async function loadSecrets(probe, justSaved){
   document.querySelectorAll("#settingsDialog button[data-clr]").forEach(b=>b.addEventListener("click",()=>saveSecret(b.dataset.clr,true)));
   if(musicHost) Object.entries(drafts).forEach(([id,v])=>{ if(id==="sec_"+justSaved) return; const el=document.getElementById(id); if(el) el.value=v; });
   loadSuunto();
+  loadCoros();
   if(probe) validateSecrets(d.secrets);
 }
 // §SG — the Suunto watch link: a one-time OAuth "Connect" (full-page bounce to Suunto and back),
@@ -3846,6 +3848,60 @@ async function loadSuunto(){
   };
   const push=$("#suuntoPush"); if(push) push.addEventListener("click",()=>runPush(push,"Push week to watch",false));
   const repush=$("#suuntoRepush"); if(repush) repush.addEventListener("click",()=>runPush(repush,"Rebuild on watch",true));
+}
+// §CG — the COROS link: a device-style login (Connect returns a link; the athlete signs in on
+// COROS's page in a new tab, and each status read polls the pending session once until the tokens
+// land), then the nightly re-plan mirrors the road onto the COROS calendar as one training plan
+// the watch syncs. Tokens never reach the browser (status only).
+async function loadCoros(){
+  const box=$("#corosBox"); if(!box) return;
+  let d; try{ d=await getJSON("/api/coros/status"); }catch(e){ box.innerHTML=""; return; }
+  if(!d.ok){ box.innerHTML=""; return; }
+  const badge = d.connected ? `<span class="src ok">✓ connected</span>`
+    : d.pending ? `<span class="src warn">waiting for sign-in</span>`
+                : `<span class="src warn">not connected</span>`;
+  box.innerHTML=`<div class="setrow">
+      <label>COROS watch (training-plan push) ${badge}</label>
+      <div class="secinput">
+        ${d.connected
+          ? `<button type="button" class="primary" id="corosPush">Push to COROS</button>
+             <button type="button" class="ghost" id="corosDisc">Disconnect</button>`
+          : d.pending
+            ? `<a class="primary" id="corosLink" href="${esc(d.login_url||"#")}" target="_blank" rel="noopener">Sign in to COROS</a>
+               <button type="button" class="ghost" id="corosDone">I've signed in</button>`
+            : `<button type="button" class="primary" id="corosConn">Connect COROS</button>`}
+      </div>
+      <div class="help">Mirrors the plan onto your COROS calendar as one structured training plan
+        (COROS syncs it to the watch; days already completed are left alone). Auto-pushes nightly
+        after the re-plan once connected.${d.plan_end?` The COROS plan currently runs to ${esc(d.plan_end)}.`:""}
+        ${d.last_push?` Last push ${esc(new Date(d.last_push).toLocaleString())}.`:""}</div>
+      <div class="err" id="corosErr"></div>
+    </div>`;
+  const err=$("#corosErr");
+  const conn=$("#corosConn"); if(conn) conn.addEventListener("click",async()=>{
+    err.textContent=""; conn.disabled=true; conn.textContent="Starting…";
+    let r; try{ r=await (await fetch("/api/coros/connect",{method:"POST"})).json(); }
+    catch(e){ r={ok:false,error:"network error"}; }
+    conn.disabled=false; conn.textContent="Connect COROS";
+    if(!r.ok){ err.textContent="⚠ "+(r.error||"could not start the COROS sign-in"); return; }
+    loadCoros();   // the status read now carries the pending login_url
+  });
+  const done=$("#corosDone"); if(done) done.addEventListener("click",()=>loadCoros());
+  const disc=$("#corosDisc"); if(disc) disc.addEventListener("click",async()=>{
+    try{ await fetch("/api/coros/disconnect",{method:"POST"}); }catch(e){}
+    loadCoros();
+  });
+  const push=$("#corosPush"); if(push) push.addEventListener("click",async()=>{
+    err.textContent=""; push.disabled=true; push.textContent="Pushing…";
+    let r, resp; try{ resp=await fetch("/api/coros/push",{method:"POST",headers:{"Content-Type":"application/json"},
+                                                      body:JSON.stringify({})}); r=await resp.json(); }
+    catch(e){ r={ok:false,error:resp?`the server answered HTTP ${resp.status}`:"network error"}; }
+    push.disabled=false; push.textContent="Push to COROS";
+    const skipped=(r.skipped_days||[]).length;
+    if(r.ok) err.innerHTML=`<span class="src ok">✓ ${r.pushed||0} day${(r.pushed===1)?"":"s"} pushed`
+      +`${skipped?` — ${skipped} completed day${skipped===1?"":"s"} left alone`:""}${r.note?" — "+esc(r.note):""}</span>`;
+    else err.textContent="⚠ "+(r.error||"push failed");
+  });
 }
 // Live key check — fires when the Settings window opens (or after a save), not on every page load (the
 // Anthropic probe is a network round-trip). A configured key resolves to ✓ in use · valid, ✗ key rejected,

@@ -79,6 +79,11 @@
   button:hover{border-color:var(--accent)} button:active{transform:translateY(1px)}
   button:disabled,input:disabled{opacity:.5;cursor:not-allowed}
   button.primary{background:var(--accent);border-color:var(--accent);color:var(--onacc)}
+  /* §CG — the COROS sign-in link is an <a> wearing the primary-button clothes (same as a.ghost) */
+  a.primary{font-family:var(--sans);font-size:13px;font-weight:500;cursor:pointer;
+    background:var(--accent);border:1px solid var(--accent);border-radius:9px;padding:8px 14px;
+    color:var(--onacc);text-decoration:none;display:inline-block;transition:border-color .15s,transform .1s}
+  a.primary:active{transform:translateY(1px)}
   button.ghost{background:transparent;color:var(--muted);font-size:12px;padding:8px 12px}
   button.ghost:hover{color:var(--text)}
   /* §RB — the header Runs/Dashboard link is an <a> wearing the ghost-button clothes */

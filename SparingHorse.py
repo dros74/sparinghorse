@@ -2857,6 +2857,930 @@ def push_guides(db, days=None, recreate=False):
             **({"error": f"{len(errs)} of {len(results)} failed"} if errs else {})}
 
 
+# ── COROS MCP — training-plan push (§CG) ─────────────────────────────────────
+# The athlete's second watch is a COROS, and COROS exposes an official MCP server (no partner
+# program needed). Where §SG uploads one Guide FILE per session, COROS works on a whole training
+# PLAN: one app-owned plan ("Sparing Horse") whose days the nightly push keeps mirroring the road.
+# Day-granular replace semantics (a submitted dayNo replaces that day's whole course list, a rest
+# entry clears it, a completed day is skipped by the server) make the mirror a per-date DIFF: each
+# pushed day's payload hash lives in meta, and only changed days are ever sent. Same three layers
+# as §SG: OAuth (dynamic client registration + PKCE + a CLI device-login the athlete signs into
+# from any browser; tokens under an internal secrets key, never in the UI spec), a PURE course
+# converter (session_to_coros_course, det-locked), and push_coros (never raises). Protocol facts
+# from the live tool catalog + a proven login/create flow (2026-10-21); the catalog pins NO output
+# schema, so every reply is parsed defensively and an unparseable one decides as little as possible.
+COROS_DEFAULT_ISSUER = "https://mcp.coros.com"      # global gateway; discovery finds the region
+COROS_TOKENS_KEY = "coros_mcp_tokens"    # internal secrets-store row (JSON); not in SECRET_SPEC
+COROS_PENDING_KEY = "coros_mcp_pending"  # the in-flight device login, same posture
+COROS_PLAN_META = "coros:plan"           # meta row: current/next plan entries + per-date hashes
+COROS_PLAN_NAME = "Sparing Horse"
+COROS_PLAN_OVERVIEW = ("The Sparing Horse plan, mirrored to COROS: each planned session arrives on "
+                       "the calendar as a structured workout and the watch follows along.")
+COROS_PLAN_RATIONALE = "Phase lengths follow the current plan's base/build/peak/taper blocks."
+COROS_SCOPES = "openid offline_access mcp.tools"
+# The device login never lands a browser on us: the authorization redirect is READ off the 302
+# Location header, so the registered redirect URI is a protocol placeholder, not a served route.
+COROS_REDIRECT_URI = os.environ.get("SH_COROS_REDIRECT_URI") or "http://127.0.0.1:43123/callback"
+COROS_MIN_WEEKS, COROS_MAX_WEEKS = 4, 16        # plan length limits from the tool catalog
+COROS_MAX_REPEATS = 20                          # interval-group repeats limit
+COROS_CHUNK_DAYS = 7                            # updateTrainingPlan calls carry ≤ 7 whole days
+COROS_PACE_RANGE = (120, 1499)                  # absolute pace intensity, integer sec/km
+COROS_HR_RANGE = (30, 240)                      # absolute HR intensity, bpm
+
+
+def _coros_issuer():
+    return (os.environ.get("SH_COROS_ISSUER") or COROS_DEFAULT_ISSUER).rstrip("/")
+
+
+def _coros_discover_issuer(issuer):
+    """The regional issuer behind the global gateway (accounts live on mcpeu/mcpus/mcpcn), read
+    from the OIDC discovery document at login time and stored with the tokens. Any non-default
+    issuer is used as given; a failed discovery keeps the one asked for."""
+    if issuer != COROS_DEFAULT_ISSUER:
+        return issuer
+    try:
+        r = requests.get(f"{issuer}/.well-known/openid-configuration",
+                         headers={"Accept": "application/json", "User-Agent": USER_AGENT}, timeout=8)
+        found = r.json().get("issuer") if r.status_code == 200 else None
+        if isinstance(found, str) and found.startswith("https://"):
+            return found.rstrip("/")
+    except Exception as e:
+        print(f"[coros] gateway discovery failed, using {issuer}: {e}")
+    return issuer
+
+
+def _coros_state(key):
+    """One internal COROS row (tokens / pending login) from the secrets store, or None."""
+    raw = _stored_secret(key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _save_coros_state(key, payload):
+    """Persist (or clear, when None) one internal COROS row. Same posture as the Suunto token row:
+    internal key, encrypted, refused in READONLY."""
+    if READONLY:
+        return False
+    try:
+        conn = _secrets_conn()
+        if payload:
+            conn.execute("INSERT INTO secret(key,value) VALUES(?,?) "
+                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                         (key, _enc(json.dumps(payload))))
+        else:
+            conn.execute("DELETE FROM secret WHERE key=?", (key,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"[coros] state store write failed: {e}")
+        return False
+
+
+def _coros_tokens():
+    return _coros_state(COROS_TOKENS_KEY)
+
+
+def _coros_register_client(issuer):
+    """Dynamic client registration: a fresh PUBLIC client per login (no secret — PKCE and the
+    poll token carry the flow), so there are no app credentials to configure at all."""
+    r = requests.post(f"{issuer}/connect/register", headers={"Accept": "application/json",
+                      "User-Agent": USER_AGENT}, timeout=15,
+                      json={"client_name": COROS_PLAN_NAME, "redirect_uris": [COROS_REDIRECT_URI],
+                            "grant_types": ["authorization_code", "refresh_token"],
+                            "response_types": ["code"], "scope": COROS_SCOPES,
+                            "token_endpoint_auth_method": "none"})
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"client registration {r.status_code}: {r.text[:200]}")
+    cid = r.json().get("client_id")
+    if not cid:
+        raise RuntimeError("client registration returned no client_id")
+    return cid
+
+
+def _coros_authorize_url(issuer, client_id, challenge, state):
+    from urllib.parse import urlencode
+    q = urlencode({"response_type": "code", "client_id": client_id,
+                   "redirect_uri": COROS_REDIRECT_URI, "scope": COROS_SCOPES,
+                   "code_challenge": challenge, "code_challenge_method": "S256",
+                   "resource": f"{issuer}/mcp", "state": state})
+    return f"{issuer}/oauth2/authorize?{q}"
+
+
+def _coros_start_login():
+    """Begin the device login: discover the regional issuer, register a client, open the CLI login
+    session. Returns the pending-session dict to store; its login_url is what the Settings box
+    links out to (the athlete signs in on COROS's page, from any browser)."""
+    issuer = _coros_discover_issuer(_coros_issuer())
+    client_id = _coros_register_client(issuer)
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii").rstrip("=")
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    state = secrets.token_urlsafe(24)
+    r = requests.post(f"{issuer}/api/v1/cli/login-sessions", json={"clientId": client_id},
+                      headers={"Accept": "application/json", "User-Agent": USER_AGENT}, timeout=15)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"login session {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    for k in ("sessionId", "pollToken", "loginUrl"):
+        if not d.get(k):
+            raise RuntimeError(f"login session returned no {k}")
+    return {"issuer": issuer, "client_id": client_id, "verifier": verifier, "state": state,
+            "authorize_url": _coros_authorize_url(issuer, client_id, challenge, state),
+            "session_id": str(d["sessionId"]), "poll_token": str(d["pollToken"]),
+            "login_url": str(d["loginUrl"])}
+
+
+def _coros_token_request(issuer, form):
+    """One POST to the token endpoint (code exchange or refresh). Raises with the provider's text."""
+    r = requests.post(f"{issuer}/oauth2/token", data=form,
+                      headers={"Accept": "application/json", "User-Agent": USER_AGENT}, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"token endpoint {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    return {"access_token": d["access_token"],
+            "refresh_token": d.get("refresh_token"),     # may be absent → the caller keeps the old
+            "expires_at": time.time() + float(d.get("expires_in", 3600))}
+
+
+def _coros_poll_login_once(pend):
+    """ONE claim against the pending CLI session (the status route polls per request, never in a
+    loop). None → still waiting for the athlete. Authorized → the login ticket rides the authorize
+    URL once (its 302 is read, not followed — no browser ever lands on our redirect URI) and the
+    code is exchanged for the token pair, which is returned. Terminal states raise."""
+    from urllib.parse import parse_qs
+    issuer = pend["issuer"]
+    r = requests.post(f"{issuer}/api/v1/cli/login-sessions/{pend['session_id']}/claim",
+                      headers={"X-Poll-Token": pend["poll_token"], "Accept": "application/json",
+                               "User-Agent": USER_AGENT}, timeout=15)
+    if r.status_code != 200:
+        raise RuntimeError(f"login poll {r.status_code}: {r.text[:200]}")
+    d = r.json()
+    st = str(d.get("status", "")).lower()
+    if st == "pending":
+        return None
+    if st != "authorized" or not d.get("loginTicket"):
+        raise RuntimeError(f"login session {st or 'failed'} — start again")
+    url = pend["authorize_url"] + "&login_ticket=" + quote(str(d["loginTicket"]), safe="")
+    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=15, allow_redirects=False)
+    qs = parse_qs(urlparse(r.headers.get("Location", "")).query)
+    code, st2 = qs.get("code", [""])[0], qs.get("state", [""])[0]
+    if r.status_code not in (302, 303) or not code:
+        raise RuntimeError("authorization did not return a code")
+    if st2 != pend["state"]:
+        raise RuntimeError("state mismatch during authorization")
+    tok = _coros_token_request(issuer, {"grant_type": "authorization_code",
+                                        "client_id": pend["client_id"], "code": code,
+                                        "redirect_uri": COROS_REDIRECT_URI,
+                                        "code_verifier": pend["verifier"]})
+    tok["client_id"], tok["issuer"] = pend["client_id"], issuer
+    return tok
+
+
+def coros_access_token():
+    """A currently-valid access token, refreshing through the stored refresh_token when within
+    2 minutes of expiry and SAVING on every refresh (COROS may rotate the refresh token). A failed
+    refresh CLEARS the pair — the Settings box then reports 'not connected' (reconnect)."""
+    tok = _coros_tokens()
+    if not tok:
+        return None
+    if time.time() < tok.get("expires_at", 0) - 120:
+        return tok["access_token"]
+    try:
+        new = _coros_token_request(tok["issuer"], {"grant_type": "refresh_token",
+                                                   "client_id": tok["client_id"],
+                                                   "refresh_token": tok["refresh_token"]})
+        if not new.get("refresh_token"):
+            new["refresh_token"] = tok["refresh_token"]
+        new["client_id"], new["issuer"] = tok["client_id"], tok["issuer"]
+        _save_coros_state(COROS_TOKENS_KEY, new)
+        return new["access_token"]
+    except Exception as e:
+        print(f"[coros] token refresh failed: {e}")
+        _save_coros_state(COROS_TOKENS_KEY, None)
+        return None
+
+
+def _coros_mcp_post(url, access_token, body):
+    """One JSON-RPC POST to the MCP endpoint. The gateway answers JSON or SSE (text/event-stream —
+    then the payload is the LAST data event). Stateless: no session header, each call re-initializes."""
+    r = requests.post(url, json=body, timeout=30, headers={
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json, text/event-stream", "User-Agent": USER_AGENT})
+    if r.status_code != 200:
+        raise RuntimeError(f"mcp {body.get('method')} {r.status_code}: {r.text[:200]}")
+    if "text/event-stream" in r.headers.get("Content-Type", ""):
+        last = None
+        for chunk in r.text.split("\n\n"):
+            data = "\n".join(l[5:].lstrip() for l in chunk.splitlines() if l.startswith("data:"))
+            if data.strip():
+                last = data
+        if last is None:
+            raise RuntimeError("mcp answered an empty event stream")
+        return json.loads(last)
+    return r.json()
+
+
+def _coros_call(tool, arguments):
+    """One MCP tool call (initialize, then tools/call). Returns the result dict; raises with the
+    tool's own text on isError. Every MCP round-trip in the app goes through here, so a test that
+    fakes this one function severs all network."""
+    tok = _coros_tokens()
+    if not tok:
+        raise RuntimeError("COROS not connected")
+    access = coros_access_token()
+    if not access:
+        raise RuntimeError("COROS token refresh failed — reconnect in Settings")
+    url = f"{tok['issuer']}/mcp"
+    init = _coros_mcp_post(url, access,
+                           {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                                       "clientInfo": {"name": COROS_PLAN_NAME, "version": "1.0.0"}}})
+    if init.get("error"):
+        raise RuntimeError(f"mcp initialize: {init['error']}")
+    resp = _coros_mcp_post(url, access,
+                           {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                            "params": {"name": tool, "arguments": arguments}})
+    if resp.get("error"):
+        raise RuntimeError(f"mcp {tool}: {resp['error']}")
+    result = resp.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(str(c.get("text", "")) for c in result.get("content", [])
+                        if isinstance(c, dict))
+        raise RuntimeError(f"{tool} refused: {text.strip()[:300]}")
+    return result
+
+
+# ── §CG course converter (pure) ──────────────────────────────────────────────
+# Course facts from the live catalog (2026-10-21): sportType 1=running 4=rest; sectionType
+# 1=warmup 2=training 3=recovery 4=cooldown; running targets 1=distance(m) 2=time(s); intensity is
+# per-section absolute (1=HR bpm 30-240, 2=pace sec/km 120-1499) with BOTH endpoints, and a
+# section with no intensity carries NO intensity fields at all (never 0). Interval groups are
+# {"intervalGroup": true, "repeats": 1-20, "sets": [...]} with only 2/3 sections inside and no
+# target or intensity fields on the container. Names/descriptions are shown to the athlete
+# verbatim: plain coaching language, no field names.
+_COROS_SECTION_TYPE = {"warmup": 1, "work": 2, "recovery": 3, "cooldown": 4, "easy_base": 2}
+_COROS_PHASE_TYPE = {"rebase": 1, "recovery": 1, "base": 2, "build": 3, "peak": 4,
+                     "taper": 5, "race": 5}
+
+
+def _coros_pace_band(sec_per_km, band=0.05):
+    """(fast, slow) integer sec/km for the same ±band SPEED window `_pace_target` uses, or None
+    when there is no pace or the band falls outside COROS's 120–1499 absolute range (the section
+    then carries no intensity at all — 0 is invalid, and a clamped lie is worse than none)."""
+    if not sec_per_km:
+        return None
+    v = 1000.0 / sec_per_km
+    fast, slow = round(1000.0 / (v * (1 + band))), round(1000.0 / (v * (1 - band)))
+    lo, hi = COROS_PACE_RANGE
+    if not (lo <= fast <= hi and lo <= slow <= hi):
+        return None
+    return (int(fast), int(slow))
+
+
+def _coros_hr_band(zone, hrz):
+    """(min, max) bpm for a plan zone off the app's own grid (`_hr_target`), or None without a
+    grid / an unmapped zone / a band outside COROS's 30–240 (same no-intensity rule as pace)."""
+    t = _hr_target(zone, hrz)
+    if not t:
+        return None
+    lo, hi = COROS_HR_RANGE
+    if not (lo <= t["min"] <= hi and lo <= t["max"] <= hi):
+        return None
+    return (t["min"], t["max"])
+
+
+def _coros_section(section_type, minutes=None, km=None, hr=None, pace=None):
+    """One plain section: a distance target (m) when framed in km, else a time target (s); at most
+    one intensity, absolute HR (1) or pace (2), both endpoints."""
+    s = {"sectionType": section_type}
+    if km is not None:
+        s["targetType"], s["targetValue"] = 1, int(round(km * 1000))
+    else:
+        s["targetType"], s["targetValue"] = 2, int(round((minutes or 0) * 60))
+    if hr:
+        s["intensityType"] = 1
+        s["intensityValueStart"], s["intensityValueEnd"] = hr
+    elif pace:
+        s["intensityType"] = 2
+        s["intensityValueStart"], s["intensityValueEnd"] = pace
+    return s
+
+
+def _coros_group_intervals(plain):
+    """Fold runs of consecutive IDENTICAL (work, recovery) pairs into one interval group each
+    (repeats ≤ 20 — a longer run splits into groups of 20). 'Identical' needs at least two pairs;
+    a lone pair stays two plain sections, and a final work rep with no recovery after it stays a
+    plain section after the group. The container carries no target or intensity fields — those
+    live on the two member sections."""
+    out, i, n = [], 0, len(plain)
+    while i < n:
+        effort, sec = plain[i]
+        run = 0
+        if effort == "work" and i + 1 < n and plain[i + 1][0] == "recovery":
+            rec = plain[i + 1][1]
+            while (i + 2 * run + 1 < n and plain[i + 2 * run][0] == "work"
+                   and plain[i + 2 * run + 1][0] == "recovery"
+                   and plain[i + 2 * run][1] == sec and plain[i + 2 * run + 1][1] == rec):
+                run += 1
+        if run >= 2:
+            left = run
+            while left:
+                take = min(left, COROS_MAX_REPEATS)
+                out.append({"intervalGroup": True, "repeats": take, "sets": [sec, rec]})
+                left -= take
+            i += 2 * run
+        else:
+            out.append(sec)
+            i += 1
+    return out
+
+
+def _coros_rest_course():
+    """The rest-day course — also how a day is CLEARED on update (a rest entry replaces the day's
+    whole course list). Name and description are required even here."""
+    return {"courseName": "Rest", "courseDescription": "Rest day", "sportType": 4, "sections": []}
+
+
+def session_to_coros_course(session, hrz=None, pace_zones=None):
+    """PURE: one plan session dict → one COROS course dict (valid for createScheduledWorkout's
+    course schema and the plan courseList entries). Mirrors session_to_guide's decisions: reps →
+    one time-framed section per rep (effort → sectionType), a simple run → one distance-framed
+    training section. Work reps are paced (the ±5% speed band, absolute sec/km); every other rep
+    takes the HR band off the app's grid, or a pace band when there is no grid. Raises on km≤0."""
+    kind = session.get("kind", "run")
+    km = session.get("km") or 0
+    if km <= 0:
+        raise ValueError("session has no distance")
+    reps = session.get("reps")
+    phrases = []                          # the description's "targets in words", in first-seen order
+
+    def note_band(kind_, zone, lo, hi):
+        if kind_ == "hr":
+            p = (f"easy parts follow a heart-rate band of {lo}-{hi} bpm" if zone == "easy"
+                 else f"the {zone} parts follow a heart-rate band of {lo}-{hi} bpm")
+        else:
+            p = f"the {zone} block follows pace, {_pace_label(lo)[:-3]}-{_pace_label(hi)}"
+        if p not in phrases:
+            phrases.append(p)
+
+    if reps:
+        plain = []
+        for r in reps:
+            pace_sec = r.get("pace_sec")
+            if pace_sec is None:
+                pace_sec = _pace_zone_sec(pace_zones, r["zone"])
+            if pace_sec is None:
+                pace_sec = _rep_pace_sec(r)
+            if r["effort"] == "work":
+                band = _coros_pace_band(pace_sec)
+                if band:
+                    note_band("pace", r["zone"], band[0], band[1])
+                sec = _coros_section(2, minutes=r["minutes"], pace=band)
+            else:
+                band = _coros_hr_band(r["zone"], hrz)
+                if band:
+                    note_band("hr", r["zone"], band[0], band[1])
+                    sec = _coros_section(_COROS_SECTION_TYPE.get(r["effort"], 2),
+                                         minutes=r["minutes"], hr=band)
+                else:
+                    pband = _coros_pace_band(pace_sec)
+                    if pband:
+                        note_band("pace", r["zone"], pband[0], pband[1])
+                    sec = _coros_section(_COROS_SECTION_TYPE.get(r["effort"], 2),
+                                         minutes=r["minutes"], pace=pband)
+            plain.append((r["effort"], sec))
+        sections = _coros_group_intervals(plain)
+    else:
+        pace_sec = session["minutes"] * 60.0 / km if session.get("minutes") else None
+        # Race day has no reps and is no easy run: an easy HR band would alarm for the whole race,
+        # so it follows the pace the plan prices it at (its minutes over its km).
+        band = None if kind == "race" else _coros_hr_band("easy", hrz)
+        if kind == "race" and pace_sec:
+            pband = _coros_pace_band(pace_sec)
+            if pband:
+                note_band("pace", "race", pband[0], pband[1])
+            sections = [_coros_section(2, km=km, pace=pband)]
+        elif band:
+            note_band("hr", "easy", band[0], band[1])
+            sections = [_coros_section(2, km=km, hr=band)]
+        else:
+            pband = _coros_pace_band(pace_sec)
+            if pband:
+                note_band("pace", session.get("zone") or kind, pband[0], pband[1])
+            sections = [_coros_section(2, km=km, pace=pband)]
+    label = {"easy": "Easy run", "long": "Long run", "long_mp": "Long run + MP"}.get(kind) \
+        or _guide_txt(kind, 20).title()
+    note = (session.get("note") or "").strip().rstrip(".")
+    desc = (note[:1].upper() + note[1:]) if note else f"{label}, {km:g} km"
+    if phrases:
+        tail = "; ".join(phrases)
+        desc += ". " + tail[:1].upper() + tail[1:]
+    return {"courseName": f"{label} {km:g} km"[:100], "courseDescription": desc[:800],
+            "sportType": 1, "sections": sections}
+
+
+# ── §CG plan machinery (pure) ────────────────────────────────────────────────
+def _coros_plan_end(start, total_weeks):
+    """The plan's last day: the Sunday of week total_weeks (natural Mon–Sun weeks; a mid-week
+    start makes the first week partial but still week 1)."""
+    return start - timedelta(days=start.weekday()) + timedelta(days=7 * total_weeks - 1)
+
+
+def _coros_rollover_start(plan_end):
+    """The Monday after a plan's last Sunday — where the follow-on plan begins at the 16-week
+    ceiling. COROS only accepts a start within [today, today+14], so the caller creates the
+    follow-on only once today is inside that window."""
+    return plan_end + timedelta(days=1)
+
+
+def _coros_total_weeks(plan, start, min_weeks=COROS_MIN_WEEKS):
+    """The COROS length for a plan starting `start`: Mon–Sun weeks from start's Monday-week to the
+    last session's week, clamped to 4–16 (never below `min_weeks` — an extension must not shrink),
+    then shortened while the FINAL week holds no workout (COROS rejects that plan). None when no
+    allowed length ends on a week with a workout — the caller skips with that reason."""
+    weeks = _plan_all_weeks(plan)
+    last = max((s["date"] for w in weeks for s in w.get("sessions", []) if (s.get("km") or 0) > 0),
+               default=None)
+    if not last:
+        return None
+    m0 = start - timedelta(days=start.weekday())
+    n = (_date(last) - m0).days // 7 + 1
+    total = max(min_weeks, min(COROS_MAX_WEEKS, n))
+    have = {w["start"] for w in weeks
+            if any((s.get("km") or 0) > 0 for s in w.get("sessions", []))}
+    while total > min_weeks and (m0 + timedelta(days=7 * (total - 1))).isoformat() not in have:
+        total -= 1
+    if (m0 + timedelta(days=7 * (total - 1))).isoformat() not in have:
+        return None
+    return total
+
+
+def _coros_periodization(plan, start, total_weeks):
+    """phaseInfo.periodization: one entry per run of consecutive Mon–Sun weeks of the same SH
+    phase kind (kind → phaseType 1–5; unknown kinds read as base). The first entry starts on the
+    plan start date (a partial first week counts), later entries on Mondays, every entry ends on
+    the Sunday of its last week, and the durations sum to total_weeks."""
+    key2kind = {ph.get("key"): ph.get("kind") for ph in plan.get("phases", [])}
+    kinds = {}
+    for w in _plan_all_weeks(plan):
+        kinds[w["start"]] = key2kind.get(w.get("pk")) or w.get("pk") or "base"
+    m0 = start - timedelta(days=start.weekday())
+    seq = [kinds.get((m0 + timedelta(days=7 * i)).isoformat(), "base") for i in range(total_weeks)]
+    runs = []
+    for kind in seq:
+        if runs and runs[-1][0] == kind:
+            runs[-1][1] += 1
+        else:
+            runs.append([kind, 1])
+    out, wk = [], 0
+    for kind, count in runs:
+        s = start if not out else m0 + timedelta(days=7 * wk)
+        last_sun = m0 + timedelta(days=7 * (wk + count) - 1)
+        out.append({"phaseType": _COROS_PHASE_TYPE.get(kind, 2),
+                    "startDate": int(s.strftime("%Y%m%d")),
+                    "endDate": int(last_sun.strftime("%Y%m%d")),
+                    "durationWeeks": count})
+        wk += count
+    return out
+
+
+def _coros_plan_days(plan, first, last, hrz=None, pace_zones=None):
+    """One entry per date in [first, last] (dates): the day's sessions as courses, in plan order,
+    or one rest course when nothing is planned. Pure — the push diff and the create payload both
+    read their day list from here."""
+    by_date = {}
+    for w in _plan_all_weeks(plan):
+        for s in w.get("sessions", []):
+            if (s.get("km") or 0) > 0:
+                by_date.setdefault(s["date"], []).append(s)
+    out, d = [], first
+    while d <= last:
+        courses = [session_to_coros_course(s, hrz, pace_zones)
+                   for s in by_date.get(d.isoformat(), [])]
+        out.append({"date": d.isoformat(), "courses": courses or [_coros_rest_course()]})
+        d += timedelta(days=1)
+    return out
+
+
+def _coros_day_hash(courses):
+    """The diff key for one day's payload — stable key order so a rebuilt-but-equal day is not resent."""
+    return hashlib.sha256(json.dumps(courses, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _coros_chunk_days(days):
+    """Split the changed-day list (date-sorted) for updateTrainingPlan: whole days only, each call
+    covering a window of at most COROS_CHUNK_DAYS calendar days. A day is never split."""
+    chunks, cur, start = [], [], None
+    for d in days:
+        if cur and (_date(d["date"]) - start).days >= COROS_CHUNK_DAYS:
+            chunks.append(cur)
+            cur = []
+        if not cur:
+            start = _date(d["date"])
+        cur.append(d)
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+# ── §CG reply parsing (the catalog pins no output schema — best-effort, defensive) ──
+def _coros_result_texts(result):
+    return [c["text"] for c in (result or {}).get("content", [])
+            if isinstance(c, dict) and isinstance(c.get("text"), str)]
+
+
+def _coros_decode_text(text):
+    """COROS wraps payloads as JSON-encoded strings (sometimes doubly); peel until a dict/list or
+    plain text remains."""
+    obj = text
+    for _ in range(3):
+        if not isinstance(obj, str):
+            break
+        try:
+            obj = json.loads(obj)
+        except Exception:
+            break
+    return obj
+
+
+def _coros_library_records(result):
+    """The plan-library rows found in a queryTrainingPlanLibrary reply, as dicts — anything that
+    carries a plan id, wherever it nests. An unparseable reply yields [], and the CALLER treats
+    that as 'decided nothing' (never as 'the plan is gone')."""
+    out = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            if {str(k).lower() for k in o} & {"planid", "plan_id"}:
+                out.append(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    for t in _coros_result_texts(result):
+        obj = _coros_decode_text(t)
+        walk(obj if not isinstance(obj, str) else _coros_library_text_rows(obj))
+    return out
+
+
+def _coros_library_text_rows(text):
+    """The library as COROS actually answers it (read live 21 Oct 2026): plain text, one numbered
+    row per plan — "1. Sparing Horse [In progress] [mcp]" and then "Plan ID: …", "Record role:
+    execution", "Editable via MCP: yes", "Dates: 2026-10-21 to 2027-02-07", "Weeks: 16" lines.
+    Parsed into the same keys a JSON row would carry, so one lookup serves both shapes."""
+    rows, cur = [], None
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r"^\d+\.\s+(.*?)((?:\s*\[[^\]]*\])*)$", line)
+        if m:
+            tags = re.findall(r"\[([^\]]*)\]", m.group(2) or "")
+            cur = {"planName": m.group(1).strip(), "status": tags[0].lower() if tags else None}
+            rows.append(cur)
+            continue
+        if cur is None or ":" not in line:
+            continue
+        key, val = (x.strip() for x in line.split(":", 1))
+        key = key.lower()
+        if key == "plan id":
+            cur["planId"] = val
+        elif key == "record role":
+            cur["recordRole"] = val
+        elif key.startswith("editable"):
+            cur["editable"] = val.lower() in ("yes", "true", "1")
+        elif key == "weeks":
+            cur["totalWeeks"] = val
+        elif key == "dates":
+            d = re.match(r"^(\d{4}-\d{2}-\d{2})", val)
+            if d:
+                cur["startDate"] = d.group(1)
+    return [r for r in rows if r.get("planId")]
+
+
+def _coros_rec(rec, *names):
+    low = {str(k).lower(): v for k, v in rec.items()}
+    for n in names:
+        if n in low:
+            return low[n]
+    return None
+
+
+def _coros_find_library_plan(result, plan_id=None, name=None):
+    """The in-progress, editable EXECUTION row for a plan id (or by name) among the library
+    records, or None. Only an execution+editable row may be updated; a library/completed copy is
+    read-only by rule."""
+    for rec in _coros_library_records(result):
+        rid = _coros_rec(rec, "planid", "plan_id", "id")
+        if rid is None or (plan_id is not None and str(rid) != str(plan_id)):
+            continue
+        if name is not None and str(_coros_rec(rec, "planname", "plan_name", "name") or "") != name:
+            continue
+        role = str(_coros_rec(rec, "recordrole", "record_role") or "").lower()
+        if role and role != "execution":
+            continue
+        editable = _coros_rec(rec, "editable")
+        if editable is not None and str(editable).lower() not in ("true", "1"):
+            continue
+        status = _coros_rec(rec, "status", "executestatus", "execute_status")
+        if status is not None and str(status).lower() not in ("1", "in progress", "in_progress"):
+            continue
+        return {"plan_id": str(rid), "start": _coros_rec(rec, "startdate", "start_date",
+                                                         "planstartdate"),
+                "weeks": _coros_rec(rec, "totalweeks", "total_weeks", "weeks")}
+    return None
+
+
+def _coros_day_ref(v, start):
+    """One day reference from an update reply — a dayNo (int, relative to plan start) or a date
+    (yyyyMMdd or ISO) — as ISO, or None."""
+    s = str(v).strip()
+    if re.match(r"^\d{1,3}$", s):
+        return (start + timedelta(days=int(s))).isoformat()
+    if re.match(r"^\d{8}$", s):
+        s = f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        return s
+    return None
+
+
+def _coros_update_skipped(result, start):
+    """The dates the server SKIPPED on update (a completed workout keeps the whole day; each is
+    reported once in skippedExecutedDays). [] when the reply names none — or says nothing
+    parseable, in which case the sent days count as applied."""
+    skipped = set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if str(k).lower() == "skippedexecuteddays" and isinstance(v, list):
+                    for d in (_coros_day_ref(x, start) for x in v):
+                        if d:
+                            skipped.add(d)
+                else:
+                    walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    for t in _coros_result_texts(result):
+        walk(_coros_decode_text(t))
+    return skipped
+
+
+# ── §CG push (one COROS plan mirrors the road; per-date diff) ────────────────
+def _coros_plan_state(db):
+    try:
+        return json.loads(get_meta(db, COROS_PLAN_META) or "{}")
+    except Exception:
+        return {}
+
+
+def _coros_save_plan_state(db, state):
+    set_meta(db, COROS_PLAN_META, json.dumps(state))
+    db.commit()
+
+
+def _coros_parse_start(v):
+    s = str(v or "").strip()
+    if re.match(r"^\d{8}$", s):
+        s = f"{s[:4]}-{s[4:6]}-{s[6:]}"
+    try:
+        return _date(s)
+    except Exception:
+        return None
+
+
+def _coros_create_or_adopt(plan, start, hrz, pace_zones, exclude_id=None):
+    """The create path's two halves. First ADOPT an in-progress editable execution plan already
+    named 'Sparing Horse' (a reconnect after disconnect must not stack a second overlapping plan —
+    COROS allows the overlap and never flags it); adoption needs the row's start + length to parse,
+    else it falls through. Then createTrainingPlan for [start, start + fitted weeks), with the
+    full periodization table and every workout day in one courseList (omitted days are rest by
+    rule), and the execution planId read back through the library. Returns the stored entry, or
+    {"skip": reason} when no valid length exists."""
+    lib = _coros_call("queryTrainingPlanLibrary", {"planType": "mcp"})
+    rec = _coros_find_library_plan(lib, name=COROS_PLAN_NAME)
+    if rec and rec["plan_id"] != str(exclude_id):
+        rstart = _coros_parse_start(rec.get("start"))
+        try:
+            rweeks = int(rec.get("weeks"))
+        except (TypeError, ValueError):
+            rweeks = None
+        if rstart and rweeks and COROS_MIN_WEEKS <= rweeks <= COROS_MAX_WEEKS:
+            return {"plan_id": rec["plan_id"], "start": rstart.isoformat(), "weeks": rweeks,
+                    "hashes": {}, "skipped": []}
+    total = _coros_total_weeks(plan, start)
+    if total is None:
+        return {"skip": "the road left is too short for COROS's 4-week minimum with a workout in "
+                        "its final week"}
+    end = _coros_plan_end(start, total)
+    days = _coros_plan_days(plan, start, end, hrz, pace_zones)
+    courses = [{"dayNo": (_date(d["date"]) - start).days, **c}
+               for d in days for c in d["courses"] if c["sportType"] != 4]
+    _coros_call("createTrainingPlan",
+                {"planInfo": {"planName": COROS_PLAN_NAME, "planOverview": COROS_PLAN_OVERVIEW,
+                              "planStartDate": int(start.strftime("%Y%m%d")), "totalWeeks": total},
+                 "phaseInfo": {"planRationale": COROS_PLAN_RATIONALE,
+                               "periodization": _coros_periodization(plan, start, total)},
+                 "courseList": courses})
+    lib = _coros_call("queryTrainingPlanLibrary", {"planType": "mcp"})
+    rec = _coros_find_library_plan(lib, name=COROS_PLAN_NAME)
+    if not rec:
+        raise RuntimeError("the plan was created but its execution id could not be read back")
+    return {"plan_id": rec["plan_id"], "start": start.isoformat(), "weeks": total,
+            "hashes": {d["date"]: _coros_day_hash(d["courses"]) for d in days}, "skipped": [],
+            "sent_days": sum(1 for d in days if any(c["sportType"] != 4 for c in d["courses"]))}
+
+
+def _coros_push_days(entry, plan, today, hrz, pace_zones, horizon=None):
+    """Diff one plan entry's window [max(today, start) .. plan end] against the stored per-date
+    hashes: only days whose payload changed are sent, in whole-day chunks. A day the server
+    reports skipped (a completed workout) is recorded in entry['skipped'] and never retried — the
+    server would keep skipping it, and the old courses on the day are the truth. Mutates the
+    entry; returns (results, errors)."""
+    start = _date(entry["start"])
+    end = _coros_plan_end(start, entry["weeks"])
+    first = max(today, start)
+    last = min(end, horizon) if horizon else end
+    results, errors = [], []
+    if first > last:
+        return results, errors
+    changed = []
+    for d in _coros_plan_days(plan, first, last, hrz, pace_zones):
+        if d["date"] in entry["skipped"]:
+            continue
+        h = _coros_day_hash(d["courses"])
+        if entry["hashes"].get(d["date"]) == h:
+            continue
+        changed.append({"date": d["date"], "hash": h, "courses": d["courses"],
+                        "dayNo": (_date(d["date"]) - start).days})
+    for chunk in _coros_chunk_days(changed):
+        course_list = [{"dayNo": c["dayNo"], **course} for c in chunk for course in c["courses"]]
+        try:
+            res = _coros_call("updateTrainingPlan",
+                              {"planInfo": {"planId": str(entry["plan_id"])},
+                               "courseList": course_list})
+        except Exception as e:
+            errors.append(f"{chunk[0]['date']}…{chunk[-1]['date']}: {str(e)[:160]}")
+            results += [{"date": c["date"], "action": "failed", "error": str(e)[:160]}
+                        for c in chunk]
+            continue
+        skipped = _coros_update_skipped(res, start)
+        for c in chunk:
+            if c["date"] in skipped:
+                entry["skipped"].append(c["date"])
+                results.append({"date": c["date"], "action": "skipped",
+                                "note": "completed on the watch — COROS keeps the day"})
+            else:
+                entry["hashes"][c["date"]] = c["hash"]
+                results.append({"date": c["date"],
+                                "action": "cleared" if c["courses"][0]["sportType"] == 4
+                                else "updated"})
+    return results, errors
+
+
+def push_coros(db, days=None):
+    """Mirror the plan onto the athlete's COROS calendar as ONE app-owned training plan. Days
+    pushed: today through the COROS plan's end (a `days` cap shortens the window, never past it);
+    a day with sessions gets those courses, a day without a rest entry, never a day before today.
+    The SH road reaching past the plan's end extends it (full periodization table in the same
+    call) up to the 16-week ceiling; at the ceiling, once the follow-on plan's start is inside
+    COROS's 14-day window it is created and the rest of the road lands there. Returns a per-day
+    summary like push_guides; never raises."""
+    if READONLY:
+        return {"ok": False, "error": "read-only instance"}
+    if not _coros_tokens():
+        return {"ok": False, "error": "COROS not connected", "skipped": True}
+    row = db.execute("SELECT plan FROM plans ORDER BY id DESC LIMIT 1").fetchone()
+    if not row:
+        return {"ok": False, "error": "no plan", "skipped": True}
+    plan = json.loads(row[0])
+    today = datetime.now().date()
+    road_end = max((s["date"] for w in _plan_all_weeks(plan) for s in w.get("sessions", [])
+                    if (s.get("km") or 0) > 0), default=None)
+    if not road_end or _date(road_end) < today:
+        return {"ok": True, "pushed": 0, "results": [], "skipped": True,
+                "note": "no sessions ahead"}
+    road_end = _date(road_end)
+    hrz = None
+    try:
+        hrz = hr_zones(db)
+    except Exception:
+        pass                                   # pace guides alone — HR grid is an enhancement
+    pace_zones = plan.get("pace_zones")
+    horizon = (today + timedelta(days=days - 1)) if days else None
+    state = _coros_plan_state(db)
+    results, errors, created_days = [], [], 0
+    try:
+        cur = state.get("current")
+        if cur:
+            # the stored execution row may be gone or read-only (the athlete quit it in the COROS
+            # app). A library reply that parses DECIDES; one that doesn't decides nothing — the
+            # update itself is then the probe, and its failure lands in errors, not a duplicate plan.
+            try:
+                lib = _coros_call("queryTrainingPlanLibrary", {"planType": "mcp"})
+                if _coros_library_records(lib) \
+                        and not _coros_find_library_plan(lib, plan_id=cur.get("plan_id")):
+                    cur = None
+            except Exception:
+                pass
+        if not cur:
+            made = _coros_create_or_adopt(plan, today, hrz, pace_zones)
+            if made.get("skip"):
+                return {"ok": True, "pushed": 0, "results": [], "skipped": True,
+                        "note": made["skip"]}
+            state["current"], state["next"] = made, None
+            cur = made
+            created_days = made.get("sent_days") or 0
+            results.append({"date": today.isoformat(), "action": "created",
+                            "note": f"new {cur['weeks']}-week COROS plan"})
+            _coros_save_plan_state(db, state)
+        cur_end = _coros_plan_end(_date(cur["start"]), cur["weeks"])
+        if road_end > cur_end and cur["weeks"] < COROS_MAX_WEEKS:
+            new_total = _coros_total_weeks(plan, _date(cur["start"]), min_weeks=cur["weeks"])
+            if new_total and new_total > cur["weeks"]:
+                _coros_call("updateTrainingPlan",
+                            {"planInfo": {"planId": str(cur["plan_id"]), "totalWeeks": new_total},
+                             "phaseInfo": {"periodization":
+                                           _coros_periodization(plan, _date(cur["start"]), new_total)}})
+                cur["weeks"] = new_total
+                cur_end = _coros_plan_end(_date(cur["start"]), new_total)
+                results.append({"date": cur_end.isoformat(), "action": "extended",
+                                "note": f"plan lengthened to {new_total} weeks"})
+                _coros_save_plan_state(db, state)
+        if road_end > cur_end and cur["weeks"] >= COROS_MAX_WEEKS and not state.get("next"):
+            nxt_start = _coros_rollover_start(cur_end)
+            if 0 <= (nxt_start - today).days <= 14:      # COROS's planStartDate window
+                made = _coros_create_or_adopt(plan, nxt_start, hrz, pace_zones,
+                                              exclude_id=cur["plan_id"])
+                if not made.get("skip"):
+                    state["next"] = made
+                    created_days += made.get("sent_days") or 0
+                    results.append({"date": nxt_start.isoformat(), "action": "created",
+                                    "note": "the 16-week ceiling: the road continues on a "
+                                            "follow-on plan"})
+                    _coros_save_plan_state(db, state)
+        for entry in (state.get("current"), state.get("next")):
+            if not entry:
+                continue
+            res, errs = _coros_push_days(entry, plan, today, hrz, pace_zones, horizon)
+            results += res
+            errors += errs
+            _coros_save_plan_state(db, state)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300], "results": results}
+    cur = state.get("current") or {}
+    out = {"ok": not errors,
+           "pushed": sum(1 for r in results if r.get("action") in ("updated", "cleared"))
+                     + created_days,
+           "results": results}
+    if cur:
+        out["plan_end"] = _coros_plan_end(_date(cur["start"]), cur["weeks"]).isoformat()
+    skipped_days = [r["date"] for r in results if r.get("action") == "skipped"]
+    if skipped_days:
+        out["skipped_days"] = skipped_days
+    if errors:
+        out["error"] = "; ".join(errors)[:300]
+    return out
+
+
+def coros_status(db):
+    """Settings-window payload: connected? login pending (with its link)? last push and the COROS
+    plan's end from meta. Never a token. A pending login is claimed ONCE here per read — when the
+    athlete has signed in since the last poll, the exchange completes and the tokens land."""
+    tok = _coros_tokens()
+    pend = _coros_state(COROS_PENDING_KEY)
+    if not tok and pend:
+        try:
+            new = _coros_poll_login_once(pend)
+        except Exception as e:
+            print(f"[coros] login poll: {e}")
+            new = None
+            if "start again" in str(e):          # terminal (failed/expired/claimed): offer a fresh link
+                _save_coros_state(COROS_PENDING_KEY, None)
+                pend = None
+        if new:
+            _save_coros_state(COROS_TOKENS_KEY, new)
+            _save_coros_state(COROS_PENDING_KEY, None)
+            tok, pend = new, None
+            print("[coros] connected")
+    out = {"connected": bool(tok), "pending": bool(pend),
+           "last_push": get_meta(db, "coros:last_push"), "plan_end": None}
+    if pend:
+        out["login_url"] = pend["login_url"]
+    cur = _coros_plan_state(db).get("current")
+    if cur:
+        try:
+            out["plan_end"] = _coros_plan_end(_date(cur["start"]), cur["weeks"]).isoformat()
+        except Exception:
+            pass
+    return out
+
+
 # ── ETL ─────────────────────────────────────────────────────────────────────
 def upsert_activity(db, a):
     sport = a.get("sport") or {}
@@ -6535,6 +7459,7 @@ def _private_only_path(p):
                   "/api/secrets/validate", "/api/runs",   # §RB — calendar carries HR-zone grades
                   "/api/system")                          # 0.56.1 — the household's timestamps
             or p.startswith("/api/suunto")                # §SG — OAuth + watch push are owner-only
+            or p.startswith("/api/coros")                 # §CG — same for the COROS plan push
             or p.startswith("/api/music")                 # §BEAT — listening history + Spotify OAuth
             or p.startswith("/api/backup") or p.startswith("/api/export")   # §BX — the user's data
             or p.startswith("/api/availability")          # §AV — away days = empty-house broadcast
@@ -6570,7 +7495,8 @@ try:
     DEMO_BANNER_HTML = (Path(__file__).resolve().parent / "static" / "demobar.html").read_text(encoding="utf-8")
 except OSError:                      # a trimmed image without the fragment: no banner, not a crash
     DEMO_BANNER_HTML = ""
-DEMO_BLOCKED_PATHS = ("/api/secrets", "/api/sync", "/api/suunto", "/api/selftest", "/selftest",
+DEMO_BLOCKED_PATHS = ("/api/secrets", "/api/sync", "/api/suunto", "/api/coros", "/api/selftest",
+                      "/selftest",
                       # 0.55.1 — a full-database download (a VACUUM INTO per call) and the JSON dump
                       # of every user table are not things a demo has any business handing out: the
                       # data is synthetic, the CPU and the bandwidth are not (review S2).
@@ -6605,8 +7531,9 @@ def _demo_guard():
     # Blocking the whole path 403'd the page on first paint — the demo's own Settings tab showed an
     # error before a visitor touched anything. Only the WRITE is refused.
     # Same reasoning for `GET /api/suunto/status`: it reports whether a watch is connected (it is
-    # not), which is what the panel renders. Only the PUSH and DISCONNECT talk to Suunto.
-    if request.method == "GET" and p in ("/api/secrets", "/api/suunto/status"):
+    # not), which is what the panel renders. Only the PUSH and DISCONNECT talk to Suunto. The COROS
+    # status read is the same shape (§CG).
+    if request.method == "GET" and p in ("/api/secrets", "/api/suunto/status", "/api/coros/status"):
         pass
     elif any(p == b or p.startswith(b + "/") for b in DEMO_BLOCKED_PATHS):
         return jsonify(ok=False, demo=True,
@@ -9789,6 +10716,7 @@ def api_system():
                           "fail_count": _sched_fail_count(db)},
                    db_writable=not unwritable, db_unwritable=unwritable,
                    suunto={"connected": bool(su.get("connected")), "last_push": get_meta(db, "suunto:last_push")},
+                   coros={"connected": bool(_coros_tokens()), "last_push": get_meta(db, "coros:last_push")},
                    backup={"dir": str(_backup_dir()), "latest": latest.name if latest else None, "age_h": age_h,
                            "kept": len(files), "keep": BACKUP_KEEP, "push": bool(BACKUP_PUSH)})
 
@@ -10003,6 +10931,59 @@ def api_suunto_disconnect():
     """Forget the stored user tokens (the app credentials in Settings stay)."""
     _save_suunto_tokens(None)
     return jsonify(ok=True, **suunto_status())
+
+
+# ── §CG COROS endpoints (all under /api/coros → private-only + readonly-guarded) ──
+@app.post("/api/coros/connect")
+def api_coros_connect():
+    """Begin the device login: register a client, open the CLI login session, store the pending
+    session and hand back the link the athlete signs into. /api/coros/status polls it from there."""
+    try:
+        pend = _coros_start_login()
+    except Exception as e:
+        print(f"[coros] connect failed: {e}")
+        return jsonify(ok=False, error=str(e)[:200]), 502
+    _save_coros_state(COROS_PENDING_KEY, pend)
+    return jsonify(ok=True, login_url=pend["login_url"])
+
+
+@app.get("/api/coros/status")
+def api_coros_status():
+    return jsonify(ok=True, **coros_status(get_db()))
+
+
+@app.post("/api/coros/disconnect")
+def api_coros_disconnect():
+    """Forget the tokens, any pending login and the stored plan id (the next push then creates a
+    fresh COROS plan instead of updating one that may have been quit in the COROS app)."""
+    _save_coros_state(COROS_TOKENS_KEY, None)
+    _save_coros_state(COROS_PENDING_KEY, None)
+    db = get_db()
+    db.execute("DELETE FROM meta WHERE key=?", (COROS_PLAN_META,))
+    db.commit()
+    return jsonify(ok=True, **coros_status(db))
+
+
+@app.post("/api/coros/push")
+def api_coros_push():
+    """Manual 'push to COROS now' — the same code path as the nightly push."""
+    d = body()
+    raw_days = d.get("days")
+    if raw_days is None or (isinstance(raw_days, str) and not raw_days.strip()):
+        days = None
+    else:
+        try:
+            days = int(raw_days)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="days must be a whole number"), 400
+        if not (1 <= days <= 60):
+            return jsonify(ok=False, error="days must be between 1 and 60"), 400
+    res = push_coros(get_db(), days=days)
+    if res.get("ok") and not res.get("skipped"):            # the System block reads this
+        set_meta(get_db(), "coros:last_push", _now_iso()); get_db().commit()
+    # 200 even on a failed push: the body carries ok/error, and a 502 behind the tunnel reached the
+    # page as an error page it could not read ("network error" on the first live push).
+    return jsonify(**res)
 
 
 def _render_app(page="dash"):
@@ -10353,6 +11334,21 @@ def _nightly_job_once(kind="nightly"):
                   + (f" — {res['error']}" if res.get("error") else ""))
     except Exception as e:
         print(f"[scheduler] suunto guides push failed: {e}")
+    # §CG — same nightly mirror for the COROS training plan, after the Suunto push, in its own
+    # try: no-ops (skipped=True) when COROS isn't connected; push_coros never raises.
+    try:
+        db = connect_db()
+        try:
+            res = push_coros(db)
+            if res.get("ok") and not res.get("skipped"):
+                set_meta(db, "coros:last_push", _now_iso()); db.commit()
+        finally:
+            db.close()
+        if not res.get("skipped"):
+            print(f"[scheduler] coros plan push: {res.get('pushed', 0)} days pushed"
+                  + (f" — {res['error']}" if res.get("error") else ""))
+    except Exception as e:
+        print(f"[scheduler] coros plan push failed: {e}")
     if ok:
         try:
             _backup_rotate()

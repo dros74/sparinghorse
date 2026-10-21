@@ -21,14 +21,15 @@ capability matrix are in the [README](README.md); this is the longer how-to behi
 6. [Reading the dashboard, panel by panel](#6-reading-the-dashboard-panel-by-panel)
 7. [The AI layer](#7-the-ai-layer)
 8. [Sending the plan to a Suunto watch (optional)](#8-sending-the-plan-to-a-suunto-watch-optional)
-9. [Cadence playlists (optional)](#9-cadence-playlists-optional)
-10. [Day-to-day and week-to-week](#10-day-to-day-and-week-to-week)
-11. [Easing, medical holds and adjustments](#11-easing-medical-holds-and-adjustments)
-12. [The privacy model](#12-the-privacy-model)
-13. [Settings and secrets](#13-settings-and-secrets)
-14. [Backing up your data](#14-backing-up-your-data)
-15. [Troubleshooting](#15-troubleshooting)
-16. [Glossary](#16-glossary)
+9. [Sending the plan to a COROS watch (optional)](#9-sending-the-plan-to-a-coros-watch-optional)
+10. [Cadence playlists (optional)](#10-cadence-playlists-optional)
+11. [Day-to-day and week-to-week](#11-day-to-day-and-week-to-week)
+12. [Easing, medical holds and adjustments](#12-easing-medical-holds-and-adjustments)
+13. [The privacy model](#13-the-privacy-model)
+14. [Settings and secrets](#14-settings-and-secrets)
+15. [Backing up your data](#15-backing-up-your-data)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Glossary](#17-glossary)
 
 ---
 
@@ -92,7 +93,7 @@ optional AI layer only narrates and parses (and no longer appears in the Plan se
 - **Anthropic API key** *(optional)* — enables the natural-language layer. Leave it blank and every AI
   feature stays dormant; the deterministic engine is unaffected.
 
-You can supply both **in the app's Settings window** (recommended — see [§13](#13-settings-and-secrets)); no
+You can supply both **in the app's Settings window** (recommended — see [§14](#14-settings-and-secrets)); no
 file editing is required for day-to-day use.
 
 ### Run locally
@@ -119,7 +120,7 @@ file editing is required for day-to-day use.
 
 **Why separate containers and not one with a toggle?** The public container has no token and a
 query-only DB connection, so it cannot sync, write, or call the AI. The split is the security boundary;
-see [§12](#12-the-privacy-model).
+see [§13](#13-the-privacy-model).
 
 ### Install it as an app (PWA)
 
@@ -140,7 +141,7 @@ served until one exists; `SH_PASSPHRASE` in the environment sets it without the 
 shows a three-step guided card. In order:
 
 1. **Connect Runalyze.** Open **Settings → Connections & keys** and paste your Personal API token. (It is
-   stored in a private-only secrets store, never the shared DB — see [§13](#13-settings-and-secrets).)
+   stored in a private-only secrets store, never the shared DB — see [§14](#14-settings-and-secrets).)
 2. **Pull your history.** Hit **Sync now**, then **Backfill all** once to load your full activity history.
    The first backfill can take a minute or two depending on how many years you have.
 3. **Add your first race.** Open the **Objectives** panel and add a goal race (label, date, type, target,
@@ -552,7 +553,7 @@ with a **confidence** flag that decays as the data ages (LTHR drifts up as fitne
 data it falls back to a %HRmax estimate, flagged *provisional*. Known limitation: for *structured* tempos the
 warm-up/cool-down dilute the whole-run average, so this method **understates** LTHR, which is why the easy
 ceiling is pinned to the conservative (lower) Friel boundary, never a looser one. A field-tested LTHR can be
-entered under **Settings → Manual LTHR** ([§13](#13-settings-and-secrets)); the 30-minute protocol is there
+entered under **Settings → Manual LTHR** ([§14](#14-settings-and-secrets)); the 30-minute protocol is there
 too, and the app only suggests the test when every readiness clearance holds.
 
 **Pace vs HR coherence.** Because prescription and judgment are independent estimates, the app cross-checks
@@ -689,7 +690,38 @@ HR detail still only arrives in the boundary popup at each step change.
 
 ---
 
-## 9. Cadence playlists (optional)
+## 9. Sending the plan to a COROS watch (optional)
+
+The plan can also live on a COROS watch, as **one training plan on the COROS calendar** that the
+watch syncs from the COROS app. Entirely optional — the app is complete without it — and **private
+container only**.
+
+**Setup.** There is nothing to register and no keys to paste: **Settings → Connections & keys →
+Connect COROS** returns a *Sign in to COROS* link. Open it (it is COROS's own page, any browser,
+the phone works), sign in, and press **I've signed in** — the app completes the exchange the next
+time it checks. **Disconnect** forgets the tokens and the stored plan.
+
+**What gets pushed.** One plan named after the app, from today to the end of the road, every
+planned session as a structured workout: warm-up, work, recovery and cool-down steps with their
+durations; work steps carry a pace range around the prescribed pace, the other steps a heart-rate
+band from your zones, and a run of identical work/recovery pairs becomes one interval set with a
+rep count. Race day follows its own priced pace. A rest day on the plan is simply a day with no
+workout. The push runs nightly after the Suunto push, and **Push to COROS** runs it on demand. Only
+days that changed are sent; a day the re-plan emptied is cleared, and a day you already ran is left
+alone — completed workouts belong to the watch's record, not to the plan.
+
+**Two things to know.** The COROS **app** must sync before a change reaches the wrist — open it and
+let it sync. And a scheduled workout can be moved or deleted only in the COROS app or on the watch,
+not from Sparing Horse; the next nightly push repairs the day from the plan side.
+
+**Length.** A COROS plan runs 4 to 16 weeks and must end on a week with a workout, so the app fits
+the road into that window, extends the plan as the road grows, and — when the 16-week ceiling comes
+within a fortnight — starts the follow-on plan the Monday after. If less than four weeks of road
+remain, the COROS push sits out rather than padding a plan with empty weeks.
+
+---
+
+## 10. Cadence playlists (optional)
 
 Every planned session is cut into segments — warm-up, work, recovery, cool-down; a race into settle,
 cruise and grind — and each segment gets a target cadence read off your own speed–cadence curves: the
@@ -779,7 +811,7 @@ operationalisation, tuned on one athlete, not prescriptions from these authors.
 
 ---
 
-## 10. Day-to-day and week-to-week
+## 11. Day-to-day and week-to-week
 
 - **Daily:** glance at readiness before a hard session. Log nothing manually — your runs flow in from
   Runalyze on the next sync and attach themselves to the matching prescribed session.
@@ -797,7 +829,7 @@ operationalisation, tuned on one athlete, not prescriptions from these authors.
 
 ---
 
-## 11. Easing, medical holds and adjustments
+## 12. Easing, medical holds and adjustments
 
 - A **qualitative check-in** ("legs flat", "easy week, travelling") applies a *clamped* load adjustment for a
   bounded window — the engine eases volume, never raises it from a complaint.
@@ -819,7 +851,7 @@ operationalisation, tuned on one athlete, not prescriptions from these authors.
 
 ---
 
-## 12. The privacy model
+## 13. The privacy model
 
 The private and public containers **share one `./data` DB**, so the hard rule is: **anything written to the
 shared DB is readable by the public container.** Sparing Horse is built around that constraint:
@@ -854,7 +886,7 @@ The decision line: *training shape + plan* can be public; *medical / location / 
 
 ---
 
-## 13. Settings and secrets
+## 14. Settings and secrets
 
 The **Settings** window (private container only) is where you configure the app without editing files.
 It has one tab per concern, each with its own **Save** that writes only the fields changed on that tab
@@ -940,7 +972,7 @@ Anything you would rather set via environment still works; see the env table in 
 
 ---
 
-## 14. Backing up your data
+## 15. Backing up your data
 
 Everything the app knows lives in one SQLite file — but only some of it can be rebuilt. Runalyze can
 re-backfill your activities and fitness history any time; what **cannot** be rebuilt is what you put
@@ -965,7 +997,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 ---
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
@@ -980,7 +1012,7 @@ API keys and tokens are **never** included in either file — they live in a sep
 
 ---
 
-## 16. Glossary
+## 17. Glossary
 
 - **CTL** — Chronic Training Load. A slow (~42-day) average of training load; the app's proxy for *fitness*.
 - **ATL** — Acute Training Load. A fast (~7-day) average; the app's proxy for *fatigue*.

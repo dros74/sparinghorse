@@ -89,6 +89,10 @@ everything.
   Guides (steps with pace and HR bands), through your own Suunto partner-app keys. The nightly push
   updates guides in place. If you delete them on the watch itself, use **Rebuild on watch** in Settings:
   the watch only fetches guide ids it has never seen, so an update alone will not bring them back.
+- **COROS watch push** *(optional)*. The plan mirrors onto a COROS watch as one training plan on the
+  COROS calendar, through COROS's official MCP server — sign in through a link in Settings, nothing
+  to register. Workouts carry pace ranges and HR bands step by step; the nightly push rewrites only
+  the days that changed and leaves completed days alone. The COROS app syncs the plan to the watch.
 - **Cadence playlists** *(optional)*. Builds a private Spotify playlist for each planned session,
   targeting a cadence read from your own speed–cadence curve, never a fixed number, from your Spotify
   and last.fm listening (a ListenBrainz account also mixes in songs you have never run to). After the
@@ -204,7 +208,7 @@ that, `_demo_guard` refuses these requests, each for its own reason:
 | Refused | Why |
 |---|---|
 | `POST /api/secrets` | a public box must never accept an API key from a stranger, nor hold one to leak |
-| `POST /api/sync`, `/api/suunto/*` | outbound calls against someone's real account |
+| `POST /api/sync`, `/api/suunto/*`, `/api/coros/*` | outbound calls against someone's real account |
 | `POST /api/selftest/run` | an anonymous POST that burns about three minutes of CPU is a denial-of-service primitive |
 | `GET /api/backup/db`, `GET /api/export/json` | a full-database snapshot per call and a JSON dump of every table; the data is synthetic, the CPU and bandwidth are not |
 | `POST /api/health` | a lab value and its note would be shown to the *next* visitor's Body tab (the read stays open so the tab renders) |
@@ -213,7 +217,7 @@ that, `_demo_guard` refuses these requests, each for its own reason:
 
 Everything else runs: regenerate, check in, objectives, availability, adjustments, rest-day and
 long-run-day preferences, manual LTHR and age. Status reads (`GET /api/secrets`, `GET /api/suunto/status`,
-`GET /api/health`) stay open because the panels render them. Every box also carries the same dampers: a
+`GET /api/coros/status`, `GET /api/health`) stay open because the panels render them. Every box also carries the same dampers: a
 64 KB request-body cap, a per-address rate limit on writes and on the backup/export downloads, and one
 demo reseed per ten seconds across all visitors (see *Configuration*).
 

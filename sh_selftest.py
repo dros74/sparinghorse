@@ -10314,7 +10314,13 @@ def _stc_calibration_inventory():
                 # instead of the plan's offset
                 "MUSIC_AUTOLAP_UNIT_TOL", "MUSIC_GUIDE_LAP_TOL_S", "MUSIC_GUIDE_LAP_DECODE_WINDOW_S",
                 # SH-59 — the share of a run's songs another day's list must hold to be read as the run's list
-                "MUSIC_LIST_ADOPT_SHARE"}
+                "MUSIC_LIST_ADOPT_SHARE",
+                # §CG — COROS's own protocol numbers (catalog, 2026-10-21): plan-length bounds, the
+                # interval-group repeats cap, the chunking window, the absolute-intensity ranges and
+                # the section/phase enum maps. Limits and enums of someone else's API, not magnitudes
+                # the plan is computed from
+                "COROS_MIN_WEEKS", "COROS_MAX_WEEKS", "COROS_MAX_REPEATS", "COROS_CHUNK_DAYS",
+                "COROS_PACE_RANGE", "COROS_HR_RANGE", "_COROS_SECTION_TYPE", "_COROS_PHASE_TYPE"}
     text = doc.read_text(encoding="utf-8")
     body = text.split("## 10. The calibration inventory", 1)
     if len(body) != 2:
@@ -11478,6 +11484,496 @@ def _stc_guide_screen_layout():
                got={"failures": fails or "none", "warm_fields": warm_types, "work_fields": work_types,
                     "simple_fields": simple_types, "easy_hr_band": None if not wth else
                     (wth["min"], wth["max"], wth["value"])})
+
+
+# §CG — shared fixtures, shaped like the live plan's sessions (the 2026-10-22 threshold run, the
+# 2026-10-25 long_mp and the 2026-10-27 11×3min intervals of live_1021.db) and the athlete's HR
+# grid (Z1 → the 103–143 easy band).
+_COROS_HRZ = {"anchor": "lthr", "ref": 172, "cutoffs": [143, 155, 164, 172],
+              "zones": [("Z1", None, 143), ("Z2", 143, 155), ("Z3", 155, 164),
+                        ("Z4", 164, 172), ("Z5", 172, None)], "lthr_confidence": "high"}
+_COROS_PACE_ZONES = {"easy": "6:26/km", "easy_top": "6:15/km", "lt1": "5:56/km", "p5k": "4:44/km",
+                     "marathon": "5:34/km", "threshold": "5:07/km", "interval": "4:39/km"}
+
+
+def _coros_fx_threshold():
+    return {"date": "2026-10-22", "kind": "tempo", "zone": "threshold", "km": 10.2, "minutes": 58,
+            "reps": [{"effort": "warmup", "zone": "easy", "minutes": 10, "km": 1.6,
+                      "detail": "easy warm-up"},
+                     {"effort": "work", "zone": "threshold", "minutes": 25, "km": 4.9,
+                      "detail": "25min continuous @ threshold"},
+                     {"effort": "cooldown", "zone": "easy", "minutes": 23, "km": 3.7,
+                      "detail": "easy to the end of the run"}],
+            "note": "threshold run — 10min easy wu + 25min @ threshold + 23min easy to finish"}
+
+
+def _coros_fx_intervals(n_work=11):
+    reps = [{"effort": "warmup", "zone": "easy", "minutes": 10, "km": 1.6,
+             "detail": "easy warm-up"}]
+    for i in range(n_work):
+        reps.append({"effort": "work", "zone": "interval", "minutes": 3, "km": 0.6,
+                     "detail": "3min @ interval"})
+        if i < n_work - 1:
+            reps.append({"effort": "recovery", "zone": "easy", "minutes": 2, "km": 0.3,
+                         "detail": "easy jog recovery"})
+    reps.append({"effort": "cooldown", "zone": "easy", "minutes": 10, "km": 1.6,
+                 "detail": "easy cool-down"})
+    return {"date": "2026-10-27", "kind": "interval", "zone": "interval", "km": 12.8,
+            "minutes": 73, "reps": reps,
+            "note": "VO2 intervals — 10min easy wu + 11x3min @ interval w/ 2min jog + 10min easy cd"}
+
+
+def _coros_fx_long_mp():
+    return {"date": "2026-10-25", "kind": "long_mp", "zone": "marathon", "km": 29.0, "minutes": 176,
+            "reps": [{"effort": "easy_base", "zone": "easy", "minutes": 136, "km": 21.8,
+                      "detail": "easy aerobic base"},
+                     {"effort": "work", "zone": "marathon", "minutes": 40, "km": 7.2,
+                      "detail": "40min @ marathon pace finish"}],
+            "note": "marathon-pace long run (progressive)"}
+
+
+def _coros_fx_flat(sections):
+    """A course's sections with interval groups expanded — what the watch ends up running."""
+    out = []
+    for s in sections:
+        if s.get("intervalGroup"):
+            for _ in range(s["repeats"]):
+                out += s["sets"]
+        else:
+            out.append(s)
+    return out
+
+
+def _coros_fx_rep_shape(reps):
+    """(sectionType, target seconds) per rep — the sequence a flattened reps-course must reproduce."""
+    return [(S._COROS_SECTION_TYPE.get(r["effort"], 2), round(r["minutes"] * 60)) for r in reps]
+
+
+def _stc_coros_course():
+    """§CG course-converter det-lock — PURE (no DB, no network): the live plan's four session
+    shapes must convert to COROS courses holding every catalog rule: effort → sectionType
+    (1/2/3/4, easy_base→2), time targets in seconds for reps and a distance target in metres for
+    the simple run, the ±5% speed window as absolute integer sec/km on work reps, the grid HR band
+    everywhere else (a pace band when there is no grid), consecutive identical (work, recovery)
+    pairs folded into ONE interval group (repeats ≤ 20, no target/intensity on the container, 2/3
+    sections inside) with a final unrecovered work rep left plain, no intensity fields at all when
+    a band falls outside COROS's ranges (never 0), names ≤ 100, and a flattened course that
+    reproduces the session's reps exactly.
+
+    THE REVERT TOOTH is the interval-group fold: `_coros_group_intervals` returning its input
+    unchanged (no grouping) fails (c) and (e) outright — seen to fail by making exactly that
+    revert. [[revert-tests-must-be-seen-to-fail]]"""
+    fails = []
+
+    # (a) the simple easy run: one DISTANCE-framed training section; HR band with the grid,
+    #     a pace band without it
+    easy = {"date": "2026-10-21", "kind": "easy", "km": 10.0, "minutes": 60, "trimp": 60,
+            "note": "easy run"}
+    c = S.session_to_coros_course(easy, _COROS_HRZ)
+    if c["sections"] != [{"sectionType": 2, "targetType": 1, "targetValue": 10000,
+                          "intensityType": 1, "intensityValueStart": 103, "intensityValueEnd": 143}]:
+        fails.append(f"(a) easy run with grid wrong: {c['sections']}")
+    c_ng = S.session_to_coros_course(easy, None)
+    if c_ng["sections"] != [{"sectionType": 2, "targetType": 1, "targetValue": 10000,
+                             "intensityType": 2, "intensityValueStart": 343,
+                             "intensityValueEnd": 379}]:
+        fails.append(f"(a) easy run without grid wrong (pace band 343-379): {c_ng['sections']}")
+
+    # (b) the 22 Oct threshold run — the EXACT course proven live on 21 Oct (tmp/coros/test-1022.json)
+    c = S.session_to_coros_course(_coros_fx_threshold(), _COROS_HRZ, _COROS_PACE_ZONES)
+    want = [{"sectionType": 1, "targetType": 2, "targetValue": 600,
+             "intensityType": 1, "intensityValueStart": 103, "intensityValueEnd": 143},
+            {"sectionType": 2, "targetType": 2, "targetValue": 1500,
+             "intensityType": 2, "intensityValueStart": 292, "intensityValueEnd": 323},
+            {"sectionType": 4, "targetType": 2, "targetValue": 1380,
+             "intensityType": 1, "intensityValueStart": 103, "intensityValueEnd": 143}]
+    if c["sections"] != want:
+        fails.append(f"(b) threshold course != the live-proven one: {c['sections']}")
+    if "103-143 bpm" not in c["courseDescription"] or "4:52-5:23/km" not in c["courseDescription"] \
+            or "hreshold run" not in c["courseDescription"]:
+        fails.append(f"(b) description lost the note or the targets in words: {c['courseDescription']!r}")
+
+    # (c) the 27 Oct 11×3min: 10 identical (work, recovery) pairs → ONE group of 10; the 11th
+    #     work rep has no recovery after it and stays a plain section; flattening reproduces the reps
+    c = S.session_to_coros_course(_coros_fx_intervals(), _COROS_HRZ, _COROS_PACE_ZONES)
+    grp = [s for s in c["sections"] if s.get("intervalGroup")]
+    if len(grp) != 1 or grp[0]["repeats"] != 10:
+        fails.append(f"(c) expected ONE interval group of 10: {grp}")
+    else:
+        g0 = grp[0]
+        if set(g0) != {"intervalGroup", "repeats", "sets"}:
+            fails.append(f"(c) container carries target/intensity fields: {sorted(g0)}")
+        if [m["sectionType"] for m in g0["sets"]] != [2, 3]:
+            fails.append(f"(c) group members not sectionType 2/3: {g0['sets']}")
+    flat = _coros_fx_flat(c["sections"])
+    if [(s["sectionType"], s["targetValue"]) for s in flat] != \
+            _coros_fx_rep_shape(_coros_fx_intervals()["reps"]):
+        fails.append("(c) flattened course does not reproduce the session's reps")
+    if c["sections"][-2] != flat[-2] or c["sections"][-2].get("intervalGroup"):
+        fails.append(f"(c) the final unrecovered work rep is not a plain section: {c['sections'][-2]}")
+
+    # (d) the 25 Oct long_mp: easy_base → sectionType 2 with the HR band; the MP finish paced
+    c = S.session_to_coros_course(_coros_fx_long_mp(), _COROS_HRZ, _COROS_PACE_ZONES)
+    want = [{"sectionType": 2, "targetType": 2, "targetValue": 8160,
+             "intensityType": 1, "intensityValueStart": 103, "intensityValueEnd": 143},
+            {"sectionType": 2, "targetType": 2, "targetValue": 2400,
+             "intensityType": 2, "intensityValueStart": 318, "intensityValueEnd": 352}]
+    if c["sections"] != want:
+        fails.append(f"(d) long_mp course wrong: {c['sections']}")
+
+    # (e) 25 identical pairs split into groups of ≤ 20
+    c = S.session_to_coros_course(_coros_fx_intervals(n_work=25), _COROS_HRZ, _COROS_PACE_ZONES)
+    reps_seq = [s["repeats"] for s in c["sections"] if s.get("intervalGroup")]
+    if reps_seq != [20, 4]:
+        fails.append(f"(e) 24 pairs must split 20 + 4: {reps_seq}")
+    if [(s["sectionType"], s["targetValue"]) for s in _coros_fx_flat(c["sections"])] != \
+            _coros_fx_rep_shape(_coros_fx_intervals(n_work=25)["reps"]):
+        fails.append("(e) flattened 25-rep course does not reproduce the reps")
+
+    # (f) schema hygiene across all four courses: names ≤ 100, never a 0 intensity value, every
+    #     plain section targeted, containers bare
+    for sess in (_coros_fx_threshold(), _coros_fx_intervals(), _coros_fx_long_mp(),
+                 {"date": "2026-10-21", "kind": "easy", "km": 10.0, "minutes": 60}):
+        cc = S.session_to_coros_course(sess, _COROS_HRZ, _COROS_PACE_ZONES)
+        if not (1 <= len(cc["courseName"]) <= 100):
+            fails.append(f"(f) courseName outside 1..100: {cc['courseName']!r}")
+        if not cc["courseDescription"] or cc["sportType"] != 1:
+            fails.append(f"(f) description empty / sportType != 1 on {cc['courseName']!r}")
+        for s in cc["sections"]:
+            members = s["sets"] if s.get("intervalGroup") else [s]
+            if s.get("intervalGroup") and set(s) != {"intervalGroup", "repeats", "sets"}:
+                fails.append(f"(f) container not bare: {sorted(s)}")
+            for memb in members:
+                if memb.get("targetType") not in (1, 2) or not memb.get("targetValue"):
+                    fails.append(f"(f) plain section without a preset target: {memb}")
+                for k, v in memb.items():
+                    if k.startswith("intensity") and v == 0:
+                        fails.append(f"(f) a ZERO intensity value leaked: {memb}")
+
+    # (g) a band outside COROS's absolute ranges → NO intensity fields at all (never 0)
+    sess = {"date": "2026-10-21", "kind": "easy", "km": 10.0, "minutes": 60,
+            "reps": [{"effort": "work", "zone": "interval", "minutes": 3, "km": 0.1,
+                      "pace_sec": 1500},
+                     {"effort": "recovery", "zone": "easy", "minutes": 2, "km": 0.05},
+                                                                    # 24:00/km — out of range too
+                     {"effort": "work", "zone": "interval", "minutes": 3, "km": 0.1,
+                      "pace_sec": 1500}]}
+    c = S.session_to_coros_course(sess, {"anchor": "lthr", "ref": 300, "cutoffs": [260, 270, 280, 290],
+                                         "zones": [("Z1", None, 260), ("Z2", 260, 270),
+                                                   ("Z3", 270, 280), ("Z4", 280, 290),
+                                                   ("Z5", 290, None)]})
+    for s in _coros_fx_flat(c["sections"]):
+        if any(k.startswith("intensity") for k in s):
+            fails.append(f"(g) out-of-range band should drop intensity entirely: {s}")
+
+    # (h) the rest course, and km≤0 refuses
+    if S._coros_rest_course() != {"courseName": "Rest", "courseDescription": "Rest day",
+                                  "sportType": 4, "sections": []}:
+        fails.append(f"(h) rest course wrong: {S._coros_rest_course()}")
+    try:
+        S.session_to_coros_course({"date": "2026-10-21", "kind": "easy", "km": 0}, None)
+        fails.append("(h) km=0 session did not raise")
+    except ValueError:
+        pass
+
+    # (i) race day, even with the HR grid, follows its own priced pace (235 min / 42.2 km =
+    #     5:34/km → 318-352), never the easy HR band that would alarm for the whole race
+    race = {"date": "2026-12-06", "kind": "race", "km": 42.2, "minutes": 235, "note": "Marathon"}
+    c = S.session_to_coros_course(race, _COROS_HRZ)
+    if c["sections"] != [{"sectionType": 2, "targetType": 1, "targetValue": 42200,
+                          "intensityType": 2, "intensityValueStart": 318, "intensityValueEnd": 352}]:
+        fails.append(f"(i) race day must follow race pace, not the easy HR band: {c['sections']}")
+
+    return _st("det", "coros-course",
+               "§CG course converter: the live plan's four session shapes → schema-valid COROS "
+               "courses (targets, absolute bands, one interval group per identical-pair run, "
+               "repeats ≤ 20, bare containers, no zero intensity, out-of-range drops intensity), "
+               "flattened == the session's reps, HR band 103-143 off the grid",
+               passed=not fails, expect="all §CG converter locks hold",
+               got="; ".join(fails) if fails else "ok",
+               note="pure — no DB/network; the 22 Oct expectation is the course proven live on 21 Oct")
+
+
+def _stc_coros_plan_days():
+    """§CG plan-machinery det-lock — PURE: the day list (rest entries on empty days), the ≤
+    7-calendar-day chunking that never splits a day, the periodization table (one entry per run of
+    same-kind weeks, contiguous, first entry on the plan start date, Sundays at the end, durations
+    summing to totalWeeks), the totalWeeks fitting rule (clamp 4–16, then shorten until the final
+    week holds a workout; below 4 → None so the push skips), and the 16-week rollover start (the
+    Monday after the old plan's last Sunday).
+
+    THE REVERT TOOTH is the final-week rule: deleting the `while total > min_weeks …` shortening
+    loop makes the plan with an empty week 16 fall through to the final guard and return None
+    instead of shortening to 15 — seen to fail with exactly that revert.
+    [[revert-tests-must-be-seen-to-fail]]"""
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    mon = _d(2026, 10, 19)     # a Monday
+
+    def wk(k, kind_key="base", sessions=True):
+        m = (mon + _td(days=7 * k)).isoformat()
+        sess = ([{"date": (mon + _td(days=7 * k + 1)).isoformat(), "kind": "easy", "km": 8.0,
+                  "minutes": 48, "trimp": 50.0},
+                 {"date": (mon + _td(days=7 * k + 3)).isoformat(), "kind": "long", "km": 14.0,
+                  "minutes": 90, "trimp": 100.0}] if sessions else [])
+        return {"wk": k + 1, "start": m, "km": 22, "runs": 2, "sessions": sess}
+
+    plan = {"phases": [{"key": "base", "kind": "base"}, {"key": "build", "kind": "build"}],
+            "base": {"weeks": [wk(0), wk(1), wk(2)]},
+            "build": {"weeks": [wk(3, "build"), wk(4, "build")]}}
+
+    # (a) day payloads: a rest entry on every empty day, courses on session days
+    days = S._coros_plan_days(plan, mon, mon + _td(days=6))
+    if len(days) != 7:
+        fails.append(f"(a) 7 days expected: {len(days)}")
+    for d in days:
+        has = d["date"] in ((mon + _td(days=1)).isoformat(), (mon + _td(days=3)).isoformat())
+        if has and any(c["sportType"] != 1 for c in d["courses"]):
+            fails.append(f"(a) session day without a run course: {d}")
+        if not has and d["courses"] != [S._coros_rest_course()]:
+            fails.append(f"(a) empty day without the rest entry: {d}")
+
+    # (b) chunking: ≤ 7 calendar days per call, whole days only; a gap re-anchors the window
+    ten = [{"date": (mon + _td(days=i)).isoformat()} for i in range(10)]
+    sizes = [len(c) for c in S._coros_chunk_days(ten)]
+    if sizes != [7, 3]:
+        fails.append(f"(b) 10 consecutive days must chunk 7 + 3: {sizes}")
+    gappy = [{"date": (mon + _td(days=i)).isoformat()} for i in (0, 1, 10)]
+    sizes = [len(c) for c in S._coros_chunk_days(gappy)]
+    if sizes != [2, 1]:
+        fails.append(f"(b) a gap beyond the 7-day window must re-chunk: {sizes}")
+
+    # (c) periodization: 3 base + 2 build weeks → two contiguous entries summing to 5
+    per = S._coros_periodization(plan, mon, 5)
+    if [p["phaseType"] for p in per] != [2, 3] or [p["durationWeeks"] for p in per] != [3, 2]:
+        fails.append(f"(c) base/build runs wrong: {per}")
+    if sum(p["durationWeeks"] for p in per) != 5:
+        fails.append(f"(c) durations do not sum to totalWeeks: {per}")
+    if per[0]["startDate"] != 20261019 or per[0]["endDate"] != 20261108 \
+            or per[1]["startDate"] != 20261109 or per[1]["endDate"] != 20261122:
+        fails.append(f"(c) entry dates wrong (contiguous Mondays/Sundays): {per}")
+    per_mid = S._coros_periodization(plan, mon + _td(days=2), 5)   # a Wednesday start
+    if per_mid[0]["startDate"] != 20261021 or per_mid[0]["endDate"] != 20261108:
+        fails.append(f"(c) a mid-week start must open ON the start date and still end on a "
+                     f"Sunday: {per_mid[0]}")
+    # an unknown kind reads as base (phaseType 2), a recovery run as preparation (1)
+    plan2 = {"phases": [{"key": "bridge", "kind": "bridge"}, {"key": "recovery1", "kind": "recovery"}],
+             "bridge": {"weeks": [wk(0, "bridge")]}, "recovery1": {"weeks": [wk(1, "recovery1")]}}
+    per2 = S._coros_periodization(plan2, mon, 2)
+    if [p["phaseType"] for p in per2] != [2, 1]:
+        fails.append(f"(c) unknown→base and recovery→preparation mapping wrong: {per2}")
+
+    # (d) the totalWeeks fit: clamp 4–16, then shorten until the final week holds a workout
+    short = {"phases": [{"key": "base", "kind": "base"}],
+             "base": {"weeks": [wk(0), wk(1), wk(2)]}}                       # road ends week 3
+    got = S._coros_total_weeks(short, mon)
+    if got is not None:
+        fails.append(f"(d) a 3-week road must SKIP (4-week minimum, empty final week), got {got}")
+    ten_w = {"phases": [{"key": "base", "kind": "base"}],
+             "base": {"weeks": [wk(k) for k in range(10)]}}
+    if S._coros_total_weeks(ten_w, mon) != 10:
+        fails.append(f"(d) a 10-week road must fit 10, got {S._coros_total_weeks(ten_w, mon)}")
+    long_ok = {"phases": [{"key": "base", "kind": "base"}],
+               "base": {"weeks": [wk(k) for k in range(20)]}}                # road ends week 20
+    if S._coros_total_weeks(long_ok, mon) != 16:
+        fails.append(f"(d) a 20-week road must clamp to 16, got {S._coros_total_weeks(long_ok, mon)}")
+    gap16 = {"phases": [{"key": "base", "kind": "base"}],
+             "base": {"weeks": [wk(k) for k in range(20) if k != 15]}}       # week 16 empty
+    if S._coros_total_weeks(gap16, mon) != 15:
+        fails.append(f"(d) an empty week 16 must shorten to 15, got {S._coros_total_weeks(gap16, mon)}")
+
+    # (e) plan end + the 16-week rollover start (the Monday after the last Sunday)
+    end = S._coros_plan_end(mon + _td(days=2), 4)
+    if end != _d(2026, 11, 15) or end.weekday() != 6:
+        fails.append(f"(e) plan end must be the Sunday of week 4: {end}")
+    if S._coros_rollover_start(end) != _d(2026, 11, 16) \
+            or S._coros_rollover_start(end).weekday() != 0:
+        fails.append(f"(e) rollover start must be the Monday after the last Sunday: "
+                     f"{S._coros_rollover_start(end)}")
+
+    return _st("det", "coros-plan-days",
+               "§CG plan machinery: rest entries for empty days, ≤7-day whole-day chunking, "
+               "contiguous periodization summing to totalWeeks, the final-week-must-hold-a-workout "
+               "fit (clamp 4-16, shorten, else skip), the 16-week rollover start date",
+               passed=not fails, expect="all §CG plan-machinery locks hold",
+               got="; ".join(fails) if fails else "ok",
+               note="pure — no DB/network")
+
+
+def _stc_coros_push_diff():
+    """§CG push diff — the nightly push must be a NO-OP when nothing changed. Drives the real
+    `push_coros` against a faked `_coros_call` (the one function every MCP round-trip goes
+    through, so faking it severs all network) with a 5-week road on an in-memory DB:
+      · the FIRST push creates the plan (one createTrainingPlan carrying every workout day) and
+        sends nothing more;
+      · a SECOND push of the same plan sends nothing at all (no update call) — the per-date hashes
+        say every day already landed;
+      · a CHANGED day sends exactly that day (one update call, one dayNo);
+      · a day the server reports in skippedExecutedDays is reported in the summary and NEVER
+        retried, even though its hash still differs.
+
+    THE REVERT TOOTH is the hash check in `_coros_push_days`: dropping the
+    `entry["hashes"].get(...) == h` comparison (send every day every night, the pre-diff shape)
+    fails the second-push assertion outright — seen to fail with exactly that revert.
+    [[revert-tests-must-be-seen-to-fail]]"""
+    import sqlite3 as _sq
+    from datetime import date as _d, timedelta as _td
+    fails, detail = [], {}
+    today = _d.today()
+    monday = today - _td(days=today.weekday())
+    day = lambda n: (today + _td(days=n)).isoformat()
+
+    def build_plan():
+        weeks = []
+        for k in range(5):
+            sess = [{"date": day(7 * k), "kind": "easy", "km": 8.0, "minutes": 48, "trimp": 50.0}]
+            if k == 0:
+                sess.append({"date": day(1), "kind": "interval", "km": 9.0, "minutes": 50,
+                             "trimp": 80.0,
+                             "reps": [{"effort": "work", "zone": "interval", "minutes": 3,
+                                       "km": 0.6},
+                                      {"effort": "recovery", "zone": "easy", "minutes": 2,
+                                       "km": 0.3},
+                                      {"effort": "work", "zone": "interval", "minutes": 3,
+                                       "km": 0.6}]})
+            weeks.append({"wk": k + 1, "start": (monday + _td(days=7 * k)).isoformat(),
+                          "km": 20, "runs": 2, "sessions": sess})
+        return {"phases": [{"key": "base", "kind": "base"}], "base": {"weeks": weeks}}
+
+    m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+    m.executescript(S.SCHEMA)
+    m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}',?)",
+              (S._now_iso(), day(0), S.json.dumps(build_plan())))
+    m.commit()
+
+    calls = []
+    state = {"created": False, "skip_daynos": []}
+
+    def fake_call(tool, args):
+        calls.append((tool, args))
+        if tool == "queryTrainingPlanLibrary":
+            plans = ([{"planId": "424242", "planName": "Sparing Horse", "recordRole": "execution",
+                       "editable": True, "status": 1,
+                       "startDate": int(today.strftime("%Y%m%d")), "totalWeeks": 5}]
+                     if state["created"] else [])
+            return {"content": [{"type": "text", "text": S.json.dumps({"plans": plans})}],
+                    "isError": False}
+        if tool == "createTrainingPlan":
+            state["created"] = args
+            return {"content": [{"type": "text", "text": "\"created\""}], "isError": False}
+        if tool == "updateTrainingPlan":
+            skipped = sorted({c["dayNo"] for c in args["courseList"]
+                              if c["dayNo"] in state["skip_daynos"]})
+            return {"content": [{"type": "text",
+                                 "text": S.json.dumps({"skippedExecutedDays": skipped})}],
+                    "isError": False}
+        raise AssertionError(f"unexpected tool {tool}")
+
+    n_calls = lambda tool: sum(1 for t, _a in calls if t == tool)
+    saved = {k: getattr(S, k) for k in ("READONLY", "_coros_tokens", "_coros_call", "hr_zones")}
+    try:
+        S.READONLY = False
+        S._coros_tokens = lambda: {"access_token": "x", "refresh_token": "y",
+                                   "expires_at": S.time.time() + 3600,
+                                   "client_id": "cid", "issuer": "https://mcp.example"}
+        S._coros_call = fake_call
+        S.hr_zones = lambda db, today=None: None      # a stable no-grid push, every run
+
+        # push 1 — creates the plan and nothing else
+        r1 = S.push_coros(m)
+        detail["r1"] = {"ok": r1.get("ok"), "pushed": r1.get("pushed")}
+        if not r1.get("ok"):
+            fails.append(f"push 1 failed: {r1}")
+        if n_calls("createTrainingPlan") != 1:
+            fails.append(f"push 1 must create exactly once: {n_calls('createTrainingPlan')}")
+        if n_calls("updateTrainingPlan") != 0:
+            fails.append(f"push 1 must not update after creating: {n_calls('updateTrainingPlan')}")
+        args = state["created"]
+        if args["planInfo"]["totalWeeks"] != 5 \
+                or args["planInfo"]["planStartDate"] != int(today.strftime("%Y%m%d")):
+            fails.append(f"create planInfo wrong: {args['planInfo']}")
+        if sum(p["durationWeeks"] for p in args["phaseInfo"]["periodization"]) != 5:
+            fails.append(f"create periodization does not sum to 5: {args['phaseInfo']}")
+        if any(c.get("sportType") == 4 for c in args["courseList"]):
+            fails.append("create must not pad rest courses — omitted days are rest by rule")
+
+        # push 2 — the same plan sends NOTHING
+        r2 = S.push_coros(m)
+        detail["r2_updates"] = n_calls("updateTrainingPlan")
+        if n_calls("updateTrainingPlan") != 0 or n_calls("createTrainingPlan") != 1:
+            fails.append("push 2 resent days of an unchanged plan")
+        if not r2.get("ok"):
+            fails.append(f"push 2 failed: {r2}")
+
+        # push 3 — a CHANGED day (a rest day gains a session) sends ONLY that day
+        plan2 = build_plan()
+        plan2["base"]["weeks"][0]["sessions"].append(
+            {"date": day(2), "kind": "easy", "km": 6.0, "minutes": 36, "trimp": 40.0})
+        m.execute("UPDATE plans SET plan=? WHERE id=(SELECT MAX(id) FROM plans)",
+                  (S.json.dumps(plan2),))
+        m.commit()
+        r3 = S.push_coros(m)
+        upd = [a for t, a in calls if t == "updateTrainingPlan"]
+        detail["r3_daynos"] = sorted({c["dayNo"] for a in upd for c in a["courseList"]})
+        if len(upd) != 1 or sorted({c["dayNo"] for c in upd[0]["courseList"]}) != [2]:
+            fails.append(f"push 3 must send only the changed day (dayNo 2): {detail['r3_daynos']}")
+        if not r3.get("ok"):
+            fails.append(f"push 3 failed: {r3}")
+
+        # push 4 — a changed day the server reports SKIPPED (completed on the watch) is reported
+        plan3 = build_plan()
+        plan3["base"]["weeks"][0]["sessions"].append(
+            {"date": day(2), "kind": "easy", "km": 6.0, "minutes": 36, "trimp": 40.0})
+        plan3["base"]["weeks"][0]["sessions"][1]["reps"][0]["minutes"] = 4   # day(1) changes
+        m.execute("UPDATE plans SET plan=? WHERE id=(SELECT MAX(id) FROM plans)",
+                  (S.json.dumps(plan3),))
+        m.commit()
+        state["skip_daynos"] = [1]
+        r4 = S.push_coros(m)
+        detail["r4"] = {"skipped_days": r4.get("skipped_days")}
+        if r4.get("skipped_days") != [day(1)]:
+            fails.append(f"push 4 must report the skipped day: {r4.get('skipped_days')}")
+        if not any(r.get("action") == "skipped" and r.get("date") == day(1)
+                   for r in r4.get("results", [])):
+            fails.append("push 4's results lack the skipped-day entry")
+
+        # push 5 — the skipped day is NOT retried, even though its hash still differs
+        r5 = S.push_coros(m)
+        detail["r5_updates"] = n_calls("updateTrainingPlan")
+        if n_calls("updateTrainingPlan") != 2:     # still exactly the pushes 3 + 4 calls
+            fails.append("push 5 retried a day COROS keeps skipping (completed on the watch)")
+        if not r5.get("ok"):
+            fails.append(f"push 5 failed: {r5}")
+    finally:
+        for k, v in saved.items():
+            setattr(S, k, v)
+        m.close()
+
+    # the library as COROS really answers it (read live 21 Oct 2026, ids replaced): plain text,
+    # not JSON. The first live push could not read it back, so it created a second plan and then
+    # failed; the fake transport above answers JSON and never saw that.
+    live_text = ("Training Plan Library\n========================\nPlans on this page: 2\n\n"
+                 "1. Sparing Horse [In progress] [mcp]\n   Plan ID: 4812019573427246\n"
+                 "   Record role: execution\n   Editable via MCP: yes\n"
+                 "   Dates: 2026-10-21 to 2027-02-07\n   Weeks: 16\n\n"
+                 "2. Sparing Horse [In progress] [mcp]\n   Plan ID: 4811957229313564\n"
+                 "   Record role: execution\n   Editable via MCP: yes\n"
+                 "   Dates: 2026-10-21 to 2026-12-06\n   Weeks: 7\n")
+    lib = {"content": [{"type": "text", "text": S.json.dumps(live_text)}], "isError": False}
+    rec = S._coros_find_library_plan(lib, name="Sparing Horse")
+    if rec != {"plan_id": "4812019573427246", "start": "2026-10-21", "weeks": "16"}:
+        fails.append(f"the live text library reply must parse to its first row: {rec}")
+    if not S._coros_find_library_plan(lib, plan_id="4811957229313564"):
+        fails.append("a stored plan id listed in the live text reply must be found")
+
+    return _st("det", "coros-push-diff",
+               "§CG the nightly push is a diff: the first push creates one COROS plan; a second "
+               "push of an unchanged plan sends nothing; a changed day sends only that day; a "
+               "server-skipped (completed) day is reported and never retried",
+               passed=not fails,
+               expect="1 create + 0 updates on push 1 · 0 updates on push 2 · only dayNo 2 on "
+               "push 3 · skipped_days=[the changed day] on push 4 · still 2 updates after push 5",
+               got={**detail, "failures": fails or "none"})
 
 
 def _stc_hr_zones():
@@ -21311,6 +21807,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
                  lambda: _stc_guide_recreate(), lambda: _stc_guide_notify(),
                  lambda: _stc_guide_reps_text(), lambda: _stc_guide_screen_layout(),
+                 lambda: _stc_coros_course(), lambda: _stc_coros_plan_days(),
+                 lambda: _stc_coros_push_diff(),
                  lambda: _stc_stream_optin(),
                  lambda: _stc_profile_belt_dynamics(), lambda: _stc_activity_belt_fields(db),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
