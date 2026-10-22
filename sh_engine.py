@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.83.1"
+ENGINE_VERSION = "0.83.2"
 
 
 def _zones_asof(db, date_iso=None):
@@ -5039,11 +5039,50 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 if _hard_share(_wk_s, _wk_tr) > 1.0 - POLARIZED_EASY_MIN + 1e-9:
                     _n = _displaced_strides(wk, _wk_s)
                     rem_s = [_uncarve(_s, easy_pace_sec, strides=_n) for _s in rem_s]
+            _race_seed = (ctl, atl)   # §RACE/SH-73 — the seed to re-publish from once the race is laid
             ctl, atl, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
                                                              roll_from=today.isoformat(),
                                                              actual_floor=act_floor,
                                                              lived_trimps=lived)   # §WKMEAN — the published
             #                                             `acwr.laid` is the value the search decided on
+            _gov_eow, _gov_flat = eow, eow_flat   # §RACE/SH-73 — the governor's pre-race reading: the
+            #                                             search decided before the race existed, so
+            #                                             `acwr.laid` keeps this pair (the full-week
+            #                                             path's `proj_acwr_soft` rule)
+            _gov_trimp_total = round(sum(s.get("trimp", 0.0) for s in elapsed + rem_s), 1)   # §RACE/SH-73 —
+            #                                             the pre-race total the §PRO6 fold reads below
+            # §RACE (SH-73) — the straddle path never laid the race: it `continue`s below, past the
+            # full-week §RACE block, so from the Tuesday of race week a regeneration showed race day
+            # as a training run (a Sunday `long` where Monday's plan had the `race`), tune-ups
+            # vanished from Tuesday of their week, and the race's load left
+            # the week's projection and the CTL/ATL carried into the next. Lay it the full-week way:
+            # the week has been governed, adjusted and un-carved, so replace the race day's session
+            # and re-roll the published projection from the same seed WITH the race in it — `ctl,
+            # atl` carry that forward, because the athlete does. Only a race still AHEAD of the
+            # lived days is a candidate: one already run (or run today) is in `elapsed` — pinned
+            # history — and `_place_race`'s week-span guard alone would append a second race row on
+            # that lived day. A volume-met or past-last-run week still gets its race: this sits
+            # after the `if/elif/else` that builds `rem_s`, not inside it.
+            _race_cands = [race] if isinstance(race, dict) else [r for r in (race or []) if r]
+            _race_cands = [r for r in _race_cands
+                           if not r.get("past")
+                           and (_date(r["date"]) > today
+                                or (_date(r["date"]) == today and not _today_run))]
+            if _race_cands:
+                _sess_r, _dt_r = _place_race(rem_s, dt, _race_cands, wk_start,
+                                             easy_pace_sec=easy_pace_sec,
+                                             strides=_displaced_strides(wk, elapsed + rem_s))
+                if _sess_r is not rem_s:
+                    rem_s, dt = _sess_r, _dt_r
+                    ctl, atl, eow, peak, eow_flat, _ = _project_week(_race_seed[0], _race_seed[1],
+                                                                     wk_start, dt,
+                                                                     roll_from=today.isoformat(),
+                                                                     actual_floor=act_floor,
+                                                                     lived_trimps=lived)
+                    # §LRH — a long run the race replaced is not held: the session that carried
+                    # `long_held` is gone, so race week must not publish `long_held` with km: None
+                    # or the "the long run keeps its rung" bar note.
+                    long_held = long_held and any(s.get("long_held") for s in rem_s)
             sessions = sorted(elapsed + rem_s, key=lambda s: s["date"])
             # §REST — hand the NEXT week this week's true tail: elapsed pinned days + the governed
             # remainder, exactly as laid. The seam gate measures against what the athlete was told
@@ -5086,7 +5125,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §LRH — `clipped` used to be a constant False here, so the ACWR axis could never read
                 # "binds" on the one week the remainder search actually governs. It binds when the
                 # search answered less than the remainder asked for.
-                acwr_laid=(eow_flat if eow_flat is not None else eow), clipped=_rem_clipped,
+                acwr_laid=(_gov_flat if _gov_flat is not None else _gov_eow), clipped=_rem_clipped,   # §RACE/SH-73 — the pre-race reading the search decided on
                 long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions), long_bound=bool(long_km_cap and any(s.get("long_step_capped") for s in sessions)),
                 eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=False,
                 eq_sess_cap=_session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
@@ -5122,7 +5161,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             if week_actuals is not None:
                 _ahead = [s for s in rem_s if (s.get("kind") or "") != "rest"]
                 if today_trimp or _today_run:
-                    _ahead = [s for s in _ahead if s["date"] > today.isoformat()]
+                    _ahead = [s for s in _ahead if s["date"] > today.isoformat()
+                              or (s.get("race") and not _today_run)]   # §RACE/SH-73 — race morning with
+                    #                                                  a non-run activity logged: the
+                    #                                                  race is still ahead; count it
                 _ahead_km = round(sum(s.get("km") or 0.0 for s in _ahead), 1)
                 pweek.update(
                     runs_done=week_actuals[0], km_done=week_actuals[1],
@@ -5137,7 +5179,11 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # header 54.6).
                 pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=_ahead,
                                          lived_km=week_actuals[1])
-            if long_held and pweek["bar"].get("diverge"):
+            # §RACE/SH-73 — neither note below may overwrite `_week_bar`'s race-week note:
+            # training_km == sheet_km ⇔ no race in the sheet, and only then is a bare over-run
+            # the thing to explain.
+            if long_held and pweek["bar"].get("diverge") \
+                    and pweek["bar"].get("training_km") == pweek["bar"].get("sheet_km"):
                 # §LRH — the sheet runs over the bar BECAUSE the long run kept its rung; say that,
                 # not "diverge". `diverge` stays true: it is. §DAYSHARE — with every day ahead at its
                 # own lay, the note says so too.
@@ -5147,7 +5193,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                         ("the long run keeps its rung; the sheet runs over the bar by "
                                          "what the easy days ran over"))
             elif day_share and not _rem_clipped and pweek["bar"].get("diverge") \
-                    and (pweek["bar"].get("sheet_km") or 0) > (pweek["bar"].get("intent_km") or 0):
+                    and (pweek["bar"].get("sheet_km") or 0) > (pweek["bar"].get("intent_km") or 0) \
+                    and pweek["bar"].get("training_km") == pweek["bar"].get("sheet_km"):   # §RACE/SH-73
                 pweek["bar"]["note"] = ("the days ahead keep their lay; the sheet runs over the bar by "
                                         "what the lived days ran over")
             # §PRO9 — surface the ceiling at week level too, exactly as the full-week path does; the
@@ -5186,9 +5233,13 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 if _is_down(wk) or _is_taper(wk) or forced_deload:     # §PULL — a recovery trough
                     consec_hard = 0
                 else:
-                    consec_hard = consec_hard + 1 if (eow and eow >= NEAR_CEILING_ACWR) else 0
-                    if pweek["trimp_total"]:
-                        last_nondown = pweek["trimp_total"]
+                    # §RACE/SH-73 — the fold reads what the full-week path's lay-time fold reads:
+                    # the PRE-race numbers (its fold runs before its `_place_race`). Tuesday must
+                    # decide what Monday decided. Non-race weeks: `_gov_eow is eow` and
+                    # `_gov_trimp_total == pweek["trimp_total"]`, so nothing changes.
+                    consec_hard = consec_hard + 1 if (_gov_eow and _gov_eow >= NEAR_CEILING_ACWR) else 0
+                    if _gov_trimp_total:
+                        last_nondown = _gov_trimp_total
             weeks.append(pweek)
             blk_longs.append(max(week_actual_long or 0.0, _week_long_km(rem_s)))
             blk_eqs.append(round((week_actual_eq or 0.0) + _week_eq_km(rem_s), 2))

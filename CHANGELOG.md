@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.83.2] - 2026-10-22
+
+### Fixed
+
+- **A regeneration from the second day of a race week onward now lays the race on race day.** The mid-week
+  path never laid races, so race day showed a training run, a tune-up disappeared from the second day of its
+  week, and the race's load was missing from the week's projection and from the fitness carried into the weeks
+  after it. The race is now laid on the days that remain, and the projection is rolled again from the same
+  seed with it in, so every later week starts from the fitness the race leaves.
+- **The race-week bar, the long-run note and the week header agree with that lay.** The bar keeps its "race
+  week" note on those days, a long run the race replaces is no longer reported as held, and the week header
+  counts a race still ahead on race morning.
+- **The near-ceiling streak on a mid-week regeneration reads the week before the race is added**, as the
+  whole-week regeneration does, so a tune-up week brings the same down week forward on every day. New
+  `det/straddle-race` covers each of these, seen to fail without the race lay and without the streak reading.
+
 ## [0.83.1] - 2026-10-21
 
 ### Fixed

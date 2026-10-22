@@ -6176,6 +6176,240 @@ def _stc_straddle_regen_day():
                     sun["limits"].get("binding")), "days_left": (o_sat, o_sun), "failures": fails or "none"})
 
 
+def _stc_straddle_race():
+    """§RACE (SH-73) — THE STRADDLING WEEK LAYS ITS RACE. The straddle branch of `generate_block`
+    `continue`s past the full-week §RACE block, so from the Tuesday of race week a regeneration
+    showed race day as a training run (a Sunday `long` where Monday's plan had the `race`),
+    tune-ups vanished from Tuesday of their week, and the race's load left the
+    week's projection and the CTL/ATL carried into the next. The fix lays a race still ahead of the
+    lived days the full-week way: after the week is governed, adjusted and un-carved, replace the
+    race day's session, then re-roll the published projection from the same seed with the race in
+    it. A race already run (or run today) is pinned history, never a candidate. Round 2 (review):
+    the §PRO6 fold reads the PRE-race numbers, as the full-week path's lay-time fold does; the
+    race-week bar note is `_week_bar`'s own, never overwritten by the over-run notes; and a race
+    dated today stays in the §CARD2 ahead count while it is still ahead. Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 11, 30)                                # race week — the race on its Sunday
+    days = [(mon + timedelta(days=i)).isoformat() for i in range(7)]
+    sun = days[6]
+    seed, easy = (52.0, 61.0), 390                          # end of Sunday 29 Nov; easy 6:30/km
+    L = {days[0]: 28.0, days[1]: 44.0, days[2]: 0.0, days[3]: 38.0,   # the taper week's lived days
+         days[4]: 0.0, days[5]: 30.0, days[6]: 0.0}
+    race = {"date": sun, "km": E.RACE_KM["marathon"], "zone": "marathon", "pace_sec": 300,
+            "label": "Goal Marathon", "type": "marathon"}
+    shape = [{"wk": 1, "km": 30, "runs": 5, "long": 12, "strides": 0, "quality": [],
+              "role": "taper", "intent": "Taper — race week"},
+             {"wk": 2, "km": 25, "runs": 4, "long": 10, "strides": 0, "quality": [],
+              "role": "recovery", "intent": "Recovery"}]
+    A = dict(regime="assertive", last_nondown=620.0, recent_longs=[18.0, 19.0, 20.0, 21.0],
+             recent_eq=[90.0, 95.0, 100.0, 105.0], recent_session_eq=[20.0, 21.0, 22.0, 23.0])
+    fails = []
+
+    def _walk(upto, series):
+        c, a = seed
+        for d in days[:upto]:
+            t = (series or {}).get(d, 0.0) or 0.0
+            c = E._ewma_step(c, t, E.TAU_CTL); a = E._ewma_step(a, t, E.TAU_ATL)
+        return c, a
+
+    def _gen(today_i, rc, series=L, **kw):
+        c, a = _walk(today_i, series)
+        return E.generate_block([dict(w) for w in shape], mon, c, a, easy,
+                                today=mon + timedelta(days=today_i), day_series=series,
+                                race=rc, **A, **kw)
+
+    # (a) from Tuesday to not-yet-run Sunday of race week, race day holds exactly one session — the
+    #     race, at its km — and the race's load is in the week's totals, its projection, and the
+    #     seed the week after starts from
+    for today_i, tag in ((1, "Tue"), (2, "Wed"), (3, "Thu"), (4, "Fri"), (5, "Sat"), (6, "Sun")):
+        (wk, nxt), _ = _gen(today_i, race)
+        (wk0, nxt0), _ = _gen(today_i, None)
+        rows = [s for s in wk["sessions"] if s["date"] == sun]
+        if len(rows) != 1 or rows[0].get("kind") != "race":
+            fails.append(f"(a) {tag}: race day holds {[(s.get('kind'), s.get('km')) for s in rows]} — "
+                         "want exactly one session, kind 'race'")
+        elif abs(rows[0]["km"] - round(E.RACE_KM["marathon"], 1)) > 0.05:
+            fails.append(f"(a) {tag}: the race is laid at {rows[0]['km']} km, "
+                         f"want RACE_KM {round(E.RACE_KM['marathon'], 1)}")
+        if not (wk["trimp_total"] > wk0["trimp_total"] and wk["proj_ctl"] > wk0["proj_ctl"]):
+            fails.append(f"(a) {tag}: the race's load is not in the week — trimp_total "
+                         f"{wk['trimp_total']} vs {wk0['trimp_total']}, proj_ctl {wk['proj_ctl']} "
+                         f"vs {wk0['proj_ctl']} (race=None)")
+        if nxt["proj_ctl"] == nxt0["proj_ctl"]:
+            fails.append(f"(a) {tag}: the week after the race starts from the same seed with and "
+                         f"without it (proj_ctl {nxt['proj_ctl']}) — the race's load was not carried")
+
+    # (b) race day already run: the pinned race session is history, not a candidate — exactly one
+    #     session on race day, never a duplicate
+    w_mon = _gen(0, race)[0][0]                  # today == week start: the full-week path
+    pinned_race = next((s for s in w_mon["sessions"] if s.get("race")), None)
+    if pinned_race is None:
+        fails.append("(b) fixture — the Monday full-week generation laid no race to pin")
+    else:
+        wk_b = _gen(6, race, today_run=True, today_trimp=float(pinned_race.get("trimp") or 0.0),
+                    pinned_past=({sun: pinned_race}, {sun}))[0][0]
+        rows_b = [s for s in wk_b["sessions"] if s["date"] == sun]
+        if len(rows_b) != 1:
+            fails.append(f"(b) race day holds {len(rows_b)} sessions on the run-today regeneration — "
+                         "a race already run is pinned history; laying it again duplicates the day")
+
+    # (c) a tune-up on Saturday is laid on the Wednesday straddle, and clears the quality in its
+    #     TUNEUP_CLEAR_DAYS run-up, as the Monday full-week generation of the same week does
+    mon2 = date(2026, 11, 16)
+    d2 = [(mon2 + timedelta(days=i)).isoformat() for i in range(7)]
+    sat2 = d2[5]
+    zones = {"easy_top": easy, "easy": 420, "marathon": 350, "threshold": 330, "interval": 310}
+    tuneup = {"date": sat2, "km": E.RACE_KM["5k"], "zone": "threshold", "pace_sec": 330,
+              "label": "5k TT", "type": "5k", "tune_up": True}
+    wk_q = {"wk": 1, "km": 45, "runs": 5, "long": 15, "strides": 0, "intent": "Build — specific",
+            "quality": [{"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+                         "rep_min": 3, "rec_min": 2, "label": "VO₂"},
+                        {"kind": "progression", "zone": "marathon", "frac": 0.10,
+                         "structure": "progression", "label": "Kenyan progression"}]}
+    L2 = {d2[0]: 60.0, d2[1]: 95.0}
+
+    def _gen2(today_i, rc):
+        c, a = seed
+        for d in d2[:today_i]:
+            t = L2.get(d, 0.0)
+            c = E._ewma_step(c, t, E.TAU_CTL); a = E._ewma_step(a, t, E.TAU_ATL)
+        return E.generate_block([dict(wk_q)], mon2, c, a, easy, zones=zones,
+                                today=mon2 + timedelta(days=today_i), day_series=L2, race=rc, **A)[0][0]
+
+    def _runup_quality(w):
+        lo = (E._date(sat2) - timedelta(days=E.TUNEUP_CLEAR_DAYS)).isoformat()
+        return [s for s in w["sessions"]
+                if (s.get("kind") or "") in E.QUALITY_KINDS and lo <= s["date"] < sat2]
+
+    w_c_mon, w_c_wed, w_c_none = _gen2(0, tuneup), _gen2(2, tuneup), _gen2(2, None)
+    # precondition first: the race=None lay of the same week must HAVE a non-carved quality session
+    # in the run-up (a carved threshold run is never laid in a race run-up, `_near_race`), or the
+    # clearing below passes on nothing
+    pre_c = [s for s in _runup_quality(w_c_none) if s.get("rot") is None]
+    if not pre_c:
+        fails.append("(c) fixture — the Wednesday race=None lay has no non-carved QUALITY_KINDS "
+                     "session in the tune-up's run-up, so there is nothing to clear")
+    for tag, w in (("Mon", w_c_mon), ("Wed", w_c_wed)):
+        rows = [s for s in w["sessions"] if s["date"] == sat2]
+        if len(rows) != 1 or not (rows[0].get("race") and rows[0].get("tune_up")):
+            fails.append(f"(c) {tag}: tune-up day holds {[(s.get('kind'), s.get('km')) for s in rows]} — "
+                         "want exactly one session, the tune-up race")
+        q = _runup_quality(w)
+        if q:
+            fails.append(f"(c) {tag}: quality survives the tune-up's run-up: "
+                         f"{[(s['date'], s['kind']) for s in q]} — §TT2 clears the "
+                         f"{E.TUNEUP_CLEAR_DAYS} days before a tune-up")
+
+    # (d) Monday vs Tuesday with the SAME inputs — Monday a planned rest day (§DAYPREF, so no run
+    #     is missing from Tuesday's inputs) and Tuesday's seed Monday's end state (rest-day decay).
+    #     Which DAY the plan is regenerated on must not move a session: compare every day Tuesday–
+    #     Sunday of the race week, the race week's proj_ctl, and every later week's sessions.
+    d2_eow = None
+    saved = E._DAY_PREF
+    E.set_day_preferences("sun", "mon")   # long run Sunday, Monday the ranked rest day
+    try:
+        def _gen_d(shape_d, rc, seed_d, A_d, mon_d, days_d, today_i):
+            c, a = seed_d
+            if today_i:
+                c = E._ewma_step(c, 0.0, E.TAU_CTL)      # the Monday rest day: decay only
+                a = E._ewma_step(a, 0.0, E.TAU_ATL)
+            return E.generate_block([dict(w) for w in shape_d], mon_d, c, a, easy,
+                                    today=mon_d + timedelta(days=today_i),
+                                    day_series={days_d[0]: 0.0}, race=rc, **A_d)[0]
+
+        def _day_keys(w, lo):
+            return [(s["date"], s.get("kind"), round(s.get("km") or 0.0, 1))
+                    for s in w["sessions"] if s["date"] >= lo]
+
+        def _first_diff(km, kt):
+            for a_, b_ in zip(km, kt):
+                if a_ != b_:
+                    return f"{a_} vs {b_}"
+            return (f"{len(km)} vs {len(kt)} sessions" if len(km) != len(kt) else None)
+
+        def _cmp(tag, weeks_m, weeks_t, days_d):
+            d = _first_diff(_day_keys(weeks_m[0], days_d[1]), _day_keys(weeks_t[0], days_d[1]))
+            if d:
+                fails.append(f"({tag}) race-week days Tue–Sun differ Mon vs Tue — first: {d}")
+            if abs(weeks_m[0]["proj_ctl"] - weeks_t[0]["proj_ctl"]) > 0.1:
+                fails.append(f"({tag}) race-week proj_ctl differs: Mon {weeks_m[0]['proj_ctl']} "
+                             f"vs Tue {weeks_t[0]['proj_ctl']}")
+            for i in range(1, min(len(weeks_m), len(weeks_t))):
+                d = _first_diff(_day_keys(weeks_m[i], "0000"), _day_keys(weeks_t[i], "0000"))
+                if d:
+                    fails.append(f"({tag}) week {weeks_m[i]['start']} sessions differ Mon vs Tue — "
+                                 f"first: {d}")
+                    break
+
+        # (d1) A-race on the Sunday of the last taper week
+        _cmp("d1", _gen_d(shape, race, seed, A, mon, days, 0),
+             _gen_d(shape, race, seed, A, mon, days, 1), days)
+
+        # (d2) a tune-up on the Saturday of a BUILD week whose pre-race proj_acwr sits just under
+        #      NEAR_CEILING_ACWR, so the post-race reading crosses it — with the streak one week
+        #      from the §PRO6 limit, the fold's pre/post-race reading decides whether the NEXT week
+        #      is a forced deload. Tuesday must fold what Monday folded (the pre-race numbers).
+        mon_b = date(2026, 11, 16)
+        days_b = [(mon_b + timedelta(days=i)).isoformat() for i in range(7)]
+        tuneup_b = {"date": days_b[5], "km": E.RACE_KM["5k"], "zone": "threshold", "pace_sec": 330,
+                    "label": "5k TT", "type": "5k", "tune_up": True}
+        shape_b = [{"wk": i + 1, "km": 55, "runs": 5, "long": 20, "strides": 0, "quality": [],
+                    "intent": "Build — specific"} for i in range(5)]   # 4 weeks after the race week
+        A_b = dict(regime="assertive", consec_hard=3, last_nondown=600.0,
+                   recent_longs=[18.0, 19.0, 20.0, 20.0], recent_eq=[23.0, 24.0, 25.0, 26.0],
+                   recent_session_eq=[13.0, 14.0, 14.5, 15.0])
+        seed_b = (60.0, 66.0)
+        wk_b0 = _gen_d(shape_b, None, seed_b, A_b, mon_b, days_b, 0)
+        wk_bm = _gen_d(shape_b, tuneup_b, seed_b, A_b, mon_b, days_b, 0)
+        wk_bt = _gen_d(shape_b, tuneup_b, seed_b, A_b, mon_b, days_b, 1)
+        d2_eow = (wk_b0[0]["proj_acwr"], wk_bt[0]["proj_acwr"])   # pre-race / post-race eow
+        if not (d2_eow[0] and d2_eow[1]
+                and 1.10 <= d2_eow[0] < E.NEAR_CEILING_ACWR <= d2_eow[1]):
+            fails.append(f"(d2) fixture — the tune-up does not cross NEAR_CEILING_ACWR "
+                         f"({E.NEAR_CEILING_ACWR}): pre-race eow {d2_eow[0]}, post-race {d2_eow[1]} "
+                         "— the fold reads nothing the correction protects")
+        _cmp("d2", wk_bm, wk_bt, days_b)
+    finally:
+        E._DAY_PREF = saved          # restore the parsed pair as-is
+
+    # (e) §CARD2 + §LRH on a straddled race week with week_actuals set: the bar's sheet includes
+    #     the race and the note stays `_week_bar`'s own ("race week: …") — the over-run notes may
+    #     not overwrite it; and a long run the race replaced publishes no `long_held`
+    wk_e = _gen(3, race, week_actuals=(2, 16.0))[0][0]
+    note_e = (wk_e["bar"].get("note") or "")
+    if not note_e.startswith("race week"):
+        fails.append(f"(e) race-week bar note is {note_e!r} — _week_bar's race-week note must stand")
+    if "long_held" in wk_e:
+        fails.append(f"(e) long_held published ({wk_e['long_held']}) though the race replaced the "
+                     "long run — race week must not claim the rung")
+
+    # (f) race morning with a non-run activity logged (today_trimp > 0, today_run False): the race
+    #     is still ahead — the header's ahead counts include it
+    wk_f = _gen(6, race, week_actuals=(4, 24.0), today_trimp=25.0, today_run=False)[0][0]
+    if wk_f.get("runs_ahead") != 1 \
+            or abs((wk_f.get("km_ahead") or 0.0) - round(E.RACE_KM["marathon"], 1)) > 0.05:
+        fails.append(f"(f) race morning, non-run activity logged: runs_ahead={wk_f.get('runs_ahead')}, "
+                     f"km_ahead={wk_f.get('km_ahead')} — the race is still ahead and the header "
+                     "must count it")
+
+    return _st("det", "straddle-race",
+               "§RACE/SH-73 the straddling week lays a race still ahead of the lived days: exactly one "
+               "'race' session on race day at the race's km from Tuesday on; its load in trimp_total/"
+               "proj_ctl and carried into the next week's seed; a run-today race day is not duplicated; "
+               "a tune-up clears its run-up as Monday's full-week lay does; Monday and Tuesday lay the "
+               "identical week (days Tue–Sun, proj_ctl, and every later week) on a taper A-race and on "
+               "a build-week tune-up that crosses NEAR_CEILING_ACWR (the §PRO6 fold reads the pre-race "
+               "numbers); the race-week bar note is _week_bar's own; race morning with a non-run "
+               "activity logged still counts the race ahead",
+               passed=not fails,
+               expect="one race session (kind 'race', km 42.2) on race day Tue–Sun-not-run; "
+               "trimp_total/proj_ctl above the race=None run; next week's proj_ctl differs; "
+               "no duplicate on a run race day; tune-up laid Wed with its run-up cleared; Mon == Tue "
+               "for every day and later week on both fixtures; bar note starts 'race week'; "
+               "runs_ahead/km_ahead count a race still ahead",
+               got={"d2_eow_pre_post": d2_eow, "failures": fails or "none"})
+
+
 def _stc_straddle_intent_anchor():
     """§WKMEAN2 (0.70.2) — THE WEEK'S INTENT IS THE PLAN AS THE MONDAY REGENERATION COMPUTES IT, ON
     WHICHEVER DAY THE STRADDLING WEEK IS ACTUALLY REGENERATED. The full-week intent search seeded from
@@ -21784,7 +22018,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),
