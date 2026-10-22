@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.83.2"
+ENGINE_VERSION = "0.83.3"
 
 
 def _zones_asof(db, date_iso=None):
@@ -4718,9 +4718,16 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                 actual_floor=None, ladder=True,   # §PRO24 — §WKMEAN2: the
                                                 #        plan as Monday computes it, no lived-day floor
                                                 prev_tail=prev_tail)   # §REST
-                _target = ((BUILD_DOWN_FRAC * last_nondown)
-                           if (_sd and last_nondown) else _full_allowed)
+                # a down week with no anchor yet aims at the shape's reduced intent, as Monday does
+                _target = ((BUILD_DOWN_FRAC * last_nondown) if (_sd and last_nondown)
+                           else (intent_trimp if _sd else _full_allowed))
                 wk_intent_trimp = min(_target, _full_allowed)
+                wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
+            if av_frac < 1.0:
+                # §AV (SH-74) — Monday's lay scales the governed week by the shed prorate, on every
+                # regime and on taper weeks too; without it `full` spread the un-shed week over the
+                # days left and the days ahead grew from the second day of an away week on.
+                wk_intent_trimp *= av_frac
                 wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
             # §PRO15 — the long run's aim for THIS week: the distance the full-week path below would
             # lay at this intent. The remainder is governed as a share of what is LEFT, so without an
@@ -4763,6 +4770,57 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 if _hard_share(_fa["sessions"], sum(_fa["dt"].values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9:
                     _n = _displaced_strides(wk, full)
                     full = [_uncarve(x, easy_pace_sec, strides=_n) for x in full]
+            # §H1/§H2/§3.1 (SH-75) — and Monday's rescue: a lay that breaches the peak, erodes the
+            # polarization or spikes the bio ceiling is re-laid pure easy, same tests and same
+            # re-govern as the full-week path. Without it a week Monday stripped to easy showed its
+            # quality again from the second day on. The projection reads Monday's lay as planned
+            # (`actual_floor=None`), the rule `_full_allowed` follows since §WKMEAN2. Assertive
+            # building and down weeks only: there `full` is governed as Monday's lay is; a caution or
+            # taper `full` is laid from the ungoverned intent (SH-103), heavier than Monday's, and
+            # the rescue would strip quality Monday kept.
+            _r_bio_over = False
+            if zones and full and assertive and not _is_taper(wk):
+                _fa = _apply_adjustment([dict(x) for x in full], dict(_full_dt), adjust)
+                _fs, _fdt = _fa["sessions"], _fa["dt"]
+                _r_peak = _project_week(ws_ctl, ws_atl, wk_start, _fdt, actual_floor=None)[3]
+                _r_breach = bool(_r_peak and _r_peak > H1_RESCUE_ACWR)
+                _r_eroded = bool(not _r_breach
+                                 and _hard_share(_fs, sum(_fdt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
+                _r_bio_over = bool(_bio_cap and not _r_breach and not _r_eroded
+                                   and _week_eq_km(_fs) > _bio_cap
+                                   and sum((s.get("km") or 0.0) for s in _fs) <= _bio_cap)
+                if (_r_eroded or _r_bio_over) and any(s.get("rot") is not None for s in _fs):
+                    _n = _displaced_strides(wk, full)          # §ROT — the threshold run goes first
+                    full = [_uncarve(x, easy_pace_sec, strides=_n) for x in full]
+                    _fs = [_uncarve(x, easy_pace_sec, strides=_n) for x in _fs]
+                    _r_eroded = bool(not _r_breach
+                                     and _hard_share(_fs, sum(_fdt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
+                    _r_bio_over = bool(_bio_cap and not _r_breach and not _r_eroded
+                                       and _week_eq_km(_fs) > _bio_cap
+                                       and sum((s.get("km") or 0.0) for s in _fs) <= _bio_cap)
+                if _r_breach or _r_eroded or _r_bio_over:
+                    _r_pre = sum(_fdt.values())
+                    _r_allowed = _max_week_trimp(ws_ctl, ws_atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
+                                                 ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                                                 shape_neutral=assertive,
+                                                 session_eq_cap=_session_eq_cap, week_eq_cap=_bio_cap,
+                                                 long_km_cap=long_km_cap,
+                                                 days_override=av_days, av_blocked=av_off,
+                                                 actual_floor=None, ladder=assertive, prev_tail=prev_tail)
+                    _r_chosen = _r_allowed if (assertive and not is_down) else min(intent_trimp, _r_allowed)
+                    if av_frac < 1.0:
+                        _r_chosen *= av_frac
+                    if _r_eroded or _r_bio_over:
+                        _r_chosen = min(_r_chosen, _r_pre)
+                    full, _full_dt = _distribute_week(wk, wk_start_d, _r_chosen, easy_pace_sec, None,
+                                                      days_override=(av_days if av_days is not None
+                                                                     else _run_days(wk["runs"])),   # §REST2
+                                                      av_blocked=av_off, long_km_cap=long_km_cap,
+                                                      ladder=assertive, prev_tail=prev_tail)
+                    wk_intent_trimp = _r_chosen
+                    wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
+                    if assertive:
+                        long_km_aim = _lw * wk_intent_km      # §PRO15 — the aim follows the re-laid intent
             # §LRH (0.60.5) — THE LONG RUN'S RUNG IS THE DISTANCE THE FULL WEEK JUST LAID FOR IT. §PRO15
             # defined the aim as "the distance the full-week path would lay at this intent" and then
             # approximated it with the skeleton's share × intent, which sits under the ladder whenever
@@ -4902,10 +4960,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                           actual_floor=act_floor,   # §PRO24 — no ladder: a remainder
                                           fixed_days=elapsed_offs, prev_tail=prev_tail,   # §REST
                                           lived_trimps=lived)   # §WKMEAN — the mean spans the whole week
-                # §AV — the denominator is the TEMPLATE's run count (== len(offsets) without §AV, so
-                # byte-identical): an av-shed week's blocked days contribute nothing, they don't
-                # concentrate the intent into the surviving days.
-                prorate = wk_intent_trimp * len(rem) / max(1, wk["runs"])
+                # §AV (SH-74) — the denominator is the week's LAID run days (== the template's run
+                # count without a shed, so byte-identical): `wk_intent_trimp` already carries the shed
+                # prorate, so the template's count would discount the shed days a second time.
+                prorate = wk_intent_trimp * len(rem) / max(1, len(offsets))
                 if week_actuals is not None:
                     # §6o-B — charge the ACTUAL km already run against the week's intent: the
                     # remainder may never re-prescribe volume the athlete has already done. One-way (min), so
@@ -5114,6 +5172,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "clipped": False, "partial": True,
                      "frequency_met": freq_met, "volume_met": vol_met,
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
+            if _r_bio_over:                          # §3.1 (SH-75) — as the full-week path publishes it
+                pweek["bio_capped"] = round(_bio_cap, 1)
             pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=sessions)   # §P2 (0.59.0)
             if long_held:
                 # §LRH — published, so "why is the sheet over the bar?" has an answer in the week itself
@@ -5127,7 +5187,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # search answered less than the remainder asked for.
                 acwr_laid=(_gov_flat if _gov_flat is not None else _gov_eow), clipped=_rem_clipped,   # §RACE/SH-73 — the pre-race reading the search decided on
                 long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions), long_bound=bool(long_km_cap and any(s.get("long_step_capped") for s in sessions)),
-                eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=False,
+                eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=_r_bio_over,   # SH-75
                 eq_sess_cap=_session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
                 # §WKMEAN2 — `ctl` is the week's projected end-of-week CTL (`_project_week(... roll_from=today
                 # ...)` just above); `ws_ctl` is the week-start state, so this reads the week's CTL gain

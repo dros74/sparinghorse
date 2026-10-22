@@ -6410,6 +6410,164 @@ def _stc_straddle_race():
                got={"d2_eow_pre_post": d2_eow, "failures": fails or "none"})
 
 
+def _stc_straddle_monday_lay():
+    """§AV/§H1/§H2 (SH-74, SH-75) — THE STRADDLE REBUILDS MONDAY'S LAY WITH MONDAY'S DECISIONS. A
+    mid-week regeneration lays the days ahead from `full`, its rebuild of the week as the Monday
+    regeneration laid it. Two of Monday's decisions were missing from that rebuild: the §AV shed
+    prorate (a week whose away days shed a run is lighter, so Tuesday's `full` spread the un-shed week
+    over the days left and every day ahead grew), and the §H1/§H2 rescue (a week Monday re-laid pure
+    easy for a peak breach or eroded polarization showed its quality again from Tuesday). Each limb
+    regenerates the same week on Monday (a planned rest day) and on Tuesday from Monday's rest-decayed
+    end state, same inputs, and compares every day Tue–Sun, the week's intent_km and every later week.
+    The §3.1 bio rescue has no limb: Monday's search takes `week_eq_cap` as a bound, so its lay sits at
+    the cap at most and `bio_over` cannot fire on it. Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 11, 2)
+    tue = (mon + timedelta(days=1)).isoformat()
+    easy = 390
+    zones = {"easy_top": easy, "easy": 420, "marathon": 350, "threshold": 330, "interval": 310}
+    tpk = (easy / 60.0) * E.EASY_TRIMP_PER_MIN
+    vo2 = {"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+           "rep_min": 3, "rec_min": 2, "label": "VO₂"}
+    cruise = {"kind": "threshold", "zone": "threshold", "frac": 0.10, "structure": "cruise",
+              "rep_min": 8, "rec_min": 2, "label": "Cruise"}
+    away = {(mon + timedelta(days=o)).isoformat() for o in (0, 2)}   # Monday and Wednesday away
+    fails, got = [], {}
+
+    def _shape(km, runs, long, quality=(), n=3):
+        return [{"wk": i + 1, "km": km, "runs": runs, "long": long, "strides": 0,
+                 "quality": [dict(q) for q in quality], "intent": "Build — general"} for i in range(n)]
+
+    def _A(km):
+        return dict(regime="assertive", last_nondown=km * tpk, recent_longs=[km * 0.28] * 4,
+                    recent_eq=[km * 1.0] * 4, recent_session_eq=[km * 0.3] * 4)
+
+    A_av = dict(regime="assertive", last_nondown=560.0, recent_longs=[14.0, 15.0, 15.0, 16.0],
+                recent_eq=[48.0, 50.0, 52.0, 54.0], recent_session_eq=[14.0, 15.0, 15.5, 16.0])
+
+    def _gen(shape, seed, A, today_i, **kw):
+        c, a = seed
+        if today_i:
+            c = E._ewma_step(c, 0.0, E.TAU_CTL)      # the Monday rest day: decay only
+            a = E._ewma_step(a, 0.0, E.TAU_ATL)
+        return E.generate_block([dict(w, quality=[dict(q) for q in w["quality"]]) for w in shape], mon,
+                                c, a, easy, today=mon + timedelta(days=today_i),
+                                day_series={mon.isoformat(): 0.0}, **A, **kw)[0]
+
+    def _keys(w, lo):
+        return [(s["date"], s.get("kind"), round(s.get("km") or 0.0, 1))
+                for s in w["sessions"] if s["date"] >= lo]
+
+    def _disarmed(shape, seed, A, **kw):
+        # Monday's lay with the §H1/§H2 rescue switched off: the positive witness that it fires
+        sv_h1, sv_hs = E.H1_RESCUE_ACWR, E._hard_share
+        E.H1_RESCUE_ACWR, E._hard_share = 99.0, (lambda *a, **k: 0.0)
+        try:
+            w = _gen(shape, seed, A, 0, **kw)[0]
+        finally:
+            E.H1_RESCUE_ACWR, E._hard_share = sv_h1, sv_hs
+        return w, E._hard_share(w["sessions"], w["trimp_total"])
+
+    def _cmp(tag, shape, seed, A, **kw):
+        wm, wt = _gen(shape, seed, A, 0, **kw), _gen(shape, seed, A, 1, **kw)
+        km, kt = _keys(wm[0], tue), _keys(wt[0], tue)
+        d = next((f"{x} vs {y}" for x, y in zip(km, kt) if x != y),
+                 f"{len(km)} vs {len(kt)} sessions" if len(km) != len(kt) else None)
+        if d:
+            fails.append(f"({tag}) days Tue–Sun differ Mon vs Tue — first: {d}")
+        im, it = wm[0].get("intent_km") or 0.0, wt[0].get("intent_km") or 0.0
+        if abs(im - it) > 0.1:
+            fails.append(f"({tag}) intent_km differs: Mon {im} vs Tue {it}")
+        for i in range(1, min(len(wm), len(wt))):
+            d = next((f"{x} vs {y}" for x, y in zip(_keys(wm[i], "0"), _keys(wt[i], "0")) if x != y), None)
+            if d:
+                fails.append(f"({tag}) week {wm[i]['start']} differs Mon vs Tue — first: {d}")
+                break
+        got[tag] = {"mon_km": wm[0]["km"], "tue_km": wt[0]["km"], "intent_km": [im, it]}
+        return wm[0]
+
+    saved = E._DAY_PREF
+    E.set_day_preferences("sun", "mon")   # long run Sunday, Monday the ranked rest day
+    try:
+        # (a) SH-74 — a six-run week whose away days shed a run
+        sh_a = _shape(50, 6, 16)
+        w_a = _cmp("a", sh_a, (55.0, 60.0), A_av, blocked=away)
+        if not w_a.get("av_shed"):
+            fails.append("(a) fixture — Monday's week sheds no run (av_shed unset)")
+
+        # (b1) SH-75 §H1 — a low-fitness VO₂ week whose quality lay breaches H1_RESCUE_ACWR
+        sh_b1, seed_b1 = _shape(35, 5, 10, [vo2]), (20.0, 24.0)
+        raw, _ = _disarmed(sh_b1, seed_b1, _A(35), zones=zones)
+        got["b1_disarmed_peak"] = raw["peak_acwr"]
+        if not (raw["peak_acwr"] or 0.0) > E.H1_RESCUE_ACWR:
+            fails.append(f"(b1) fixture — Monday's quality lay peaks at {raw['peak_acwr']}, "
+                         f"not over H1_RESCUE_ACWR {E.H1_RESCUE_ACWR}")
+        w_b1 = _cmp("b1", sh_b1, seed_b1, _A(35), zones=zones)
+        if any((s.get("kind") or "") in E.QUALITY_KINDS for s in w_b1["sessions"]):
+            fails.append("(b1) fixture — Monday's week kept its quality: the rescue did not fire")
+
+        # (b2) SH-75 §H2 — VO₂ + cruise at low fitness: the hard share erodes, the peak does not breach
+        sh_b2, seed_b2 = _shape(20, 5, 6, [vo2, cruise]), (35.0, 35.0)
+        raw, hs = _disarmed(sh_b2, seed_b2, _A(20), zones=zones)
+        got["b2_disarmed_peak_hard"] = (raw["peak_acwr"], round(hs, 3))
+        if not (hs > 1.0 - E.POLARIZED_EASY_MIN and (raw["peak_acwr"] or 0.0) <= E.H1_RESCUE_ACWR):
+            fails.append(f"(b2) fixture — Monday's quality lay: hard share {hs:.3f}, peak "
+                         f"{raw['peak_acwr']} — want share over {1.0 - E.POLARIZED_EASY_MIN:.2f} "
+                         "without a breach")
+        w_b2 = _cmp("b2", sh_b2, seed_b2, _A(20), zones=zones)
+        if any((s.get("kind") or "") in E.QUALITY_KINDS for s in w_b2["sessions"]):
+            fails.append("(b2) fixture — Monday's week kept its quality: the rescue did not fire")
+
+        # (c) control — a VO₂ week no rescue touches: Monday and Tuesday agree with or without the fix
+        sh_c = _shape(35, 5, 10, [vo2])
+        w_c = _cmp("c", sh_c, (40.0, 46.0), _A(35), zones=zones)
+        if not any((s.get("kind") or "") in E.QUALITY_KINDS for s in w_c["sessions"]):
+            fails.append("(c) fixture — the control week lost its quality")
+
+        # (d) SH-74 on a taper week: the shed holds outside the building regime too
+        sh_d = [{"wk": 1, "km": 40, "runs": 6, "long": 14, "strides": 0, "quality": [],
+                 "role": "taper", "intent": "Taper — race week"},
+                {"wk": 2, "km": 30, "runs": 4, "long": 10, "strides": 0, "quality": [],
+                 "role": "recovery", "intent": "Recovery"}]
+        w_d = _cmp("d", sh_d, (55.0, 60.0), A_av, blocked=away)
+        if not w_d.get("av_shed"):
+            fails.append("(d) fixture — Monday's taper week sheds no run (av_shed unset)")
+
+        # (e) limb (a) with the week's actuals given (Monday rest), so §CARD2, §DAYSHARE and the
+        #     bar run on Tuesday
+        _cmp("e", sh_a, (55.0, 60.0), A_av, blocked=away, week_actuals=(0, 0.0))
+
+        # (f) caution control — a low-fitness VO₂ week Monday keeps whole: the rescue stays off a
+        #     caution `full` (laid ungoverned, heavier than Monday's), so Tuesday keeps the VO₂ too
+        A_f = dict(_A(35), regime="caution")
+        w_f = _cmp("f", _shape(35, 5, 10, [vo2]), (20.0, 20.0), A_f, zones=zones)
+        if not any((s.get("kind") or "") in E.QUALITY_KINDS for s in w_f["sessions"]):
+            fails.append("(f) fixture — Monday's caution week lost its quality")
+
+        # (g) a down week with no building week behind it (`last_nondown` None): Monday aims at the
+        #     shape's reduced intent, never the ceiling, and so does Tuesday
+        sh_g = [dict(w, role="down", intent="Down week") if i == 0 else w
+                for i, w in enumerate(_shape(30, 5, 9))]
+        A_g = dict(_A(30), last_nondown=None)
+        w_g = _cmp("g", sh_g, (50.0, 50.0), A_g)
+        if (w_g.get("intent_km") or 0.0) > 30.0 + 0.1:
+            fails.append(f"(g) fixture — Monday's anchorless down week aims at {w_g.get('intent_km')} km, "
+                         "over the shape's 30")
+    finally:
+        E._DAY_PREF = saved
+
+    return _st("det", "straddle-monday-lay",
+               "§AV/§H1/§H2 (SH-74/75) a mid-week regeneration rebuilds Monday's lay with Monday's "
+               "decisions: an away week that sheds a run keeps the shed prorate (building and taper "
+               "weeks), and a week Monday re-laid pure easy for a peak breach or eroded polarization "
+               "stays pure easy — Monday and Tuesday lay the same days, intent_km and later weeks",
+               passed=not fails,
+               expect="Mon == Tue (days Tue–Sun, intent_km ±0.1, every later week) on limbs a, b1, b2, "
+               "c, d, e, f (caution), g (anchorless down week); preconditions: av_shed on a/d, disarmed peak > H1_RESCUE_ACWR on b1, disarmed "
+               "hard share over 1 − POLARIZED_EASY_MIN without a breach on b2, quality kept on c",
+               got={**got, "failures": fails or "none"})
+
+
 def _stc_straddle_intent_anchor():
     """§WKMEAN2 (0.70.2) — THE WEEK'S INTENT IS THE PLAN AS THE MONDAY REGENERATION COMPUTES IT, ON
     WHICHEVER DAY THE STRADDLING WEEK IS ACTUALLY REGENERATED. The full-week intent search seeded from
@@ -22018,7 +22176,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),

@@ -15,9 +15,9 @@
           "adherence_basis": "sheet_km",
           "diverge": true,
           "governor_basis": "intent_km",
-          "intent_km": 12.1,
+          "intent_km": 11.9,
           "note": "the sheet and the bar diverge beyond 10 %",
-          "ratio": 0.835,
+          "ratio": 0.849,
           "sheet_km": 10.1,
           "training_km": 10.1
         },
@@ -31,7 +31,7 @@
         "frequency_met": false,
         "frozen": false,
         "intent": "General \u2014 aerobic volume + early VO\u2082 (build it now, hold it cheap)",
-        "intent_km": 12.1,
+        "intent_km": 11.9,
         "intent_runs": 2,
         "km": 10.1,
         "km_ahead": 0,
@@ -58,24 +58,24 @@
             "basis": "S",
             "binds": false,
             "ceiling": 6.5,
-            "headroom": 3.6,
-            "laid": 2.9,
+            "headroom": 3.9,
+            "laid": 2.6,
             "unit": "eq-km"
           },
           "eq_week": {
             "basis": "A",
             "binds": false,
             "ceiling": 16.9,
-            "headroom": 11.4,
-            "laid": 5.5,
+            "headroom": 12.1,
+            "laid": 4.8,
             "unit": "eq-km"
           },
           "long_step": {
             "basis": "L",
             "binds": false,
             "ceiling": 5.5,
-            "headroom": 2.6,
-            "laid": 2.9,
+            "headroom": 2.9,
+            "laid": 2.6,
             "unit": "km"
           },
           "regime": "assertive",
@@ -103,25 +103,25 @@
           {
             "date": "2026-06-29",
             "kind": "easy",
-            "km": 2.6,
-            "minutes": 16,
+            "km": 2.2,
+            "minutes": 14,
             "note": "easy run",
             "pace_zone": "6:15/km easy",
-            "trimp": 25.9
+            "trimp": 23.4
           },
           {
             "date": "2026-06-30",
             "kind": "easy",
-            "km": 2.9,
-            "minutes": 18,
+            "km": 2.6,
+            "minutes": 16,
             "note": "easy run",
             "pace_zone": "6:15/km easy",
-            "trimp": 29.5
+            "trimp": 26.6
           }
         ],
         "start": "2026-06-29",
         "strides": 2,
-        "trimp_total": 55.4,
+        "trimp_total": 50.0,
         "volume_met": true,
         "wk": 1
       },

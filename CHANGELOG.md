@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.83.3] - 2026-10-22
+
+### Fixed
+
+- **A regeneration on a later day of a week whose away days drop a run now lays the days ahead as the Monday
+  regeneration did.** The mid-week path spread the whole week's volume over the days left without the
+  away-day reduction, so every day ahead grew and the long run grew most. The reduction now applies on every
+  regime, taper included, and the remainder is spread over the run days actually laid.
+- **A week the Monday regeneration lays as easy running only now stays easy on the later days of the week.**
+  This covers a week whose quality session pushed the peak load ratio past the rescue threshold, or took too
+  large a share of the week's hard load. The mid-week path did not run that rescue and showed the quality
+  session again. It now re-lays the week as Monday does, on building and down weeks.
+- **A down week with no building week before it aims at its own reduced volume on every day of the week**, as
+  Monday's lay does, never at the load ceiling. New `det/straddle-monday-lay` compares Monday's lay with the
+  next day's regeneration across these cases, seen to fail without each part of the fix.
+
 ## [0.83.2] - 2026-10-22
 
 ### Fixed
