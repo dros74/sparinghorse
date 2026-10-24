@@ -1452,9 +1452,12 @@ function objManager(p){
   // light write: POST /time, update the local row, re-render — no re-plan. Public: text, like the
   // date (0.55.1 — no dead controls on the read-only box).
   const timeCell = o => SH_READONLY
-    ? (o.start_time ? ` · <span class="otime-ro mono">${esc(o.start_time)}</span>` : "")
+    ? (o.start_time ? ` · <span class="otime-ro mono">${esc(o.start_time)}${o.start_tz?" "+esc(o.start_tz):""}</span>` : "")
     : ` · <input type="time" class="otime" data-oid="${o.id}" value="${esc(o.start_time||"")}"
-        aria-label="gun time of ${esc(o.label)}" title="Gun time (optional) — the countdown in the bar above targets it; leave empty for midnight">`;
+        aria-label="gun time of ${esc(o.label)}" title="Gun time (optional) — the countdown in the bar above targets it; leave empty for midnight">
+      <input type="text" class="otz mono" list="tzlist" data-oid="${o.id}" value="${esc(o.start_tz||"")}" size="16"
+        placeholder="${esc(o.default_tz||"your device's zone")}"
+        aria-label="time zone of ${esc(o.label)}" title="Time zone of the gun time (optional, e.g. Europe/Madrid) — empty uses ${esc(o.default_tz||"your device's zone")}">`;
   const rows = OBJECTIVES.filter(o=>o.status==='upcoming').map(o=>{
     // §CHAIN4b — the highlighted row is the race the console is SHOWING (viewRaceOf: the tapped leg,
     // else the next race ahead), not the engine's terminal anchor; it re-renders with every strip tap.
@@ -1504,6 +1507,8 @@ function objManager(p){
       <select id="ao_type" aria-label="Race type"><option>5k</option><option>10k</option><option>half</option><option selected>marathon</option><option>custom</option></select>
       <input id="ao_date" type="date" aria-label="Race date">
       <input id="ao_time" type="time" aria-label="Start time (optional)" title="Gun time (optional) — the countdown targets it">
+      <input id="ao_tz" type="text" list="tzlist" size="16" placeholder="${esc((OBJECTIVES[0]&&OBJECTIVES[0].default_tz)||"your device's zone")}" aria-label="Time zone of the start (optional)" title="Time zone of the gun time (optional, e.g. Europe/Madrid)">
+      ${tzDatalist()}
       <select id="ao_pri" aria-label="Priority"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select>
       <input id="ao_target" placeholder="goal (finish / 3:55)" style="width:120px">
       <button class="primary" id="ao_add" style="font-size:12px;padding:6px 11px">Add objective</button>
@@ -1576,7 +1581,7 @@ function wireObjActions(){
     if(add.disabled) return;   // §OBJ2 — a second click while a re-plan is in flight is a no-op
     const body={label:$("#ao_label").value||"Race", type:$("#ao_type").value,
       date:$("#ao_date").value, priority:$("#ao_pri").value, target:$("#ao_target").value||"finish",
-      start_time:$("#ao_time").value||null};   // §GUN — optional gun time; empty counts to midnight
+      start_time:$("#ao_time").value||null, start_tz:$("#ao_tz").value.trim()||null};   // §GUN — optional gun time; empty counts to midnight
     if(!body.date){ await notice({title:"Pick a date", intro:"A race needs a day before it can be planned for."}); return; }
     const t=add.textContent; add.disabled=true; add.textContent="Planning…";
     try{
@@ -1620,6 +1625,26 @@ function wireObjActions(){
         await notice({title:"Could not set the gun time", intro:p.error||"unknown", tone:"danger"}); return; }
       const o=OBJECTIVES.find(x=>String(x.id)===inp.dataset.oid);
       if(o) o.start_time=p.start_time||null;
+      renderPlan(LAST_PLAN);
+    });
+  });
+  // SH-64 — the zone the gun time is in; same light write as the time (POST /time carries both).
+  document.querySelectorAll(".obj .otz").forEach(inp=>{
+    const was=inp.value;
+    inp.addEventListener("change", async ()=>{
+      const v=inp.value.trim();
+      if(v===was) return;
+      inp.disabled=true;
+      const o=OBJECTIVES.find(x=>String(x.id)===inp.dataset.oid);
+      let p;
+      try{
+        const r=await fetch(`/api/objectives/${inp.dataset.oid}/time`,{method:"POST",
+          headers:{"Content-Type":"application/json"},body:JSON.stringify({start_time:(o&&o.start_time)||null,start_tz:v||null})});
+        p=await r.json();
+      }catch(e){ p={ok:false, error:"the server could not be reached — try again"}; }
+      if(!p.ok){ inp.value=was; inp.disabled=false;
+        await notice({title:"Could not set the time zone", intro:p.error||"unknown", tone:"danger"}); return; }
+      if(o) o.start_tz=p.start_tz||null;
       renderPlan(LAST_PLAN);
     });
   });
@@ -2211,6 +2236,11 @@ function phaseSection(title,block,p,today,pk){
 // drift; the element is re-queried every tick because renderPlan's innerHTML re-renders wipe it —
 // the next renderPlan re-arms. No aria-live: a per-second live region is hostile to screen readers.
 let CD_TIMER=null;
+// SH-64 — the race form's zone suggestions; empty where Intl.supportedValuesOf is missing (the field stays free text)
+function tzDatalist(){
+  let zones=[]; try{ zones=Intl.supportedValuesOf("timeZone"); }catch(e){}
+  return `<datalist id="tzlist">${zones.map(z=>`<option value="${esc(z)}">`).join("")}</datalist>`;
+}
 function fmtCountdown(ms){
   const s=Math.max(0,Math.round(ms/1000)), d=Math.floor(s/86400), h=Math.floor(s%86400/3600),
         m=Math.floor(s%3600/60), sec=s%60;
@@ -2218,16 +2248,35 @@ function fmtCountdown(ms){
   return d>0 ? `${pl(d,"day")}, ${pl(h,"hour")}, ${pl(m,"minute")}, ${pl(sec,"second")}`
              : `${pl(h,"hour")}, ${pl(m,"minute")}, ${pl(sec,"second")}`;
 }
-function armCountdown(dateIso, timeHM){
+// SH-64 — the instant a race-local wall time (date + HH:MM) is, in IANA zone `tz`: the zone's offset
+// at that moment read back through Intl parts, so it holds under any viewer TZ and across DST. A null
+// zone is the old reading (the viewer's own clock); an unknown zone or unreadable input → an Invalid Date.
+function zonedInstant(dateIso, timeHM, tz){
+  const hm=timeHM||"00:00";
+  if(!tz) return new Date(dateIso+"T"+hm+":00");
+  const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(dateIso||""), t=/^(\d{2}):(\d{2})$/.exec(hm);
+  if(!m||!t) return new Date(NaN);
+  const wall=Date.UTC(+m[1],+m[2]-1,+m[3],+t[1],+t[2]);
+  let f; try{ f=new Intl.DateTimeFormat("en-US",{timeZone:tz,hourCycle:"h23",year:"numeric",month:"numeric",
+    day:"numeric",hour:"numeric",minute:"numeric",second:"numeric"}); }catch(e){ return new Date(NaN); }
+  const offsetAt=ms=>{ const q={}; f.formatToParts(new Date(ms)).forEach(x=>{ q[x.type]=+x.value; });
+    return Date.UTC(q.year,q.month-1,q.day,q.hour,q.minute,q.second)-Math.floor(ms/1000)*1000; };
+  let guess=wall-offsetAt(wall);          // one pass lands within the DST hour; the second settles it
+  guess=wall-offsetAt(guess);
+  return new Date(guess);
+}
+function armCountdown(dateIso, timeHM, tz){
   clearTimeout(CD_TIMER); CD_TIMER=null;
   if(!dateIso) return;
-  const target=new Date(dateIso+"T"+(timeHM||"00:00")+":00");   // local time — a gun time IS local
+  const target=zonedInstant(dateIso,timeHM,tz||null);   // a gun time is the RACE's clock: its zone, else the viewer's
   if(isNaN(target)) return;   // an unreadable date/time shows no countdown, never a false "race day"
+  let viewerTz=""; try{ viewerTz=Intl.DateTimeFormat().resolvedOptions().timeZone||""; }catch(e){}
+  const zoneNote=(tz&&tz!==viewerTz) ? ` (gun ${timeHM||"00:00"} ${tz})` : "";   // only when it differs from the viewer's
   const tick=()=>{
     const el=document.getElementById("objcount");
     if(!el){ CD_TIMER=null; return; }   // a re-render wiped it; the next renderPlan re-arms
     const ms=target-Date.now();
-    el.textContent=ms>0 ? " · in "+fmtCountdown(ms) : " · race day 🏁";
+    el.textContent=ms>0 ? " · in "+fmtCountdown(ms)+zoneNote : " · race day 🏁";
     CD_TIMER=setTimeout(tick, 1000-(Date.now()%1000)+5);   // align to the second
   };
   tick();
@@ -2267,7 +2316,7 @@ function renderPlan(p){
     : "";
   // arm AFTER the innerHTML above lands the span; no shown race (or no bar) disarms the tick.
   // Works identically on the public box — date + start_time are allowlisted and #objbar exists there.
-  if(ob && cdRace) armCountdown(cdRace.date, (cdObj&&cdObj.start_time)||null);
+  if(ob && cdRace) armCountdown(cdRace.date, (cdObj&&cdObj.start_time)||null, (cdObj&&(cdObj.start_tz||cdObj.default_tz))||null);
   else armCountdown(null);
   const totalw=p.phases.reduce((s,x)=>s+x.weeks,0);
   const zoneChips=Object.entries(p.pace_zones).map(([k,v])=>
@@ -3878,6 +3927,9 @@ async function loadCoros(){
       <div class="err" id="corosErr"></div>
     </div>`;
   const err=$("#corosErr");
+  const when=iso=>new Date(iso).toLocaleString();
+  if(d.connected&&d.last_error)
+    err.innerHTML=`⚠ Last push failed ${esc(when(d.last_error.at))}: ${esc(d.last_error.error||"")}`;
   const conn=$("#corosConn"); if(conn) conn.addEventListener("click",async()=>{
     err.textContent=""; conn.disabled=true; conn.textContent="Starting…";
     let r; try{ r=await (await fetch("/api/coros/connect",{method:"POST"})).json(); }

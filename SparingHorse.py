@@ -40,6 +40,7 @@ from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote, urlparse
+import zoneinfo
 from zoneinfo import ZoneInfo
 
 import requests
@@ -364,10 +365,23 @@ def mcp_call(tool, args):
     return res.get("structuredContent") or json.loads(res["content"][0]["text"])
 
 
-def cadence_is_halved(source):
-    """Suunto logs cadence as a one-leg step count → double it for true spm. Conditioned on
-    source so other devices (which report full spm) aren't wrongly doubled."""
-    return (source or "").lower() == "suunto"
+CAD_ONE_LEG_BELOW = 120   # spm — nobody runs under it, no leg turns over that often a minute
+
+
+def cadence_is_halved(values):
+    """Runalyze relays running cadence as a one-leg count (strides a minute) from Suunto and from an
+    uploaded COROS file alike, while other sources carry full steps per minute. So decide by magnitude,
+    as `cadence_rows` and `parse_fit` already do: `values` is one reading or a stream, and a median under
+    CAD_ONE_LEG_BELOW is a one-leg count. None, non-numbers and non-positive reads are ignored."""
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+    v = sorted(x for x in values
+               if isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0)
+    if not v:
+        return False
+    n = len(v)
+    med = v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2
+    return med < CAD_ONE_LEG_BELOW
 
 
 # §RD2 — RUNALYZE'S MCP STOPPED SHIPPING STREAMS BY DEFAULT. Observed 2026-08-25 on the day's own
@@ -407,8 +421,9 @@ def streams_are_final(act):
 
 # Bump when activity_profile's shape changes (new channel etc.) so cached profiles in trackcache
 # that predate the bump are re-fetched instead of served stale. v2 = elevation; v3 = route path
-# (lat/long); v4 = belt running dynamics (GCT/VO).
-PROFILE_VERSION = 4
+# (lat/long); v4 = belt running dynamics (GCT/VO); v5 = cadence unit decided by magnitude (a one-leg
+# count cached as steps per minute).
+PROFILE_VERSION = 5
 
 
 def activity_profile(activity_id, n=120):
@@ -416,10 +431,10 @@ def activity_profile(activity_id, n=120):
     Returns {dist[], pace[], hr[], cadence[], elevation[], path[], gct[], vo[], hr_avg, v, has_*} —
     pace in sec/km, dist in km, elevation in metres, gct in ms, vo in cm (SH-39 belt dynamics)."""
     act = activity_details(activity_id)
-    cad_mult = 2 if cadence_is_halved(act.get("source")) else 1
     s = act.get("streams") or {}
     dist, tim, hr, cad = (s.get("distance") or [], s.get("time") or [],
                           s.get("heart_rate") or [], s.get("cadence") or [])
+    cad_mult = 2 if cadence_is_halved(cad) else 1
     # SH-39 — the belt's running dynamics: ground contact time (ms) and vertical oscillation (mm,
     # normalised to cm below). Absent streams on wrist runs leave both lists empty.
     gcts, vos = s.get("ground_contact_time") or [], s.get("vertical_oscillation") or []
@@ -1389,7 +1404,8 @@ CREATE TABLE IF NOT EXISTS objectives (
     outcome    TEXT,                 -- §RL: JSON result once resolved (finished/dnf/unrun/unverified)
     resolved_at TEXT,                -- §RL: when resolve_passed_races settled it
     removed_at  TEXT,                -- §OBJ3: when remove took it off the calendar (NULL once put back)
-    start_time  TEXT                 -- §GUN: HH:MM local gun time (optional; NULL counts to midnight)
+    start_time  TEXT,                -- §GUN: HH:MM local gun time (optional; NULL counts to midnight)
+    start_tz    TEXT                 -- SH-64: IANA zone the gun time is in (optional; NULL = the viewer's own)
 );
 
 -- Versioned training plans. Each generation is a new row → diff-able history (§4).
@@ -1686,6 +1702,10 @@ def init_db():
     # countdown targets. NULL = the old semantics (count to midnight).
     if "start_time" not in ocols:
         db.execute("ALTER TABLE objectives ADD COLUMN start_time TEXT")
+    # SH-64 migration: `start_tz` — the IANA zone the gun time is in, so a countdown abroad reads the
+    # race's clock, not the viewer's. NULL = the old semantics (the viewer's own zone).
+    if "start_tz" not in ocols:
+        db.execute("ALTER TABLE objectives ADD COLUMN start_tz TEXT")
     # SH-49 migration: the same stamp on away windows, so ✕ gets a 24 h put-back like a race.
     avcols = {r["name"] for r in db.execute("PRAGMA table_info(availability)").fetchall()}
     if "removed_at" not in avcols:
@@ -3470,10 +3490,10 @@ def _coros_rec(rec, *names):
     return None
 
 
-def _coros_find_library_plan(result, plan_id=None, name=None):
-    """The in-progress, editable EXECUTION row for a plan id (or by name) among the library
-    records, or None. Only an execution+editable row may be updated; a library/completed copy is
-    read-only by rule."""
+def _coros_find_library_plan(result, plan_id=None, name=None, require_editable=True):
+    """The in-progress EXECUTION row for a plan id (or by name) among the library records, or
+    None. Updates require an editable row; the relaxed lookup detects a locked plan before a
+    create. A library/completed copy is read-only by rule."""
     for rec in _coros_library_records(result):
         rid = _coros_rec(rec, "planid", "plan_id", "id")
         if rid is None or (plan_id is not None and str(rid) != str(plan_id)):
@@ -3484,15 +3504,48 @@ def _coros_find_library_plan(result, plan_id=None, name=None):
         if role and role != "execution":
             continue
         editable = _coros_rec(rec, "editable")
-        if editable is not None and str(editable).lower() not in ("true", "1"):
+        editable = editable is None or str(editable).lower() in ("true", "1", "yes")
+        if require_editable and not editable:
             continue
         status = _coros_rec(rec, "status", "executestatus", "execute_status")
         if status is not None and str(status).lower() not in ("1", "in progress", "in_progress"):
             continue
         return {"plan_id": str(rid), "start": _coros_rec(rec, "startdate", "start_date",
                                                          "planstartdate"),
-                "weeks": _coros_rec(rec, "totalweeks", "total_weeks", "weeks")}
+                "weeks": _coros_rec(rec, "totalweeks", "total_weeks", "weeks"),
+                "editable": editable}
     return None
+
+
+def _coros_library_empty(result):
+    """The reply that decides "nothing is running", not an unparseable reply that decides nothing."""
+    for text in _coros_result_texts(result):
+        obj = _coros_decode_text(text)
+        if isinstance(obj, str) and (re.search(r"no in-progress training plans found", obj, re.I)
+                                     or re.search(r"plans on this page:\s*0\b", obj, re.I)):
+            return True
+    return False
+
+
+def _coros_lock_reason(plan_id):
+    """COROS's explanation for a locked execution plan, if the details reply supplies one."""
+    try:
+        result = _coros_call("queryTrainingPlanDetails", {"planId": str(plan_id)})
+        for text in _coros_result_texts(result):
+            obj = _coros_decode_text(text)
+            if isinstance(obj, str):
+                match = re.search(r"^\s*Reason:\s*(.+)$", obj, re.I | re.M)
+                if match:
+                    return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _coros_locked_message(reason):
+    return ("COROS no longer lets the app change the Sparing Horse plan"
+            + (f" ({reason})" if reason else "")
+            + ". Quit that plan in the COROS app; the next push creates a fresh one.")
 
 
 def _coros_day_ref(v, start):
@@ -3560,8 +3613,9 @@ def _coros_create_or_adopt(plan, start, hrz, pace_zones, exclude_id=None):
     COROS allows the overlap and never flags it); adoption needs the row's start + length to parse,
     else it falls through. Then createTrainingPlan for [start, start + fitted weeks), with the
     full periodization table and every workout day in one courseList (omitted days are rest by
-    rule), and the execution planId read back through the library. Returns the stored entry, or
-    {"skip": reason} when no valid length exists."""
+    rule), and the execution planId read back through the library. Returns the stored entry,
+    {"blocked": reason} when a locked in-progress plan forbids creation, or {"skip": reason}
+    when no valid length exists."""
     lib = _coros_call("queryTrainingPlanLibrary", {"planType": "mcp"})
     rec = _coros_find_library_plan(lib, name=COROS_PLAN_NAME)
     if rec and rec["plan_id"] != str(exclude_id):
@@ -3573,6 +3627,9 @@ def _coros_create_or_adopt(plan, start, hrz, pace_zones, exclude_id=None):
         if rstart and rweeks and COROS_MIN_WEEKS <= rweeks <= COROS_MAX_WEEKS:
             return {"plan_id": rec["plan_id"], "start": rstart.isoformat(), "weeks": rweeks,
                     "hashes": {}, "skipped": []}
+    locked = _coros_find_library_plan(lib, name=COROS_PLAN_NAME, require_editable=False)
+    if locked and not locked["editable"] and locked["plan_id"] != str(exclude_id):
+        return {"blocked": _coros_locked_message(_coros_lock_reason(locked["plan_id"]))}
     total = _coros_total_weeks(plan, start)
     if total is None:
         return {"skip": "the road left is too short for COROS's 4-week minimum with a workout in "
@@ -3678,18 +3735,28 @@ def push_coros(db, days=None):
     try:
         cur = state.get("current")
         if cur:
-            # the stored execution row may be gone or read-only (the athlete quit it in the COROS
-            # app). A library reply that parses DECIDES; one that doesn't decides nothing — the
-            # update itself is then the probe, and its failure lands in errors, not a duplicate plan.
+            # Three outcomes: the stored row is present (editable or locked), the library rows or
+            # explicit empty reply say it is gone, or an unclear/failed query decides nothing.
             try:
                 lib = _coros_call("queryTrainingPlanLibrary", {"planType": "mcp"})
-                if _coros_library_records(lib) \
-                        and not _coros_find_library_plan(lib, plan_id=cur.get("plan_id")):
+                if _coros_library_records(lib):
+                    rec = _coros_find_library_plan(lib, plan_id=cur.get("plan_id"),
+                                                   require_editable=False)
+                    if rec and not rec["editable"]:
+                        reason = _coros_lock_reason(cur.get("plan_id"))
+                        return {"ok": False, "error": _coros_locked_message(reason),
+                                "locked": True, "results": results}
+                    if not rec:
+                        cur = None
+                elif _coros_library_empty(lib):
                     cur = None
             except Exception:
                 pass
         if not cur:
             made = _coros_create_or_adopt(plan, today, hrz, pace_zones)
+            if made.get("blocked"):
+                return {"ok": False, "error": made["blocked"], "locked": True,
+                        "results": results}
             if made.get("skip"):
                 return {"ok": True, "pushed": 0, "results": [], "skipped": True,
                         "note": made["skip"]}
@@ -3717,7 +3784,9 @@ def push_coros(db, days=None):
             if 0 <= (nxt_start - today).days <= 14:      # COROS's planStartDate window
                 made = _coros_create_or_adopt(plan, nxt_start, hrz, pace_zones,
                                               exclude_id=cur["plan_id"])
-                if not made.get("skip"):
+                if made.get("blocked"):
+                    errors.append(made["blocked"])
+                elif not made.get("skip"):
                     state["next"] = made
                     created_days += made.get("sent_days") or 0
                     results.append({"date": nxt_start.isoformat(), "action": "created",
@@ -3748,6 +3817,17 @@ def push_coros(db, days=None):
     return out
 
 
+def _coros_note_push(db, res):
+    """Keep the last real push failure for Settings; skipped pushes leave the previous result alone."""
+    if not res.get("skipped"):
+        if res.get("ok"):
+            db.execute("DELETE FROM meta WHERE key=?", ("coros:last_error",))
+        else:
+            set_meta(db, "coros:last_error", json.dumps({"at": _now_iso(),
+                                                         "error": res.get("error", "")[:300]}))
+        db.commit()
+
+
 def coros_status(db):
     """Settings-window payload: connected? login pending (with its link)? last push and the COROS
     plan's end from meta. Never a token. A pending login is claimed ONCE here per read — when the
@@ -3769,7 +3849,11 @@ def coros_status(db):
             tok, pend = new, None
             print("[coros] connected")
     out = {"connected": bool(tok), "pending": bool(pend),
-           "last_push": get_meta(db, "coros:last_push"), "plan_end": None}
+           "last_push": get_meta(db, "coros:last_push"), "last_error": None, "plan_end": None}
+    try:
+        out["last_error"] = json.loads(get_meta(db, "coros:last_error") or "null")
+    except Exception:
+        pass
     if pend:
         out["login_url"] = pend["login_url"]
     cur = _coros_plan_state(db).get("current")
@@ -8329,6 +8413,18 @@ def _start_time(v):
     return v
 
 
+def _start_tz(v):
+    """SH-64 — normalize an objective's gun-time zone to an IANA name or raise ValueError. Strict at
+    the API edge, like `_start_time()`: a name this host's tzdata does not know is rejected HERE.
+    None/"" → None (optional; absent means the viewer's own zone)."""
+    if v is None or v == "":
+        return None
+    v = str(v).strip()
+    if v not in zoneinfo.available_timezones():
+        raise ValueError(f"start_tz must be an IANA time zone such as Europe/Madrid, got {v!r}")
+    return v
+
+
 def replan(db, mutate):
     """Re-periodize around a write (§6b): snapshot the plan, apply `mutate`, regenerate, commit, return
     the diff. Centralises the invariant that every objective/adjustment change re-anchors the road
@@ -8582,9 +8678,10 @@ _PV_DRIFT = {"anchor": {"created_at": True, "for_date": True, "is_current": True
 # NOT `outcome` / `resolved_at` — a race RESULT is personal (§RL/H7). `SELECT *` feeds this, so the
 # allowlist is also what keeps a NEW objectives column off the public box.
 # `start_time` IS in: a race's gun time is organizer-published public info, the same class as the
-# date (already public) — and the public box's countdown needs it.
+# date (already public) — and the public box's countdown needs it. `start_tz` (SH-64) is in for the
+# same reason: it is the RACE's zone, stored on the race; the athlete's own zone never rides this payload.
 _PV_OBJECTIVES = {"date": True, "id": True, "label": True, "priority": True, "start_time": True,
-                  "status": True, "target": True, "type": True}
+                  "start_tz": True, "status": True, "target": True, "type": True}
 
 _PV_WEEKLY = {"km": True, "week": True}
 
@@ -8659,6 +8756,7 @@ _PV_PROJECTOR = {"history": {"date": True, "ctl": True, "atl": True, "tsb": True
 _PV_VO2MAX = {"months": True, "n": True, "points": {"date": True, "vo2max": True}}
 
 _PV_WITHHELD = {
+    "objectives[].default_tz",               # SH-64 — the athlete's own chosen zone: private payloads only; the public row carries just a zone stored on the race
     "plan.seed_now.source", "plan.shape.seed.source",   # §SEED6 provenance of the load seed (own state vs Runalyze's rows),
     "plan.shape.seed.runalyze", "plan.shape.seed.own_gap",   #   and how far apart they were: private only; publishing it is not decided
     "track.races[].p50_hms",                 # §TR — publishing the prediction beside its error
@@ -9608,6 +9706,11 @@ def api_objectives():
     seed_objectives(db)
     resolve_passed_races(db)   # §RL — idempotent; keeps the list honest even between nightly re-plans
     rows = [dict(r) for r in db.execute("SELECT * FROM objectives ORDER BY date").fetchall()]
+    if not READONLY:           # SH-64 — the athlete's own chosen zone, the default for a race with none
+        tzval, tzsrc = _resolve_setting(db, SETTINGS_BY_KEY["tz"])
+        default_tz = _process_tz_for(tzval, tzsrc)
+        for o in rows:
+            o["default_tz"] = default_tz
     if READONLY:               # §PV/§RL/H7 — race RESULTS are personal, redacted at the DATA layer
         rows = public_view("objectives", rows)   # (the UI hiding the strip is cosmetic). `SELECT *`
                                                  # feeds this, so the allowlist is also what keeps a
@@ -9631,6 +9734,10 @@ def api_objectives_add():
         start_time = _start_time(d.get("start_time"))   # it is in the table (absent/"" → NULL)
     except ValueError:
         return jsonify(ok=False, error="start_time must be HH:MM (24-hour)"), 400
+    try:                                   # SH-64 — the same guard for the gun time's zone
+        start_tz = _start_tz(d.get("start_tz"))
+    except ValueError:
+        return jsonify(ok=False, error="start_tz must be an IANA time zone such as Europe/Madrid"), 400
     label = d.get("label", "Race")
     db = get_db()
     # §OBJ2 — an unthrottled Add button once queued 12 identical clicks before the first re-plan
@@ -9641,10 +9748,10 @@ def api_objectives_add():
     ).fetchone():
         return jsonify(ok=False, error=f"already on the calendar: {label} on {d['date']}"), 409
     return replan(db, lambda: db.execute(
-        "INSERT INTO objectives (type,label,date,target,priority,status,created_at,start_time) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT INTO objectives (type,label,date,target,priority,status,created_at,start_time,start_tz) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
         (d.get("type", "custom"), label, str(d["date"]),
-         d.get("target", "finish"), d.get("priority", "A"), "upcoming", _now_iso(), start_time),
+         d.get("target", "finish"), d.get("priority", "A"), "upcoming", _now_iso(), start_time, start_tz),
     ))
 
 
@@ -9726,17 +9833,26 @@ def api_objectives_time(oid):
         start_time = _start_time(d.get("start_time"))   # the table (absent/"" → NULL = clear)
     except ValueError:
         return jsonify(ok=False, error="start_time must be HH:MM (24-hour)"), 400
+    set_tz = "start_tz" in d               # SH-64 — absent leaves the zone alone; ""/null clears it
+    try:
+        start_tz = _start_tz(d.get("start_tz"))
+    except ValueError:
+        return jsonify(ok=False, error="start_tz must be an IANA time zone such as Europe/Madrid"), 400
     db = get_db()
-    o = db.execute("SELECT status FROM objectives WHERE id=?", (oid,)).fetchone()
+    o = db.execute("SELECT status, start_tz FROM objectives WHERE id=?", (oid,)).fetchone()
     if o is None:
         return jsonify(ok=False, error="no such objective"), 404
     if o["status"] != "upcoming":
         why = ("it is no longer on the calendar" if o["status"] == "removed" else
                "its start is a matter of record")
         return jsonify(ok=False, error=f"a {o['status']} race takes no start time — {why}"), 409
-    db.execute("UPDATE objectives SET start_time=? WHERE id=?", (start_time, oid))
+    if set_tz:
+        db.execute("UPDATE objectives SET start_time=?, start_tz=? WHERE id=?", (start_time, start_tz, oid))
+    else:
+        db.execute("UPDATE objectives SET start_time=? WHERE id=?", (start_time, oid))
+        start_tz = o["start_tz"]
     db.commit()
-    return jsonify(ok=True, start_time=start_time)
+    return jsonify(ok=True, start_time=start_time, start_tz=start_tz)
 
 
 @app.post("/api/objectives/<int:oid>/remove")
@@ -10201,7 +10317,7 @@ def _activity_payload(db, a):
     dist, dur = a.get("distance") or 0, a.get("duration") or 0
     pace = (dur / 60) / dist if dist else None  # min/km
     cad = a.get("cadence")
-    if cad and cadence_is_halved(a.get("source")):  # Suunto logs one-leg cadence → ×2 for spm
+    if cad and cadence_is_halved(cad):  # a one-leg count (Suunto, COROS upload) → ×2 for spm, by magnitude
         cad *= 2
     # SH-39 — belt running dynamics straight off the REST payload: ground contact (ms) and vertical
     # oscillation (mm → cm); wrist runs carry neither key, a non-positive read is no read.
@@ -10959,7 +11075,7 @@ def api_coros_disconnect():
     _save_coros_state(COROS_TOKENS_KEY, None)
     _save_coros_state(COROS_PENDING_KEY, None)
     db = get_db()
-    db.execute("DELETE FROM meta WHERE key=?", (COROS_PLAN_META,))
+    db.execute("DELETE FROM meta WHERE key IN (?, ?)", (COROS_PLAN_META, "coros:last_error"))
     db.commit()
     return jsonify(ok=True, **coros_status(db))
 
@@ -10979,6 +11095,7 @@ def api_coros_push():
         if not (1 <= days <= 60):
             return jsonify(ok=False, error="days must be between 1 and 60"), 400
     res = push_coros(get_db(), days=days)
+    _coros_note_push(get_db(), res)
     if res.get("ok") and not res.get("skipped"):            # the System block reads this
         set_meta(get_db(), "coros:last_push", _now_iso()); get_db().commit()
     # 200 even on a failed push: the body carries ok/error, and a 502 behind the tunnel reached the
@@ -11340,6 +11457,7 @@ def _nightly_job_once(kind="nightly"):
         db = connect_db()
         try:
             res = push_coros(db)
+            _coros_note_push(db, res)
             if res.get("ok") and not res.get("skipped"):
                 set_meta(db, "coros:last_push", _now_iso()); db.commit()
         finally:

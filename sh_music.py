@@ -43,6 +43,7 @@ MUSIC_TEMPO_WINDOW = 0.02      # ±2 % — the entrainment basin (Van Dyck 2015)
 #                                is a track the legs will not follow without being told to.
 #                                §BEAT11: the picker's second rung, opened only when the lock band is dry
 MUSIC_STEP_PCT = 1.5           # default ladder step over the recent curve, per build — inside the basin
+MUSIC_MAX_LIFT_SPM = 5.0       # the lift setting's ceiling: a flat spm added to every target, under the comfort ceiling
 MUSIC_MAX_STEP_PCT = 3.0       # the setting's ceiling: beyond ~3 % nothing entrains spontaneously
 MUSIC_WORK_STEP_PCT = 3.0      # §BEAT5 (0.65.0) — WORK segments take the whole basin as their step. At
 #                                threshold pace the athlete sat ~10 spm under the trained line and
@@ -108,6 +109,7 @@ MUSIC_STEADY_SPM = 3.0         # §BEAT7 — samples within this of the song's m
 MUSIC_SONG_SEAM_S = 20         # §BEAT2 read-back: the first seconds of a song are the seam from the
 #                                last one — the legs are still on the old beat; excluded per song
 MUSIC_SONG_MIN_S = 60          # …and a song with under a minute inside the run is not read at all
+MUSIC_PRESS_RETIRED_FROM = "2026-10-22"   # runs dated on or after this read no lap presses on any watch; older runs keep theirs
 MUSIC_PRESS_PAIR_S = 6         # §BEAT3: lap presses within this many seconds are ONE signal — since §BEAT7
 #                                one press says "the beat lost me here", two say "never again"; the verdict
 #                                lands on the song playing
@@ -154,9 +156,9 @@ MUSIC_LB_WEEKLY_LISTS = 4          # the newest weekly-exploration lists read
 MUSIC_LB_RADIO_SEEDS = 6           # LB radio seeded on the listener's top artists of the year (needs the token)
 MUSIC_LB_LOOKUPS = 120             # candidate → Spotify searches per refresh (the rest wait for the next)
 MUSIC_LB_NAMES_BATCH = 50          # recordings named per metadata call
-MUSIC_FRESH_QUOTA = 4              # §DISCO — songs never run to that each list carries when the window holds them:
-                                   # measured 2026-09-11 on one listener's ListenBrainz sources, ~150 runnable fresh songs
-                                   # and ~45 per target, so four a list refills for months without a repeat
+MUSIC_RECENT_LISTS = 2             # SH-61 — songs on this many newest lists rank after every other song inside a tempo window
+MUSIC_FRESH_QUOTA = 8              # §DISCO — rotation inside the ±1 % window (24 Oct 2026) needs more fresh songs:
+                                   # eight never-run songs per list when the window holds them, spread over its core segments
 
 SP_TOKENS_KEY = "spotify_oauth_tokens"   # internal secrets-store row (JSON); never in the UI spec
 
@@ -235,7 +237,7 @@ def press_protocol_from(conn):
 
 
 SETTING_DEFAULTS = {"lastfm_user": "", "listenbrainz_user": "", "max_spm": "", "step_pct": str(MUSIC_STEP_PCT),
-                    "half_time": "0", "discovery": "0"}
+                    "half_time": "0", "discovery": "0", "lift_spm": "0"}
 # discovery is OFF by default: ReccoBeats' recommendations ignore tempo, and measured on 2026-09-06
 # the local window kept 1 track of 264 returned for targets of 166–178 bpm — a lottery, not a source
 
@@ -267,6 +269,13 @@ def validate_music_setting(key, value):
             return False, "a number of percent"
         if not (0 <= f <= MUSIC_MAX_STEP_PCT):
             return False, f"0–{MUSIC_MAX_STEP_PCT} % — beyond that the legs stop following the beat"
+    elif key == "lift_spm":
+        try:
+            f = float(v) if v else 0.0
+        except ValueError:
+            return False, "a number of spm"
+        if not (0 <= f <= MUSIC_MAX_LIFT_SPM and abs(f * 2 - round(f * 2)) < 1e-9):
+            return False, f"0–{MUSIC_MAX_LIFT_SPM:g} spm in steps of 0.5"
     elif key in ("half_time", "discovery"):
         if v and v not in ("0", "1"):
             return False, "1 (on) or 0 (off)"
@@ -405,14 +414,15 @@ def _line_at(ln, kmh):
     return ln["a"] + ln["b"] * kmh
 
 
-def target_spm(curve, pace_sec, step_pct=None, ramp=None, work=False):
+def target_spm(curve, pace_sec, step_pct=None, ramp=None, work=False, lift=0.0):
     """The segment's target cadence at `pace_sec`/km: the recent line lifted by the step — on a WORK
     segment by MUSIC_WORK_STEP_PCT when the setting's step is smaller (§BEAT5) — or, on a
     road with a race ahead, lifted to where the ramp stands between the recent and the trained line
     (§BEAT4) — capped by the trained line (never past what this runner has done at this speed), by
     the comfort ceiling, and by the rung: one entrainment step over what the legs last showed on a
     read-back, the last target itself when they ran under it, one step over the recent line before
-    any read-back exists. Never under the recent line. Returns a dict so the page can show WHY."""
+    any read-back exists. Never under the recent line. The athlete's own `lift` (spm, the /music setting) is
+    added last, after those caps, and only the comfort ceiling caps it. Returns a dict so the page can show WHY."""
     if not curve or not pace_sec or pace_sec <= 0:
         return None
     step = MUSIC_STEP_PCT if step_pct is None else float(step_pct)
@@ -461,18 +471,27 @@ def target_spm(curve, pace_sec, step_pct=None, ramp=None, work=False):
         if v <= target + 1e-9 and asked > v + 1e-9:
             why = label
             break
+    lift = float(lift or 0.0)
+    if lift > 0:
+        lifted_to = min(target + lift, comfort)
+        moved = lifted_to > target + 1e-9
+        if target + lift > comfort + 1e-9:
+            why = "comfort ceiling" + (" · lift +%g spm" % lift if moved else "")
+        elif moved:
+            why += " · lift +%g spm" % lift
+        target = lifted_to
     return {"spm": round(target, 1), "recent": round(rec, 1), "trained": round(tr, 1),
             "comfort": comfort, "why": why, "ramp": round(ramped, 1) if ramped is not None else None}
 
 
-def cadence_table(curve, zones, step_pct=None, ramp=None):
+def cadence_table(curve, zones, step_pct=None, ramp=None, lift=0.0):
     """The page's cadence card rows: one per pace zone the plan prescribes."""
     rows = []
     for name in ("easy", "lt1", "marathon", "threshold", "interval"):
         p = _pace_sec(zones.get(name)) if zones else None
         if not p:
             continue
-        t = target_spm(curve, p, step_pct, ramp, work=(name in MUSIC_WORK_ZONES))
+        t = target_spm(curve, p, step_pct, ramp, work=(name in MUSIC_WORK_ZONES), lift=lift)
         if t:
             rows.append({"zone": name, "pace": zones[name], **t})
     return rows
@@ -786,6 +805,7 @@ def pick_for_segments(segments, pool, targets, half_time=False, discover=None, s
     the window — a fresh song that does not fit the cadence is not on the list. What the window
     holds no more of stays owed, and the notes say so."""
     used, used_names, notes, out = set(), set(), [], {}
+    recent = getattr(served, "recent", None) or set()
     follow, served, fresh = follow or {}, served or {}, fresh or set()
     quota_left, fresh_taken = (int(fresh_quota or 0) if fresh else 0), 0
     if CADENCE_SENSOR_BIAS_SPM:        # §BEAT12 — once per list, not per segment
@@ -833,7 +853,9 @@ def pick_for_segments(segments, pool, targets, half_time=False, discover=None, s
                          + MUSIC_SCORE_CLOSE * _closeness(t["tempo"], song_t, window, hit)
                          - MUSIC_SCORE_SERVED * int(sv or 0))
                 scored.append((score, hit, t, fw, sv))
-            scored.sort(key=lambda x: -x[0])
+            # SH-61 — a song on either of the last two lists ranks after every song that was not; the score
+            # orders each group, so the window's width is untouched and only the order inside it changes
+            scored.sort(key=lambda x: (_on_recent(recent, x[2]), -x[0]))
             if quota_left > 0 and seg.get("effort") != "tail":
                 segs_left = sum(1 for j in order[pos:] if segments[j].get("effort") != "tail")
                 take = -(-quota_left // max(1, segs_left))          # ceil — the quota spread over what is left
@@ -919,13 +941,23 @@ def _by_song(d, t):
     return max(vals) if vals else None
 
 
+class ServedCounts(dict):
+    """`served_counts()`'s {id-or-song_key: lists} with `.recent`: the ids and song keys of the
+    MUSIC_RECENT_LISTS newest lists read (SH-61 — the picker ranks those songs last inside a window)."""
+    recent = frozenset()
+
+
+def _on_recent(recent, t):
+    return bool(recent) and (t.get("id") in recent or song_key(t.get("artist"), t.get("title")) in recent)
+
+
 def served_counts(conn, today=None, exclude_key=None, days=MUSIC_ROTATION_DAYS):
     """§BEAT7 — how many lists inside the rotation window each track was on, from the playlist
     ledger. The list being rebuilt (`exclude_key`) does not count against its own tracks: a rebuild
     before the run is not a new run. `days=None` (§DISCO) reads the whole ledger."""
     since = ((today or date.today()) - timedelta(days=days)).isoformat() if days is not None else ""
-    out = {}
-    for r in conn.execute("SELECT key, spec FROM playlist WHERE built_at >= ?", (since,)):
+    out, newest, lists_seen = ServedCounts(), set(), 0
+    for r in conn.execute("SELECT key, spec FROM playlist WHERE built_at >= ? ORDER BY built_at DESC", (since,)):
         if r["key"] == exclude_key:
             continue
         try:
@@ -942,6 +974,10 @@ def served_counts(conn, today=None, exclude_key=None, days=MUSIC_ROTATION_DAYS):
                     seen.add(k)
         for sid in seen:
             out[sid] = out.get(sid, 0) + 1
+        if lists_seen < MUSIC_RECENT_LISTS:
+            newest |= seen
+            lists_seen += 1
+    out.recent = frozenset(newest)
     return out
 
 
@@ -1910,11 +1946,6 @@ def readback(db, run_id):
     a = db.execute("SELECT id, date, date_time, distance, duration, raw FROM activities WHERE id=?", (run_id,)).fetchone()
     if not a:
         return {"ok": False, "error": "no such run"}
-    src = None
-    try:
-        src = json.loads(a["raw"] or "{}").get("source")
-    except Exception:
-        pass
     run_start = _epoch(a["date_time"])
     run_end = run_start + float(a["duration"] or 0)
     conn = _mdb()
@@ -1948,13 +1979,15 @@ def readback(db, run_id):
         except Exception as e:
             print(f"[music] fit read failed for {run_id}: {e}")
         presses, clock_shift, n_guide_laps = [], 0.0, 0
+        votes_by_press = (a["date"] or "")[:10] < MUSIC_PRESS_RETIRED_FROM    # runs from the retirement date read no presses
         if fit:
             fit, clock_shift = anchor_fit(fit, run_start)     # §BEAT6 — the file's clock, anchored to the run's
             samples = fit["samples"]
             run_start = fit["start"] or run_start
             run_end = samples[-1][0]
             stream_source = "fit"
-            presses = press_times(fit["laps"], run_end, guide_s=guide_s, decoded_s=decoded_s)
+            if votes_by_press:
+                presses = press_times(fit["laps"], run_end, guide_s=guide_s, decoded_s=decoded_s)
             n_guide_laps = sum(guide_laid(fit["laps"], guide_s, decoded_s))   # §BEAT15 — laps actually dropped
         else:
             try:
@@ -1964,13 +1997,14 @@ def readback(db, run_id):
                                               f"({type(e).__name__}) — try again"}
             s = act.get("streams") or {}
             try:
-                presses = press_times_from_splits(act.get("splits"), run_start, guide_s=guide_s, decoded_s=decoded_s)
+                if votes_by_press:
+                    presses = press_times_from_splits(act.get("splits"), run_start, guide_s=guide_s, decoded_s=decoded_s)
             except Exception as e:
                 print(f"[music] splits unreadable for {run_id}: {e}")
             tim, cad, dist = s.get("time") or [], s.get("cadence") or [], s.get("distance") or []
             if not tim or not cad:
                 return {"ok": False, "error": "the run has no cadence stream"}
-            mult = 2 if S.cadence_is_halved(src) else 1
+            mult = 2 if S.cadence_is_halved(cad) else 1
             km_units = bool(dist) and max(d for d in dist if d is not None) <= 100
             samples = [(run_start + tim[i], (cad[i] or 0) * mult if i < len(cad) and cad[i] is not None else None,
                         (dist[i] * (1000.0 if km_units else 1.0)) if i < len(dist) and dist[i] is not None else None)
@@ -2759,13 +2793,14 @@ def plan_for_session(session, curve, pool, settings, discover=None, ramp=None, s
     (and after) the playlist is written. The run-home tail is filled but counts in neither the
     session's minutes nor its overall target."""
     step = float(settings.get("step_pct") or MUSIC_STEP_PCT)
+    lift = float(settings.get("lift_spm") or 0.0)
     half = str(settings.get("half_time") or "0") == "1"
     segs = session_segments(session)
     if not segs:
         return {"ok": False, "error": "nothing to play — a rest day, or a session without distance"}
     targets = []
     for sg in segs:
-        t = target_spm(curve, sg["pace_sec"], step, ramp, work=(sg["effort"] in MUSIC_WORK_EFFORTS))
+        t = target_spm(curve, sg["pace_sec"], step, ramp, work=(sg["effort"] in MUSIC_WORK_EFFORTS), lift=lift)
         targets.append(t["spm"] if t else None)
         sg["target"] = t
     if any(t is None for t in targets):
@@ -2859,7 +2894,7 @@ def build_playlist(db, key, write=True):
         except Exception as e:
             res.update(written=False, error=f"Spotify refused the playlist: {e}"[:300])
             return res
-        spec = json.dumps({"target_spm": res["target_spm"], "sensor_bias_spm": CADENCE_SENSOR_BIAS_SPM,  # §BEAT12
+        spec = json.dumps({"target_spm": res["target_spm"], "lift_spm": float(settings.get("lift_spm") or 0.0), "sensor_bias_spm": CADENCE_SENSOR_BIAS_SPM,  # §BEAT12
                            "ramp": {k: ramp.get(k) for k in ("fraction", "week", "weeks", "phase", "landed_by_legs")} if ramp else None,
                            "rung": ramp.get("rung") if ramp else None, "segments": [
             {"label": s["label"], "effort": s.get("effort"), "minutes": s["minutes"], "target_spm": s["target_spm"],
@@ -3159,7 +3194,7 @@ def register(app, host):
         zones = (plan or {}).get("pace_zones") or {}
         ramp = ramp_state(plan, curve, date.today())
         return jsonify(ok=True, curve=curve, ramp=ramp,
-                       table=cadence_table(curve, zones, settings.get("step_pct"), ramp) if curve else [],
+                       table=cadence_table(curve, zones, settings.get("step_pct"), ramp, float(settings.get("lift_spm") or 0.0)) if curve else [],
                        recent=recent_cadence(db))
 
     @app.post("/api/music/settings")
@@ -3188,7 +3223,8 @@ def register(app, host):
         for s in upcoming_sessions(plan, date.today()):
             segs = session_segments(s)
             targets = [target_spm(curve, sg["pace_sec"], settings.get("step_pct"), ramp,
-                                  work=(sg["effort"] in MUSIC_WORK_EFFORTS)) for sg in segs] if curve else []
+                                  work=(sg["effort"] in MUSIC_WORK_EFFORTS),
+                                  lift=float(settings.get("lift_spm") or 0.0)) for sg in segs] if curve else []
             spms = [t["spm"] for t in targets if t]
             overall = (sum(t * sg["minutes"] for t, sg in zip(spms, segs)) / max(1e-9, sum(sg["minutes"] for sg in segs))
                        if spms and len(spms) == len(segs) else None)

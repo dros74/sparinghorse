@@ -10,6 +10,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.84.0] - 2026-10-24
+
+### Added
+
+- **A target lift for the music page.** A new setting, *Target lift* (0 to 5 spm in steps of 0.5, default 0), adds
+  a flat number of steps per minute to every segment's target cadence. It is added after the ramp, the
+  trained-curve and the rung caps, and only the comfort ceiling caps it; the target's reason line reads
+  "· lift +N spm" when the lift moved it, and "comfort ceiling" when the ceiling bound. The lift is recorded in
+  the saved playlist spec. `det/music-target-lift` pins the added spm, the comfort cap and the reason line.
+- **A time zone for each race's gun time.** A race takes an optional IANA time zone (for example
+  `Europe/Madrid`), set on the add form or edited in the race calendar, validated against the host's tzdata and
+  stored in a new `objectives.start_tz` column (migrated on start). The countdown reads the gun time in the
+  race's zone; with none set it uses the zone chosen in Settings (private and demo pages), and then the
+  viewer's own clock. When the race's zone differs from the viewer's, the countdown adds "(gun HH:MM Zone)".
+  The public payload carries `start_tz` only when it is stored on the race, like the gun time (organizer-published
+  information); the athlete's own Settings zone stays out of it. `det/zoned-instant` runs the countdown's
+  conversion under three viewer zones; `det/objective-time` gains limb (g) and a migration check.
+
+### Changed
+
+- **Playlists repeat songs less.** The tempo window stays at ±1 %. Inside each tempo attempt, songs on either of
+  the two newest lists (by Spotify id or by artist and title) now rank after every other song, so the window's
+  width is unchanged and only the order inside it moves. The fresh-song quota from ListenBrainz
+  (`MUSIC_FRESH_QUOTA`) rises from 4 to 8 per list. Measured on a live copy: at the day's easy target the ±1 %
+  window held 74 songs and every one had been on a list in the last 28 days, because the window widens only
+  when it is short of songs, never when it is short of fresh ones. On the next easy list the songs carried over
+  from the previous two lists fell from 11 to 0, and with a lift of +1 spm eight never-run songs entered, since
+  the shifted window reaches fresh songs. Songs still come back, about every two weeks instead of on nearly every
+  list. `det/music-rotation` covers the recency order, the quota and the two-list window.
+
+### Removed
+
+- **In-run Lap-press votes, on every watch.** Runs dated 2026-10-22 or later read no lap presses
+  (`MUSIC_PRESS_RETIRED_FROM`); older runs keep their stored votes, and "Read again" on them reproduces the
+  votes. On a COROS structured workout the Lap key starts the next step, so a press could not be a vote there.
+  A headset skip still sets the song aside for that kind of segment, the legs' follow score is unchanged, and
+  the after-run *Leave it out* and *Keep* buttons stay. "Read again" on a run from the retirement date on removes
+  the press votes stored by an earlier read. The read-back copy drops the press protocol for those runs.
+  `det/music-press-retired` pins both sides of the date.
+
+## [0.83.6] - 2026-10-23
+
+### Fixed
+
+- **A mid-week regeneration no longer lays the rest of a caution or taper week heavier than Monday did.** On a
+  caution week, and on the taper of an athlete following the assertive road, the mid-week rebuild of the
+  current week laid the days ahead from the week's full intent, so from Tuesday on the plan could show more
+  load than the Monday lay the ceilings had allowed, keep quality sessions that Monday's safety rescue had
+  stripped from a caution week, and stay silent about a limit that was in fact binding. The rebuild now lays
+  the days ahead from Monday's own governed lay, runs the mid-week quality rescue on caution weeks too (it
+  stays off on the assertive taper until a separate fix lands), and judges the copied days
+  against the week's ceilings before keeping them: a copy that would break the ceiling is re-laid, on the
+  caution road off the charged uniform share rather than the refused copy's own budget. An over-run on a
+  caution week is still charged against the days ahead, with a rounding tolerance for how runs are laid and
+  logged, and the week now says when Monday's lay was clipped by a limit. `det/straddle-monday-lay` gains
+  limbs for the clipped caution lay and its limit flag, the copied days and the refused-copy re-lay, the
+  away-day shed on caution, and the charge-gate rounding; `det/long-run-held` covers the caution long run on
+  track and over-run.
+- **A safety rescue on a taper week or a forced deload no longer adds the volume back.** When the
+  quality-to-easy rescue fired on a week whose volume is reduced on purpose, the pure-easy re-lay rode the
+  full load ceiling — more total load than the week it had just made safer. The re-laid week is now capped at
+  what the week laid before the rescue (read after any check-in, as the polarization rescue's cap already
+  was); down weeks are unchanged. `det/straddle-monday-lay` pins the cap on a taper, on a forced deload, and
+  on a week eased by a check-in, each seen to fail with the cap removed.
+
+## [0.83.5] - 2026-10-23
+
+### Fixed
+
+- **The COROS push no longer stacks a second plan when COROS locks the plan it tracks.** COROS can mark a plan
+  "Editable via MCP: no" while it is still in progress, for example when its dates change outside MCP and no
+  longer match its metadata. The lookup skipped such rows, so the push read a locked plan as a missing one and
+  created a new plan. COROS allows overlapping plans and offers no way to quit or delete one from MCP, so the
+  old plan stayed on the calendar beside the new one. A stored plan that is in progress but locked now stops
+  the push with COROS's own reason and "Quit that plan in the COROS app; the next push creates a fresh one",
+  with no create and no update, and the adopt step refuses to create while a locked "Sparing Horse" plan is in
+  progress (the follow-on plan path reports it as an error and keeps updating the current plan). After the
+  plan is quit, COROS answers the library query with one sentence and no rows; that reply now means the stored
+  plan is gone, so the next push creates a fresh plan instead of failing on the quit plan's id. Every push,
+  nightly or manual, records its last failure, and the Settings COROS box shows when the last push failed and
+  why until a push succeeds; disconnecting clears it. `det/coros-push-diff` gains limbs for an empty
+  library with a stored plan, a locked stored plan, a locked plan with none stored, and the recorded failure,
+  each seen to fail with its fix reverted.
+
+## [0.83.4] - 2026-10-22
+
+### Fixed
+
+- **A run uploaded from a COROS watch now shows its cadence in steps per minute, not half of it.** Runalyze
+  relays a one-leg cadence count for an uploaded COROS file as it does for a Suunto run, but the app doubled
+  that count only when the run's source was Suunto. The activity tile and the run card showed about 90 instead
+  of about 180, and the music read-back graded every song about 50 % under its tempo, so none was followed and
+  the ramp's rung read as not held. The unit is now decided by magnitude, as the FIT reader already did: a
+  median reading under 120 steps per minute is a one-leg count and is doubled. This applies to the activity
+  tile, the run card and the music read-back. Suunto runs read as before, and a source that reports full steps
+  per minute is left alone. Run-card profiles cached before this release are fetched again. After the update,
+  Read again on a run's music read-back replaces its stored grades. New `det/cadence-unit-by-magnitude`
+  covers the helper, the profile and the tile, seen to fail with the helper reverted.
+
 ## [0.83.3] - 2026-10-22
 
 ### Fixed

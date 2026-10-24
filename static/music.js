@@ -22,6 +22,8 @@
   const paceOf = s => (s.minutes && s.km) ? fmtPace(s.minutes*60/s.km) : "—";
   const clock = iso => iso ? esc(String(iso).slice(11, 16)) : "";
   const PAGE = document.body.dataset.page;
+  const PRESS_RETIRED_FROM = "2026-10-22";   // = MUSIC_PRESS_RETIRED_FROM: runs from this date read no lap presses
+  const pressesRetired = iso => String(iso || "").slice(0, 10) >= PRESS_RETIRED_FROM;
   const openSettings = tab => { if(window.SHSettings) window.SHSettings.open(tab); };
 
   // ══ Settings → Music: the tab every private page can open ══════════════════════════════════════
@@ -49,6 +51,7 @@
     q("#mMatching").innerHTML = `
       <div class="mrow"><label for="mMax">Comfort ceiling</label><input type="number" id="mMax" min="120" max="220" value="${esc(s.max_spm)}" placeholder="spm (empty = observed p90)"><span class="mprog">the cadence no target passes</span></div>
       <div class="mrow"><label for="mStep">Step</label><input type="number" id="mStep" min="0" max="${st.constants.max_step}" step="0.5" value="${esc(s.step_pct)}"><span class="mprog">% over the recent curve on easy segments · work segments take ${st.constants.work_step} % · at most ${st.constants.max_step}</span></div>
+      <div class="mrow"><label for="mLift">Target lift (spm)</label><input type="number" id="mLift" min="0" max="5" step="0.5" value="${esc(s.lift_spm)}"><span class="mprog">Added to every target, under the comfort ceiling.</span></div>
       <div class="mrow"><label>Matching</label>
         <span class="chk"><input type="checkbox" id="mHalf" ${s.half_time==="1"?"checked":""}> allow half-time (one beat per stride)</span>
         <span class="chk"><input type="checkbox" id="mDisco" ${s.discovery==="1"?"checked":""}> ReccoBeats discovery when a window runs dry (measured yield 1 in 264 near 170 bpm)</span></div>`;
@@ -80,6 +83,7 @@
       save.addEventListener("click", async () => {
         const msg = q("#mSaveMsg"); msg.textContent = "";
         const body = {lastfm_user: q("#mLfm").value, listenbrainz_user: q("#mLb").value, max_spm: q("#mMax").value, step_pct: q("#mStep").value,
+                      lift_spm: q("#mLift").value,
                       half_time: q("#mHalf").checked ? "1" : "0", discovery: q("#mDisco").checked ? "1" : "0"};
         const d = await postJ("/api/music/settings", body);
         // the tab's one Save also lands any key pasted into it (the rows are write-only, no Save of their own)
@@ -249,7 +253,7 @@
         <span class="mrow" style="margin:0 0 0 auto"><label for="mRunSel" style="min-width:0">Run</label><select id="mRunSel">${opts}</select>
         <button type="button" class="ghost" id="mReadBtn">${r.readback_at ? "Read again" : "Read back"}</button></span></div>
       <div id="musicRb">${r.readback_at ? `<div class="empty">Loading the read-back…</div>` : `<div class="empty">Not read yet — the nightly reads the day's run once its plays are in, or press Read back.</div>`}</div>
-      <p class="mhint">Which song was playing when, and the cadence the legs held through it, seams excluded. From the watch: <b>one lap press</b> during a song = the beat lost me here · <b>two presses within six seconds</b> = never again · a headset <b>skip</b> sets the song aside for that kind of segment. The stream adds <b>followed</b> (cadence within 1 % of the song's tempo) and <b>dips</b> (4 spm under the song's median for 4 s or more). Together they score each track for the next lists. A song the play history dropped is read from the list order when the gap between its neighbours fits it, and is marked <b>from the list</b>. On a reps day a song is read over the reps only; one that fell on the recoveries is left ungraded.</p>`;
+      <p class="mhint">Which song was playing when, and the cadence the legs held through it, seams excluded. ${pressesRetired(r.date) ? "From the headset: a <b>skip</b> sets the song aside for that kind of segment. Skip a song on the headset to leave it out of this kind of run, or use <b>Leave it out</b> below after the run." : "From the watch: <b>one lap press</b> during a song = the beat lost me here · <b>two presses within six seconds</b> = never again · a headset <b>skip</b> sets the song aside for that kind of segment."} The stream adds <b>followed</b> (cadence within 1 % of the song's tempo) and <b>dips</b> (4 spm under the song's median for 4 s or more). Together they score each track for the next lists. A song the play history dropped is read from the list order when the gap between its neighbours fits it, and is marked <b>from the list</b>. On a reps day a song is read over the reps only; one that fell on the recoveries is left ungraded.</p>`;
     q("#mRunSel").addEventListener("change", e => showRun(Number(e.target.value)));
     q("#mReadBtn").addEventListener("click", async () => {
       const b = q("#mReadBtn"); b.disabled = true; q("#musicRb").innerHTML = `<div class="empty">Reading the run…</div>`;
@@ -290,7 +294,7 @@
         <td>${verdictCell(s)}</td></tr>`).join("");
     const unmatched = (r.presses || []).filter(p => !p.spotify_id).length;
     host.innerHTML = `${stats}
-      <p class="mhint" style="margin:0 0 8px">Read from the ${r.stream_source === "fit" ? "FIT file (1 Hz, lap presses)" : "summary stream"}${r.computed_at ? ` on ${esc(String(r.computed_at).slice(0, 16).replace("T", " "))}` : ""}${r.skipped ? ` · ${r.skipped} skipped` : ""}${r.off_playlist ? ` · ${r.off_playlist} off the playlist (not read for the rung)` : ""}${r.inferred ? ` · ${r.inferred} read from the list` : ""}${r.clock_shift_s ? ` · the file's clock ran ${Math.round(Math.abs(r.clock_shift_s)/60)} min ${r.clock_shift_s < 0 ? "ahead of" : "behind"} the run and was re-anchored` : ""}${unmatched ? ` · ${unmatched} press${unmatched > 1 ? "es" : ""} outside any song` : ""}</p>
+      <p class="mhint" style="margin:0 0 8px">Read from the ${r.stream_source === "fit" ? (pressesRetired(r.date) ? "FIT file (1 Hz)" : "FIT file (1 Hz, lap presses)") : "summary stream"}${r.computed_at ? ` on ${esc(String(r.computed_at).slice(0, 16).replace("T", " "))}` : ""}${r.skipped ? ` · ${r.skipped} skipped` : ""}${r.off_playlist ? ` · ${r.off_playlist} off the playlist (not read for the rung)` : ""}${r.inferred ? ` · ${r.inferred} read from the list` : ""}${r.clock_shift_s ? ` · the file's clock ran ${Math.round(Math.abs(r.clock_shift_s)/60)} min ${r.clock_shift_s < 0 ? "ahead of" : "behind"} the run and was re-anchored` : ""}${unmatched ? ` · ${unmatched} press${unmatched > 1 ? "es" : ""} outside any song` : ""}</p>
       <div style="overflow-x:auto"><table class="mtbl"><thead><tr><th>At</th><th>Song</th><th>Read</th><th>Cadence</th><th>Pace</th><th>Legs</th><th>Verdict</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     if(!host.dataset.wired){
       host.dataset.wired = "1";

@@ -5930,7 +5930,8 @@ def _stc_long_run_held():
     week lays, the sheet may run over the bar, and only the load ceilings may shorten it (out loud).
     §LRH-2: a day already run is LIVED, not laid — the nightly regeneration runs after the evening
     run, and laying a session on that day then shedding it folded its budget into the long run.
-    Pure/in-memory."""
+    SH-103 extends Monday's lay to caution, but not its `long_held` flag: caution's §6o-B charge
+    still takes an easy-day over-run back from the days ahead. Pure/in-memory."""
     from datetime import date, timedelta
     easy = 414
     mon = date(2026, 8, 31)
@@ -6039,28 +6040,39 @@ def _stc_long_run_held():
     if e["km"] > full_km + 0.5:
         fails.append(f"(e) under-run week {e['km']} exceeds its full week {full_km}")
 
-    # (f) CAUTION CONTRACT — no rung, no hold: the proportional lay stands, byte-identical. The
-    #     on-track actuals are CAUTION's own (its intent is the skeleton), or the remainder is spent
-    #     and the limb judges an optional-rest day instead of a long run.
+    # (f) CAUTION — Monday's long holds on track, without the assertive-only flag; an easy-day
+    #     over-run is still charged against the remainder under §6o-B.
     cfw = _gen(regime="caution")
     cf = _long(cfw)
-    f = _gen(today=sun, week_actuals=(5, round(cfw["km"] - (cf["km"] if cf else 0.0), 1)), regime="caution")
-    lf = _long(f)
-    if f.get("long_held") or any(s.get("long_held") for s in f["sessions"]):
-        fails.append("(f) the hold leaked into caution")
-    if not (lf and cf):
-        fails.append(f"(f) fixture too weak — caution laid no long run (full {cf and cf['km']}, Sunday {lf and lf['km']})")
-    elif not (lf["km"] < cf["km"] - 0.5):
-        fails.append(f"(f) caution Sunday long {lf['km']} did not scale with the remainder ({cf['km']} full)")
+    if not cf:
+        fails.append("(f) fixture too weak — caution's full week laid no long run")
+        cf_km = 0.0
+    else:
+        cf_km = cf["km"]
+    f1 = _gen(today=sun, week_actuals=(5, round(cfw["km"] - cf_km, 1)), regime="caution")
+    lf1 = _long(f1)
+    if f1.get("long_held") or any(s.get("long_held") for s in f1["sessions"]):
+        fails.append("(f1) the hold leaked into caution")
+    if not lf1 or abs(lf1["km"] - cf_km) > 0.35:
+        fails.append(f"(f1) caution Sunday long {lf1 and lf1['km']} ≠ Monday's {cf_km}")
+    f2 = _gen(today=sun, week_actuals=(5, round(cfw["km"] - cf_km + 6.0, 1)), regime="caution")
+    lf2 = _long(f2)
+    lf2_km = lf2["km"] if lf2 else 0.0       # the charge may take the whole remaining long run
+    if lf2_km >= cf_km - 0.5:
+        fails.append(f"(f2) caution over-run long {lf2_km} was not charged below {cf_km}")
     return _st("det", "long-run-held",
                "§LRH the straddling week's long run holds the rung the full week lays, on whatever day the "
                "week is regenerated (uniform-share regression, day-invariance incl. a run-today, sheet "
-               "already spent, ceiling as the only cutter and it says so, never cram, caution untouched)",
+               "already spent, ceiling as the only cutter and it says so, never cram; caution holds "
+               "Monday's lay on track but still charges an easy-day over-run)",
                passed=not fails, expect="long == full-week long (±0.35) on Thu/Sat/Sun regens; held flags; "
-               "spent week keeps it; ceiling cut ⇒ acwr.binds; caution proportional",
+               "spent week keeps it; ceiling cut ⇒ acwr.binds; caution on track == Monday without flags; "
+               "caution +6 km over-run ⇒ long below Monday −0.5",
                got={"rung": rung, "full_km": full_km, "sun": la and la["km"], "thu": _long(b_thu) and _long(b_thu)["km"],
                     "sat": _long(b_sat) and _long(b_sat)["km"], "spent": lc and lc["km"],
-                    "ceiling": ld and ld["km"], "caution": lf and lf["km"], "failures": fails or "none"})
+                    "ceiling": ld and ld["km"], "caution_monday": cf_km,
+                    "caution_on_track": lf1 and lf1["km"], "caution_over_run": lf2_km,
+                    "failures": fails or "none"})
 
 
 def _stc_week_mean_roll_invariant():
@@ -6419,8 +6431,11 @@ def _stc_straddle_monday_lay():
     easy for a peak breach or eroded polarization showed its quality again from Tuesday). Each limb
     regenerates the same week on Monday (a planned rest day) and on Tuesday from Monday's rest-decayed
     end state, same inputs, and compares every day Tue–Sun, the week's intent_km and every later week.
-    The §3.1 bio rescue has no limb: Monday's search takes `week_eq_cap` as a bound, so its lay sits at
-    the cap at most and `bio_over` cannot fire on it. Pure/in-memory."""
+    SH-103 adds caution and taper clipping, caution's copied quality days and shed prorate, while its
+    over-run charge remains covered by det/long-run-held; SH-105 caps a rescued taper or forced-deload
+    week at the pre-rescue total instead of refilling to the ceiling. The §3.1 bio rescue has no limb:
+    Monday's search takes `week_eq_cap` as a bound, so its lay sits at the cap at most and `bio_over`
+    cannot fire on it. Pure/in-memory."""
     from datetime import date, timedelta
     mon = date(2026, 11, 2)
     tue = (mon + timedelta(days=1)).isoformat()
@@ -6431,8 +6446,10 @@ def _stc_straddle_monday_lay():
            "rep_min": 3, "rec_min": 2, "label": "VO₂"}
     cruise = {"kind": "threshold", "zone": "threshold", "frac": 0.10, "structure": "cruise",
               "rep_min": 8, "rec_min": 2, "label": "Cruise"}
+    mp = {"kind": "long_mp", "zone": "marathon", "frac": 0.25, "structure": "mp_finish",
+          "label": "MP"}
     away = {(mon + timedelta(days=o)).isoformat() for o in (0, 2)}   # Monday and Wednesday away
-    fails, got = [], {}
+    fails, got, tues = [], {}, {}
 
     def _shape(km, runs, long, quality=(), n=3):
         return [{"wk": i + 1, "km": km, "runs": runs, "long": long, "strides": 0,
@@ -6468,22 +6485,30 @@ def _stc_straddle_monday_lay():
             E.H1_RESCUE_ACWR, E._hard_share = sv_h1, sv_hs
         return w, E._hard_share(w["sessions"], w["trimp_total"])
 
-    def _cmp(tag, shape, seed, A, **kw):
-        wm, wt = _gen(shape, seed, A, 0, **kw), _gen(shape, seed, A, 1, **kw)
-        km, kt = _keys(wm[0], tue), _keys(wt[0], tue)
-        d = next((f"{x} vs {y}" for x, y in zip(km, kt) if x != y),
-                 f"{len(km)} vs {len(kt)} sessions" if len(km) != len(kt) else None)
-        if d:
-            fails.append(f"({tag}) days Tue–Sun differ Mon vs Tue — first: {d}")
-        im, it = wm[0].get("intent_km") or 0.0, wt[0].get("intent_km") or 0.0
-        if abs(im - it) > 0.1:
-            fails.append(f"({tag}) intent_km differs: Mon {im} vs Tue {it}")
-        for i in range(1, min(len(wm), len(wt))):
-            d = next((f"{x} vs {y}" for x, y in zip(_keys(wm[i], "0"), _keys(wt[i], "0")) if x != y), None)
+    def _cmp(tag, shape, seed, A, tue_actuals=None, **kw):
+        wm = _gen(shape, seed, A, 0, **kw)
+        wts = [_gen(shape, seed, A, 1, **kw)]
+        if tue_actuals is not None:
+            # Tuesday as the app calls it — the week's actuals given, Monday lived as (runs, km)
+            wts.append(_gen(shape, seed, A, 1, week_actuals=tue_actuals, **kw))
+        for wt in wts:
+            km, kt = _keys(wm[0], tue), _keys(wt[0], tue)
+            d = next((f"{x} vs {y}" for x, y in zip(km, kt) if x != y),
+                     f"{len(km)} vs {len(kt)} sessions" if len(km) != len(kt) else None)
             if d:
-                fails.append(f"({tag}) week {wm[i]['start']} differs Mon vs Tue — first: {d}")
-                break
-        got[tag] = {"mon_km": wm[0]["km"], "tue_km": wt[0]["km"], "intent_km": [im, it]}
+                fails.append(f"({tag}) days Tue–Sun differ Mon vs Tue — first: {d}")
+            im, it = wm[0].get("intent_km") or 0.0, wt[0].get("intent_km") or 0.0
+            if abs(im - it) > 0.1:
+                fails.append(f"({tag}) intent_km differs: Mon {im} vs Tue {it}")
+            for i in range(1, min(len(wm), len(wt))):
+                d = next((f"{x} vs {y}" for x, y in zip(_keys(wm[i], "0"), _keys(wt[i], "0")) if x != y), None)
+                if d:
+                    fails.append(f"({tag}) week {wm[i]['start']} differs Mon vs Tue — first: {d}")
+                    break
+        tues[tag] = [wt[0] for wt in wts]
+        got[tag] = {"mon_km": wm[0]["km"], "tue_km": [wt[0]["km"] for wt in wts],
+                    "intent_km": [wm[0].get("intent_km") or 0.0] + [wt[0].get("intent_km") or 0.0
+                                                                   for wt in wts]}
         return wm[0]
 
     saved = E._DAY_PREF
@@ -6537,8 +6562,7 @@ def _stc_straddle_monday_lay():
         #     bar run on Tuesday
         _cmp("e", sh_a, (55.0, 60.0), A_av, blocked=away, week_actuals=(0, 0.0))
 
-        # (f) caution control — a low-fitness VO₂ week Monday keeps whole: the rescue stays off a
-        #     caution `full` (laid ungoverned, heavier than Monday's), so Tuesday keeps the VO₂ too
+        # (f) caution control — a low-fitness VO₂ week Monday keeps whole stays whole on Tuesday
         A_f = dict(_A(35), regime="caution")
         w_f = _cmp("f", _shape(35, 5, 10, [vo2]), (20.0, 20.0), A_f, zones=zones)
         if not any((s.get("kind") or "") in E.QUALITY_KINDS for s in w_f["sessions"]):
@@ -6553,18 +6577,161 @@ def _stc_straddle_monday_lay():
         if (w_g.get("intent_km") or 0.0) > 30.0 + 0.1:
             fails.append(f"(g) fixture — Monday's anchorless down week aims at {w_g.get('intent_km')} km, "
                          "over the shape's 30")
+
+        # (h) SH-103 — caution's clipped Monday lay governs the days ahead, quality included; the
+        #     straddle's acwr.binds inherits Monday's clipped flag, Tuesday actuals or none
+        w_h = _cmp("h", _shape(50, 5, 15, [vo2, cruise]), (30.0, 34.0),
+                   dict(regime="caution"), tue_actuals=(0, 0.0), zones=zones)
+        if not w_h.get("clipped"):
+            fails.append("(h) fixture — Monday's caution week is not clipped")
+        binds_h = [w_h["limits"]["acwr"]["binds"]] + [w["limits"]["acwr"]["binds"] for w in tues["h"]]
+        if not all(binds_h):
+            fails.append(f"(h) acwr.binds not set on Monday and both Tuesdays of the clipped week: "
+                         f"{binds_h}")
+
+        # (i) SH-103 — a copied threshold day survives the remainder search's lower allowance
+        w_i = _cmp("i", _shape(35, 4, 10, [cruise]), (35.0, 35.0),
+                   dict(regime="caution"), tue_actuals=(0, 0.0), zones=zones)
+        if not any(s["date"] == tue and s.get("kind") == "threshold" for s in w_i["sessions"]):
+            fails.append("(i) fixture — Monday's caution week has no Tuesday threshold session")
+
+        # (j) SH-103 — an assertive taper over its ceiling also keeps Monday's clipped lay
+        sh_j = _shape(60, 5, 16, [vo2])
+        sh_j[0].update(role="taper", intent="Taper — race week")
+        _cmp("j", sh_j, (20.0, 24.0), _A(60), zones=zones)
+
+        # (k) SH-103 — caution keeps the away-day shed prorate too
+        w_k = _cmp("k", _shape(50, 6, 16), (30.0, 34.0), dict(regime="caution"), blocked=away)
+        if not w_k.get("av_shed"):
+            fails.append("(k) fixture — Monday's caution week sheds no run (av_shed unset)")
+
+        # (l) SH-105 — an assertive taper whose rescue fires is re-laid at the PRE-RESCUE total, not
+        #     refilled to the ceiling: the week's volume is reduced on purpose (the un-capped refill
+        #     laid 22.1 km here). Monday's lay only: Tuesday's match waits on SH-104 — the straddle
+        #     rescue is off the assertive taper (sh_engine.py ~4826).
+        sh_l = _shape(35, 4, 10, [mp])
+        sh_l[0].update(role="taper", intent="Taper — race week")
+        raw_l, _ = _disarmed(sh_l, (20.0, 24.0), _A(35), zones=zones)
+        if not (raw_l["peak_acwr"] or 0.0) > E.H1_RESCUE_ACWR:
+            fails.append(f"(l) fixture — the disarmed taper lay peaks at {raw_l['peak_acwr']}, "
+                         f"not over H1_RESCUE_ACWR {E.H1_RESCUE_ACWR}")
+        w_l = _gen(sh_l, (20.0, 24.0), _A(35), 0, zones=zones)[0]
+        if any((s.get("kind") or "") not in ("easy", "long", "rest") for s in w_l["sessions"]):
+            fails.append("(l) fixture — Monday's taper week kept its quality: the rescue did not fire")
+        if w_l["km"] > 18.7 + 0.05:
+            fails.append(f"(l) the rescued taper week lays {w_l['km']} km, over the pre-rescue total "
+                         "of 18.7")
+        got["l"] = {"mon_km": w_l["km"]}
+
+        # (m) SH-105 — the same cap on a FORCED DELOAD: the streak at MESO_MAX_HARD with no down week
+        #     ahead forces the trough; at this fitness even its pure-easy lay peaks over
+        #     H1_RESCUE_ACWR, so the rescue re-governs — and must not refill (the un-capped refill
+        #     laid 22.1 km). Pure easy with or without the rescue, so the cap is pinned by the km.
+        sh_m = _shape(35, 4, 10, [vo2])
+        w_m = _cmp("m", sh_m, (20.0, 24.0), dict(_A(35), consec_hard=E.MESO_MAX_HARD), zones=zones)
+        if not w_m.get("deload_forced"):
+            fails.append("(m) fixture — no forced deload on a streak at MESO_MAX_HARD with no down "
+                         "week ahead")
+        if w_m["km"] > 20.8 + 0.05:
+            fails.append(f"(m) the rescued forced deload lays {w_m['km']} km, over the pre-rescue "
+                         "total of 20.8")
+
+        # (n) SH-103 — EVERY copy of the days ahead is judged by the remainder's ceiling, not only a
+        #     clipped one: an 8 km run logged on the Monday rest day lifts the week, and the
+        #     unchecked copy read a shape-neutral 1.29 over ACWR_SOFT 1.25; the judged copy re-lays
+        sh_n = _shape(50, 6, 15, [mp])
+        sh_n[0].update(role="taper", intent="Taper — race week")
+        c_n = E._ewma_step(50.0, 8 * tpk, E.TAU_CTL)
+        a_n = E._ewma_step(55.0, 8 * tpk, E.TAU_ATL)
+        w_n = E.generate_block([dict(w, quality=[dict(q) for q in w["quality"]]) for w in sh_n], mon,
+                               c_n, a_n, easy, today=mon + timedelta(days=1),
+                               day_series={mon.isoformat(): 8 * tpk}, week_actuals=(1, 8.0),
+                               **_A(50), zones=zones)[0][0]
+        if not w_n.get("day_share"):
+            fails.append("(n) fixture — Tuesday did not take the copy of Monday's days ahead")
+        laid_n = (w_n["limits"]["acwr"] or {}).get("laid")
+        if laid_n is None or laid_n > E.ACWR_SOFT + 1e-3:
+            fails.append(f"(n) the straddling week reads acwr laid {laid_n}, over ACWR_SOFT "
+                         f"{E.ACWR_SOFT}")
+        got["n_laid"] = laid_n
+
+        # (o) SH-103 — a REFUSED copy on caution re-lays off the uniform share, charged: the interval
+        #     run at 1.5× its lay spends the §6o-B charge, the ceiling refuses the copy of the days
+        #     ahead, and the re-lay spreads what is left instead of collapsing into one heavy run
+        #     (the copy-budget re-lay read eow 1.264, over ACWR_SOFT)
+        sh_o = _shape(20, 4, 6, [vo2])
+        w_om = _gen(sh_o, (20.0, 24.0), dict(regime="caution"), 0, zones=zones)[0]
+        wed = (mon + timedelta(days=2)).isoformat()
+        iv_o = next((s for s in w_om["sessions"] if s["date"] == tue and s.get("kind") == "interval"),
+                    None)
+        if not (w_om.get("clipped") and iv_o
+                and any(s["date"] > wed and (s.get("kind") or "") == "long" for s in w_om["sessions"])):
+            fails.append("(o) fixture — Monday's clipped caution week does not lay the Tuesday "
+                         "interval and the Sunday long")
+        tr_o = float(iv_o["trimp"]) * 1.5 if iv_o else 0.0
+        c_o = E._ewma_step(E._ewma_step(20.0, 0.0, E.TAU_CTL), tr_o, E.TAU_CTL)
+        a_o = E._ewma_step(E._ewma_step(24.0, 0.0, E.TAU_ATL), tr_o, E.TAU_ATL)
+        w_o = E.generate_block([dict(w, quality=[dict(q) for q in w["quality"]]) for w in sh_o], mon,
+                               c_o, a_o, easy, today=mon + timedelta(days=2),
+                               day_series={mon.isoformat(): 0.0, tue: tr_o},
+                               week_actuals=(1, round((iv_o["km"] if iv_o else 0.0) * 1.5, 1)),
+                               regime="caution", zones=zones)[0][0]
+        runs_o = [s for s in w_o["sessions"] if s["date"] >= wed and (s.get("km") or 0) > 0
+                  and (s.get("kind") or "") != "rest"]
+        if (w_o.get("proj_acwr") or 9.0) > E.ACWR_SOFT + 1e-3:
+            fails.append(f"(o) the straddling week reads proj_acwr {w_o.get('proj_acwr')}, over "
+                         f"ACWR_SOFT {E.ACWR_SOFT}")
+        if len(runs_o) < 2:
+            fails.append(f"(o) the refused copy's re-lay collapsed to {len(runs_o)} run(s) ahead")
+        got["o_proj_acwr"] = w_o.get("proj_acwr")
+
+        # (p) SH-105 — the cap reads the CHECKED-IN lay: a check-in that zeroes Tuesday drops the
+        #     taper week's total, the rescue fires on what is left, and the re-laid week may not
+        #     exceed the checked-in pre-rescue total (the un-capped refill read 184.1 against 173.3)
+        sh_p = _shape(35, 4, 10)
+        sh_p[0].update(role="taper", intent="Taper — race week")
+        adj_p = {"applies_from": tue, "applies_until": tue, "volume_multiplier": 0.0}
+        raw_p, _ = _disarmed(sh_p, (20.0, 24.0), _A(35), zones=zones, adjust=adj_p)
+        if not (raw_p["peak_acwr"] or 0.0) > E.H1_RESCUE_ACWR:
+            fails.append(f"(p) fixture — the checked-in taper lay peaks at {raw_p['peak_acwr']}, "
+                         f"not over H1_RESCUE_ACWR {E.H1_RESCUE_ACWR}")
+        w_p = _gen(sh_p, (20.0, 24.0), _A(35), 0, zones=zones, adjust=adj_p)[0]
+        if w_p["trimp_total"] > raw_p["trimp_total"] + 0.1:
+            fails.append(f"(p) the rescued checked-in week carries {w_p['trimp_total']} TRIMP, over "
+                         f"the checked-in pre-rescue total of {raw_p['trimp_total']}")
+        got["p_trimp"] = (w_p["trimp_total"], raw_p["trimp_total"])
+
+        # (q) SH-103 — the §6o-B charge gate tolerates rounding: on an UNCLIPPED caution week the copy
+        #     of the days ahead sits 0.125 TRIMP over the charge (sessions lay and runs read to
+        #     0.1 km), inside the half-decimal-per-session tolerance; at the old 1e-6 the copy was
+        #     refused and Tuesday re-laid the uniform share (threshold day gone, long run 8.5 → 10.0)
+        w_q = _cmp("q", _shape(35, 4, 10, [cruise]), (70.0, 75.0), dict(regime="caution"),
+                   tue_actuals=(0, 0.0), zones=zones)
+        if w_q.get("clipped"):
+            fails.append("(q) fixture — Monday's caution week is clipped: the gate is not at the "
+                         "rounding boundary")
+        if not any(s["date"] == tue and s.get("kind") == "threshold" for s in w_q["sessions"]):
+            fails.append("(q) fixture — Monday's caution week has no Tuesday threshold session")
     finally:
         E._DAY_PREF = saved
 
     return _st("det", "straddle-monday-lay",
-               "§AV/§H1/§H2 (SH-74/75) a mid-week regeneration rebuilds Monday's lay with Monday's "
-               "decisions: an away week that sheds a run keeps the shed prorate (building and taper "
-               "weeks), and a week Monday re-laid pure easy for a peak breach or eroded polarization "
-               "stays pure easy — Monday and Tuesday lay the same days, intent_km and later weeks",
+               "§AV/§H1/§H2 (SH-74/75/103/105) a mid-week regeneration rebuilds Monday's lay with "
+               "Monday's decisions: an away week that sheds a run keeps the shed prorate (building, "
+               "caution and taper weeks), a rescued week stays pure easy at the pre-rescue total "
+               "(the checked-in lay when a check-in eased the week), clipped caution/taper weeks "
+               "keep Monday's days and say binds, and every copy of the days ahead is judged by the "
+               "remainder's ceiling, a refused one re-laid off the charged uniform share — Monday "
+               "and Tuesday lay the same days, intent_km and later weeks",
                passed=not fails,
-               expect="Mon == Tue (days Tue–Sun, intent_km ±0.1, every later week) on limbs a, b1, b2, "
-               "c, d, e, f (caution), g (anchorless down week); preconditions: av_shed on a/d, disarmed peak > H1_RESCUE_ACWR on b1, disarmed "
-               "hard share over 1 − POLARIZED_EASY_MIN without a breach on b2, quality kept on c",
+               expect="Mon == Tue (days Tue–Sun, intent_km ±0.1, every later week) on the _cmp limbs "
+               "(a–k, m, q); preconditions: av_shed on a/d/k, disarmed peak > H1_RESCUE_ACWR on "
+               "b1/l/p, disarmed hard share over 1 − POLARIZED_EASY_MIN without a breach on b2, "
+               "quality kept on c, clipped on h and o's Monday, Tuesday threshold kept on i, "
+               "deload_forced on m, day_share on n, unclipped on q; acwr.binds on h Mon and Tue; "
+               "rescued taper/forced-deload km ≤ pre-rescue total + 0.05 on l/m; acwr laid ≤ "
+               "ACWR_SOFT + 1e-3 on n; proj_acwr ≤ ACWR_SOFT + 1e-3 and ≥2 runs ahead on o; rescued "
+               "checked-in TRIMP ≤ pre-rescue total + 0.1 on p",
                got={**got, "failures": fails or "none"})
 
 
@@ -10679,6 +10846,7 @@ def _stc_calibration_inventory():
     # prescription or a projection, so nothing here is calibration.
     PLUMBING = {"LIMITS_LAID_TOL","_SCHED_MEM", "PAGE_DELAY", "AUTO_SYNC_THROTTLE", "SCHED_STALE_HOURS", "PROFILE_VERSION", "STRUCT_VERSION",
                 "SUUNTO_ACTIVITY_RUNNING", "EXPORT_FORMAT",
+                "CAD_ONE_LEG_BELOW",   # SH-106 — which unit a cadence stream is in; a display fix, no plan reads it
                 "_EXPLAIN_CACHE_MAX",
                 # 0.55.1 — abuse dampers and the public by-id window: seconds and days of plumbing,
                 # not magnitudes the plan is computed from
@@ -10707,6 +10875,9 @@ def _stc_calibration_inventory():
                 "MUSIC_AUTOLAP_UNIT_TOL", "MUSIC_GUIDE_LAP_TOL_S", "MUSIC_GUIDE_LAP_DECODE_WINDOW_S",
                 # SH-59 — the share of a run's songs another day's list must hold to be read as the run's list
                 "MUSIC_LIST_ADOPT_SHARE",
+                # 24 Oct 2026 — the lift setting's upper bound (an input check, like MUSIC_MAX_STEP_PCT's range) and
+                # how many of the newest lists the picker ranks last inside a window (SH-61)
+                "MUSIC_MAX_LIFT_SPM", "MUSIC_RECENT_LISTS",
                 # §CG — COROS's own protocol numbers (catalog, 2026-10-21): plan-length bounds, the
                 # interval-group repeats cap, the chunking window, the absolute-intensity ranges and
                 # the section/phase enum maps. Limits and enums of someone else's API, not magnitudes
@@ -11448,8 +11619,8 @@ def _stc_profile_belt_dynamics():
                                                         "average_heart_rate": 150,
                                                         "streams": dict(STREAMS)}
         p = S.activity_profile(1)
-        if p.get("v") != 4:
-            fails.append(f"profile v{p.get('v')}, want v4 (belt dynamics)")
+        if p.get("v") != S.PROFILE_VERSION:
+            fails.append(f"profile v{p.get('v')}, want v{S.PROFILE_VERSION}")
         g, v = p.get("gct"), p.get("vo")
         if not (isinstance(g, list) and g):
             fails.append(f"gct empty: {g!r}")
@@ -11524,6 +11695,45 @@ def _stc_activity_belt_fields(db):
                "None without the belt; both withheld on the public box",
                passed=not fails,
                expect="242 → 242, 76 mm → 7.6 cm; None without the keys; absent when read-only",
+               got={"failures": fails or "none"})
+
+
+def _stc_cadence_unit_by_magnitude(db):
+    """SH-106 — Runalyze relays running cadence as a one-leg count (~90) from Suunto AND from an
+    uploaded COROS file (source "api"); other sources carry full spm. The unit is decided by the
+    magnitude of the readings, not by the source: the helper, the run-card profile and the activity
+    tile all double a one-leg stream and leave a full-spm one alone."""
+    fails = []
+    for vals, want in (([None, 90, 0, 88, 91], True), ([178, 180, 176], False), (89, True),
+                       (172, False), (None, False), ([], False)):
+        got = S.cadence_is_halved(vals)
+        if got is not want:
+            fails.append(f"cadence_is_halved({vals!r}) = {got!r}, want {want!r}")
+
+    def streams(c):
+        return {"distance": [0, 250, 500, 750, 1000], "time": [0, 60, 120, 180, 240],
+                "heart_rate": [150] * 5, "cadence": [c] * 5}
+    saved = S.activity_details
+    try:
+        for src, c, want in (("api", 90, 180), ("Suunto", 172, 172), ("synthetic", 172, 172)):
+            S.activity_details = lambda aid, streams_=True, _s=src, _c=c: {
+                "id": 1, "source": _s, "average_heart_rate": 150, "streams": streams(_c)}
+            vals = [x for x in (S.activity_profile(1).get("cadence") or []) if x]
+            if not vals or any(abs(x - want) > 2 for x in vals):
+                fails.append(f"profile source={src!r} stream {c}: cadence {sorted(set(vals))}, want ~{want}")
+    finally:
+        S.activity_details = saved
+    base = {"id": -1, "distance": 5, "duration": 1500, "date_time": "2026-09-24T07:00:00"}
+    for src, c, want in (("api", 90, 180), ("synthetic", 172, 172)):
+        got = S._activity_payload(db, {**base, "source": src, "cadence": c}).get("cadence")
+        if got != want:
+            fails.append(f"payload source={src!r} cadence {c}: {got!r}, want {want}")
+    return _st("det", "cadence-unit-by-magnitude",
+               "SH-106 the cadence unit is decided by magnitude: a one-leg stream (any source, COROS "
+               "upload included) is doubled in the helper, the run-card profile and the activity "
+               "tile; a full-spm stream is left alone",
+               passed=not fails,
+               expect="[90..] → 180 whatever the source; 172 → 172 for Suunto and synthetic alike",
                got={"failures": fails or "none"})
 
 
@@ -12202,11 +12412,14 @@ def _stc_coros_push_diff():
         say every day already landed;
       · a CHANGED day sends exactly that day (one update call, one dayNo);
       · a day the server reports in skippedExecutedDays is reported in the summary and NEVER
-        retried, even though its hash still differs.
+        retried, even though its hash still differs;
+      · (e) an explicit empty library retires the stored id and creates a fresh plan;
+      · (f) a locked stored plan and (g) a locked unowned plan both stop before create/update;
+      · (h) a real failure is stored for Settings and a later success clears it.
 
-    THE REVERT TOOTH is the hash check in `_coros_push_days`: dropping the
-    `entry["hashes"].get(...) == h` comparison (send every day every night, the pre-diff shape)
-    fails the second-push assertion outright — seen to fail with exactly that revert.
+    THE REVERT TEETH are the hash check in `_coros_push_days` (push 2 resends), the explicit-empty
+    branch (e updates instead of creating), and the two locked-plan guards (f/g create another
+    plan). Every revert is run and must fail its named limb.
     [[revert-tests-must-be-seen-to-fail]]"""
     import sqlite3 as _sq
     from datetime import date as _d, timedelta as _td
@@ -12239,16 +12452,22 @@ def _stc_coros_push_diff():
     m.commit()
 
     calls = []
-    state = {"created": False, "skip_daynos": []}
+    state = {"created": False, "skip_daynos": [], "library": None, "details": ""}
 
     def fake_call(tool, args):
         calls.append((tool, args))
         if tool == "queryTrainingPlanLibrary":
+            if state["library"] is not None and not state["created"]:
+                return {"content": [{"type": "text", "text": S.json.dumps(state["library"])}],
+                        "isError": False}
             plans = ([{"planId": "424242", "planName": "Sparing Horse", "recordRole": "execution",
                        "editable": True, "status": 1,
                        "startDate": int(today.strftime("%Y%m%d")), "totalWeeks": 5}]
                      if state["created"] else [])
             return {"content": [{"type": "text", "text": S.json.dumps({"plans": plans})}],
+                    "isError": False}
+        if tool == "queryTrainingPlanDetails":
+            return {"content": [{"type": "text", "text": S.json.dumps(state["details"])}],
                     "isError": False}
         if tool == "createTrainingPlan":
             state["created"] = args
@@ -12336,6 +12555,94 @@ def _stc_coros_push_diff():
             fails.append("push 5 retried a day COROS keeps skipping (completed on the watch)")
         if not r5.get("ok"):
             fails.append(f"push 5 failed: {r5}")
+
+        empty_text = ("No in-progress training plans found (statusList omitted, server default "
+                      "[1]). Not-started library originals and completed plans were not searched. "
+                      "If the user asked for all / complete / history plans (全部/所有/完整/历史), "
+                      "call queryTrainingPlanLibrary again with statusList=[0,1,2]; otherwise tell "
+                      "the user they currently have no in-progress training plan.")
+        locked_text = ("Training Plan Library\n========================\n"
+                       "Status filter: in progress only (statusList omitted, server default [1]). "
+                       "Not-started library originals and completed plans are NOT included. If the "
+                       "user asked for all / complete / history plans (全部/所有/完整/历史), call "
+                       "queryTrainingPlanLibrary again with statusList=[0,1,2] before answering; "
+                       "otherwise tell the user this list covers in-progress plans only.\n"
+                       "Plans on this page: 1\n\n"
+                       "1. Sparing Horse [In progress] [mcp]\n   Plan ID: 111\n"
+                       "   Record role: execution\n   Editable via MCP: no\n"
+                       "   Modification: unavailable for this record. Do not pass this Plan ID to "
+                       "updateTrainingPlan; use an in-progress execution record with editable=true.\n"
+                       "   Dates: 2026-10-21 to 2027-02-14\n   Weeks: 16\n"
+                       "   Frequency: 4.8 workouts/week\n"
+                       "   Overview: The Sparing Horse plan, mirrored to COROS: each planned session "
+                       "arrives on the calendar as a structured workout and the watch follows along.\n"
+                       "   Created: 2026-10-21 21:09:43 | Updated: 2026-10-22 08:41:15\n\n"
+                       "Only use a Plan ID with recordRole=execution and editable=true for "
+                       "updateTrainingPlan. Before modifying it, call queryTrainingPlanDetails first. "
+                       "Do not show Plan ID to the user.")
+        details_text = ("Training Plan Detail\n========================\nPlan ID: 111\n"
+                        "Name: Sparing Horse\nStatus: In progress\nType: mcp\n"
+                        "Dates: 2026-10-21 to 2027-02-14\nWeeks: 16\nEditable via MCP: no\n"
+                        "  Reason: This plan's dates were changed outside MCP and no longer match "
+                        "its MCP metadata. Adjust the plan in the COROS app or recreate it via MCP.")
+
+        def reset_limb():
+            calls.clear()
+            state.update(created=False, skip_daynos=[], library=None, details="")
+            m.execute("DELETE FROM meta WHERE key IN (?, ?)",
+                      (S.COROS_PLAN_META, "coros:last_error"))
+            m.execute("UPDATE plans SET plan=? WHERE id=(SELECT MAX(id) FROM plans)",
+                      (S.json.dumps(build_plan()),))
+            m.commit()
+
+        def store_current(plan_id):
+            S.set_meta(m, S.COROS_PLAN_META, S.json.dumps({"current": {
+                "plan_id": plan_id, "start": today.isoformat(), "weeks": 5,
+                "hashes": {}, "skipped": []}}))
+            m.commit()
+
+        # (e) COROS's explicit no-in-progress reply retires the stored id and permits a create.
+        reset_limb()
+        store_current("999")
+        state["library"] = empty_text
+        re_ = S.push_coros(m)
+        if n_calls("createTrainingPlan") != 1:
+            fails.append(f"(e) empty library must create once: {n_calls('createTrainingPlan')}")
+        current = S._coros_plan_state(m).get("current") or {}
+        if not re_.get("ok") or current.get("plan_id") != "424242":
+            fails.append(f"(e) empty library must store the new id: {re_}")
+
+        # (f) A locked stored plan is still present: neither create nor update is allowed.
+        reset_limb()
+        store_current("111")
+        state.update(library=locked_text, details=details_text)
+        rf = S.push_coros(m)
+        if n_calls("createTrainingPlan") or n_calls("updateTrainingPlan"):
+            fails.append("(f) locked stored plan must not create or update")
+        if not rf.get("locked") or rf.get("ok") or "dates were changed outside MCP" not in rf.get("error", "") \
+                or "Quit" not in rf.get("error", ""):
+            fails.append(f"(f) locked stored plan must return COROS's reason and quit advice: {rf}")
+
+        # (g) With no stored id, another locked in-progress plan still blocks creation.
+        reset_limb()
+        state.update(library=locked_text, details=details_text)
+        rg = S.push_coros(m)
+        if n_calls("createTrainingPlan") or n_calls("updateTrainingPlan"):
+            fails.append("(g) locked unowned plan must not create or update")
+        if not rg.get("locked") or rg.get("ok") or "Quit" not in rg.get("error", ""):
+            fails.append(f"(g) locked unowned plan must return the locked message: {rg}")
+
+        # (h) Settings retains a real push failure only until the next real success.
+        reset_limb()
+        S._coros_note_push(m, {"ok": False, "error": "nightly failed"})
+        saved_error = S.json.loads(S.get_meta(m, "coros:last_error") or "null")
+        if not saved_error or saved_error.get("error") != "nightly failed" \
+                or S.coros_status(m).get("last_error") != saved_error:
+            fails.append(f"(h) failed push must be stored and returned by status: {saved_error}")
+        S._coros_note_push(m, {"ok": True})
+        if S.get_meta(m, "coros:last_error") is not None \
+                or S.coros_status(m).get("last_error") is not None:
+            fails.append("(h) successful push must clear the stored failure")
     finally:
         for k, v in saved.items():
             setattr(S, k, v)
@@ -12353,7 +12660,8 @@ def _stc_coros_push_diff():
                  "   Dates: 2026-10-21 to 2026-12-06\n   Weeks: 7\n")
     lib = {"content": [{"type": "text", "text": S.json.dumps(live_text)}], "isError": False}
     rec = S._coros_find_library_plan(lib, name="Sparing Horse")
-    if rec != {"plan_id": "4812019573427246", "start": "2026-10-21", "weeks": "16"}:
+    if rec != {"plan_id": "4812019573427246", "start": "2026-10-21", "weeks": "16",
+               "editable": True}:
         fails.append(f"the live text library reply must parse to its first row: {rec}")
     if not S._coros_find_library_plan(lib, plan_id="4811957229313564"):
         fails.append("a stored plan id listed in the live text reply must be found")
@@ -19314,7 +19622,11 @@ def _stc_objective_time(db):
       (e) the public GET carries start_time — it is in _PV_OBJECTIVES (a gun time is
           organizer-published, the same class as the date) and NOT in _PV_WITHHELD.
       (f) migration: an objectives table predating the column gains it via init_db, idempotently,
-          keeping its rows."""
+          keeping its rows.
+      (g) SH-64: `start_tz`, the IANA zone the gun time is in — stored on add (NULL when absent),
+          set/changed/cleared through /time (absent key leaves it alone), junk refused with a 400,
+          no re-plan; the public row carries a zone stored on the race and NEVER the athlete's own
+          (`default_tz`, private payloads only, null when no zone was chosen); the migration adds it."""
     from datetime import timedelta
     import tempfile as _tf
     fails = []
@@ -19400,11 +19712,77 @@ def _stc_objective_time(db):
             fails.append("(e) start_time is not allowlisted in _PV_OBJECTIVES")
         if "objectives[].start_time" in S._PV_WITHHELD:
             fails.append("(e) start_time is BOTH published and registered withheld")
+        if oid is not None:
+            # (g) SH-64 — the zone the gun time is in: stored on add, cleared/changed through /time (which
+            # leaves it alone when the key is absent), validated against the host's tzdata, and the
+            # athlete's own chosen zone is only ever a PRIVATE default — never on the public row
+            r = c.post("/api/objectives", json={"type": "10k", "label": label + "-tz", "start_time": "08:00",
+                                                "date": (S.datetime.now().date() + timedelta(days=231)).isoformat(),
+                                                "start_tz": "Europe/Madrid"})
+            row3 = db.execute("SELECT id, start_tz FROM objectives WHERE lower(label)=lower(?)", (label + "-tz",)).fetchone()
+            if r.status_code != 200 or row3 is None or row3["start_tz"] != "Europe/Madrid":
+                fails.append(f"(g) add with a zone answered {r.status_code} and stores "
+                             f"{None if row3 is None else row3['start_tz']!r} — want 200 + 'Europe/Madrid'")
+            row_plain = db.execute("SELECT start_tz FROM objectives WHERE id=?", (oid,)).fetchone()
+            if row_plain["start_tz"] is not None:
+                fails.append(f"(g) a race added without a zone must store NULL: {row_plain['start_tz']!r}")
+            n1 = db.execute("SELECT COUNT(*) FROM objectives").fetchone()[0]
+            for junk in ("Mars/Base", "europe/madrid ", "UTC+2"):
+                rj = c.post("/api/objectives", json={"type": "5k", "label": label + "-tzjunk", "date": date_probe, "start_tz": junk})
+                dj = rj.get_json() or {}
+                if rj.status_code != 400 or not is_json(rj) or dj.get("ok") is not False:
+                    fails.append(f"(g) start_tz {junk!r} answered {rj.status_code} {dj} — want JSON 400")
+            if db.execute("SELECT COUNT(*) FROM objectives").fetchone()[0] != n1:
+                fails.append("(g) a rejected zone left a row behind")
+            if row3:
+                tid = row3["id"]
+                plans_before = db.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
+                for body_, want_tz, want_time in (({"start_time": "09:00"}, "Europe/Madrid", "09:00"),
+                                                  ({"start_time": "09:00", "start_tz": "Asia/Tokyo"}, "Asia/Tokyo", "09:00"),
+                                                  ({"start_time": "09:00", "start_tz": ""}, None, "09:00"),
+                                                  ({"start_time": None, "start_tz": "UTC"}, "UTC", None)):
+                    rt = c.post(f"/api/objectives/{tid}/time", json=body_)
+                    dt = rt.get_json() or {}
+                    cur = db.execute("SELECT start_time, start_tz FROM objectives WHERE id=?", (tid,)).fetchone()
+                    if rt.status_code != 200 or dt.get("start_tz") != want_tz or cur["start_tz"] != want_tz or cur["start_time"] != want_time:
+                        fails.append(f"(g) /time {body_} answered {rt.status_code} {dt}; row reads {tuple(cur)} — want {want_time!r}, {want_tz!r}")
+                rt = c.post(f"/api/objectives/{tid}/time", json={"start_time": "09:00", "start_tz": "Not/AZone"})
+                if rt.status_code != 400 or not is_json(rt):
+                    fails.append(f"(g) /time with a junk zone answered {rt.status_code} — want JSON 400")
+                if db.execute("SELECT start_tz FROM objectives WHERE id=?", (tid,)).fetchone()["start_tz"] != "UTC":
+                    fails.append("(g) a rejected zone changed the stored one")
+                if db.execute("SELECT COUNT(*) FROM plans").fetchone()[0] != plans_before:
+                    fails.append("(g) /time with a zone created a plan row — it must not re-periodize")
+                saved_ptf = S._process_tz_for
+                S._process_tz_for = lambda v, src: "Pacific/Auckland"        # the athlete CHOSE a zone
+                try:
+                    priv = next((o for o in (c.get("/api/objectives").get_json() or []) if o.get("id") == tid), None)
+                    S.READONLY = True
+                    pub_resp = c.get("/api/objectives")
+                    pub_row = next((o for o in (pub_resp.get_json() or []) if o.get("id") == tid), None)
+                    S.READONLY = False
+                finally:
+                    S._process_tz_for = saved_ptf
+                if not priv or priv.get("start_tz") != "UTC" or priv.get("default_tz") != "Pacific/Auckland":
+                    fails.append(f"(g) private GET must carry start_tz and the athlete's default zone: {priv}")
+                if not pub_row or pub_row.get("start_tz") != "UTC" or "default_tz" in pub_row \
+                        or "Pacific/Auckland" in pub_resp.get_data(as_text=True):
+                    fails.append(f"(g) the public row carries the race's own zone and never the athlete's: {pub_row}")
+                S._process_tz_for = lambda v, src: None                         # nothing chosen: no default
+                try:
+                    unch = next((o for o in (c.get("/api/objectives").get_json() or []) if o.get("id") == tid), None)
+                finally:
+                    S._process_tz_for = saved_ptf
+                if not unch or unch.get("default_tz") is not None:
+                    fails.append(f"(g) with no zone chosen the default must be null: {unch}")
+            if "start_tz" not in S._PV_OBJECTIVES or "objectives[].default_tz" not in S._PV_WITHHELD:
+                fails.append("(g) start_tz must be allowlisted and default_tz registered withheld")
         # (f) the migration heals a pre-§GUN table, twice
         tmp = S.Path(_tf.mkdtemp())
         S.DB_PATH = tmp / "sparinghorse.db"
         old = S.connect_db()
         old.executescript(S.SCHEMA)
+        old.execute("ALTER TABLE objectives DROP COLUMN start_tz")     # SH-64: a table that never had the zone either
         old.execute("ALTER TABLE objectives DROP COLUMN start_time")   # the pre-0.76.0 shape
         old.execute("INSERT INTO objectives (type,label,date) VALUES ('marathon','mig','2030-01-01')")
         old.commit(); old.close()
@@ -19412,6 +19790,8 @@ def _stc_objective_time(db):
         chk = S.connect_db()
         if "start_time" not in {x["name"] for x in chk.execute("PRAGMA table_info(objectives)").fetchall()}:
             fails.append("(f) objectives.start_time missing after init_db on a pre-§GUN table")
+        if "start_tz" not in {x["name"] for x in chk.execute("PRAGMA table_info(objectives)").fetchall()}:
+            fails.append("(f) objectives.start_tz missing after init_db on a pre-SH-64 table")
         if chk.execute("SELECT COUNT(*) FROM objectives WHERE label='mig'").fetchone()[0] != 1:
             fails.append("(f) the migration lost a pre-existing row")
         chk.close()
@@ -19424,8 +19804,9 @@ def _stc_objective_time(db):
                "the objective's optional gun time (§GUN): POST /api/objectives validates and stores "
                "it, POST /api/objectives/<id>/time sets/changes/clears it with the /date guards but "
                "NO re-periodization, the public box serves it (allowlisted), and init_db migrates a "
-               "pre-§GUN table idempotently",
-               passed=not fails, expect="see docstring (a)-(f)",
+               "pre-§GUN table idempotently; SH-64 — the race's own time zone is validated, stored and "
+               "served, and the athlete's zone never reaches the public row",
+               passed=not fails, expect="see docstring (a)-(g)",
                got={"violations": fails or "none"})
 
 
@@ -22173,7 +22554,7 @@ def run_server_selftest(db, categories=None):
 
 
 def _run_server_selftest(db, categories=None):
-    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
+    scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_target_lift(), lambda: _stc_music_rotation(), lambda: _stc_music_press_retired(), lambda: _stc_zoned_instant(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
                  lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
@@ -22202,7 +22583,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_coros_course(), lambda: _stc_coros_plan_days(),
                  lambda: _stc_coros_push_diff(),
                  lambda: _stc_stream_optin(),
-                 lambda: _stc_profile_belt_dynamics(), lambda: _stc_activity_belt_fields(db),
+                 lambda: _stc_profile_belt_dynamics(), lambda: _stc_activity_belt_fields(db), lambda: _stc_cadence_unit_by_magnitude(db),
                  lambda: _stc_no_shadowed_defs(), lambda: _stc_wrong_axis_signals(),
                  lambda: _stc_health_staleness(), lambda: _stc_explain_cache(), lambda: _stc_calibration_inventory(), lambda: _stc_track_record(),
                  lambda: _stc_lt1(),
@@ -24339,6 +24720,337 @@ def _stc_music_reps_read():
                "c jogs-only and ungraded; held_rung weighs by rep seconds and drops c (songs 4, held); revert "
                "tooth without work_spans reads the whole window, songs 5, and runs cooler",
                got={"violations": fails or "none", **got})
+
+
+def _stc_music_target_lift():
+    """24 Oct 2026 — the athlete's own `lift_spm` (a /music setting) is added to every segment target
+    AFTER the ramp, trained-curve and rung caps, and capped only by the comfort ceiling. (a) lift 0 (or
+    none) reproduces today's target dict byte for byte over several paces, steps, work/easy, ramp and
+    rung cases; (b) lift 1 adds exactly 1.0 over the caps and says so; (c) the comfort ceiling caps it
+    and is named — wholly (already at the ceiling) or partly (the lift moved it, then the ceiling
+    bound); (d) the setting validates like step_pct (0–5 in half-spm steps, empty = 0) and defaults to
+    0; (e) `plan_for_session` and `cadence_table` thread it."""
+    if M is None:
+        return _music_skip("music-target-lift", "24 Oct 2026 — the target lift setting")
+    from datetime import date as _d, timedelta as _td
+    fails = []
+    today = _d(2026, 9, 6)
+    rows = []
+    for i in range(60):
+        v = 8 + (i % 9) * 0.5
+        rows.append(((today - _td(days=200 + i * 3)).isoformat(), v, 152 + 2.5 * v + (0.4 if i % 2 else -0.4), 90.0))
+    for i in range(20):
+        v = 8 + (i % 5) * 0.5
+        rows.append(((today - _td(days=1 + i * 2)).isoformat(), v, 152 + 1.6 * v + (0.3 if i % 2 else -0.3), 30.0))
+    cv = M.cadence_curve(rows, today, {})
+    ramps = [None,
+             {"fraction": 0.5, "week": 4, "weeks": 8, "rung": None},
+             {"fraction": 0.5, "week": 4, "weeks": 8, "rung": {"held": True, "lift_ran": 0.01, "date": "2026-10-01", "ran": 170.0, "target": 169.0, "lift_target": 0.012}},
+             {"fraction": 0.5, "week": 4, "weeks": 8, "rung": {"held": False, "lift_ran": 0.0, "date": "2026-10-01", "ran": 166.0, "target": 169.0, "lift_target": 0.012}},
+             {"fraction": 1.0, "week": 8, "weeks": 8, "rung": None, "landed_by_legs": {"runs": 4, "of": 5}}]
+    n = 0
+    for pace in (300.0, 360.0, 400.0, 450.0, 520.0):
+        for step in (None, 1.0, 3.0):
+            for work in (False, True):
+                for rp in ramps:
+                    base = M.target_spm(cv, pace, step, rp, work=work)
+                    for zero in (0, 0.0, None):
+                        if M.target_spm(cv, pace, step, rp, work=work, lift=zero) != base:
+                            fails.append(f"(a) lift {zero!r} changed the target at {pace}/{step}/{work}/{rp and rp.get('rung')}")
+                    n += 1
+                    one = M.target_spm(cv, pace, step, rp, work=work, lift=1.0)
+                    if abs((one["spm"] - base["spm"]) - 1.0) > 1e-6 or "lift +1 spm" not in one["why"]:
+                        fails.append(f"(b) lift 1 at {pace}/{step}/{work}: {base['spm']} -> {one['spm']} ({one['why']})")
+                    elif one["why"] != base["why"] + " · lift +1 spm":
+                        fails.append(f"(b) the lift should append to the binding cap's words: {base['why']!r} -> {one['why']!r}")
+    # (c) the comfort ceiling
+    cv_c = M.cadence_curve(rows, today, {"max_spm": "168"})
+    at = M.target_spm(cv_c, 400.0, 3.0, lift=1.0)
+    if at["spm"] != 168 or at["why"] != "comfort ceiling":
+        fails.append(f"(c) already at the ceiling: the lift must not pass it, and the ceiling is named: {at}")
+    cv_p = M.cadence_curve(rows, today, {"max_spm": "169"})
+    part = M.target_spm(cv_p, 400.0, lift=1.0)
+    base_p = M.target_spm(cv_p, 400.0)
+    if part["spm"] != 169 or part["spm"] <= base_p["spm"] or part["why"] != "comfort ceiling · lift +1 spm":
+        fails.append(f"(c) the lift moved the target then the ceiling bound: {base_p['spm']} -> {part}")
+    half = M.target_spm(cv, 400.0, lift=0.5)
+    if abs(half["spm"] - M.target_spm(cv, 400.0)["spm"] - 0.5) > 1e-6 or half["why"].endswith("lift +0.5 spm") is False:
+        fails.append(f"(b) a half-spm lift: {half}")
+    # (d) the setting
+    if M.SETTING_DEFAULTS.get("lift_spm") != "0":
+        fails.append(f"(d) the default must be '0': {M.SETTING_DEFAULTS.get('lift_spm')!r}")
+    for v in ("0", "0.5", "1", "5", "", " 2.5 "):
+        if M.validate_music_setting("lift_spm", v) != (True, None):
+            fails.append(f"(d) {v!r} must validate: {M.validate_music_setting('lift_spm', v)}")
+    for v in ("5.5", "-1", "0.3", "abc", "6", "1,5"):
+        ok, err = M.validate_music_setting("lift_spm", v)
+        if ok or not err:
+            fails.append(f"(d) {v!r} must be refused with an error: {(ok, err)}")
+    # (e) threaded
+    seg = {"minutes": 40, "km": 6.0, "kind": "easy", "date": "2026-09-08", "note": "", "pace_zone": "easy"}
+    tbl0 = M.cadence_table(cv, {"easy": "6:40", "threshold": "5:00"})
+    tbl1 = M.cadence_table(cv, {"easy": "6:40", "threshold": "5:00"}, lift=1.0)
+    if not tbl0 or [round(b["spm"] - a["spm"], 6) for a, b in zip(tbl0, tbl1)] != [1.0] * len(tbl0):
+        fails.append(f"(e) cadence_table must carry the lift: {[(a['spm'], b['spm']) for a, b in zip(tbl0, tbl1)]}")
+    pool = [{"id": f"p{i}", "title": f"p{i}", "artist": f"p{i}", "duration_ms": 240000, "tempo": 168 + (i % 6), "energy": 0.7,
+             "weight": 1.0, "discovered": 0} for i in range(40)]
+    sess = {"kind": "easy", "km": 6.0, "minutes": 40, "pace_zone": "easy", "date": "2026-09-08"}
+    zones_ok = True
+    try:
+        res0 = M.plan_for_session(dict(sess), cv, pool, {"step_pct": "1.5", "lift_spm": "0"})
+        res1 = M.plan_for_session(dict(sess), cv, pool, {"step_pct": "1.5", "lift_spm": "1"})
+        if res0.get("ok") and res1.get("ok"):
+            if abs((res1["target_spm"] - res0["target_spm"]) - 1.0) > 0.11:
+                fails.append(f"(e) plan_for_session: {res0['target_spm']} -> {res1['target_spm']}, want +1")
+        else:
+            zones_ok = False
+    except Exception as e:                                                      # a session shape this fixture did not guess
+        zones_ok = False
+        fails.append(f"(e) plan_for_session raised {type(e).__name__}: {e}")
+    return _st("det", "music-target-lift",
+               "the /music target lift: added after the caps, capped only by the comfort ceiling (named), "
+               "0 = today's targets exactly, validated 0–5 in half-spm steps, threaded to the table and the plan",
+               passed=not fails, expect="lift 0 == today; lift 1 = +1.0 and 'lift +1 spm'; ceiling names itself; "
+               "5.5/0.3/abc refused",
+               got={"violations": fails or "none", "cases": n, "plan_threaded": zones_ok})
+
+
+def _stc_music_rotation():
+    """SH-61 (24 Oct 2026) — rotation INSIDE the tempo window. The window is unchanged (±1 % lock first,
+    wider only when the section cannot fill); inside each attempt a song on either of the last two lists
+    (by id or by song name) ranks after every song that was not, and the score orders each group.
+    (a) with enough unplayed songs in the ±1 % window none of the recent ones is picked, though they
+    outscore the unplayed; (b) with too few unplayed the list still fills from the recent ones, inside
+    the window (a far, unplayed, better-scored song is not preferred and nothing widens); (c) a recent
+    song under ANOTHER id is recent too; (d) `served_counts(...).recent` is the newest two lists read,
+    the list being rebuilt left out, and the counts are unchanged; (e) the fresh quota is 8 and eight
+    never-run songs the window holds are all taken (spread over the core segments)."""
+    if M is None:
+        return _music_skip("music-rotation", "SH-61 — rotation inside the tempo window")
+    import tempfile
+    from datetime import date as _d
+    fails = []
+    B = M.CADENCE_SENSOR_BIAS_SPM
+    mk = lambda i, off, weight, title=None, artist=None: {
+        "id": i, "title": title or i, "artist": artist or i, "duration_ms": 240000, "tempo": 170 + B + off,
+        "energy": 0.7, "weight": weight, "discovered": 0}
+    seg = lambda mins: [{"label": "Easy", "effort": "easy", "minutes": mins, "pace_sec": 360, "floor": 0.55}]
+    served_of = lambda recent, counts=None: _served(M, recent, counts)
+    recent_ids = [f"r{i}" for i in range(6)]
+    pool = ([mk(i, 0.2 * k, 5.0) for k, i in enumerate(recent_ids)]            # known and liked: they outscore the rest
+            + [mk(f"u{k}", 0.2 * k - 0.5, 1.0) for k in range(6)]             # unplayed, inside ±1 % (±1.7 spm)
+            + [mk("far", 3.0, 9.0)])                                          # +1.8 %: outside the lock band, best score
+    sv = served_of(set(recent_ids), {i: 1 for i in recent_ids})
+    out, notes = M.pick_for_segments(seg(12), pool, [170.0], served=sv)         # 3 songs of 4 min
+    ids = [t["id"] for t in out[0]["tracks"]]
+    if len(ids) != 3 or any(i in recent_ids or i == "far" for i in ids):
+        fails.append(f"(a) enough unplayed songs: none of the recent (or the far one) may be picked: {ids}")
+    # the same pool with no recent set: the liked songs lead (the revert tooth for (a))
+    out_n, _ = M.pick_for_segments(seg(12), pool, [170.0], served=served_of(set(), {i: 1 for i in recent_ids}))
+    ids_n = [t["id"] for t in out_n[0]["tracks"]]
+    if not all(i in recent_ids for i in ids_n):
+        fails.append(f"(a) without the rule the liked songs outscore the unplayed (the fixture's premise): {ids_n}")
+    # (b) too few unplayed: 2 unplayed in the window, 5 songs wanted
+    pool_b = [mk(i, 0.2 * k, 5.0) for k, i in enumerate(recent_ids)] + [mk("u0", -0.3, 1.0), mk("u1", -0.2, 1.0), mk("far", 3.0, 9.0)]
+    out_b, notes_b = M.pick_for_segments(seg(20), pool_b, [170.0], served=served_of(set(recent_ids), {i: 1 for i in recent_ids}))
+    ids_b = [t["id"] for t in out_b[0]["tracks"]]
+    if ids_b[:2] != ["u1", "u0"] and sorted(ids_b[:2]) != ["u0", "u1"]:
+        fails.append(f"(b) the unplayed come first: {ids_b}")
+    if len(ids_b) != 5 or "far" in ids_b or sum(1 for i in ids_b if i in recent_ids) != 3 or any("widened" in x for x in notes_b):
+        fails.append(f"(b) too few unplayed: fill from the recent ones inside the window, widen nothing: {ids_b} {notes_b}")
+    # (c) the same song under another id
+    pool_c = [mk("e1", 0.0, 5.0, title="Same Song", artist="Band"), mk("u0", 0.1, 1.0)]
+    sv_c = _served(M, {M.song_key("Band", "Same Song")}, {})
+    out_c, _ = M.pick_for_segments(seg(4), pool_c, [170.0], served=sv_c)
+    if [t["id"] for t in out_c[0]["tracks"]] != ["u0"]:
+        fails.append(f"(c) another edition of a recent song is recent: {[t['id'] for t in out_c[0]['tracks']]}")
+    # (d) the ledger
+    saved_path = M.music_db_path
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    try:
+        conn = M._mdb()
+        try:
+            spec = lambda ids: S.json.dumps({"segments": [{"label": "A", "tracks": [{"id": i} for i in ids]}]})
+            conn.executemany("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES(?,?,?,?,?,?)",
+                             [("2026-09-01-easy", "p1", "n", "u", "2026-09-01T10:00:00+00:00", spec(["A", "B"])),
+                              ("2026-09-05-tempo", "p2", "n", "u", "2026-09-05T10:00:00+00:00", spec(["A", "C"])),
+                              ("2026-09-08-easy", "p3", "n", "u", "2026-09-08T10:00:00+00:00", spec(["D"]))])
+            conn.commit()
+            today = _d(2026, 9, 10)
+            sv = M.served_counts(conn, today)
+            if set(sv.recent) != {"A", "C", "D"} or dict(sv) != {"A": 2, "B": 1, "C": 1, "D": 1}:
+                fails.append(f"(d) the newest two lists: recent {sorted(sv.recent)} counts {dict(sv)}")
+            sv2 = M.served_counts(conn, today, exclude_key="2026-09-08-easy")
+            if set(sv2.recent) != {"A", "B", "C"}:
+                fails.append(f"(d) the list being rebuilt is not one of the last two: {sorted(sv2.recent)}")
+        finally:
+            conn.close()
+    finally:
+        M.music_db_path = saved_path
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    # (e) the quota: 8 never-run songs in the window, two core segments, all eight taken
+    if M.MUSIC_FRESH_QUOTA != 8:
+        fails.append(f"(e) MUSIC_FRESH_QUOTA must be 8: {M.MUSIC_FRESH_QUOTA}")
+    pool_e = [mk(f"k{k}", 0.1 * (k % 8) - 0.4, 4.0) for k in range(24)] + [mk(f"n{k}", 0.1 * k - 0.4, 0.1) for k in range(8)]
+    segs_e = [{"label": "A", "effort": "easy", "minutes": 40, "pace_sec": 360, "floor": 0.55},
+              {"label": "B", "effort": "easy", "minutes": 40, "pace_sec": 360, "floor": 0.55},
+              {"label": "Tail", "effort": "tail", "minutes": 8, "pace_sec": 360, "floor": 0.55}]
+    out_e, _ = M.pick_for_segments(segs_e, pool_e, [170.0, 170.0, 170.0], fresh={f"n{k}" for k in range(8)},
+                                   fresh_quota=M.MUSIC_FRESH_QUOTA)
+    never = [t["id"] for sg in out_e for t in sg["tracks"] if t.get("never_run")]
+    if len(never) != 8 or any(t.get("never_run") for t in out_e[2]["tracks"]):
+        fails.append(f"(e) eight never-run songs, none on the tail: {never}")
+    return _st("det", "music-rotation",
+               "SH-61 — inside the tempo window, songs on either of the last two lists rank after every song "
+               "that was not (by id or by song name), the window itself unchanged; the fresh quota is eight",
+               passed=not fails, expect="unplayed before recent; the list still fills from recent, no widening; "
+               "recent = newest two lists; 8 never-run songs taken",
+               got={"violations": fails or "none"})
+
+
+def _served(M_, recent, counts=None):
+    """A `served_counts()`-shaped value for a pick fixture: the counts, with `.recent` set."""
+    sv = M_.ServedCounts(counts or {})
+    sv.recent = frozenset(recent)
+    return sv
+
+
+def _stc_music_press_retired():
+    """24 Oct 2026 — lap-press votes retired on every watch. A run dated on or after
+    MUSIC_PRESS_RETIRED_FROM reads no presses at all (FIT laps present): no `press_times`, no `break` /
+    `never` rows, no breaks on the follow row; a run dated before keeps today's behaviour, so "Read
+    again" reproduces its stored votes. `readback` deletes and rewrites `rating_run` and `follow` for the
+    run, so "Read again" on a retired run with stored press rows leaves none of them, while the headset
+    skip is kept. (a) the older run: a manual-trigger lap during a song is a `break` row and a break on
+    the follow row, read twice; (b) a run on the retirement date: no presses, no break row, the same
+    cadence read; (c) a retired run holding stored `break` and `never` rows from before: gone after
+    "Read again", a `skip` row stays; (d) the constant."""
+    if M is None:
+        return _music_skip("music-press-retired", "24 Oct 2026 — lap presses read nothing from the retirement date")
+    import tempfile, sqlite3, json as _json
+    fails = []
+    if M.MUSIC_PRESS_RETIRED_FROM != "2026-10-22":
+        fails.append(f"(d) MUSIC_PRESS_RETIRED_FROM: {M.MUSIC_PRESS_RETIRED_FROM}")
+    run_start = 3_000_000.0
+    iso = lambda t: M.datetime.fromtimestamp(t, M.timezone.utc).isoformat()
+    samples = [(run_start + t, 170.0, 2.5 * t) for t in range(0, 601)]
+    laps = [(run_start + 100, 250.0, 0.0, "manual"), (run_start + 400, 1000.0, 0.0, "distance")]
+    spec = {"target_spm": 170.0, "segments": [{"label": "Easy run", "effort": "easy", "target_spm": 170.0,
+            "tracks": [{"id": "hi", "title": "Hi", "artist": "Band", "tempo": 170.0, "hit": "full"},
+                       {"id": "lo", "title": "Lo", "artist": "Band", "tempo": 170.0, "hit": "full"}]}]}
+    played = [(iso(run_start + 300), "hi", "Hi", "Band", 300_000, "x"), (iso(run_start + 600), "lo", "Lo", "Band", 300_000, "x")]
+    saved_path, saved_fetch, saved_parse = M.music_db_path, M.fetch_fit, M.parse_fit
+    tmp = S.Path(tempfile.mktemp(suffix="-music.db"))
+    M.music_db_path = lambda: tmp
+    M.fetch_fit = lambda rid: b".FIT"
+    M.parse_fit = lambda raw: {"start": run_start, "samples": list(samples), "laps": list(laps)}
+    db = sqlite3.connect(":memory:"); db.row_factory = sqlite3.Row
+    db.execute("CREATE TABLE activities(id INTEGER PRIMARY KEY, date TEXT, date_time TEXT, distance REAL, duration REAL, raw TEXT)")
+    for rid, day in ((90, "2026-10-21"), (91, "2026-10-22"), (92, "2026-10-25")):
+        db.execute("INSERT INTO activities VALUES(?, ?, ?, 2.5, 600, '{}')", (rid, day, iso(run_start)))
+    db.commit()
+    rows_of = lambda conn, rid: sorted((r["spotify_id"], r["rating"]) for r in conn.execute("SELECT spotify_id, rating FROM rating_run WHERE run_id=?", (rid,)))
+    try:
+        conn = M._mdb()
+        try:
+            conn.executemany("INSERT INTO played(played_at, spotify_id, title, artist, duration_ms, pulled_at) VALUES(?,?,?,?,?,?)", played)
+            conn.executemany("INSERT INTO track(spotify_id, title, artist, duration_ms, tempo) VALUES(?,?,?,?,?)",
+                             [("hi", "Hi", "Band", 300_000, 170.0), ("lo", "Lo", "Band", 300_000, 170.0)])
+            conn.execute("INSERT INTO playlist(key, spotify_id, name, url, built_at, spec) VALUES('2026-10-21-easy', 'p', 'SH · test', '', 'x', ?)",
+                         (_json.dumps(spec),))
+            conn.execute("INSERT OR REPLACE INTO setting(key, value) VALUES('press_protocol_from', '2000-01-01')")
+            conn.commit()
+            # (a) the run before the retirement date: the press is a vote, read twice the same
+            for _ in range(2):
+                res = M.readback(db, 90)
+                if not res.get("ok") or len(res.get("presses") or []) != 1 or rows_of(conn, 90) != [("hi", "break")]:
+                    fails.append(f"(a) a run before the retirement date keeps its press vote: {res.get('ok')} "
+                                 f"{res.get('presses')} {rows_of(conn, 90)}")
+            fb = conn.execute("SELECT breaks FROM follow WHERE run_id=90 AND spotify_id='hi'").fetchone()
+            if not fb or fb["breaks"] != 1:
+                fails.append(f"(a) the follow row of the older run carries the break: {fb and tuple(fb)}")
+            # (b) the retirement date itself, and a later one: no presses, same cadence read
+            for rid in (91, 92):
+                res = M.readback(db, rid)
+                if not res.get("ok") or res.get("presses") != [] or rows_of(conn, rid) != [] or (res.get("followed") or {}).get("breaks"):
+                    fails.append(f"(b) run {rid} dated on/after the retirement date reads no presses: "
+                                 f"{res.get('ok')} {res.get('presses')} {rows_of(conn, rid)} {res.get('followed')}")
+                fb = conn.execute("SELECT breaks, entrained FROM follow WHERE run_id=? AND spotify_id='hi'", (rid,)).fetchone()
+                if not fb or fb["breaks"] != 0 or fb["entrained"] != 1:
+                    fails.append(f"(b) run {rid}: the legs' read must still land, with no break: {fb and tuple(fb)}")
+            # (c) stored press votes on a retired run vanish on "Read again"; a headset skip stays
+            conn.executemany("INSERT OR REPLACE INTO rating_run(run_id, spotify_id, rating, at_s, role) VALUES(?,?,?,?,?)",
+                             [(91, "hi", "break", 100, "easy"), (91, "lo", "never", 400, "easy")])
+            conn.execute("INSERT OR REPLACE INTO follow(run_id, spotify_id, spm, tempo, delta_pct, entrained, steady, dips, dip_s, breaks, read_s) "
+                         "VALUES(91, 'hi', 170, 170, 0, 1, 1.0, 0, 0, 1, 280)")
+            conn.commit()
+            M.readback(db, 91)
+            if rows_of(conn, 91) != []:
+                fails.append(f"(c) 'Read again' on a retired run leaves its stored press rows: {rows_of(conn, 91)}")
+            fb = conn.execute("SELECT breaks FROM follow WHERE run_id=91 AND spotify_id='hi'").fetchone()
+            if not fb or fb["breaks"] != 0:
+                fails.append(f"(c) the stored break on the follow row survives 'Read again': {fb and tuple(fb)}")
+        finally:
+            conn.close()
+    finally:
+        M.music_db_path, M.fetch_fit, M.parse_fit = saved_path, saved_fetch, saved_parse
+        db.close()
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return _st("det", "music-press-retired",
+               "lap presses retired — a run dated on or after the retirement date reads no presses (no break "
+               "or never rows, no breaks on the follow row, and 'Read again' clears the stored ones); an older "
+               "run keeps its votes",
+               passed=not fails, expect="before: 1 press, break row, breaks=1; on/after: 0 presses, no rows, "
+               "entrained still read; stored press rows gone after a re-read",
+               got={"violations": fails or "none"})
+
+
+def _stc_zoned_instant():
+    """SH-64 — `zonedInstant(dateIso, hm, tz)` in static/app.js gives the same instant for a race-local
+    wall time under any viewer TZ (run in node under three), across a DST change, and a null zone reads
+    the viewer's own clock as before. Skipped where node is absent."""
+    import shutil, subprocess
+    node = shutil.which("node")
+    if not node:
+        return _st("det", "zoned-instant", "SH-64 — the countdown's zoned instant (skipped: no node)", passed=None,
+                   expect="run where node is installed", got={"node": "absent"})
+    path = S.Path(S.__file__).resolve().parent / "static" / "app.js"
+    js = ('const src=require("fs").readFileSync(process.argv[1],"utf8");'
+          'const a=src.indexOf("function zonedInstant"),b=src.indexOf("function armCountdown");'
+          'eval(src.slice(a,b)+";globalThis.z=zonedInstant");'
+          'const o=[z("2026-12-06","08:15","Europe/Madrid"),z("2026-03-29","03:30","Europe/Madrid"),'
+          'z("2026-07-01","00:00","America/New_York"),z("2026-12-06","08:15","Not/AZone"),z("2026-12-06","08:15",null)]'
+          '.map(d=>isNaN(d)?null:d.toISOString());console.log(JSON.stringify(o))')
+    fails, outs = [], {}
+    for tz in ("America/New_York", "Europe/Lisbon", "Asia/Tokyo"):
+        try:
+            r = subprocess.run([node, "-e", js, str(path)], capture_output=True, text=True, timeout=60,
+                               env={**os.environ, "TZ": tz})
+            outs[tz] = S.json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 and r.stdout.strip() else r.stderr[-200:]
+        except Exception as e:
+            outs[tz] = f"{type(e).__name__}: {e}"
+    want = ["2026-12-06T07:15:00.000Z", "2026-03-29T01:30:00.000Z", "2026-07-01T04:00:00.000Z", None]
+    for tz, o in outs.items():
+        if not isinstance(o, list):
+            fails.append(f"{tz}: node did not answer: {o}")
+            continue
+        if o[:4] != want:
+            fails.append(f"{tz}: zoned instants {o[:4]} — want {want}")
+    ok_lists = [o for o in outs.values() if isinstance(o, list)]
+    if len(ok_lists) == 3 and len({o[4] for o in ok_lists}) != 3:
+        fails.append("a null zone must read the viewer's own clock (three viewer zones, three different instants)")
+    return _st("det", "zoned-instant",
+               "SH-64 — a race-local gun time resolves to one instant under any viewer time zone, across a DST "
+               "change; an unknown zone gives no countdown; no zone keeps the viewer's own clock",
+               passed=not fails, expect="Madrid 08:15 on 6 Dec = 07:15Z under New York, Lisbon and Tokyo; DST day right",
+               got={"violations": fails or "none"})
 
 
 def _stc_music_follow():

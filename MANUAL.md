@@ -209,8 +209,12 @@ Races tile. Each race optionally carries a **gun time** (the local start time, `
 the add form or edited in place in the race calendar (**Edit races**), next to the date. The countdown targets that
 moment; with no gun time set it counts to midnight of race day. Setting or clearing the gun time is
 display-only — the engine periodizes to the *day*, so no re-plan runs — and a race that has already
-been run takes no edits: its start is a matter of record. The gun time is public (organizer-published
-info, like the date), so the countdown ticks on the public page too.
+been run takes no edits: its start is a matter of record. Each race can also carry a **time zone** for its gun time (an IANA name such as
+`Europe/Madrid`, on the add form or in **Edit races**). The countdown then targets the gun time in the race's
+zone, whatever zone you view it from, and adds "(gun HH:MM Zone)" when that zone differs from your device's.
+With no race zone it uses the zone chosen in Settings (private and demo pages), and then your device's clock.
+The gun time and the race's zone are public (organizer-published info, like the date), so the countdown ticks
+on the public page too; the zone chosen in Settings is not published.
 
 ### Removing a race
 
@@ -750,16 +754,21 @@ withdrew) and picked inside the entrainment window, ±1 % of the target first, w
 when that band is dry. A race list follows a ramp toward the race's cadence over the weeks before it
 and takes the ramp of the day it is built — rebuild it in race week. The ramp lands early when your legs
 have already shown the trained cadence: when the last read-backs reached it on 3 of 5 runs (within the
-same 2 % window), the target is the trained curve and the music page says so; your comfort ceiling still caps it. After the run, the read-back grades
+same 2 % window), the target is the trained curve and the music page says so; your comfort ceiling still caps it. The **Target lift** setting on the Music page (0 to 5 spm, steps of 0.5, default 0)
+adds a flat number of steps per minute to every target after the ramp and the caps; only the comfort ceiling
+caps it, and the reason line under a target reads "· lift +N spm". Raise it when the lists feel slower than your
+legs want. Songs on either of the two newest lists rank after every other song inside a tempo window, and each
+list carries up to eight songs you have never run to when the window holds them, so consecutive lists repeat
+less; a narrow tempo window with a small library still brings songs back. After the run, the read-back grades
 every song by the cadence your legs held through it, from the run's original FIT file when Runalyze
-holds one or the streams otherwise: a song run within 1 % of its tempo is followed. **One lap press
-during a song means "the beat lost me here"; two presses within six seconds mean "never again."** A
+holds one or the streams otherwise: a song run within 1 % of its tempo is followed. A
 headset skip sets the song aside for that kind of segment, and a cadence drop of 4 spm under the song's
 median for 4 seconds or more counts as a dip. Each song row on the read-back also carries **leave it
-out** — the same verdict as two presses, given after the run while the feel is fresh — and **keep**,
-which pardons whatever the run itself found too — a headset skip, or two presses — so the song
-returns to the picker. A guide's own laps, one at the start of each work step, are never read as a
-press. The next list is picked from these grades, so the ladder climbs from what you ran, not from
+out** — "never again", given after the run while the feel is fresh — and **keep**, which pardons whatever
+the run itself found too (a headset skip), so the song returns to the picker. Lap presses on the watch are
+no longer read as votes: on a COROS structured workout the Lap key starts the next step, so runs from
+22 October 2026 on take no press votes on any watch, and "Read again" on such a run removes any press
+votes an earlier read stored. Older runs keep the votes they have. The next list is picked from these grades, so the ladder climbs from what you ran, not from
 what was asked — and on a reps day a song is read over the reps only.
 
 **Limits.** ReccoBeats does not cover every song — one without a tempo is never picked. Spotify keeps
