@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.0] - 2026-10-24
+
+### Added
+
+- **A taper length setting.** A new setting on the Athlete tab, *Taper length (weeks)* (environment
+  `SH_TAPER_WEEKS`), takes 2, 3 or empty. Empty keeps the automatic rule: 3 weeks when the road to a goal race
+  spans 16 weeks or more, otherwise 2. A choice moves weeks between the Peak and the Taper only, after the
+  automatic split, so the Base, the Build and every lived week keep their calendar. A longer taper comes out of the
+  Peak and stops at an empty Peak, and a subordinate race keeps its one-week sharpen. It applies to a single
+  goal race and to every segment of a chain. Once the earliest week a change would re-role has begun, the newest
+  saved plan's split for that race stands, so the same input keeps laying the same road. The setting accepts
+  nothing but 2, 3 or empty. `det/taper-length` pins the split, the chain, the keep rule and the validation.
+- **A long-run limit.** No single run in an assertive plan is laid past 35 km or 3 h 30 min at its own planned
+  pace, whichever comes first. The distance comes from the studies that found no further gain beyond about 35 km;
+  the time is a judgement inside the coaching range, since slower running puts more steps into each kilometre.
+  A marathon-pace long run keeps its marathon-pace minutes and the easy part takes the rest. The limit is folded
+  into the long-run step's cap, so it only ever lowers it, and the kilometres it holds back stay on the easy
+  runs: the week's load is unchanged. Easy runs are held to the same time. It shows as a "Long-run limit" row in
+  the week's limits (a click opens its sources), as a "long run at its limit" badge on the week, and as a
+  line in the run's note. It does not size the week, so it never counts as the limit that holds a week.
+  The conservative regime keeps its own shorter caps. `det/long-run-max` pins the two limbs, the marathon-pace
+  long run, the raise path, the re-laid week and the easy runs of a short week.
+
+### Changed
+
+- **The golden plans carry the new axis.** Every assertive week now lists the long-run limit. Synthetic long runs
+  that were laid past 35 km are held at about 35 km, with the difference on the easy runs; the other golden
+  plans (maintenance, post-race, caution) are unchanged.
+
 ## [0.84.0] - 2026-10-24
 
 ### Added

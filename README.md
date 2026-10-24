@@ -28,7 +28,7 @@ everything.
 **The engine (deterministic, no AI required)**
 - **Current shape.** VO₂max, CTL/ATL (fitness/fatigue) and ACWR, read from your Runalyze data.
 - **Objective-driven plan.** Re-base → Base → Build → Peak → Taper toward a goal race. Every week is
-  governed: a hard ACWR ceiling, a long-run-jump cap and a biomechanical-load brake (see *How the plan
+  governed: a hard ACWR ceiling, long-run step and length limits and a biomechanical-load brake (see *How the plan
   is governed*).
 - **Replanning in both directions.** Run poorly or miss sessions and the road eases toward a goal you
   can still reach. Rebuild faster than projected and it expands to use the fitness you have. Each
@@ -47,7 +47,7 @@ everything.
   build. The *conservative* post-illness rebuild engages only on a medical hold or a stop-symptom
   check-in within the last 56 days, and lifts by itself once that window is clean. There is no "train
   harder" button; the safety is in the governors.
-- **Injury brakes beyond ACWR.** A long-run-jump cap, a biomechanical damage-equivalent lens, a tissue
+- **Injury brakes beyond ACWR.** A long-run-jump cap, a long-run length limit, a biomechanical damage-equivalent lens, a tissue
   limiter and a chronic-growth cap, so the ACWR ceiling is not the only guardrail.
 - **Which limit holds the week.** Every planned week publishes its limits: per governor axis (load ratio,
   long-run step, damage-equivalent km per week and per session, near-ceiling streak, fitness gain per
@@ -241,6 +241,7 @@ screen is computed by the deterministic engine.
 | `SH_ATHLETE_CONTEXT` | one-line context injected into the LLM prompts (e.g. returning from injury) |
 | `SH_ATHLETE_AGE` / `SH_MANUAL_LTHR` | age in years; a field-tested lactate-threshold HR (Settings overrides both) |
 | `SH_LONG_RUN_DAY` / `SH_REST_DAY_RANK` | the shape of the week: one weekday, and a ranked list of rest days (`fri,mon,wed`); Settings overrides |
+| `SH_TAPER_WEEKS` | taper length before an A-race: `2` or `3` weeks; empty = automatic (3 on a road of 16 weeks or more, else 2); Settings overrides |
 | `SH_HOUSE_URL` / `SH_HOUSE_NAME` | optional back-link in the header |
 | `SH_PRIVATE_URL` | public box: an optional "Log in" link to your private console |
 | `SH_GUIDE_URL` | "more info" link on pushed Suunto guides (default: this repo) |
@@ -347,6 +348,10 @@ byte-identical with them dormant.
   previous four weeks. Frandsen et al. 2025 followed 5,200 runners for 18 months: a single run more than 10 %
   longer than the longest run of the previous 30 days raised the rate of overuse injury, and week-to-week
   volume changes did not predict it. The +10 % is the study's own threshold.
+- **Long-run limit.** No single run is laid past **35 km or 3 h 30 min** at its own planned pace, whichever
+  comes first. The distance follows Fokkema et al. 2020 and Knopp et al. 2024, which found no further gain from a
+  longest run past about 35 km; the time is a judgement, since slower running puts more steps into each
+  kilometre. The kilometres it holds back stay on the easy runs.
 - **Biomechanical load (`eq_km`).** A pace-weighted "damage-equivalent" distance (fast kilometres count
   for several easy ones), following the tissue-damage axis Davis's biomechanical-load work highlights. A
   soft brake trims a week's fast work when that damage proxy spikes, even if mileage looks fine. The
@@ -382,7 +387,7 @@ regime keeps its gentler classic mix; only the tags show there.
 > Friel (*Total Heart Rate Training*, %LTHR zones), Daniels (*Daniels' Running Formula*, VDOT pacing;
 > with Gilbert, *Oxygen Power*, the oxygen-cost tables behind it) and
 > [Jones](https://doi.org/10.1113/JP284205) (physiological resilience). The specific thresholds (the
-> `eq_km` damage weighting, the 80 %-of-5k LT1, the +10 % long-run cap, and the maintenance/progression
+> `eq_km` damage weighting, the 80 %-of-5k LT1, the +10 % long-run cap, the 3 h 30 min long-run limit, and the maintenance/progression
 > fractions of the component periodization) are our own operationalization, tuned to one athlete's
 > data, not prescriptions issued by any of these authors. The cadence-playlist feature's own references
 > are in [MANUAL §9](MANUAL.md#9-cadence-playlists-optional).

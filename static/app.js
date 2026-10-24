@@ -1930,7 +1930,7 @@ const weekDates = mon => { const d=new Date(mon+"T00:00:00Z"), out=[];
 // week was laid at, and which one HELD the week. `basis` says where the ceiling comes from
 // (L literature · A fitted · S structural). SH-86 turns each row into the reason and the source:
 // a plain sentence about THIS week, and on click the named study or guideline behind the number.
-const LIMIT_NAMES={acwr:"load ratio",long_step:"long-run step",eq_week:"impact load, week",eq_session:"impact load, single run",tissue:"weeks near the ceiling",chronic:"fitness gain per week"};
+const LIMIT_NAMES={acwr:"load ratio",long_step:"long-run step",long_max:"long-run limit",eq_week:"impact load, week",eq_session:"impact load, single run",tissue:"weeks near the ceiling",chronic:"fitness gain per week"};
 const BASIS={
   L:{label:"Literature", desc:"Literature: published science or an established coaching convention."},
   A:{label:"Fitted to one runner", desc:"Fitted: measured on the history of the athlete this engine was calibrated on. If that is not you, treat the number as a starting point."},
@@ -1962,6 +1962,14 @@ const PLAN_SOURCES={
     refs:[{cite:"Frandsen et al. How much running is too much? Identifying high-risk running sessions in a 5200-person cohort study. Br J Sports Med 2025;59(17):1203-1210.", finding:"A single run more than 10 % longer than the longest run of the previous 30 days raised the rate of overuse injury. Week-to-week volume measures did not predict it."}],
     use:"A hard cap, chosen 1 Jul 2026. The week's total load stays the same; only the single longest run is held.",
     caveat:"One observational study; injuries were self-reported."},
+  long_max:{title:"Long-run limit", basis:"L",
+    what:"The longest any single run may be, as a distance and as a time on your feet at the run's own planned pace, whichever comes first.",
+    rule:"At most 35 km or 3 h 30 min while the plan builds; the conservative restart blocks keep their own shorter caps. The kilometres the limit holds back stay on the easy runs.",
+    refs:[{cite:"Fokkema T et al. Training for a (half-)marathon: training volume and longest endurance run related to performance and running injuries. Scand J Med Sci Sports 2020;30(9):1692-1704.", finding:"In 441 marathoners, a longest run over 35 km was no faster than one of 30 to 35 km and carried the same injury rate; one under 25 km was 13 minutes slower."},
+          {cite:"Knopp M et al. Quantitative analysis of 92 12-week sub-elite marathon training plans. Sports Med Open 2024;10:50.", finding:"The longest run of the plans was 31 to 35 km at every weekly volume."},
+          {cite:"Hunter JG et al. Fast running does not contribute more to cumulative load than slow running. Med Sci Sports Exerc 2019;51(6):1178-1185.", finding:"Slow running put more cumulative load on the shin per distance than fast running, through more steps: time on feet carries load that distance alone does not show."}],
+    use:"The 35 km comes from the studies. The 3 h 30 min was chosen on 24 Oct 2026: no study separates time on feet from distance, and coaching guidance ranges from 2.5 hours (Daniels) to about the runner's marathon time (McMillan). The week's total load stays the same; only the longest run is held.",
+    caveat:"The distance limb rests on observational studies; the time limb is a judgement inside the coaching range."},
   eq_week:{title:"Impact load, week", basis:"A",
     what:"The week's kilometres weighted by speed, because a fast kilometre loads tendons and bones more than an easy one: marathon pace counts 1.4×, threshold 2.5×, intervals 3.5×.",
     rule:"At most 1.3× the heaviest week of the last four, counting the runs actually run.",
@@ -2009,7 +2017,7 @@ const PLAN_SOURCES={
     caveat:"The share of each part per phase is the app's own reading of Davis."}
 };
 // one-line credit per limit, for the tile (SH-86)
-const SOURCE_SHORT={chronic:"Friel; Couzens (ramp-rate guidance)", acwr:"Gabbett 2016 (contested)", long_step:"Frandsen et al. 2025, 5,200 runners", eq_week:"Davis; fitted", eq_session:"the weekly impact-load step", tissue:"3:1 periodisation convention"};
+const SOURCE_SHORT={chronic:"Friel; Couzens (ramp-rate guidance)", acwr:"Gabbett 2016 (contested)", long_step:"Frandsen et al. 2025, 5,200 runners", long_max:"Fokkema 2020; Knopp 2024", eq_week:"Davis; fitted", eq_session:"the weekly impact-load step", tissue:"3:1 periodisation convention"};
 // the source panel for one limit (SH-86): every text escaped; an unknown key is no panel.
 // SH-86c — in three parts (top / left / right) so a panel can lay the sections in two columns
 // (.srccols): the week line, the what and the rule on the left; the named sources, the use, the
@@ -2057,6 +2065,13 @@ function limitSentence(k, ax, w, L){
     return (at?`Longest run ${v(ax.laid)} ${limU(ax.unit)}: right at the step, 10 % over the longest of the last four weeks (${prev} ${limU(ax.unit)}).`
              :`Longest run ${v(ax.laid)} ${limU(ax.unit)}; the step allows ${v(ax.ceiling)} ${limU(ax.unit)}, 10 % over the longest of the last four weeks (${prev} ${limU(ax.unit)}).`)+sized;
   }
+  if(k==="long_max"){
+    const dur=m=>`${Math.floor(m/60)} h ${String(Math.round(m%60)).padStart(2,"0")} min`;
+    const km=x=>`${Number(U.d(x)).toFixed(1)} ${U.unit}`;
+    if(ax.binds)
+      return `Longest run ${km(ax.km)}, ${dur(ax.laid)}: held at the limit of ${ax.km>=ax.max_km-0.05?km(ax.max_km):dur(ax.ceiling)}.${sized}`;
+    return `Longest run ${km(ax.km)}, ${dur(ax.laid)}; the limit is ${km(ax.max_km)} or ${dur(ax.ceiling)}, whichever comes first.${sized}`;
+  }
   if(k==="eq_week")
     return `${v(ax.laid)} speed-weighted ${limU(ax.unit)} against a ceiling of ${v(ax.ceiling)}, 1.3× the heaviest week of the last four.${sized}`;
   if(k==="eq_session")
@@ -2071,7 +2086,7 @@ function limitSentence(k, ax, w, L){
 }
 function limitsHtml(L, w){
   if(!L) return "";
-  const order=["chronic","acwr","long_step","eq_week","eq_session","tissue"].filter(k=>L[k]);
+  const order=["chronic","acwr","long_step","long_max","eq_week","eq_session","tissue"].filter(k=>L[k]);
   if(!order.length) return "";
   order.sort((a,b)=>(a===L.binding?0:1)-(b===L.binding?0:1));   // the one that held the week first
   const rows=order.map(k=>{
@@ -2144,6 +2159,8 @@ function weekHtml(w,p,today){
                  :(w.clipped?'<span class="down">clipped to fit ACWR</span>':''),
                // §PRO9 — long-run progression cap (Aarhus injury lever); §3.1 — biomechanical (eq_km) load ease
                w.long_step_capped?`<span class="wfz" title="Long-run progression cap: this week's long run was held to +10% over your longest run of the last 4 weeks — the strongest single injury lever (a sharp long-run jump predicts injury more than mileage jumps). Freed volume went to easy runs; weekly load unchanged.">long-run held (+10%)</span>`:'',
+               // §LRMAX — the long-run limit (35 km or 3 h 30 min, the shorter)
+               w.long_max_capped?`<span class="wfz" title="Long-run limit: this week's long run was held to 35 km or 3 h 30 min at its planned pace, whichever comes first. Past 35 km the studies found no further gain. The rest of the week's volume is on the easy runs; weekly load unchanged.">long run at its limit</span>`:'',
                w.long_held?`<span class="wfz" title="Long run kept at its ladder rung (${U.d(w.long_held.rung_km)} ${U.unit}): your easy days ran over this week's sheet, so the sheet runs over the bar and the long run keeps its distance. Only the load ceilings can shorten it.">long run kept</span>`:'',
                // §REST — the day-spacing gate: the week wanted another run day but every open day
                // would have chained a run streak, so the spacing held and the week is honestly lighter
@@ -2498,7 +2515,7 @@ function renderPlan(p){
 
   // — tile 2: what holds this week (the binding limit, then the rest compact) —
   const LW=curIt&&curIt.w.limits;
-  const limOrder=["chronic","acwr","long_step","eq_week","eq_session","tissue"].filter(k=>LW&&LW[k]);
+  const limOrder=["chronic","acwr","long_step","long_max","eq_week","eq_session","tissue"].filter(k=>LW&&LW[k]);
   const limVal=(k,ax)=>k==="tissue"?`${ax.streak} of ${ax.limit} weeks`
     :k==="chronic"?`${ax.laid>=0?"+":""}${Number(ax.laid).toFixed(1)} of ${ax.ceiling>=0?"+":""}${Number(ax.ceiling).toFixed(1)} CTL`
     :`${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${limU(ax.unit)}`;
@@ -3554,7 +3571,7 @@ if(_hform) _hform.addEventListener("submit", async e=>{
 // touches Connections. The AI switches sit next to the Claude key they gate; a key the app adds later
 // lands on Athlete until this table names its tab.
 const SETTINGS_TABS = {
-  athlete: ["athlete_context","athlete_age","manual_lthr","units","long_run_day","rest_day_rank"],
+  athlete: ["athlete_context","athlete_age","manual_lthr","units","long_run_day","rest_day_rank","taper_weeks"],
   connections: ["ai_narration","ai_parsing","ai_judgment"],
   console: ["house_url","house_name","private_url"]
 };

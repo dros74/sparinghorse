@@ -435,7 +435,7 @@ sharpening is in the freshness. Shorter races sharpen with a short tempo at thre
 **The limit rows.** Each week card lists the limits the regime runs, one row each, the one that held the
 week first. A row has the limit's name, a tag ("holds the week", "ran over" or "exempt in the peak"), a bar
 of what the week laid against the ceiling, a plain sentence with that week's own numbers, and a basis
-badge. The limits are the load ratio, the long-run step, impact load for the week, impact load for a single
+badge. The limits are the load ratio, the long-run step, the long-run limit, impact load for the week, impact load for a single
 run, weeks near the ceiling, and fitness gain per week. If none binds, the card says no limit binds this
 week. The badge says where the ceiling comes from: **Literature** (published science or an established
 coaching convention), **Fitted to one runner** (measured on the calibration athlete's history; a starting
@@ -450,7 +450,13 @@ Impellizzeri et al. 2020 on its conceptual problems, and Frandsen et al. 2025, w
 injury in runners. Fitness gain per week cites Friel and Couzens; impact load cites Davis and the fitted
 replay of the calibration athlete's 1,078 runs. Weeks near the ceiling follows the 3:1 periodisation
 convention and has no named source yet. It is a read, not a probability: the app never prints an injury
-percentage, because one runner's history cannot calibrate one. In a race week the long-run step reads the
+percentage, because one runner's history cannot calibrate one. The long-run limit is an absolute ceiling on any single run
+in the assertive plan: 35 km or 3 h 30 min at the run's own planned pace, whichever comes first. Its sources
+are Fokkema et al. 2020 and Knopp et al. 2024 (no further gain from a longest run past about 35 km) and Hunter
+et al. 2019 (slower running puts more steps into each kilometre); the 3 h 30 min is a judgement inside the
+coaching range, since no study separates time on feet from distance. The kilometres the limit holds back stay
+on the week's easy runs, so the week's load does not change, and the week card shows a "long run at its limit"
+badge. It does not size the week, so it never appears as the limit that holds it. In a race week the long-run step reads the
 longest *training* bout; the race distance is the goal, not a step. The conservative regime lists only the
 load ratio: its biomechanical governors are dormant there. Today carries the same binding limit under the
 why-line.
@@ -959,6 +965,13 @@ library) and **Console** (access, system, links, backup and export). The blocks:
   is harmless. And the plan will not overrule you to keep its usual spacing: if you ask to rest
   Saturday and Sunday, you get a five-day run streak, because that is what you asked for — it only
   declines to make a week *denser* than your own choice already makes it.
+- **Taper length (weeks)** — how many weeks before an A-race the plan tapers, counting the race week. Leave
+  it empty for the automatic rule: 3 weeks when the road to the race spans 16 weeks or more, otherwise 2.
+  Set **2** or **3** to choose. A choice moves weeks between the Peak and the Taper only: the Base, the Build
+  and every week already lived keep their dates. A longer taper comes out of the Peak and stops when the Peak
+  has no week to give; a secondary race keeps its one-week sharpen. It applies to the next plan you generate.
+  Once the first week a change would re-role has begun, the plan keeps the split it already laid for that
+  race, so changing the setting in the middle of a taper does not move the weeks you are in.
 
 ### The 30-minute field test (LTHR)
 

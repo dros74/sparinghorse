@@ -157,6 +157,16 @@
             "laid": 64.2,
             "unit": "eq-km"
           },
+          "long_max": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 210,
+            "headroom": 126,
+            "km": 17.3,
+            "laid": 84,
+            "max_km": 35.0,
+            "unit": "min"
+          },
           "long_step": {
             "basis": "L",
             "binds": false,
@@ -536,6 +546,16 @@
             "laid": 25.3,
             "unit": "eq-km"
           },
+          "long_max": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 210,
+            "headroom": 182,
+            "km": 5.6,
+            "laid": 28,
+            "max_km": 35.0,
+            "unit": "min"
+          },
           "long_step": {
             "basis": "L",
             "binds": false,
@@ -738,6 +758,16 @@
             "headroom": 32.21,
             "laid": 32.1,
             "unit": "eq-km"
+          },
+          "long_max": {
+            "basis": "L",
+            "binds": false,
+            "ceiling": 210,
+            "headroom": 190,
+            "km": 4.0,
+            "laid": 20,
+            "max_km": 35.0,
+            "unit": "min"
           },
           "long_step": {
             "basis": "L",

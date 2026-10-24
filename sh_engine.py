@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.84.0"
+ENGINE_VERSION = "0.85.0"
 
 
 def _zones_asof(db, date_iso=None):
@@ -164,6 +164,13 @@ SETTINGS_SPEC = [
              "to week — six runs leaves one rest day, four leaves three — so a ranking is what "
              "lets the plan honour you at every frequency: it takes rest days off the top of your "
              "list until the week has enough. Empty = the house layouts."},
+    {"key": "taper_weeks", "env": "SH_TAPER_WEEKS", "label": "Taper length (weeks)", "kind": "line",
+     "help": "The weeks of the taper before a goal race, race week included: 2 or 3. Empty = "
+             "automatic: 3 weeks when the road to the race is 16 weeks or longer, else 2. A week "
+             "taken from the taper goes to the Peak, and a week added to it comes out of the Peak, "
+             "when the Peak has one to give; the Base and the Build keep their weeks. Once the taper "
+             "a change would move has begun, that race keeps the taper it has. A tune-up race keeps "
+             "its 1-week sharpen."},
 ]
 SETTINGS_BY_KEY = {s["key"]: s for s in SETTINGS_SPEC}
 
@@ -842,7 +849,7 @@ def _plan_span(block_start, race_date):
     return max(0, (rd - block_start).days // 7 + 1)
 
 
-def periodize(today, race_date, rebase_weeks=6):
+def periodize(today, race_date, rebase_weeks=6, taper_pref=None):
     """Reverse periodization: split the runway into Phase-0 re-base → Base → Build →
     Peak → Taper. Phase lengths scale with the weeks available."""
     total = weeks_until(race_date, today)
@@ -851,6 +858,7 @@ def periodize(today, race_date, rebase_weeks=6):
     base = round(remaining * 0.45)
     build = round(remaining * 0.40)
     peak = max(0, remaining - base - build)
+    peak, taper = _taper_choice(taper, peak, taper_pref)   # §TAPERLEN — Peak ↔ Taper only
     phases = [("Re-base (Phase 0)", rebase_weeks), ("Base — aerobic", base),
               ("Build — specific", build), ("Peak / sharpen", peak), ("Taper", taper)]
     return [{"phase": n, "weeks": w} for n, w in phases if w > 0], total
@@ -870,7 +878,52 @@ def _seg_taper(total, full):
     return min((3 if total >= 16 else 2) if full else 1, max(0, total))
 
 
-def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
+def _parse_taper_weeks(text):
+    """§TAPERLEN (SH-53) — the `taper_weeks` setting → 2, 3, or None (automatic). Forgiving like
+    `_parse_day`: anything else reads as automatic, so a stored typo can never stop a plan being
+    laid; `validate_setting` refuses it on the way in."""
+    t = (text or "").strip()
+    return int(t) if t in ("2", "3") else None
+
+
+def _taper_choice(auto, peak, pref):
+    """§TAPERLEN (SH-53) — the athlete's taper length applied to one full segment → (peak, taper).
+    The automatic split lays out every phase first; the choice then moves weeks between the Peak and
+    the Taper only, so the Base and the Build, and every lived week in them, keep their calendar
+    whatever is chosen (a re-split would move a lived week from one phase to another). A longer taper
+    comes out of the Peak and stops when the Peak is empty; a 1-week sharpen (a subordinate race, or
+    a one-week segment) is not a taper the choice governs."""
+    if not pref or auto <= 1:
+        return peak, auto
+    if pref < auto:
+        return peak + auto - pref, pref
+    give = min(pref - auto, peak)
+    return peak - give, auto + give
+
+
+def _taper_kept(prior_plan, phases, today):
+    """§TAPERLEN — {race date: taper weeks} for each race whose taper a change of the setting may no
+    longer move. A change moves the boundary between the Peak and the Taper; once the earliest week it
+    would re-role has begun (today on or after its Monday), the newest saved plan's split for that race
+    stands, so a taper already being run is never turned back into a Peak week, nor a Peak week into
+    the taper, mid-week. Keyed on the saved plan, not the regeneration day: each later plan saves the
+    kept split, so the same input keeps laying the same road."""
+    from datetime import timedelta
+    saved = {str(p.get("date"))[:10]: p.get("weeks") for p in ((prior_plan or {}).get("phases") or [])
+             if p.get("kind") == "taper" and p.get("date")}
+    kept = {}
+    for p in phases:
+        rd = str(p.get("date") or "")[:10]
+        if p.get("kind") != "taper" or rd not in saved or not saved[rd] or saved[rd] == p["weeks"]:
+            continue
+        race_mon = _date(rd) - timedelta(days=_date(rd).weekday())
+        first_moved = race_mon - timedelta(weeks=max(saved[rd], p["weeks"]) - 1)
+        if today >= first_moved:
+            kept[rd] = saved[rd]
+    return kept
+
+
+def periodize_chain(today, chain, rebase_weeks=6, block_start=None, taper_pref=None, taper_keep=None):
     """§6q — reverse-periodize the whole A-race CHAIN into a flat phase list. Each phase carries a
     unique `key` (what generate_plan stores its block under + the UI selects), a `kind` (which shaper
     builds it), and the `race`/`role` it serves. Segment 0 is the full Re-base→Base→Build→Peak→Taper
@@ -893,6 +946,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
     # deltas of these, so the contiguous layout hits each race's week exactly.
     cum = (lambda d: _plan_span(block_start, d)) if block_start is not None else None
 
+    keep = taper_keep or {}
+
     def seg0_split(total, full):
         taper = _seg_taper(total, full)
         rem = max(0, total - rebase_weeks - taper)
@@ -900,6 +955,7 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
         if full:
             build = round(rem * 0.40)
             peak = max(0, rem - base - build)
+            peak, taper = _taper_choice(taper, peak, keep.get(str(r0["date"])[:10], taper_pref))   # §TAPERLEN
         else:                                  # subordinate: no peak, the build runs longer
             build = max(0, rem - base)
             peak = 0
@@ -939,7 +995,8 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
             # base/build/peak split seg0_split uses, minus the rebase (only segment 0 re-bases).
             basek = round(remk * 0.45)
             buildk = round(remk * 0.40)
-            peakk = remk - basek - buildk
+            peakk, taperk = _taper_choice(taperk, remk - basek - buildk,
+                                          keep.get(str(rk["date"])[:10], taper_pref))   # §TAPERLEN
             phases += [
                 recovery_ph,
                 {"phase": f"Base → {lblk}", "weeks": basek, "kind": "base", "key": f"base{k}", "race": lblk, "role": rolek},
@@ -952,6 +1009,7 @@ def periodize_chain(today, chain, rebase_weeks=6, block_start=None):
         else:
             peakk = min(2, remk) if fullk else 0      # short inter-race sharpen; fitness is held, no new base
             bridgek = max(0, remk - peakk)            # recovk + bridgek + peakk + taperk == totalk (no calendar drift)
+            peakk, taperk = _taper_choice(taperk, peakk, keep.get(str(rk["date"])[:10], taper_pref))   # sum holds
             phases += [
                 recovery_ph,
                 {"phase": f"Bridge → {lblk}", "weeks": bridgek, "kind": "bridge", "key": f"bridge{k}", "race": lblk, "role": rolek},
@@ -1486,6 +1544,19 @@ MESO_MAX_HARD = 4                      # max consecutive near-ceiling building w
 # Magnitude 🟡 LITERATURE (+10% = the 10% rule); earn a looser step from my corpus before widening.
 LONG_RUN_STEP_CAP = 1.10    # max long-run jump vs the trailing-window longest (+10%)
 LONG_RUN_STEP_WINDOW = 4    # trailing weeks whose longest run sets the progression baseline
+
+# §LRMAX (SH-53, 0.85.0) — the long run's absolute ceiling, two limbs, the shorter binds. DISTANCE 35 km:
+# where the measured benefit stops — Fokkema et al. 2020 (441 marathoners: a longest run over 35 km was
+# no faster than 30–35 km and carried the same injury rate; "it does not seem necessary to include an
+# endurance run of more than 35 km"), Knopp et al. 2024 (92 plans: longest run 31–35 km at every weekly
+# volume), Davis (32–35 km at 90–95 % MP). TIME 3 h 30 min at the run's own planned pace: time on feet,
+# not distance, is what a slower runner's legs and fuel pay for (more steps per km, Hunter et al. 2019;
+# damage climbs with duration); no outcome study isolates it, so the number is the athlete's call
+# (2026-10-24), inside the coaching range (2.5 h, Daniels, up to about the runner's marathon time,
+# McMillan). Folded into §PRO9's `long_km_cap`, so it only
+# ever lowers that ceiling, on the same assertive-only path (caution has no long-run cap at all).
+LONG_RUN_MAX_KM = 35.0
+LONG_RUN_MAX_MIN = 210
 
 # §PRO21 — the long run has to BE the long run. Every long-run constant above this line is a CEILING
 # (LONG_RUN_MAX_FRAC/BASE_LONG_FRAC = the Daniels/Hansons share cap; LONG_RUN_STEP_CAP = the Aarhus
@@ -2509,6 +2580,19 @@ def _displaced_strides(wk, sessions):
     return 0 if any(x.get("strides") for x in sessions) else int(wk.get("strides") or 0)
 
 
+def _at_long_max(sess, cap_km):
+    """§LRMAX — the published long run sits AT the limit (within the rounding of its whole minutes):
+    the limit held it, whether the share clip cut it down or §SHARE's raise to the ladder stopped
+    there. Without this a run raised to the limit and no further read as not held."""
+    return (sess.get("km") or 0.0) >= cap_km - 0.15 or (sess.get("minutes") or 0) >= LONG_RUN_MAX_MIN - 1
+
+
+# The long run's note when a ceiling clipped it: §PRO9's step, or §LRMAX's absolute limit.
+_LONG_CAP_NOTE = {False: " — held to the +10% long-run progression cap (trailing-4wk)",
+                  True: f" — held to the long-run limit ({LONG_RUN_MAX_KM:g} km or "
+                        f"{LONG_RUN_MAX_MIN // 60} h {LONG_RUN_MAX_MIN % 60:02d} min, the shorter)"}
+
+
 def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, days_override=None,
                      long_km_cap=None, av_blocked=None, q_days=None, long_km_aim=None,
                      free_from=None, ladder=False, fixed_days=None, prev_tail=0, _relay_runs=None,
@@ -2655,6 +2739,17 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         _per = trimp_per_min(long_q["zone"])
         _zp = (zones or {}).get(long_q["zone"]) or easy_pace_sec
         mp_km = round(max(1, round(mp_work / _per)) * 60 / _zp, 1)
+    # §LRMAX — the absolute ceiling, in km at THIS run's paces: the MP finish keeps its minutes and the
+    # easy base gets what is left of LONG_RUN_MAX_MIN. Floored to 0.1 km so the published run, whose km
+    # the guards below hold to the cap, never passes the minutes either.
+    long_max_bound = False
+    _step_cap_in = long_km_cap        # the caller's cap: a §REST2 re-lay folds the limit in again itself
+    if long_km_cap:
+        _mp_min = max(1, round(mp_work / _per)) if long_q else 0
+        _max_km = math.floor(10 * min(LONG_RUN_MAX_KM, mp_km + max(0.0, LONG_RUN_MAX_MIN - _mp_min)
+                                      * 60.0 / easy_pace_sec)) / 10
+        if _max_km < long_km_cap:
+            long_km_cap, long_max_bound = _max_km, True
     # §SHARE (0.60.6) — THE SHARE CEILING IS A FRACTION OF THE WEEK'S KM, AS ITS CONSTANT SAYS. `long_w`
     # is a share of the EASY budget, which on a quality week is the week less its hard sessions, so
     # bounding it at LONG_RUN_MAX_FRAC held the long run to 30 % of the easy km — 23 % of my 57-km base
@@ -2772,6 +2867,10 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         # shorter — not fewer bigger) so the weekly total still lands. `cap_short_trimp` = an easy run
         # at exactly the cap distance; the easy loop hard-clamps each short to it as the final guarantee.
         cap_short_trimp = long_km_cap * easy_pace_sec / 60.0 * EASY_TRIMP_PER_MIN
+        if long_max_bound:
+            # §LRMAX — the folded cap is in km at the LONG run's paces (its MP finish is faster), so an
+            # easy run at that distance would run longer than the limit; hold the shorts to its minutes.
+            cap_short_trimp = min(cap_short_trimp, LONG_RUN_MAX_MIN * EASY_TRIMP_PER_MIN)
         # §PRO21 — the §PRO9 clamp above bounds the shorts at the LONG RUN'S OWN CEILING, so on a week
         # whose budget reaches that ceiling every day lands on the same number and the long run stops
         # being one (see LONG_RUN_EASY_FRAC). Bound each short at a fraction of the long run ACTUALLY
@@ -2832,7 +2931,7 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
                         and (_has_day_pref() or _max_streak(_tpl) <= AV_MAX_STREAK)
                         and _seam <= RELAY_MAX_SEAM_STREAK):
                     return _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones,
-                                            days_override=None, long_km_cap=long_km_cap,
+                                            days_override=None, long_km_cap=_step_cap_in,
                                             av_blocked=av_blocked, q_days=q_days,
                                             long_km_aim=long_km_aim, free_from=free_from,
                                             ladder=ladder, fixed_days=fixed_days,
@@ -3031,9 +3130,18 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         date = (start_monday + timedelta(days=days[i])).isoformat()
         if is_long and long_q:                          # marathon-pace finish on the long run
             sess = _build_long_mp(date, tr, mp_work, long_q, zones, easy_pace_sec)
-            if long_step_capped:                        # §PRO9 — tell the truth about the cap
-                sess["note"] += " — held to the +10% long-run progression cap (trailing-4wk)"
-                sess["long_step_capped"] = True
+            # §LRMAX — the MP lay rounds its base to whole minutes and its km from two paces, so it can
+            # publish 0.1 km or a minute past the limit that sized it; step the base down a minute at a
+            # time until the published run holds the limit, as §PRO21 does for the easy long run below.
+            # Only when the limit is the cap in force: §PRO9's step keeps its own lay unchanged.
+            while (long_max_bound and tr > EASY_TRIMP_PER_MIN
+                   and (sess["km"] > long_km_cap + 1e-9 or sess["minutes"] > LONG_RUN_MAX_MIN)):
+                tr = round(tr - EASY_TRIMP_PER_MIN, 1)
+                sess = _build_long_mp(date, tr, mp_work, long_q, zones, easy_pace_sec)
+            _held = long_step_capped or (long_max_bound and _at_long_max(sess, long_km_cap))
+            if _held:                                   # §PRO9 / §LRMAX — tell the truth about the cap
+                sess["note"] += _LONG_CAP_NOTE[long_max_bound]
+                sess["long_max_capped" if long_max_bound else "long_step_capped"] = True
             sessions.append(sess)
             day_trimps[date] = day_trimps.get(date, 0.0) + sess["trimp"]
             continue
@@ -3069,8 +3177,10 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
         carries_strides = bool(wk["strides"]) and not is_long and i == strides_slot
         if carries_strides:
             note += f" + {wk['strides']}×4–6 strides"
-        if is_long and long_step_capped:                # §PRO9
-            note += " — held to the +10% long-run progression cap (trailing-4wk)"
+        _held = is_long and (long_step_capped or (long_max_bound and _at_long_max({"km": km, "minutes": mins},
+                                                                                   long_km_cap)))
+        if _held:                                       # §PRO9 / §LRMAX
+            note += _LONG_CAP_NOTE[long_max_bound]
         sess = {"date": date, "kind": "long" if is_long else "easy",
                 "km": km, "minutes": mins, "trimp": tr,
                 "pace_zone": f"{fmt_pace(easy_pace_sec)}/km easy", "note": note}
@@ -3078,8 +3188,8 @@ def _distribute_week(wk, start_monday, week_trimp, easy_pace_sec, zones=None, da
             sess["strides"] = wk["strides"]
         if is_long and zones:                           # §T2 — the building-phase long run builds economy
             sess["component"] = COMPONENT_BY_KIND["long"]   # (mileage is the economy lever; re-base untagged)
-        if is_long and long_step_capped:
-            sess["long_step_capped"] = True
+        if _held:
+            sess["long_max_capped" if long_max_bound else "long_step_capped"] = True
         sessions.append(sess)
         day_trimps[date] = day_trimps.get(date, 0.0) + tr
     # §ROT — the threshold run, last. Not in the governor's search (`carve=False`): the week is sized
@@ -3556,6 +3666,18 @@ def _current_week_actuals(db, today):
     act_km = round(sum(r["distance"] for r in rows if r["id"] not in drop and r["distance"]), 1)
     act_runs = len({r["date"] for r in rows if r["id"] not in drop and r["distance"]})
     return act_runs, act_km
+
+
+def _long_max_read(sessions, fresh=None):
+    """§LRMAX — the week's longest training run as the absolute ceiling reads it: its km and minutes,
+    and whether that ceiling clipped it. The flag is read only off `fresh` sessions (those THIS
+    generation laid, the §PAST rule), the run itself off all of them. None on a week with no run."""
+    runs = [x for x in (sessions or []) if not x.get("race") and (x.get("km") or 0) > 0]
+    if not runs:
+        return None
+    top = max(runs, key=lambda x: x.get("km") or 0.0)
+    return {"km": top.get("km"), "min": top.get("minutes") or 0,
+            "binds": any(x.get("long_max_capped") for x in (runs if fresh is None else fresh))}
 
 
 def _week_long_km(sessions):
@@ -4232,7 +4354,8 @@ RETIRE_AUTO_MIN_N = 10       # §C (decision (b)) — automatic mode needs this 
 RETIRE_AUTO_BIAS = 0.20      # §C (decision (b)) — … with a median under-prediction of at least this fraction
 BAR_DIVERGE_TOL = 0.10  # §P2 (0.59.0) — sheet ÷ intent bar beyond this on a LIVE non-race week is labelled; measured 0.92–1.00 (proposal §11)
 LIMITS_LAID_TOL = 0.15  # km — the sheet rounds a capped bout to 0.1 km AFTER the cap; within this it still reads "within"
-LIMITS_BASIS = {"acwr": "L", "long_step": "L", "eq_week": "A", "eq_session": "S", "tissue": "L", "chronic": "L"}
+LIMITS_BASIS = {"acwr": "L", "long_step": "L", "long_max": "L", "eq_week": "A", "eq_session": "S", "tissue": "L",
+                "chronic": "L"}
 
 
 def _retire_mode(db):
@@ -4397,7 +4520,8 @@ def _week_bar(*, intent_km, sessions, frozen=False, ran_km=None, lived_km=None):
 
 def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid, long_bound,
                  eq_week_cap, eq_week_laid, eq_week_bound, eq_sess_cap, eq_sess_laid,
-                 streak, streak_bound, ramp_cap, ctl_gain, race_week=False, streak_exempt=None):
+                 streak, streak_bound, ramp_cap, ctl_gain, race_week=False, streak_exempt=None,
+                 long_max=None):
     def axis(name, ceiling, laid, bound, unit):
         if ceiling is None or laid is None:
             return None
@@ -4415,6 +4539,13 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
             ax = axis(name, ceiling, laid, bound, unit)
             if ax:
                 out[name] = ax
+        if long_max:
+            # §LRMAX — read in minutes (the time limb), with the km limb beside it; `long_max` is
+            # `_long_max_read`'s dict, present whenever the week holds a training run.
+            out["long_max"] = {"ceiling": LONG_RUN_MAX_MIN, "laid": long_max["min"],
+                               "headroom": LONG_RUN_MAX_MIN - long_max["min"], "binds": bool(long_max["binds"]),
+                               "basis": LIMITS_BASIS["long_max"], "unit": "min",
+                               "km": long_max["km"], "max_km": LONG_RUN_MAX_KM}
         if streak is not None:
             out["tissue"] = {"streak": int(streak), "limit": MESO_MAX_HARD, "headroom": MESO_MAX_HARD - int(streak),
                              "binds": bool(streak_bound), "basis": LIMITS_BASIS["tissue"], "unit": "weeks"}
@@ -4430,12 +4561,18 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
                               "headroom": round(ramp_cap - ctl_gain, 2),
                               "binds": ctl_gain >= ramp_cap - 0.05, "basis": LIMITS_BASIS["chronic"], "unit": "CTL/wk"}
     # the binding axis: the one that held this week, else the one with the least relative headroom
+    # §LRMAX is never the week's `binding`: it holds one run and moves its km to the easy days, so the
+    # week's size is still set by whichever governor names it here (the card reads `binding` as "the
+    # limit that sized the week"). Its own axis carries `binds`, and the card names the hold there.
     bound = [k for k in ("long_step", "eq_week", "acwr", "tissue", "chronic") if k in out and out[k].get("binds")]
     if bound:
         out["binding"] = bound[0]
     else:
         rel = {}
+        _lm_held = bool((out.get("long_max") or {}).get("binds"))
         for k in ("acwr", "long_step", "eq_week", "eq_session", "chronic"):
+            if k == "long_step" and _lm_held:
+                continue                      # §LRMAX held the run; the step's headroom is not the story
             ax = out.get(k)
             if ax and ax["ceiling"]:
                 rel[k] = ax["headroom"] / abs(ax["ceiling"])
@@ -5269,7 +5406,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §WKMEAN2 — `ctl` is the week's projected end-of-week CTL (`_project_week(... roll_from=today
                 # ...)` just above); `ws_ctl` is the week-start state, so this reads the week's CTL gain
                 # against the +5 ceiling exactly as the full-week path does (`ctl_gain=(ctl - _ctl_start)`).
-                streak=None, streak_bound=False, ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None))
+                streak=None, streak_bound=False, ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None),
+                long_max=(_long_max_read(sessions, fresh=[x for x in sessions if x["date"] not in from_history])
+                          if long_km_cap else None))
             # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to
             # done+ahead below: the honest record of what was PRESCRIBED, kept distinct from what
             # was run (the header). Display/history provenance only since §FORM1 — no decision
@@ -5345,6 +5484,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             if long_km_cap and any(s.get("long_step_capped") for s in sessions
                                    if s["date"] not in from_history):
                 pweek["long_step_capped"] = long_km_cap
+            if long_km_cap and any(s.get("long_max_capped") for s in sessions
+                                   if s["date"] not in from_history):
+                pweek["long_max_capped"] = True            # §LRMAX — as the full-week path
             if av_dates:                                   # §AV — laid around away days (PRIVATE-only
                 pweek["av_dates"] = av_dates               # field; the public plan view strips it)
                 if av_shed:
@@ -5644,6 +5786,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         _rot_intent(week)                          # §ROT — the sentence names only a run that is laid
         if long_km_cap and any(s.get("long_step_capped") for s in sessions):
             week["long_step_capped"] = long_km_cap   # §PRO9 — the +10% ceiling that bound this week's long
+        if long_km_cap and any(s.get("long_max_capped") for s in sessions):
+            week["long_max_capped"] = True           # §LRMAX — the absolute ceiling held this week's long
         week["eq_km"] = _week_eq_km(sessions)        # §3.1 — the week's damage-equivalent km (bio load)
         if bio_over:                                 # §3.1 — the soft bio ceiling reshaped this week to easy
             week["bio_capped"] = round(bio_cap, 1)
@@ -5658,7 +5802,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             eq_sess_cap=session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
             streak=consec_hard, streak_bound=bool(forced_deload),
             streak_exempt=("peak" if is_peak else None),     # §MESO4 — say why a streak past its limit stands
-            ramp_cap=ramp, ctl_gain=(ctl - _ctl_start))
+            ramp_cap=ramp, ctl_gain=(ctl - _ctl_start),
+            long_max=_long_max_read(sessions) if long_km_cap else None)
         if av_dates:                                 # §AV — laid around away days (PRIVATE-only field;
             week["av_dates"] = av_dates              # the public plan view strips it)
             if av_shed:
@@ -7364,8 +7509,16 @@ def generate_plan(db, force_regime=None, today=None, permission=None):
         # path: same base/build/peak/taper keys + week counts). Each later race adds a bridge/peak/taper
         # segment; generate_plan WALKS the resulting phase list, chaining the live CTL seed segment-to-
         # segment with the past frozen (§6f E), so the multi-peak road is one continuous, diff-able plan.
+        # §TAPERLEN (SH-53) — the athlete's taper length; automatic (None) keeps the 3-or-2 rule.
+        # The re-base clamp above stays on the automatic taper: the choice moves weeks between the
+        # Peak and the Taper only, so it can never change what the runway leaves the re-base.
+        taper_pref = _parse_taper_weeks(_resolve_setting(db, SETTINGS_BY_KEY["taper_weeks"])[0])
         phases, total_weeks = periodize_chain(today, chain, rebase_weeks=rebase_weeks_n,
-                                              block_start=block_start)
+                                              block_start=block_start, taper_pref=taper_pref)
+        _kept = _taper_kept(prior_plan, phases, today)   # a taper already under way keeps its split
+        if _kept:
+            phases, total_weeks = periodize_chain(today, chain, rebase_weeks=rebase_weeks_n, block_start=block_start,
+                                                  taper_pref=taper_pref, taper_keep=_kept)
         plan["mode"] = "race"
         plan["objective"] = {"label": anchor["label"], "date": anchor["date"],
                              "type": anchor.get("type"),   # §6s — needed to match the race-day activity

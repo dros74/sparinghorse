@@ -1886,6 +1886,8 @@ def validate_setting(key, value):
         if not v.isdigit() or not (MANUAL_LTHR_RANGE[0] <= int(v) <= MANUAL_LTHR_RANGE[1]):
             return False, (f"a whole number {MANUAL_LTHR_RANGE[0]}–{MANUAL_LTHR_RANGE[1]} bpm "
                            "(or empty to derive from your runs)")
+    if key == "taper_weeks" and value.strip() and value.strip() not in ("2", "3"):
+        return False, "2 or 3 weeks (or empty for automatic: 3 on a road of 16 weeks or more, else 2)"
     if key == "athlete_age" and value.strip():
         v = value.strip()
         if not v.isdigit() or not (10 <= int(v) <= 100):
@@ -8478,6 +8480,7 @@ _PV_QUALITY = {"attach": True, "component": True, "frac": True, "kind": True, "l
 # NOT `reflection`: the free-text "how it felt" is the readiness-note posture — private (§H7).
 _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "component": True,
                "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
+               "long_max_capped": True,   # §LRMAX — the long-run limit held this run (prescription)
                "long_held": True,   # §LRH — the long run kept its rung on a straddling week
                "minutes": True, "missed": True, "note": True, "optional": True,
                "pace_zone": True, "race": True,   # §RACE — race day, already public via objectives
@@ -8531,7 +8534,7 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
                        "cap": True, "gates": {"absorbed": True, "acwr": True, "atl": True},
                        "mode": True, "bias": {"n": True, "median_pct": True, "needs": {"n": True, "median_pct": True}},
                        "retired": True, "offer": True, "source": True, "record_pending": True, "why": True},
-            "long_step_capped": True,
+            "long_step_capped": True, "long_max_capped": True,   # §LRMAX — same class
             # §REST — same governor-annotation class: the day-spacing gate's honest marker, printed
             # "held to rest days — spacing kept" on the week card. Describes the prescription, not the athlete.
             # §REST2 — `rest_shed_km` is the SIZE of that hold. It travels with the flag for the same
@@ -8542,6 +8545,7 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             # PRESCRIPTION (the same class as proj_acwr and eq_km above), never the athlete's body.
             "limits": {"regime": True, "binding": True,
                        "acwr": _PV_LIMIT_AXIS, "long_step": _PV_LIMIT_AXIS, "eq_week": _PV_LIMIT_AXIS,
+                       "long_max": {**_PV_LIMIT_AXIS, "km": True, "max_km": True},   # §LRMAX
                        "eq_session": _PV_LIMIT_AXIS, "chronic": _PV_LIMIT_AXIS,
                        "tissue": {"streak": True, "limit": True, "headroom": True, "binds": True, "basis": True, "unit": True,
                                   "exempt": True, "note": True},   # §MESO4 — the peak exemption, named

@@ -8441,6 +8441,274 @@ def _stc_periodize_chain():
                got={"violations": fails or "none"})
 
 
+def _stc_taper_length():
+    """§TAPERLEN (SH-53) — the taper-length setting (`taper_weeks`: empty = automatic, 2, 3) moves weeks
+    between the Peak and the Taper only. Locks: (a) automatic (None) ≡ the call without the argument,
+    on five chain shapes, both calendar paths; (b) a choice changes no phase but peak*/taper*, and each
+    segment's Peak + Taper is kept, so the Base, the Build and every lived week in them keep their
+    calendar (a re-split would hand a lived week to another phase); (c) the worked case: a 25-week road
+    (automatic taper 3) set to 2 → base 7, build 6, peak 4, taper 2; (d) a longer taper stops at an
+    empty Peak, and a tune-up's 1-week sharpen ignores the choice; (e) periodize() ≡ periodize_chain()
+    for a single goal race under each choice; (f) the parser is forgiving and validate_setting refuses
+    what the parser would ignore; (g) generate_plan reads the stored setting: the same race fixture
+    lays a 3-week taper on automatic and a 2-week one with `set:taper_weeks` = 2."""
+    from datetime import timedelta as _td
+    today = S._date("2026-06-01")                  # a Monday, so it is also the block_start grid
+
+    def race(i, wks, typ, label, role):
+        return {"id": i, "date": (today + _td(weeks=wks)).isoformat(), "type": typ, "label": label, "role": role}
+
+    def wk(ps):
+        return {p["key"]: p["weeks"] for p in ps}
+
+    fails, detail = [], {}
+    chains = {
+        "single-24": [race(1, 24, "marathon", "Goal", "goal")],
+        "single-14": [race(1, 14, "marathon", "Goal", "goal")],
+        "two-mara": [race(1, 12, "marathon", "First", "coequal"), race(2, 34, "marathon", "Second", "goal")],
+        "co-bridge": [race(1, 16, "10k", "Spring 10k", "coequal"), race(2, 24, "marathon", "Goal", "goal")],
+        "sub-first": [race(1, 12, "marathon", "Tune-up", "subordinate"), race(2, 34, "marathon", "Goal", "goal")],
+    }
+    for name, ch in chains.items():
+        for bs in (None, today):
+            auto = wk(E.periodize_chain(today, ch, rebase_weeks=6, block_start=bs)[0])
+            if wk(E.periodize_chain(today, ch, rebase_weeks=6, block_start=bs, taper_pref=None)[0]) != auto:
+                fails.append(f"(a) {name}/{bs}: automatic differs from the call without the argument")
+            for pref in (2, 3):
+                got = wk(E.periodize_chain(today, ch, rebase_weeks=6, block_start=bs, taper_pref=pref)[0])
+                detail[f"{name}/{'grid' if bs else 'today'}/{pref}"] = got
+                moved = sorted(k for k in set(auto) | set(got) if auto.get(k, 0) != got.get(k, 0)
+                               and not k.startswith(("peak", "taper")))
+                if moved:
+                    fails.append(f"(b) {name}/{bs}/{pref}: phases outside Peak/Taper moved: {moved}")
+                for suf in ("", "1"):
+                    a = auto.get("peak" + suf, 0) + auto.get("taper" + suf, 0)
+                    g = got.get("peak" + suf, 0) + got.get("taper" + suf, 0)
+                    if a != g:
+                        fails.append(f"(b) {name}/{bs}/{pref}: segment '{suf}' Peak+Taper {a} → {g}")
+    # (c) the worked case, on the grid path generate_plan uses
+    c = wk(E.periodize_chain(today, chains["single-24"], rebase_weeks=6, block_start=today, taper_pref=2)[0])
+    want_c = {"rebase": 6, "base": 7, "build": 6, "peak": 4, "taper": 2}
+    if c != want_c:
+        fails.append(f"(c) 25-week road set to 2: {c} != {want_c}")
+    # (d) a longer taper comes out of the Peak and stops when it is empty: a 10-week road (span 10:
+    # rebase 6, automatic taper 2, base 1, build 1, peak 0) set to 3 keeps its 2-week taper
+    short = wk(E.periodize_chain(today, [race(1, 9, "marathon", "Goal", "goal")], rebase_weeks=6,
+                                 block_start=today, taper_pref=3)[0])
+    if short.get("taper") != 2 or short.get("peak", 0) != 0:
+        fails.append(f"(d) a 3-week choice on an empty Peak: {short}")
+    longer = wk(E.periodize_chain(today, chains["single-14"], rebase_weeks=6, block_start=today, taper_pref=3)[0])
+    if longer.get("taper") != 3:
+        fails.append(f"(d) 14-week road set to 3 should taper 3 weeks out of its Peak: {longer}")
+    for pref in (2, 3):
+        sub = wk(E.periodize_chain(today, chains["sub-first"], rebase_weeks=6, block_start=today, taper_pref=pref)[0])
+        if sub.get("taper") != 1 or "peak" in sub:
+            fails.append(f"(d) the tune-up's sharpen must stay 1 week with no Peak (pref {pref}): {sub}")
+    # (e) the reduction oracle holds under each choice
+    red = lambda ps: [(p["phase"].split()[0], p["weeks"]) for p in ps]
+    for pref in (None, 2, 3):
+        a = red(E.periodize_chain(today, chains["single-24"], rebase_weeks=6, taper_pref=pref)[0])
+        b = red(E.periodize(today, chains["single-24"][0]["date"], rebase_weeks=6, taper_pref=pref)[0])
+        if a != b:
+            fails.append(f"(e) periodize_chain ≠ periodize under {pref}: {a} vs {b}")
+    # (f) parser and validation agree on what counts
+    for raw, want in (("2", 2), (" 3 ", 3), ("", None), (None, None), ("4", None), ("two", None), ("1", None)):
+        if E._parse_taper_weeks(raw) != want:
+            fails.append(f"(f) _parse_taper_weeks({raw!r}) != {want}")
+    for raw, ok in (("2", True), ("3", True), ("", True), ("4", False), ("two", False), ("1", False)):
+        if S.validate_setting("taper_weeks", raw)[0] != ok:
+            fails.append(f"(f) validate_setting('taper_weeks', {raw!r}) should be {'accepted' if ok else 'refused'}")
+    # (h) a taper already under way keeps its split: the boundary a change would move is the earliest
+    # week it re-roles (race-week Monday − (longer taper − 1) weeks); from that Monday on, the saved
+    # plan's taper stands, before it the setting applies; equal splits keep nothing
+    race_d = "2026-12-06"
+    saved3 = {"phases": [{"kind": "taper", "key": "taper", "weeks": 3, "date": race_d}]}
+    new2 = [{"kind": "taper", "key": "taper", "weeks": 2, "date": race_d}]
+    for d, want in (("2026-11-15", {}), ("2026-11-16", {race_d: 3}), ("2026-11-25", {race_d: 3})):
+        if E._taper_kept(saved3, new2, S._date(d)) != want:
+            fails.append(f"(h) 3→2 on {d}: kept {E._taper_kept(saved3, new2, S._date(d))}, want {want}")
+    saved2 = {"phases": [{"kind": "taper", "key": "taper", "weeks": 2, "date": race_d}]}
+    new3 = [{"kind": "taper", "key": "taper", "weeks": 3, "date": race_d}]
+    if E._taper_kept(saved2, new3, S._date("2026-11-16")) != {race_d: 2} or E._taper_kept(saved2, new3, S._date("2026-11-15")):
+        fails.append("(h) 2→3: the earliest re-roled week is the Peak's last, from 16 Nov")
+    if E._taper_kept(saved2, new2, S._date("2026-11-25")) or E._taper_kept(None, new2, S._date("2026-11-25")):
+        fails.append("(h) an unchanged split or no saved plan must keep nothing")
+    kept_wk = wk(E.periodize_chain(today, chains["single-24"], rebase_weeks=6, block_start=today, taper_pref=2,
+                                   taper_keep={chains["single-24"][0]["date"]: 3})[0])
+    if kept_wk.get("taper") != 3 or kept_wk.get("peak") != 3:
+        fails.append(f"(h) taper_keep must override the choice for its race: {kept_wk}")
+    # (g) the wiring: generate_plan reads the stored setting
+    taper_of = lambda plan: next((p["weeks"] for p in plan.get("phases") or [] if p.get("key") == "taper"), None)
+    fx, ftoday = _race_fixture_db("marathon", weeks_out=20)
+    try:
+        p_auto = E.generate_plan(fx, today=ftoday)
+        E.set_meta(fx, "set:taper_weeks", "2"); fx.commit()
+        p_two = E.generate_plan(fx, today=ftoday)
+    finally:
+        fx.close()
+    detail["fixture_taper"] = {"automatic": taper_of(p_auto), "set_2": taper_of(p_two)}
+    if taper_of(p_auto) != 3 or taper_of(p_two) != 2:
+        fails.append(f"(g) generate_plan taper weeks automatic/set-2 = {taper_of(p_auto)}/{taper_of(p_two)}, want 3/2")
+    # (g2) …and keeps a started taper: a saved 3-week plan, the setting at 2, regenerated inside the
+    # automatic taper's first week, still lays 3; the week before, it lays 2
+    fx, ftoday = _race_fixture_db("marathon", weeks_out=20)
+    try:
+        rdate = (ftoday + _td(weeks=20)).isoformat()
+        E.set_meta(fx, "rebase_start", ftoday.isoformat())
+        E.set_meta(fx, "set:taper_weeks", "2")
+        fx.execute("INSERT INTO plans (created_at, for_date, inputs, plan) VALUES (?,?,?,?)",
+                   (S._now_iso(), ftoday.isoformat(), "{}", S.json.dumps(
+                       {"phases": [{"kind": "taper", "key": "taper", "weeks": 3, "date": rdate}]})))
+        fx.commit()
+        in_taper = taper_of(E.generate_plan(fx, today=ftoday + _td(weeks=18, days=1)))
+        before = taper_of(E.generate_plan(fx, today=ftoday + _td(weeks=17, days=6)))
+    finally:
+        fx.close()
+    detail["fixture_kept"] = {"in_taper": in_taper, "week_before": before}
+    if in_taper != 3 or before != 2:
+        fails.append(f"(g2) a started taper: in-taper/before = {in_taper}/{before}, want 3/2")
+    return _st("det", "taper-length",
+               "§TAPERLEN — the taper-length setting moves weeks between the Peak and the Taper only; automatic "
+               "keeps the 3-or-2 rule; a tune-up keeps its 1-week sharpen; generate_plan reads the setting",
+               passed=not fails, expect="automatic ≡ before; only Peak/Taper move; sums kept; wiring 3/2",
+               got={"violations": fails or "none", **detail})
+
+
+def _stc_long_run_max():
+    """§LRMAX (SH-53) — the long run's absolute ceiling: LONG_RUN_MAX_KM or LONG_RUN_MAX_MIN at its own
+    planned pace, the shorter, folded into §PRO9's `long_km_cap` so it only ever lowers it. Locks:
+    (a) slow pace, the TIME limb binds: a peak-sized week whose long run would run past four hours is
+    laid at ≤ LONG_RUN_MAX_MIN minutes, the MP finish keeps its minutes, the week's TRIMP is kept (the
+    km move to the easy runs), the run is flagged `long_max_capped` (not `long_step_capped`) and its
+    note names the limit; (b) fast pace, the DISTANCE limb binds: ≤ LONG_RUN_MAX_KM in under the
+    minutes; (c) a step cap tighter than the limit lays exactly what it lays with the limit switched off,
+    flagged `long_step_capped`; (d) no cap (caution) ⇒ no limit; (e) `_week_limits` publishes the axis
+    (minutes against the limit, km beside it, `binds` when it held) and never names it the week's
+    `binding`, which the card reads as the limit that sized the week; `_long_max_read` reads the flag
+    only off fresh sessions. Pure."""
+    from datetime import date
+    fails, detail = [], {}
+    mon = date(2026, 11, 16)                           # a Monday
+    wk = {"wk": 1, "km": 90, "runs": 5, "long": 40, "strides": 0, "phase": "peak", "role": "build",
+          "quality": [{"kind": "long_mp", "zone": "marathon", "frac": 0.10, "attach": "long",
+                       "label": "long-fast resilience run", "component": "resilience"}]}
+
+    def lay(easy, mp, cap, limits=True, week=None, **kw):
+        zones = {"easy": easy, "easy_top": easy, "marathon": mp, "threshold": mp - 30, "interval": mp - 60}
+        budget = float((week or wk)["km"]) * (easy / 60.0) * E.EASY_TRIMP_PER_MIN
+        keep = (E.LONG_RUN_MAX_KM, E.LONG_RUN_MAX_MIN)
+        try:
+            if not limits:
+                E.LONG_RUN_MAX_KM, E.LONG_RUN_MAX_MIN = 10_000.0, 100_000
+            sess, _ = E._distribute_week(dict(week or wk), mon, budget, easy, zones, long_km_cap=cap, **kw)
+        finally:
+            E.LONG_RUN_MAX_KM, E.LONG_RUN_MAX_MIN = keep
+        return sess
+
+    longest = lambda ss: max(ss, key=lambda x: x.get("km") or 0.0)
+    work_min = lambda s: sum((r.get("minutes") or 0) for r in (s.get("reps") or []) if r.get("effort") == "work")
+    trimp = lambda ss: round(sum(x.get("trimp") or 0.0 for x in ss), 1)
+    for tag, easy, mp, limb in (("slow", 375, 340, "time"), ("fast", 270, 235, "km")):
+        free, held = lay(easy, mp, 60.0, limits=False), lay(easy, mp, 60.0)
+        lf, lh = longest(free), longest(held)
+        detail[tag] = {"free": [lf["km"], lf["minutes"]], "held": [lh["km"], lh["minutes"]],
+                       "trimp": [trimp(free), trimp(held)]}
+        # anti-vacuity: the limb under test must be the one the free lay passes
+        if limb == "time" and not lf["minutes"] > E.LONG_RUN_MAX_MIN:
+            fails.append(f"({tag}) vacuous: the free long run is {lf['minutes']} min, not past the limit")
+        if limb == "km" and not (lf["km"] > E.LONG_RUN_MAX_KM and lh["minutes"] < E.LONG_RUN_MAX_MIN):
+            fails.append(f"({tag}) vacuous: free {lf['km']} km / held {lh['minutes']} min does not isolate the km limb")
+        if lh["minutes"] > E.LONG_RUN_MAX_MIN or lh["km"] > E.LONG_RUN_MAX_KM + 1e-9:
+            fails.append(f"({tag}) long run {lh['km']} km / {lh['minutes']} min passes the limit")
+        if limb == "km" and lh["km"] < E.LONG_RUN_MAX_KM - 0.2:
+            fails.append(f"({tag}) the km limb should hold the run at ~{E.LONG_RUN_MAX_KM} km, laid {lh['km']}")
+        if limb == "time" and lh["minutes"] < E.LONG_RUN_MAX_MIN - 2:
+            fails.append(f"({tag}) the time limb should hold the run at ~{E.LONG_RUN_MAX_MIN} min, laid {lh['minutes']}")
+        if work_min(lh) != work_min(lf):
+            fails.append(f"({tag}) the MP finish changed: {work_min(lf)} → {work_min(lh)} min")
+        if abs(trimp(free) - trimp(held)) > 1.0:
+            fails.append(f"({tag}) the week's TRIMP moved: {trimp(free)} → {trimp(held)}")
+        if not lh.get("long_max_capped") or lh.get("long_step_capped"):
+            fails.append(f"({tag}) flags: long_max_capped={lh.get('long_max_capped')} long_step_capped={lh.get('long_step_capped')}")
+        if "long-run limit" not in (lh.get("note") or ""):
+            fails.append(f"({tag}) the note does not name the limit: {lh.get('note')!r}")
+    # (a2) the raise path: a week whose share lays a short long run, raised by §SHARE toward a far
+    # ladder, stops AT the limit with no clip, and must still read as held (the golden peak weeks)
+    wk_lo = dict(wk, long=20)
+    r_free = longest(lay(270, 235, 48.0, limits=False, week=wk_lo))
+    r_held = longest(lay(270, 235, 48.0, week=wk_lo))
+    detail["raise"] = {"free": [r_free["km"], r_free["minutes"]], "held": [r_held["km"], r_held["minutes"]]}
+    if not r_free["km"] > E.LONG_RUN_MAX_KM:
+        fails.append(f"(a2) vacuous: the raise lays {r_free['km']} km without the limit")
+    if not (E.LONG_RUN_MAX_KM - 0.2 <= r_held["km"] <= E.LONG_RUN_MAX_KM) or not r_held.get("long_max_capped"):
+        fails.append(f"(a2) raised run {r_held['km']} km, long_max_capped={r_held.get('long_max_capped')}")
+    # (a3)/(a4) the review's two escapes, on its own inputs: a build week with a VO2 session, the long
+    # run's MP finish at 0.13 of the week, easy 373 s/km (zones easy 383), MP 332, a step cap of 40.
+    def lay_r(km, runs, **kw):
+        q = [{"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals", "rep_min": 3,
+              "rec_min": 2, "label": "VO2", "component": "vo2max", "rot": 0},
+             {"kind": "long_mp", "zone": "marathon", "frac": 0.13, "attach": "long", "label": "lr",
+              "component": "resilience"}]
+        w = {"wk": 1, "km": km, "runs": runs, "long": round(km * 0.4), "strides": 0, "phase": "build",
+             "role": "build", "quality": q}
+        z = {"easy": 383, "easy_top": 373, "marathon": 332, "threshold": 302, "interval": 272}
+        out, _ = E._distribute_week(w, mon, km * (373 / 60.0) * E.EASY_TRIMP_PER_MIN, 373, z, long_km_cap=40.0, **kw)
+        return out
+    # (a3) a 4-run week the §REST2 spread re-lays to 5 runs calls the layout again: the limit must
+    # survive the recursion (it came back as the +10 % step, unflagged, at 35.1 km)
+    for km in (120, 125):
+        rl = longest(lay_r(km, 4))
+        detail[f"relay_{km}"] = [rl["km"], rl["minutes"], bool(rl.get("long_max_capped")), bool(rl.get("long_step_capped"))]
+        if rl["km"] > E.LONG_RUN_MAX_KM + 1e-9 or rl["minutes"] > E.LONG_RUN_MAX_MIN \
+                or not rl.get("long_max_capped") or rl.get("long_step_capped"):
+            fails.append(f"(a3) re-laid {km}-km week: long {rl['km']} km / {rl['minutes']} min, "
+                         f"max={rl.get('long_max_capped')} step={rl.get('long_step_capped')}")
+    # (a4) three days left (Fri–Sun) carrying 110 km: an easy run takes the cap's km at easy pace and
+    # ran 217 min; the shorts are held to the minutes too
+    aw = lay_r(110, 5, days_override=[4, 5, 6], free_from=4, long_km_aim=40.0)
+    detail["three_days"] = [(x["date"][5:], x.get("kind"), x["km"], x["minutes"]) for x in aw]
+    over = [(x["date"], x["km"], x["minutes"]) for x in aw if (x.get("minutes") or 0) > E.LONG_RUN_MAX_MIN]
+    if over:
+        fails.append(f"(a4) three days left: runs past the minutes {over}")
+    # (c) a tighter step cap: the limit is inert
+    st_on, st_off = lay(375, 340, 30.0), lay(375, 340, 30.0, limits=False)
+    if [(x["date"], x["km"], x["minutes"]) for x in st_on] != [(x["date"], x["km"], x["minutes"]) for x in st_off]:
+        fails.append("(c) a step cap tighter than the limit laid differently with the limit on")
+    if not longest(st_on).get("long_step_capped") or longest(st_on).get("long_max_capped"):
+        fails.append("(c) a tighter step cap must flag long_step_capped, not long_max_capped")
+    # (d) caution (no cap) has no limit
+    cau = longest(lay(375, 340, None))
+    detail["caution"] = [cau["km"], cau["minutes"]]
+    if cau["km"] <= E.LONG_RUN_MAX_KM or cau.get("long_max_capped"):
+        fails.append(f"(d) the caution lay was limited: {cau['km']} km")
+    # (e) the published axis
+    base = dict(assertive=True, eff_cap=1.25, acwr_laid=1.10, clipped=False, long_cap=40.0, long_laid=34.9,
+                long_bound=False, eq_week_cap=None, eq_week_laid=None, eq_week_bound=False, eq_sess_cap=None,
+                eq_sess_laid=None, streak=None, streak_bound=False, ramp_cap=None, ctl_gain=None)
+    held_l = E._week_limits(**base, long_max={"km": 34.9, "min": 210, "binds": True})
+    ax = held_l.get("long_max") or {}
+    if (ax.get("ceiling"), ax.get("laid"), ax.get("unit"), ax.get("km"), ax.get("max_km"), ax.get("binds")) != \
+            (E.LONG_RUN_MAX_MIN, 210, "min", 34.9, E.LONG_RUN_MAX_KM, True):
+        fails.append(f"(e) held axis {ax}")
+    # it holds one run, never the week's size: the week's `binding` stays with the week's governors
+    near = E._week_limits(**base, long_max={"km": 34.0, "min": 207, "binds": False})
+    if held_l.get("binding") == "long_max" or near.get("binding") == "long_max":
+        fails.append(f"(e) the long-run limit was named the week's binding axis ({held_l.get('binding')}/{near.get('binding')})")
+    if "long_max" in E._week_limits(**base):
+        fails.append("(e) the axis appears with no long run read")
+    ss = [{"date": "2026-11-22", "km": 34.9, "minutes": 210, "long_max_capped": True},
+          {"date": "2026-11-18", "km": 14.0, "minutes": 86}]
+    if E._long_max_read(ss) != {"km": 34.9, "min": 210, "binds": True} or \
+            E._long_max_read(ss, fresh=[ss[1]])["binds"]:
+        fails.append("(e) _long_max_read: the run or the fresh-only flag read is wrong")
+    return _st("det", "long-run-max",
+               "§LRMAX — the long run is held to 35 km or 3 h 30 min at its planned pace, the shorter; the "
+               "MP finish and the week's load are kept; the limit is named, published, and inert under a "
+               "tighter step cap or with no cap",
+               passed=not fails, expect="time limb on slow pace, km limb on fast; flags, note, axis",
+               got={"violations": fails or "none", **detail})
+
+
 def _stc_race_day_landing():
     """§PER1 calendar-precision — with a block_start the periodized phases, laid contiguously from that
     Monday grid, land the final taper week ON the race's calendar week (race-week-inclusive span), where
@@ -22565,7 +22833,8 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_doubles_log(), lambda: _stc_dedup(db),
                  lambda: _stc_local_delete(), lambda: _stc_settings(), lambda: _stc_secrets(), lambda: _stc_copy_posture(db),
                  lambda: _stc_multi_a_chain(),
-                 lambda: _stc_periodize_chain(), lambda: _stc_race_day_landing(),
+                 lambda: _stc_periodize_chain(), lambda: _stc_taper_length(), lambda: _stc_long_run_max(),
+                 lambda: _stc_race_day_landing(),
                  lambda: _stc_race_session(),   # §RACE
                  lambda: _stc_tuneup_session(),  # §TT2
                  lambda: _stc_race_lifecycle(), lambda: _stc_backup_export(),
