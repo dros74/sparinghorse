@@ -6422,6 +6422,625 @@ def _stc_straddle_race():
                got={"d2_eow_pre_post": d2_eow, "failures": fails or "none"})
 
 
+def _stc_lay_within_ceiling():
+    """SH-112 — the FINAL lay, not only the search's `allowed` lay, must clear the site's judge."""
+    from datetime import date, timedelta
+    mon = date(2026, 11, 2)
+    tue = mon + timedelta(days=1)
+    easy = 390
+    zones = {"easy_top": easy, "easy": 420, "marathon": 350, "threshold": 330, "interval": 310}
+    vo2 = {"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+           "rep_min": 3, "rec_min": 2, "label": "VO₂"}
+    fails, got = [], {}
+
+    def _generate(shape, seed, regime, away, today_i=0, series=None, actuals=None, calls=None,
+                  history=None, adjust=None, race=None):
+        if calls is not None:
+            calls.clear()
+        real = E._lay_within_ceiling
+
+        def wrapped(lay, total, breaches, swap=None):
+            checks = []
+
+            def judged(sess, day_trimps, t):
+                bad = breaches(sess, day_trimps, t)
+                checks.append((t, bad))
+                return bad
+
+            import inspect
+            supports_swap = "swap" in inspect.signature(real).parameters
+            if supports_swap:
+                if swap is None:
+                    fails.append("(swap_sites) a ceiling call site omitted its swap configuration")
+                answer = real(lay, total, judged, swap=swap)
+            else:
+                answer = (*real(lay, total, judged), [])
+            if calls is not None:
+                calls.append({"total": total, "chosen": answer[2], "swap": swap,
+                              "stepped": answer[3], "moves": answer[4], "checks": checks})
+            return answer if supports_swap else answer[:4]
+
+        E._lay_within_ceiling = wrapped
+        try:
+            return E.generate_block(
+                [dict(w, quality=[dict(q) for q in w["quality"]]) for w in shape],
+                mon, *seed, easy, zones=zones, today=mon + timedelta(days=today_i),
+                day_series=series if series is not None else {mon.isoformat(): 0.0},
+                regime=regime, blocked=away, week_actuals=actuals, adjust=adjust, race=race,
+                **(history or {}))[0][0]
+        finally:
+            E._lay_within_ceiling = real
+
+    def _assert_total(tag, total, expected, calls, require_step=True):
+        if abs(total - expected) > 0.05:
+            fails.append(f"({tag}) total {total:.3f} differs from expected {expected:.3f} TRIMP")
+        if not calls:
+            fails.append(f"({tag}) fixture did not reach the lay guard")
+            return
+        call = calls[-1]
+        if call["stepped"] != require_step:
+            fails.append(f"({tag}) stepped={call['stepped']}, expected {require_step}")
+        if not call["stepped"]:
+            return
+        if len(call["checks"]) < 2 or not call["checks"][-2][1]:
+            fails.append(f"({tag}) preceding k-1 step does not breach: {call['checks']}")
+
+    def _case(tag, km, runs, long, quality, seed, away_offsets, regime, expected, require_step=True):
+        shape = [{"wk": 1, "km": km, "runs": runs, "long": long, "strides": 0,
+                  "quality": [dict(vo2)] if quality else [], "intent": "Build — general"}]
+        away = {(mon + timedelta(days=o)).isoformat() for o in away_offsets}
+        calls = []
+
+        def _gen(today_i=0, mon_session=None):
+            c, a = seed
+            actuals = None
+            series = {mon.isoformat(): 0.0}
+            if mon_session is not None:
+                load = float(mon_session["trimp"])
+                actuals = (1, mon_session["km"])
+                series = {mon.isoformat(): load}
+            if today_i:
+                load = float(mon_session["trimp"]) if mon_session is not None else 0.0
+                c = E._ewma_step(c, load, E.TAU_CTL)
+                a = E._ewma_step(a, load, E.TAU_ATL)
+            return _generate(shape, (c, a), regime, away, today_i, series, actuals, calls)
+
+        week = _gen()
+        sess = [s for s in week["sessions"] if (s.get("km") or 0) > 0 and s.get("kind") != "rest"]
+        dt = {s["date"]: float(s.get("trimp") or 0) for s in sess}
+        total = sum(dt.values())
+        bad = E._lay_breaches(*seed, shape[0], mon.isoformat(), sess, dt, E.ACWR_SOFT, total,
+                              ramp_max=E.CTL_RAMP_MAX if regime == "assertive" else None,
+                              shape_neutral=regime == "assertive")
+        peak = week.get("peak_acwr") or 0.0
+        binds = week["limits"]["acwr"]["binds"]
+        if bad or peak > E.ACWR_HARD:
+            fails.append(f"({tag}) final lay breaches={bad}, peak {peak:.3f} > {E.ACWR_HARD:.2f}; "
+                         f"total {total:.1f} TRIMP")
+        _assert_total(tag, total, expected, calls, require_step)
+        if not binds:
+            fails.append(f"({tag}) limits.acwr.binds is false at total {total:.1f}, expected {expected:.1f}")
+        mon_session = next((s for s in sess if s["date"] == mon.isoformat()), None)
+        rebuilt = _gen(1, mon_session)
+        keys = lambda w: [(s["date"], s.get("kind"), s.get("km"), s.get("trimp"))
+                          for s in w["sessions"] if s["date"] >= tue.isoformat()]
+        if keys(week) != keys(rebuilt):
+            fails.append(f"({tag}) Tue–Sun differ after Monday: "
+                         f"Monday {keys(week)} vs Tuesday {keys(rebuilt)}")
+        if week["intent_km"] != rebuilt["intent_km"]:
+            fails.append(f"({tag}) intent_km Monday {week['intent_km']} vs Tuesday {rebuilt['intent_km']}")
+        rebuilt_binds = rebuilt["limits"]["acwr"]["binds"]
+        if binds != rebuilt_binds:
+            fails.append(f"({tag}) acwr.binds Monday {binds} vs Tuesday {rebuilt_binds}")
+        got[tag] = {"expected": expected, "total": round(total, 3),
+                    "km": week["km"], "peak": peak, "binds": binds,
+                    "intent_km": [week["intent_km"], rebuilt["intent_km"]]}
+
+    def _remainder_case(tag, role, expected):
+        shape = [{"wk": 1, "km": 20, "runs": 6, "long": 6.4, "strides": 0,
+                  "quality": [dict(vo2)], "intent": "Build — general"}]
+        if role:
+            shape[0].update(role=role, intent="Down week")
+        away = {mon.isoformat(), (mon + timedelta(days=4)).isoformat()}
+        calls = []
+
+        def _gen(today_i=0, mon_session=None):
+            c, a = (22.0, 22.0)
+            series = {mon.isoformat(): 0.0}
+            actuals = None
+            if mon_session is not None:
+                load = float(mon_session["trimp"]) * 1.1
+                for offset in range(today_i):
+                    d = (mon + timedelta(days=offset)).isoformat()
+                    day_load = load if d == mon_session["date"] else 0.0
+                    c = E._ewma_step(c, day_load, E.TAU_CTL)
+                    a = E._ewma_step(a, day_load, E.TAU_ATL)
+                series = {mon_session["date"]: load}
+                actuals = (1, round(mon_session["km"] * 1.1, 2))
+            return _generate(shape, (c, a), "assertive", away, today_i, series, actuals, calls)
+
+        monday = _gen()
+        mon_session = max((s for s in monday["sessions"]
+                           if s["date"] < (mon + timedelta(days=2)).isoformat()
+                           and (s.get("km") or 0) > 0), key=lambda s: s["date"])
+        week = _gen(2, mon_session)
+        wed = (mon + timedelta(days=2)).isoformat()
+        sess = [s for s in week["sessions"] if s["date"] >= wed
+                and (s.get("km") or 0) > 0 and s.get("kind") != "rest"]
+        dt = {s["date"]: float(s.get("trimp") or 0) for s in sess}
+        total = sum(dt.values())
+        load = float(mon_session["trimp"]) * 1.1
+        seed = (22.0, 22.0)
+        for offset in range(2):
+            d = (mon + timedelta(days=offset)).isoformat()
+            day_load = load if d == mon_session["date"] else 0.0
+            seed = (E._ewma_step(seed[0], day_load, E.TAU_CTL),
+                    E._ewma_step(seed[1], day_load, E.TAU_ATL))
+        bad = E._lay_breaches(*seed, shape[0], mon.isoformat(), sess, dt, E.ACWR_SOFT, total,
+                              roll_from=wed, shape_neutral=True,
+                              lived_trimps={mon_session["date"]: load})
+        peak = week.get("peak_acwr") or 0.0
+        binds = week["limits"]["acwr"]["binds"]
+        if bad or peak > E.ACWR_HARD:
+            fails.append(f"({tag}) remainder breaches={bad}, peak {peak:.3f}; total {total:.1f} TRIMP")
+        _assert_total(tag, total, expected, calls, True)
+        if not binds:
+            fails.append(f"({tag}) remainder acwr.binds is false at total {total:.1f}")
+        got[tag] = {"expected": expected, "total": round(total, 3), "peak": peak, "binds": binds,
+                    "km": sum(s["km"] for s in sess), "moves": calls[-1]["moves"]}
+
+    def _regen_case(tag, shape, seed, away, history, today_i, expected, require_step):
+        calls = []
+        week = _generate(shape, seed, "assertive", away, calls=calls, history=history)
+        total = sum(float(s.get("trimp") or 0) for s in week["sessions"]
+                    if (s.get("km") or 0) > 0 and s.get("kind") != "rest")
+        _assert_total(tag, total, expected, calls, require_step)
+        by_day = {}
+        for s in week["sessions"]:
+            if (s.get("km") or 0) > 0 and s.get("kind") != "rest":
+                by_day.setdefault(s["date"], []).append(s)
+        c, a = seed
+        series, n, km = {}, 0, 0.0
+        for offset in range(today_i):
+            iso = (mon + timedelta(days=offset)).isoformat()
+            load = sum(float(s["trimp"]) for s in by_day.get(iso, []))
+            series[iso] = load
+            n += len(by_day.get(iso, []))
+            km += sum(float(s["km"]) for s in by_day.get(iso, []))
+            c = E._ewma_step(c, load, E.TAU_CTL)
+            a = E._ewma_step(a, load, E.TAU_ATL)
+        rebuilt = _generate(shape, (c, a), "assertive", away, today_i, series,
+                            (n, round(km, 2)), history=history)
+        from_iso = (mon + timedelta(days=today_i)).isoformat()
+        keys = lambda w: [(s["date"], s.get("kind"), s.get("km"), s.get("trimp"))
+                          for s in w["sessions"] if s["date"] >= from_iso]
+        if keys(week) != keys(rebuilt):
+            fails.append(f"({tag}) regeneration sessions differ: Monday {keys(week)} vs {keys(rebuilt)}")
+        if week["intent_km"] != rebuilt["intent_km"]:
+            fails.append(f"({tag}) intent_km Monday {week['intent_km']} vs regeneration {rebuilt['intent_km']}")
+        binds = week["limits"]["acwr"]["binds"]
+        rebuilt_binds = rebuilt["limits"]["acwr"]["binds"]
+        if binds != rebuilt_binds:
+            fails.append(f"({tag}) acwr.binds Monday {binds} vs regeneration {rebuilt_binds}")
+        got[tag] = {"expected": expected, "total": round(total, 3), "binds": binds,
+                    "intent_km": [week["intent_km"], rebuilt["intent_km"]]}
+
+    def _swap_c01():
+        shape = [{"wk": 1, "km": 25, "runs": 7, "long": 8.0, "strides": 0,
+                  "quality": [], "intent": "Build — general", "phase": "build"}]
+        away = {(mon + timedelta(days=4)).isoformat()}
+        calls = []
+        week = _generate(shape, (70.0, 109.3), "assertive", away, calls=calls)
+        runs = [s for s in week["sessions"] if s.get("kind") != "rest"]
+        if (week["km"], len(runs), round(week["trimp_total"], 1)) != (10.1, 3, 109.8):
+            fails.append(f"(swap_c01) km/runs/TRIMP {week['km']}/{len(runs)}/{week['trimp_total']:.1f}, "
+                         "expected 10.1/3/109.8")
+        if week["peak_acwr"] > E.ACWR_HARD or not week["limits"]["acwr"]["binds"]:
+            fails.append(f"(swap_c01) peak {week['peak_acwr']}, binds {week['limits']['acwr']['binds']}")
+        moved = [s for s in runs if s.get("moved_from")]
+        if len(moved) != 1 or (moved[0]["moved_from"], moved[0]["date"]) != (mon.isoformat(), "2026-11-04"):
+            fails.append(f"(swap_c01) moved_from/date wrong: {[(s.get('moved_from'), s['date']) for s in runs]}")
+        keys = lambda w: sorted((s["date"], s.get("kind"), s.get("km"), s.get("trimp"),
+                                 s.get("moved_from")) for s in w["sessions"])
+        for today_i in (1, 3):
+            c, a, series, n, km = 70.0, 109.3, {}, 0, 0.0
+            for offset in range(today_i):
+                iso = (mon + timedelta(days=offset)).isoformat()
+                load = sum(float(s.get("trimp") or 0) for s in runs if s["date"] == iso)
+                day_runs = [s for s in runs if s["date"] == iso]
+                series[iso] = load
+                n += len(day_runs)
+                km += sum(float(s.get("km") or 0) for s in day_runs)
+                c, a = E._ewma_step(c, load, E.TAU_CTL), E._ewma_step(a, load, E.TAU_ATL)
+            rebuilt = _generate(shape, (c, a), "assertive", away, today_i, series,
+                                (n, round(km, 2)), calls)
+            if not any(s.get("moved_from") for s in rebuilt["sessions"]):
+                fails.append(f"(swap_c01) day {today_i} regeneration has no moved_from")
+            if keys(week) != keys(rebuilt):
+                fails.append(f"(swap_c01) day {today_i} sessions/moved_from differ: "
+                             f"{keys(week)} vs {keys(rebuilt)}")
+            if (week["intent_km"], week["limits"]["acwr"]["binds"]) != \
+                    (rebuilt["intent_km"], rebuilt["limits"]["acwr"]["binds"]):
+                fails.append(f"(swap_c01) day {today_i} intent/binds differ")
+        got["swap_c01"] = {"km": week["km"], "runs": len(runs), "total": week["trimp_total"],
+                           "moves": week.get("run_moved"), "regenerated": [1, 3]}
+
+    def _golden_swap():
+        plan = S.json.loads(_golden_build(dict(), None, "caution"))
+        found = []
+
+        def walk(value):
+            if isinstance(value, dict):
+                if value.get("start") == "2026-09-14" and "sessions" in value:
+                    found.append(value)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        walk(plan)
+        week = found[0]
+        interval = next(s for s in week["sessions"] if s.get("kind") == "interval")
+        if (week["km"], week["runs"], week["trimp_total"]) != (16.3, 4, 142.5):
+            fails.append(f"(swap_golden) km/runs/TRIMP {week['km']}/{week['runs']}/{week['trimp_total']}, "
+                         "expected 16.3/4/142.5")
+        if (interval.get("moved_from"), interval["date"]) != ("2026-09-15", "2026-09-16"):
+            fails.append(f"(swap_golden) interval move is {interval.get('moved_from')} → {interval['date']}")
+        got["swap_golden"] = {"km": week["km"], "runs": week["runs"], "total": week["trimp_total"],
+                              "moves": week.get("run_moved")}
+
+    def _step_case(tag, shape, seed, regime, away, expected, history=None):
+        calls = []
+        week = _generate(shape, seed, regime, away, calls=calls, history=history)
+        _assert_total(tag, week["trimp_total"], expected, calls, True)
+        if week.get("run_moved") or any(s.get("moved_from") for s in week["sessions"]):
+            fails.append(f"({tag}) immovable/no-fit peak moved instead of stepping")
+        got[tag] = {"expected": expected, "total": week["trimp_total"], "stepped": True}
+
+    def _remainder_swap():
+        import copy
+        start, roll = mon.isoformat(), "2026-11-04"
+        sessions = [{"date": roll, "kind": "easy", "km": 3.2, "minutes": 21, "trimp": 35.2},
+                    {"date": "2026-11-08", "kind": "long", "km": 3.2, "minutes": 21, "trimp": 35.1}]
+        dt = {s["date"]: s["trimp"] for s in sessions}
+        judge = dict(ctl=70.0, atl=109.3, wk={"km": 25, "runs": 3, "long": 8.0},
+                     start=start, cap=E.ACWR_SOFT, roll_from=roll,
+                     lived_trimps={mon.isoformat(): 0.0, "2026-11-03": 0.0})
+        breaches = lambda ss, dd, t: E._lay_breaches(sess=ss, dt=dd, charge=t, **judge)
+        import inspect
+        lay = lambda t: (copy.deepcopy(sessions), dict(dt))
+        if "swap" in inspect.signature(E._lay_within_ceiling).parameters:
+            answer = E._lay_within_ceiling(lay, 70.3, breaches,
+                                           swap=dict(judge=judge, free_from=2, fixed_days=[0]))
+        else:
+            answer = (*E._lay_within_ceiling(lay, 70.3, breaches), [])
+        moved = next(s for s in answer[0] if s.get("kind") == "easy")
+        if answer[2:] != (70.3, False, [{"from": roll, "to": "2026-11-05"}]) \
+                or (moved.get("moved_from"), moved["date"]) != (roll, "2026-11-05"):
+            fails.append(f"(remainder_swap) unexpected answer: {answer}")
+        got["remainder_swap"] = {"total": answer[2], "moves": answer[4]}
+
+    def _as_laid_regen(tag, shape, seed, regime, away_offsets, today_i, prev_tail=0):
+        away = {(mon + timedelta(days=o)).isoformat() for o in away_offsets}
+        history = dict(prev_tail=prev_tail)
+        week = _generate(shape, seed, regime, away, history=history)
+        runs = [s for s in week["sessions"] if s.get("kind") != "rest" and (s.get("km") or 0) > 0]
+        c, a, series, n, km = *seed, {}, 0, 0.0
+        for offset in range(today_i):
+            iso = (mon + timedelta(days=offset)).isoformat()
+            daily = [s for s in runs if s["date"] == iso]
+            load = sum(float(s.get("trimp") or 0.0) for s in daily)
+            series[iso] = load
+            n += len(daily)
+            km += sum(float(s.get("km") or 0.0) for s in daily)
+            c, a = E._ewma_step(c, load, E.TAU_CTL), E._ewma_step(a, load, E.TAU_ATL)
+        rebuilt = _generate(shape, (c, a), regime, away, today_i, series,
+                            (n, round(km, 2)), history=history)
+        cut = (mon + timedelta(days=today_i)).isoformat()
+        keys = lambda w: sorted((s["date"], s.get("kind"), s.get("km"), s.get("trimp"),
+                                 s.get("moved_from")) for s in w["sessions"]
+                                if s["date"] >= cut and s.get("kind") != "rest")
+        if keys(week) != keys(rebuilt):
+            fails.append(f"({tag}) as-laid regeneration differs: {keys(week)} vs {keys(rebuilt)}")
+        if (week.get("run_moved") or None) != (rebuilt.get("run_moved") or None):
+            fails.append(f"({tag}) published moves differ: {week.get('run_moved')} vs "
+                         f"{rebuilt.get('run_moved')}")
+        got[tag] = {"day": today_i, "moves": rebuilt.get("run_moved")}
+
+    def _monday_night():
+        shape = [{"wk": 1, "km": 20, "runs": 5, "long": 6.3, "strides": 0,
+                  "quality": [dict(vo2), E._thu_spec(1)], "intent": "Build — general", "phase": "build"}]
+        away = {(mon + timedelta(days=o)).isoformat() for o in (4, 6)}
+        seed = (27.38981493249268, 30.913845237745527)
+        history = dict(prev_tail=2)
+        week = _generate(shape, seed, "assertive", away, history=history)
+        monday = next(s for s in week["sessions"] if s["date"] == mon.isoformat())
+        night = _generate(shape, seed, "assertive", away, series={mon.isoformat(): monday["trimp"]},
+                          actuals=(1, monday["km"]),
+                          history=dict(history, today_run=True, today_trimp=monday["trimp"]))
+        keys = lambda w: sorted((s["date"], s.get("kind"), s.get("km"), s.get("trimp"),
+                                 s.get("moved_from")) for s in w["sessions"] if s["date"] > mon.isoformat())
+        if keys(week) != keys(night) or week.get("run_moved") != night.get("run_moved"):
+            fails.append(f"(monday_night) morning/night differ: {keys(week)} / {week.get('run_moved')} vs "
+                         f"{keys(night)} / {night.get('run_moved')}")
+        got["monday_night"] = night.get("run_moved")
+
+    def _monday_actual_floor_retry():
+        shape = [{"wk": 1, "km": 20.0, "runs": 6, "long": 7.4, "strides": 2,
+                  "quality": [dict(vo2)], "intent": "Build — general", "phase": "build"}]
+        seed = (23.688988970097608, 31.17438158303504)
+        load = 30.0
+        night = _generate(shape, seed, "assertive", {mon.isoformat()},
+                          series={mon.isoformat(): load}, actuals=(1, 2.8),
+                          history=dict(today_run=True, today_trimp=load, pinned_past=({}, set())))
+        sess = [s for s in night["sessions"] if s["date"] > mon.isoformat()]
+        dt = {s["date"]: float(s.get("trimp") or 0.0) for s in sess}
+        projection = dict(ctl=seed[0], atl=seed[1], roll_from=mon.isoformat(),
+                          actual_floor={mon.isoformat(): load})
+        peak_day = E._lay_peak_day(mon.isoformat(), dt, projection)
+        if peak_day is not None:
+            fails.append(f"(monday_actual_floor) Tuesday–Sunday peak above hard cap on {peak_day}: "
+                         f"{[(s['date'], s['kind'], s['km']) for s in sess]}")
+        got["monday_actual_floor"] = {"peak_day": peak_day, "peak": night.get("peak_acwr")}
+
+    def _race_placeholder_immovable():
+        shape = [{"wk": 1, "km": 10, "runs": 5, "long": 3.0, "strides": 0,
+                  "quality": [], "intent": "Build — general", "phase": "build"}]
+        race = {"date": tue.isoformat(), "km": 10.0, "pace_sec": 330, "zone": "threshold",
+                "label": "tune-up", "tune_up": True}
+        week = _generate(shape, (20, 22.4), "caution", set(), race=race)
+        moved = [s for s in week["sessions"] if s.get("moved_from") == race["date"]]
+        if moved or week.get("run_moved"):
+            fails.append(f"(race_placeholder) race-day placeholder moved: {week.get('run_moved')}")
+        got["race_placeholder"] = {"km": week["km"], "moves": week.get("run_moved")}
+
+    def _as_laid_keeps_final_run():
+        shape = [{"wk": 1, "km": 8.0, "runs": 5, "long": 2.5, "strides": 2,
+                  "quality": [], "intent": "Build — general", "phase": "build"}]
+        seed = (18.284623422207236, 21.919495210687675)
+        history = dict(prev_tail=1)
+        monday = _generate(shape, seed, "caution", set(), history=history)
+        runs = [s for s in monday["sessions"] if s.get("kind") != "rest" and (s.get("km") or 0) > 0]
+        c, a, series, n, km = *seed, {}, 0, 0.0
+        for offset in range(5):
+            iso = (mon + timedelta(days=offset)).isoformat()
+            daily = [s for s in runs if s["date"] == iso]
+            load = sum(float(s.get("trimp") or 0.0) for s in daily)
+            series[iso] = load
+            n += len(daily)
+            km += sum(float(s.get("km") or 0.0) for s in daily)
+            if offset < 4:
+                c, a = E._ewma_step(c, load, E.TAU_CTL), E._ewma_step(a, load, E.TAU_ATL)
+        friday = (mon + timedelta(days=4)).isoformat()
+        night = _generate(shape, (c, a), "caution", set(), 4, series, (n, round(km, 2)),
+                          history=dict(history, today_run=True, today_trimp=series[friday],
+                                       pinned_past=({}, set())))
+        keys = lambda w: sorted((s["date"], s.get("kind"), s.get("km"), s.get("trimp"),
+                                 s.get("moved_from")) for s in w["sessions"]
+                                if s["date"] >= "2026-11-07" and s.get("kind") != "rest")
+        if keys(monday) != keys(night):
+            fails.append(f"(as_laid_final_run) Friday night differs: {keys(monday)} vs {keys(night)}")
+        got["as_laid_final_run"] = keys(night)
+
+    def _moved_badge_names_every_source():
+        src = (S.Path(S.__file__).parent / "static/app.js").read_text(encoding="utf-8")
+        title = ("${w.run_moved.length>1?'Runs':'Run'} moved from "
+                 "${w.run_moved.map(m=>sessDate(m.from).split(' - ').pop()).join(' and ')}")
+        if src.count(title) != 1:
+            fails.append("(moved_badge_sources) title does not name every run_moved source day")
+        got["moved_badge_sources"] = src.count(title)
+
+    def _remainder_site_natural():
+        shape = [{"wk": 1, "km": 15, "runs": 5, "long": 4.8, "strides": 0,
+                  "quality": [], "intent": "Build — general", "phase": "build"}]
+        seed = (18.93257329669992, 18.426947519348662)
+        monday = _generate(shape, seed, "caution", set())
+        laid = next(s for s in monday["sessions"] if s["date"] == mon.isoformat())
+        load, km = float(laid["trimp"]) * 1.3, round(laid["km"] * 1.3, 2)
+        c, a = E._ewma_step(seed[0], load, E.TAU_CTL), E._ewma_step(seed[1], load, E.TAU_ATL)
+        week = _generate(shape, (c, a), "caution", set(), 1, {mon.isoformat(): load}, (1, km))
+        expected = [{"from": tue.isoformat(), "to": "2026-11-06"}]
+        if week.get("run_moved") != expected:
+            fails.append(f"(remainder_site_natural) moves {week.get('run_moved')}, expected {expected}")
+        got["remainder_site_natural"] = week.get("run_moved")
+
+    def _checkin_and_preferences():
+        shape = [{"wk": 1, "km": 15, "runs": 6, "long": 5.3, "strides": 2,
+                  "quality": [], "intent": "Build — general", "phase": "build"}]
+        adjust = {"applies_from": "2026-11-04", "applies_until": "2026-11-05",
+                  "volume_multiplier": 0.0}
+        week = _generate(shape, (32.8, 45.9), "caution", set(), adjust=adjust)
+        moved = [s for s in week["sessions"] if s.get("moved_from")]
+        if not moved or any(adjust["applies_from"] <= d <= adjust["applies_until"]
+                            for s in moved for d in (s["moved_from"], s["date"])):
+            fails.append(f"(checkin_window) moved inside check-in: {week.get('run_moved')}")
+        source_adjust = dict(adjust, applies_from=mon.isoformat(), applies_until=tue.isoformat(),
+                             volume_multiplier=0.5, easy_only=True)
+        sourced = _generate(shape, (32.8, 45.9), "caution", set(), adjust=source_adjust)
+        if any(s.get("moved_from") == mon.isoformat() for s in sourced["sessions"]):
+            fails.append("(checkin_source) moved a session out of its check-in window")
+        E.set_day_preferences("sun", "fri,mon,wed")
+        pref_shape = [{"wk": 1, "km": 10, "runs": 4, "long": 2.9, "strides": 0,
+                       "quality": [], "intent": "Build — general", "phase": "build"}]
+        pref = _generate(pref_shape, (23.9, 38.4), "caution", set())
+        away = {(mon + timedelta(days=2)).isoformat()}
+        ranked = _generate(pref_shape, (23.9, 38.4), "caution", away)
+        if pref.get("run_moved") != [{"from": tue.isoformat(), "to": "2026-11-04"}] \
+                or ranked.get("run_moved") != [{"from": tue.isoformat(), "to": "2026-11-06"}]:
+            fails.append(f"(rest_day_order) unranked/ranked moves {pref.get('run_moved')} / "
+                         f"{ranked.get('run_moved')}")
+        unranked_shape = [{"wk": 1, "km": 10, "runs": 7, "long": 2.8, "strides": 0,
+                           "quality": [], "intent": "Build — general", "phase": "build"}]
+        unranked = _generate(unranked_shape, (67.57108790815285, 103.94161605321489),
+                             "caution", set(), history=dict(prev_tail=2))
+        expected_unranked = [{"from": mon.isoformat(), "to": "2026-11-05"}]
+        if unranked.get("run_moved") != expected_unranked:
+            fails.append(f"(rest_day_unranked_first) moves {unranked.get('run_moved')}, "
+                         f"expected {expected_unranked}")
+        got["checkin_window"] = week.get("run_moved")
+        got["rest_day_order"] = [pref.get("run_moved"), ranked.get("run_moved"),
+                                  unranked.get("run_moved")]
+
+    def _forward_seam_and_publication():
+        E.set_day_preferences("sat", "wed,thu,mon")
+        shape = [{"wk": 1, "km": 20, "runs": 7, "long": 5.1, "strides": 2,
+                  "quality": [], "intent": "Build — general", "phase": "build"},
+                 {"wk": 2, "km": 21, "runs": 7, "long": 7.3, "strides": 2,
+                  "quality": [dict(vo2)], "intent": "Build — general", "phase": "build"}]
+        weeks = E.generate_block(shape, mon, 50.7, 75.9, easy, zones=zones, regime="caution")[0]
+        days = sorted({(date.fromisoformat(s["date"]) - mon).days for w in weeks for s in w["sessions"]
+                       if s.get("kind") != "rest" and (s.get("km") or 0) > 0})
+        streak = E._max_streak(days)
+        if streak > 6:
+            fails.append(f"(forward_seam) cross-week streak {streak} > 6")
+        chained = [{"date": mon.isoformat(), "kind": "easy", "km": 3.0, "trimp": 30.0}]
+        moved, dt = E._move_lay_session(chained, {mon.isoformat(): 30.0}, mon.isoformat(), "2026-11-04")
+        moved, dt = E._move_lay_session(moved, dt, "2026-11-04", "2026-11-06")
+        published = [{"from": s["moved_from"], "to": s["date"]} for s in moved if s.get("moved_from")]
+        if published != [{"from": mon.isoformat(), "to": "2026-11-06"}]:
+            fails.append(f"(move_publication) chained move published {published}")
+        got["forward_seam"] = streak
+        got["move_publication"] = published
+
+    def _swap_guard_helpers():
+        def direct(tag, days, kinds, kms, c, a, expected, extra=None, actual=None,
+                   soft_only=False, marks=None):
+            sessions = [{"date": (mon + timedelta(days=d)).isoformat(), "kind": k, "km": km,
+                         "minutes": int(km * 6.5), "trimp": round(km * 10.7, 1)}
+                        for d, k, km in zip(days, kinds, kms)]
+            sessions[0].update(marks or {})
+            dt = {s["date"]: s["trimp"] for s in sessions}
+            judge = dict(ctl=c, atl=a, wk={"km": sum(kms), "runs": len(kms), "long": kms[-1]},
+                         start=mon.isoformat(), cap=0.0 if soft_only else E.ACWR_SOFT,
+                         actual_floor=actual)
+            projection = {k: judge.get(k) for k in ("ctl", "atl", "roll_from", "actual_floor")}
+            breach_judge = dict(judge, actual_floor=None)
+            breaches = (lambda ss, dd, t: bool(E._lay_peak_day(mon.isoformat(), dd, projection))) \
+                if soft_only else (lambda ss, dd, t: E._lay_breaches(
+                    sess=ss, dt=dd, charge=t, **breach_judge))
+            answer = E._lay_swap_peak((sessions, dt), sum(dt.values()), breaches,
+                                      dict(judge=judge, **(extra or {})))
+            moves = None if answer is None else answer[2]
+            if moves != expected:
+                fails.append(f"({tag}) moves {moves}, expected {expected}")
+            got[tag] = moves
+
+        direct("guard_long_immovable", [0, 1, 6], ["long", "easy", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024, None)
+        direct("guard_rot_immovable", [0, 1, 6], ["easy", "easy", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024, None, marks={"rot": 1})
+        direct("guard_race_immovable", [0, 1, 6], ["easy", "easy", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024, None, marks={"race": "test"})
+        direct("guard_spacing", [0, 1, 6], ["interval", "interval", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024,
+               [{"from": mon.isoformat(), "to": "2026-11-05"}])
+        direct("guard_fixed", [0, 1, 6], ["interval", "easy", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024,
+               [{"from": mon.isoformat(), "to": "2026-11-05"}], dict(fixed_days=[2]))
+        direct("guard_lived", [0, 1, 6], ["interval", "easy", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024, None,
+               actual={mon.isoformat(): 61.0})
+        direct("guard_prev_tail", [0, 1, 2, 5, 6], ["easy"] * 4 + ["long"],
+               [2.5, 5.2, 5.9, 2.6, 5.2], 38.650056337043516, 55.91189585218872,
+               None, dict(prev_tail=2))
+        direct("guard_lowest_peak", [0, 1, 5, 6], ["easy", "easy", "interval", "long"],
+               [2.6, 4.5, 3.6, 4.4], 30.326827487931105, 47.72037512897291,
+               [{"from": mon.isoformat(), "to": "2026-11-04"},
+                {"from": tue.isoformat(), "to": "2026-11-05"}])
+        direct("guard_non_peak", [0, 1, 6], ["interval", "easy", "long"], [5.7, 5.2, 5.0],
+               41.88587965724818, 54.33173235988024, None, soft_only=True)
+        sessions = [{"date": "2026-11-04", "kind": "easy", "km": 3.2, "minutes": 21, "trimp": 35.2},
+                    {"date": "2026-11-08", "kind": "long", "km": 3.2, "minutes": 21, "trimp": 35.1}]
+        dt = {s["date"]: s["trimp"] for s in sessions}
+        judge = dict(ctl=70.0, atl=109.3, wk={"km": 25, "runs": 3, "long": 8.0},
+                     start=mon.isoformat(), cap=E.ACWR_SOFT, roll_from="2026-11-04",
+                     lived_trimps={mon.isoformat(): 0.0, tue.isoformat(): 0.0})
+        breaches = lambda ss, dd, t: E._lay_breaches(sess=ss, dt=dd, charge=t, **judge)
+        for tag, extra, expected in (
+                ("guard_free_from", dict(free_from=4),
+                 [{"from": "2026-11-04", "to": "2026-11-06"}]),
+                ("guard_race", dict(free_from=4, race_offsets=[3]), None)):
+            answer = E._lay_swap_peak((sessions, dt), 70.3, breaches, dict(judge=judge, **extra))
+            moves = None if answer is None else answer[2]
+            if moves != expected:
+                fails.append(f"({tag}) moves {moves}, expected {expected}")
+            got[tag] = moves
+        shape = [{"wk": 1, "km": 20, "runs": 6, "long": 7.9, "strides": 0,
+                  "quality": [], "intent": "Build — general", "phase": "build"}]
+        week = _generate(shape, (41.08709394668842, 59.658119716195515), "caution", set(),
+                         history=dict(prev_tail=2))
+        if week.get("run_moved"):
+            fails.append(f"(guard_back_streak) illegal swap {week['run_moved']}")
+        got["guard_back_streak"] = week.get("run_moved")
+
+    _golden_swap()
+    saved = E._DAY_PREF
+    E.set_day_preferences("sun", "mon")
+    try:
+        _case("caution_easy", 35, 5, 11.2, False, (22.0, 27.5), (5, 6), "caution", 113.4, False)
+        _case("caution_vo2", 35, 6, 11.2, True, (22.0, 27.5), (1, 4), "caution", 146.4, True)
+        _case("assertive", 20, 6, 6.4, False, (22.0, 27.5), (5, 6), "assertive", 111.7, False)
+        _remainder_case("remainder_build", None, 105.9)
+        _remainder_case("remainder_down", "down", 105.9)
+        _swap_c01()
+        E.set_day_preferences(None, None)
+        _monday_night()
+        _monday_actual_floor_retry()
+        _race_placeholder_immovable()
+        _moved_badge_names_every_source()
+        _remainder_site_natural()
+        _checkin_and_preferences()
+        _forward_seam_and_publication()
+        E.set_day_preferences(None, None)
+        _swap_guard_helpers()
+        _as_laid_regen("caution_copy_gate",
+                       [{"wk": 1, "km": 20, "runs": 7, "long": 5.5, "strides": 2,
+                         "quality": [dict(vo2)], "intent": "Build — general", "phase": "build"}],
+                       (37.86, 49.7), "caution", (), 4, 1)
+        _as_laid_regen("covered_rounding",
+                       [{"wk": 1, "km": 10, "runs": 6, "long": 3.8, "strides": 0,
+                         "quality": [], "intent": "Build — general", "phase": "build"}],
+                       (21.78, 33.2), "caution", (0, 5), 3, 2)
+        E.set_day_preferences("sat", "wed,thu,mon")
+        _as_laid_keeps_final_run()
+        E.set_day_preferences("sun", "mon")
+        _step_case("swap_long_peak",
+                   [{"wk": 1, "km": 20, "runs": 7, "long": 6.4, "strides": 0,
+                     "quality": [dict(vo2)], "intent": "Build — general", "phase": "build"}],
+                   (8.0, 11.4), "assertive", {(mon + timedelta(days=2)).isoformat()}, 62.9,
+                   dict(recent_longs=[5.0, 5.3, 5.6, 5.6], recent_eq=[17.7, 18.6, 23.4, 24.7],
+                        recent_session_eq=[4.5] * 4, last_nondown=192.50620701774244, ride_cap=1.25))
+        _step_case("swap_no_later_day",
+                   [{"wk": 1, "km": 60, "runs": 7, "long": 19.2, "strides": 0,
+                     "quality": [dict(vo2)], "intent": "Build — general", "phase": "build"}],
+                   (20.0, 15.9), "caution",
+                   {(mon + timedelta(days=o)).isoformat() for o in (1, 3)}, 128.2)
+        _remainder_swap()
+        quality = [dict(vo2), E._thu_spec(1)]
+        taper = [{"wk": 1, "km": 60, "runs": 3, "long": 19.2, "strides": 0,
+                  "quality": quality, "intent": "Taper — race week", "role": "taper", "phase": "build"}]
+        _regen_case("taper_sunday", taper, (40, 52.0), set(),
+                    dict(recent_longs=[19.4, 20.5, 21.6, 21.6], recent_eq=[54, 57, 66, 60],
+                         recent_session_eq=[23.8] * 4, last_nondown=579.15),
+                    6, 386.8, False)
+        build = [{"wk": 1, "km": 50, "runs": 6, "long": 16.0, "strides": 0,
+                  "quality": quality, "intent": "Build — general", "phase": "build"}]
+        away = {(mon + timedelta(days=o)).isoformat() for o in (1, 6)}
+        _regen_case("rescue_tuesday", build, (8, 12.3), away,
+                    dict(recent_longs=[9.1, 9.6, 10.1, 10.1], recent_eq=[32.6, 55.8, 59.1, 57.2],
+                         recent_session_eq=[9.8] * 4, last_nondown=597.8, ride_cap=1.15),
+                    1, 64.1, True)
+    finally:
+        E.set_day_preferences(*saved)
+    return _st("det", "lay-within-ceiling",
+               "SH-112/SH-113/SH-120 — natural lays hit their expected totals; a peak moves to the "
+               "first legal later day before any 1% step, immovable/no-fit peaks still step, and "
+               "Monday, Tuesday, Thursday and remainder lays preserve sessions, intent and moved_from",
+               passed=not fails, expect="exact swapped/stepped totals, final peak ≤ hard cap, Mon=Tue=Thu",
+               got={"cases": got, "failures": fails or "none"})
+
+
 def _stc_straddle_monday_lay():
     """§AV/§H1/§H2 (SH-74, SH-75) — THE STRADDLE REBUILDS MONDAY'S LAY WITH MONDAY'S DECISIONS. A
     mid-week regeneration lays the days ahead from `full`, its rebuild of the week as the Monday
@@ -6655,10 +7274,9 @@ def _stc_straddle_monday_lay():
                          f"{E.ACWR_SOFT}")
         got["n_laid"] = laid_n
 
-        # (o) SH-103 — a REFUSED copy on caution re-lays off the uniform share, charged: the interval
-        #     run at 1.5× its lay spends the §6o-B charge, the ceiling refuses the copy of the days
-        #     ahead, and the re-lay spreads what is left instead of collapsing into one heavy run
-        #     (the copy-budget re-lay read eow 1.264, over ACWR_SOFT)
+        # (o) SH-103/SH-120 — a REFUSED copy on caution re-lays off the uniform share, charged:
+        #     the interval run at 1.5× its lay spends the §6o-B charge. The template remainder
+        #     keeps its run days when the over-run leaves room for them.
         sh_o = _shape(20, 4, 6, [vo2])
         w_om = _gen(sh_o, (20.0, 24.0), dict(regime="caution"), 0, zones=zones)[0]
         wed = (mon + timedelta(days=2)).isoformat()
@@ -6684,6 +7302,9 @@ def _stc_straddle_monday_lay():
         if len(runs_o) < 2:
             fails.append(f"(o) the refused copy's re-lay collapsed to {len(runs_o)} run(s) ahead")
         got["o_proj_acwr"] = w_o.get("proj_acwr")
+        got["o_sessions"] = [(s["date"], s.get("kind"), s.get("km"), s.get("moved_from"))
+                             for s in w_o["sessions"]]
+        got["o_moves"] = w_o.get("run_moved")
 
         # (p) SH-105 — the cap reads the CHECKED-IN lay: a check-in that zeroes Tuesday drops the
         #     taper week's total, the rescue fires on what is left, and the re-laid week may not
@@ -6712,6 +7333,73 @@ def _stc_straddle_monday_lay():
                          "rounding boundary")
         if not any(s["date"] == tue and s.get("kind") == "threshold" for s in w_q["sessions"]):
             fails.append("(q) fixture — Monday's caution week has no Tuesday threshold session")
+
+        # (r) SH-120 — with no Monday move, the straddle remainder keeps the template's days. §JR
+        #     sheds them all here, exactly as 0.85.1 does; rebuilding `rem` from `full` re-added Tuesday.
+        sh_r = _shape(20, 3, 6.4, [vo2], n=1)
+        sh_r[0].update(role="taper", intent="Taper — race week")
+        away_r = {(mon + timedelta(days=5)).isoformat()}
+        w_rm = _gen(sh_r, (15.0, 18.8), dict(regime="assertive"), 0,
+                    zones=zones, blocked=away_r)[0]
+        w_rt = _gen(sh_r, (15.0, 18.8), dict(regime="assertive"), 1,
+                    zones=zones, blocked=away_r, week_actuals=(0, 0.0))[0]
+        days_r = [s["date"] for s in w_rt["sessions"] if s["date"] >= tue
+                  and (s.get("km") or 0) > 0 and s.get("kind") != "rest"]
+        if w_rm.get("run_moved"):
+            fails.append(f"(r) fixture — Monday unexpectedly moved a run: {w_rm['run_moved']}")
+        if days_r != []:
+            fails.append(f"(r) template remainder differs from 0.85.1: {days_r}, expected []")
+        got["r_template_days"] = days_r
+
+        # (s) SH-120 — Monday's frequency+1 lay has Wednesday and moves it to Thursday; the fixed
+        #     five-day straddle lay has no Wednesday. The carry-over skips it instead of crashing,
+        #     while `rem` still follows Monday's move. Direct guards cover an occupied target too.
+        guard_source, guard_target = "2026-11-04", "2026-11-05"
+        guard_sessions = [{"date": guard_source, "kind": "easy", "km": 3.0, "trimp": 30.0},
+                          {"date": guard_target, "kind": "easy", "km": 4.0, "trimp": 40.0}]
+        guard_dt = {guard_source: 30.0, guard_target: 40.0}
+        guard_answer = E._move_lay_session(guard_sessions, guard_dt, guard_source, guard_target)
+        if guard_answer != (guard_sessions, guard_dt):
+            fails.append(f"(s) occupied target was overwritten: {guard_answer}")
+        sh_s = _shape(54, 5, 13, n=1)
+        A_s = dict(regime="assertive", recent_longs=[10.0] * 4, last_nondown=1000.0)
+        real_lay = E._lay_within_ceiling
+        forced_s = False
+        day_s = 0
+
+        def _frequency_move(lay, total, breaches, swap=None):
+            nonlocal forced_s
+            answer = real_lay(lay, total, breaches, swap=swap)
+            forced_s = True
+            move = {"from": guard_source, "to": guard_target}
+            if day_s == 0:
+                moved, moved_dt = E._move_lay_session(answer[0], answer[1],
+                                                      guard_source, guard_target)
+                return moved, moved_dt, answer[2], answer[3], [move]
+            return answer[0], answer[1], answer[2], answer[3], [move]
+
+        E._lay_within_ceiling = _frequency_move
+        E.set_day_preferences(None, None)
+        try:
+            forced_s, day_s = False, 0
+            w_sm = _gen(sh_s, (60.0, 60.0), A_s, 0)[0]
+            moved_s = [s for s in w_sm["sessions"] if s.get("moved_from") == guard_source
+                       and s["date"] == guard_target]
+            if len(moved_s) != 1:
+                fails.append("(s) fixture — Monday did not make the Wednesday → Thursday move")
+            forced_s, day_s = False, 1
+            try:
+                w_st = _gen(sh_s, (60.0, 60.0), A_s, 1, week_actuals=(0, 0.0))[0]
+            except StopIteration:
+                fails.append("(s) straddle carry-over raised StopIteration")
+            else:
+                days_s = [s["date"] for s in w_st["sessions"] if s["date"] >= tue
+                          and (s.get("km") or 0) > 0 and s.get("kind") != "rest"]
+                if guard_target not in days_s:
+                    fails.append(f"(s) remainder lost Monday's target day: {days_s}")
+                got["s_straddle_days"] = days_s
+        finally:
+            E._lay_within_ceiling = real_lay
     finally:
         E._DAY_PREF = saved
 
@@ -22825,7 +23513,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_target_lift(), lambda: _stc_music_rotation(), lambda: _stc_music_press_retired(), lambda: _stc_zoned_instant(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_lay_within_ceiling(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),

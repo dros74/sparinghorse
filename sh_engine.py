@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.85.0"
+ENGINE_VERSION = "0.85.2"
 
 
 def _zones_asof(db, date_iso=None):
@@ -668,6 +668,8 @@ def _session_groups(rows):
 # only proposes adjustments the engine then clamps to these guardrails.
 ACWR_SOFT = 1.25   # planning target ceiling (margin under the hard limit)
 ACWR_HARD = 1.30   # never exceed (the model has error near the boundary, §6a-bis)
+# SH-112 — once §JR sheds runs, a lower total can merge load into a less safe lay; step and re-judge.
+LAY_STEP_FRAC = 0.01
 # §PRO8 — low-CTL soft-ceiling floor [[governor-lever-retune]]. ACWR is a RATIO (ATL/CTL): at low
 # chronic load its denominator is tiny, so the settled end-of-week ratio becomes hypersensitive and the
 # SOFT ceiling permits only ~maintenance load — riding it (assertive) plateaus CTL near its current value
@@ -3375,7 +3377,8 @@ def _eow_soft(eow, eow_flat, m_ctl, endctl, endatl, shape_neutral, soft_ctl_floo
 
 def _lay_breaches(ctl, atl, wk, start, sess, dt, cap, charge, roll_from=None, ramp_max=None,
                   soft_ctl_floor=None, prog_floor=None, shape_neutral=False, session_eq_cap=None,
-                  week_eq_cap=None, long_km_cap=None, actual_floor=None, lived_trimps=None):
+                  week_eq_cap=None, long_km_cap=None, actual_floor=None, lived_trimps=None,
+                  hard_cap=ACWR_HARD):
     """`_max_week_trimp`'s acceptance test on one laid week (`sess`, `dt`, charged `charge`): True
     when the lay breaks a ceiling the search bounds by. Shared, so a lay the search never made
     (SH-103: the straddle's copy of Monday's days ahead) is judged by the same rule, not by the
@@ -3456,8 +3459,144 @@ def _lay_breaches(ctl, atl, wk, start, sess, dt, cap, charge, roll_from=None, ra
     _couple_km = max(long_km_cap / BASE_LONG_FRAC, (wk.get("km") or 0.0)) if long_km_cap else None
     shape_bad = (bool(long_km_cap) and BASE_LONG_FRAC > 0
                  and sum((x.get("km") or 0.0) for x in _sess) > _couple_km + 1e-9)
-    return bool(soft_bad or bio_bad or shape_bad or (_peak_governs and peak and peak > ACWR_HARD)
+    return bool(soft_bad or bio_bad or shape_bad or (_peak_governs and peak and peak > hard_cap)
                 or too_fast)
+
+
+def _lay_peak_day(start, dt, projection):
+    """First plannable day over the hard ACWR ceiling, using the lay judge's projection."""
+    from datetime import timedelta
+    end = _date(start) + timedelta(days=6)
+    roll_from = projection.get("roll_from") or start
+    actual = projection.get("actual_floor") or {}
+    loads = dict(dt)
+    pinned = set()
+    for d, value in actual.items():
+        if roll_from <= d <= end.isoformat():
+            if (value or 0.0) >= loads.get(d, 0.0):
+                pinned.add(d)
+            loads[d] = max(loads.get(d, 0.0), value or 0.0)
+    curve = project_forward(loads, projection["ctl"], projection["atl"], roll_from) if loads else []
+    last = max((_date(d) for d in loads), default=_date(roll_from) - timedelta(days=1))
+    cc, aa = ((curve[-1]["ctl"], curve[-1]["atl"]) if curve
+              else (projection["ctl"], projection["atl"]))
+    cur = last + timedelta(days=1)
+    while cur <= end:
+        cc, aa = _ewma_step(cc, 0.0, TAU_CTL), _ewma_step(aa, 0.0, TAU_ATL)
+        curve.append({"date": cur.isoformat(), "acwr": round(aa / cc, 3) if cc else None})
+        cur += timedelta(days=1)
+    return next((p["date"] for p in curve
+                 if p["acwr"] and p["acwr"] > ACWR_HARD and p["date"] not in pinned), None)
+
+
+def _move_lay_session(sessions, dt, source, target):
+    session_i = next((i for i, s in enumerate(sessions) if s["date"] == source
+                      and not (s.get("kind") or "").startswith("long")
+                      and s.get("rot") is None and not s.get("race")), None)
+    occupied = any(s["date"] == target and (s.get("km") or 0) > 0 and s.get("kind") != "rest"
+                   for s in sessions)
+    if session_i is None or occupied:
+        return sessions, dt
+    moved = [dict(s) for s in sessions]
+    session = moved[session_i]
+    session["moved_from"] = session.get("moved_from", source)
+    session["date"] = target
+    day_trimps = dict(dt)
+    day_trimps[target] = day_trimps.pop(source, 0.0)
+    return moved, day_trimps
+
+
+def _lay_swap_peak(original, total, breaches, swap):
+    sessions, dt = [dict(s) for s in original[0]], dict(original[1])
+    judge = dict(swap["judge"])
+    if _lay_breaches(sess=sessions, dt=dt, charge=total, hard_cap=math.inf, **judge):
+        return None
+    start = judge["start"]
+    projection = {k: judge.get(k) for k in ("ctl", "atl", "roll_from", "actual_floor")}
+    blocked = set(swap.get("av_blocked") or ())
+    fixed = set(swap.get("fixed_days") or ())
+    race_offs = set(swap.get("race_offsets") or ())
+    prev_tail = swap.get("prev_tail") or 0
+    free_from = swap.get("free_from")
+    adjust = swap.get("adjust") or {}
+    adjust_lo, adjust_hi = adjust.get("applies_from"), adjust.get("applies_until")
+    rest_rank = set(day_preferences()[1])
+    moves = []
+    for _ in range(sum(1 for s in sessions if (s.get("km") or 0) > 0 and s.get("kind") != "rest")):
+        if not breaches(sessions, dt, total):
+            return sessions, dt, moves
+        day = _lay_peak_day(start, dt, projection)
+        victims = [s for s in sessions if s["date"] == day and (s.get("km") or 0) > 0
+                   and not (s.get("kind") or "").startswith("long")
+                   and s.get("rot") is None and not s.get("race")]
+        if day is None or not victims or (adjust_lo and adjust_lo <= day <= adjust_hi):
+            return None
+        victim = victims[0]
+        old_off = (_date(day) - _date(start)).days
+        if old_off in race_offs:
+            return None
+        current = {(_date(s["date"]) - _date(start)).days for s in sessions
+                   if (s.get("km") or 0) > 0 and s.get("kind") != "rest"}
+        quality = victim.get("kind") in QUALITY_KINDS
+        hard = [(_date(s["date"]) - _date(start)).days for s in sessions
+                if s is not victim and ((s.get("kind") or "").startswith("long")
+                                        or s.get("kind") in QUALITY_KINDS)]
+        ceiling = _streak_ceiling(list(current | fixed))
+        before_tail = _week_run_tail(sessions, start)
+        later = range(old_off + 1, 7)
+        candidate_offs = [off for off in later if off not in rest_rank] + \
+                         [off for off in reversed(day_preferences()[1]) if off in later]
+        candidates = []
+        for off in candidate_offs:
+            target = (_date(start) + timedelta(days=off)).isoformat()
+            if (off in current or off in blocked or off in fixed
+                    or any(r - TUNEUP_CLEAR_DAYS <= off <= r + 2 for r in race_offs)
+                    or (free_from is not None and off < free_from)
+                    or (adjust_lo and adjust_lo <= target <= adjust_hi)):
+                continue
+            days = sorted((current - {old_off}) | {off} | fixed
+                          | {-(i + 1) for i in range(prev_tail)})
+            if _max_streak(days) > ceiling:
+                continue
+            if quality and any(abs(off - other) < 2 for other in hard):
+                continue
+            trial = _move_lay_session(sessions, dt, day, target)
+            if _week_run_tail(trial[0], start) > before_tail:
+                continue
+            candidates.append((off, trial))
+            if not breaches(*trial, total):
+                moves.append({"from": day, "to": target})
+                return *trial, moves
+        if not candidates:
+            return None
+        # A later move may clear the next peak; take the candidate with the lowest peak meanwhile.
+        def trial_peak(item):
+            trial_dt = item[1][1]
+            endctl, endatl, eow, peak, eow_flat, m_ctl = _project_week(
+                day_trimps=trial_dt, week_start=start, peak_plannable_only=True, **projection)
+            return peak or 0.0
+        off, (sessions, dt) = min(candidates, key=trial_peak)
+        target = (_date(start) + timedelta(days=off)).isoformat()
+        moves.append({"from": day, "to": target})
+    return (sessions, dt, moves) if not breaches(sessions, dt, total) else None
+
+
+# SH-112/SH-113/SH-120 — move a peak day's session to a later legal rest day before
+# reducing volume; every other breach and every failed swap takes the original 1% steps.
+def _lay_within_ceiling(lay, total, breaches, swap=None):
+    original = lay(total)
+    if total <= 0 or not breaches(*original, total):
+        return *original, total, False, []
+    if swap is not None:
+        moved = _lay_swap_peak(original, total, breaches, swap)
+        if moved is not None:
+            return *moved[:2], total, False, moved[2]
+    for k in range(1, int(1 / LAY_STEP_FRAC) + 1):
+        t = total * (1 - k * LAY_STEP_FRAC)
+        candidate = lay(t)
+        if not breaches(*candidate, t):
+            return *candidate, t, True, []
+    return *original, total, False, []
 
 
 def _max_week_trimp(ctl, atl, wk, start, easy_pace_sec, cap, zones=None, roll_from=None,
@@ -4928,7 +5067,26 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # remainder still at 14.7). The straddle week is the one week whose days are already
             # fixed by history; it does not re-lay, exactly as `free_from`/`fixed_days` keep the
             # remainder itself from re-laying.
-            _mon_chosen = _full_trimp      # Monday's `chosen`: the budget `full` is laid at (SH-103)
+            # SH-112 — the stepped total is Monday's decision, so it is judged on Monday's own lay
+            # (`av_days`, which §REST2 may re-lay); `full` is then laid at it on the fixed day set below.
+            full_judge = dict(ctl=ws_ctl, atl=ws_atl, wk=wk, start=wk_start, cap=eff_cap,
+                              ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                              prog_floor=(_prog if assertive and not _is_taper(wk) else None),
+                              shape_neutral=assertive, session_eq_cap=_session_eq_cap,
+                              week_eq_cap=_bio_cap, long_km_cap=long_km_cap, actual_floor=None)
+            full, _full_dt, _full_trimp, _full_stepped, _full_moves = _lay_within_ceiling(
+                lambda t: _distribute_week(wk, wk_start_d, t, easy_pace_sec,
+                                           (None if forced_deload else zones),   # §PULL — §PRO6/E
+                                           days_override=av_days, av_blocked=av_off,
+                                           long_km_cap=long_km_cap, ladder=assertive,   # §PRO24
+                                           prev_tail=prev_tail,   # §REST
+                                           carve_eq_cap=_bio_cap,   # §ROT — the ceiling Monday's lay had
+                                           carve_race_offs=_race_offsets(race, wk_start_d)),
+                _full_trimp,
+                lambda sess, day_trimps, t: _lay_breaches(
+                    sess=sess, dt=day_trimps, charge=t, **full_judge),
+                swap=dict(judge=full_judge, av_blocked=av_off, prev_tail=prev_tail,
+                          race_offsets=_race_offsets(race, wk_start_d), adjust=adjust))
             full, _full_dt = _distribute_week(wk, wk_start_d, _full_trimp, easy_pace_sec,
                                               (None if forced_deload else zones),   # §PULL — §PRO6/E
                                               days_override=(av_days if av_days is not None
@@ -4938,6 +5096,19 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                               prev_tail=prev_tail,   # §REST
                                               carve_eq_cap=_bio_cap,   # §ROT — the ceiling Monday's lay had
                                               carve_race_offs=_race_offsets(race, wk_start_d))
+            for _move in _full_moves:
+                full, _full_dt = _move_lay_session(full, _full_dt, _move["from"], _move["to"])
+                _source_off = (_date(_move["from"]) - wk_start_d).days
+                _target_off = (_date(_move["to"]) - wk_start_d).days
+                rem = [o for o in rem if o != _source_off]
+                if (_target_off > today_off or (_target_off == today_off and not _today_run)) \
+                        and _target_off not in rem:
+                    rem.append(_target_off)
+            rem.sort()
+            if _full_stepped and assertive:
+                wk_intent_trimp = _full_trimp
+                wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
+            _mon_chosen = _full_trimp      # Monday's `chosen`: the budget `full` is laid at (SH-103)
             full = _uncarve_eased(full, adjust, wk, easy_pace_sec)   # §ROT — as Monday's lay does
             if zones and not forced_deload and any(x.get("rot") is not None for x in full):
                 # §ROT — `full` is Monday's lay, so it takes Monday's un-carve decision too (§H2 below:
@@ -4993,11 +5164,37 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                         _r_chosen *= av_frac
                     if _r_eroded or _r_bio_over or forced_deload or _is_taper(wk):   # SH-105
                         _r_chosen = min(_r_chosen, _r_pre)
+                    rescue_judge = dict(ctl=ws_ctl, atl=ws_atl, wk=wk, start=wk_start, cap=eff_cap,
+                                        ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                                        shape_neutral=assertive, session_eq_cap=_session_eq_cap,
+                                        week_eq_cap=_bio_cap, long_km_cap=long_km_cap, actual_floor=None)
+                    full, _full_dt, _r_chosen, _r_stepped, _r_moves = _lay_within_ceiling(
+                        lambda t: _distribute_week(wk, wk_start_d, t, easy_pace_sec, None,
+                                                   days_override=av_days, av_blocked=av_off,
+                                                   long_km_cap=long_km_cap,
+                                                   ladder=assertive, prev_tail=prev_tail),
+                        _r_chosen,
+                        lambda sess, day_trimps, t: _lay_breaches(
+                            sess=sess, dt=day_trimps, charge=t, **rescue_judge),
+                        swap=dict(judge=rescue_judge, av_blocked=av_off, prev_tail=prev_tail,
+                                  race_offsets=_race_offsets(race, wk_start_d), adjust=adjust))
+                    _full_stepped = _full_stepped or _r_stepped
+                    _full_moves = _r_moves
                     full, _full_dt = _distribute_week(wk, wk_start_d, _r_chosen, easy_pace_sec, None,
                                                       days_override=(av_days if av_days is not None
                                                                      else _run_days(wk["runs"])),   # §REST2
                                                       av_blocked=av_off, long_km_cap=long_km_cap,
                                                       ladder=assertive, prev_tail=prev_tail)
+                    rem = [o for o in offsets if o > today_off or (o == today_off and not _today_run)]
+                    for _move in _full_moves:
+                        full, _full_dt = _move_lay_session(full, _full_dt, _move["from"], _move["to"])
+                        _source_off = (_date(_move["from"]) - wk_start_d).days
+                        _target_off = (_date(_move["to"]) - wk_start_d).days
+                        rem = [o for o in rem if o != _source_off]
+                        if (_target_off > today_off or (_target_off == today_off and not _today_run)) \
+                                and _target_off not in rem:
+                            rem.append(_target_off)
+                    rem.sort()
                     _mon_chosen = _r_chosen
                     if assertive:                     # caution keeps the skeleton (SH-103, above)
                         wk_intent_trimp = _r_chosen
@@ -5045,7 +5242,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # aerobic shape). vol_met (§6o-B, the 2026-07-05 over-run incident): the km intent alone
             # is spent — an over-run week must NOT lay more sessions on the remaining days just
             # because the run count is short (more runs to hit a count = junk by definition). "Spent"
-            # = less than one §JR-honest run left (taper exempt: a tiny shakeout is real).
+            # = less than one §JR-honest run left (taper exempt: a tiny shakeout is real). A week run
+            # as laid is the exception: a run still ahead on Monday's lay stays prescribed.
             # §LRH — IS THE WEEK'S LONG RUN STILL AHEAD? Its laid date is after today, or today and not
             # yet run, and that day is one the remainder may place. Only then is there a rung to hold.
             _long_ahead = bool(
@@ -5053,8 +5251,16 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 and (_full_long["date"] > today.isoformat()
                      or (_full_long["date"] == today.isoformat() and not _today_run))
                 and ((_date(_full_long["date"]) - wk_start_d).days in rem))
-            long_held, _rem_clipped, day_share = False, False, False
+            long_held, _rem_clipped, _rem_stepped, day_share = False, False, False, False
+            _rem_moves = []
             freq_met = vol_met = False
+            _lived = [s for s in full
+                      if (s.get("kind") or "") != "rest" and (s.get("km") or 0) > 0
+                      and (_date(s["date"]) - wk_start_d).days not in rem]
+            _lived_km = sum(float(s.get("km") or 0.0) for s in _lived)
+            _as_laid = bool(week_actuals is not None
+                            and week_actuals[0] == len(_lived)
+                            and week_actuals[1] <= _lived_km + 0.05 * len(_lived))
             if rem and week_actuals is not None:
                 a_runs, a_km = week_actuals
                 # §PRO13 — these read the week's REAL intent too: an assertive week is not "already
@@ -5064,7 +5270,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 min_left = 0.0 if _is_taper(wk) else \
                     RUN_MIN_KM * (easy_pace_sec / 60.0) * EASY_TRIMP_PER_MIN
                 freq_met = a_runs >= (wk.get("runs") or 0) and a_km >= wk_intent_km
-                vol_met = wk_intent_km > 0 and left_tr <= min_left
+                vol_met = (wk_intent_km > 0 and left_tr <= max(0.0, min_left - 0.05 * TRIMP_PER_KM)
+                           and (not _as_laid or not any(
+                               (s.get("kind") or "") != "rest" and (s.get("km") or 0) > 0
+                               and (_date(s["date"]) - wk_start_d).days in rem for s in full)))
                 # §LRH — THE RULING OF 2026-09-06 ("protect the long run when I over-run"): a week whose
                 # sheet is already run does not lose its long run. The easy days absorbed the over-run;
                 # the long run is the marathon stimulus and the one bout whose progression the Aarhus
@@ -5174,10 +5383,13 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                               if (s.get("kind") or "") != "rest" and (s.get("km") or 0) > 0
                               and (_date(s["date"]) - wk_start_d).days in rem]
                     _ahead_tr = sum(_ahead)
-                    _charge = (max(0.0, wk_intent_km - week_actuals[1]) * TRIMP_PER_KM
-                               if (not assertive and week_actuals is not None) else None)
-                    # sessions are laid and runs read to 0.1 km: half of that per session either side of
-                    # the charge is rounding, not an over-run (271.2 copied against a 271.17 charge)
+                    _charge = None
+                    if not assertive and week_actuals is not None:
+                        _spent = (sum(float(s.get("trimp") or 0.0) for s in _lived) if _as_laid
+                                  else week_actuals[1] * TRIMP_PER_KM)
+                        _charge = max(0.0, wk_intent_trimp - _spent)
+                    # On fully lived as-laid days, charge Monday's own TRIMP: reconverting a moved
+                    # quality session's km at the easy rate would refuse Monday's unchanged copy.
                     _tol = (0.05 * TRIMP_PER_KM * (len(_ahead) + week_actuals[0])
                             if _charge is not None else 0.0)
                     if _ahead_tr > 0 and (_charge is None or _ahead_tr <= _charge + _tol):
@@ -5244,6 +5456,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 if _rem_clipped:
                     long_held = False       # the ceiling spoke: the long run is NOT at its rung, and says so
                 chosen = prorate if (day_share and not _rem_clipped) else min(prorate, allowed)
+                _rem_stepped = False
                 if day_share and not _rem_clipped:
                     rem_s, dt = _copy, _cdt
                 else:
@@ -5260,15 +5473,40 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                  carve=_full_thu is not None, carve_eq_cap=_rem_eq_cap,
                                                  carve_basis=wk_intent_trimp, carve_max_min=_full_thu,
                                                  carve_race_offs=_race_offsets(race, wk_start_d))
-                    if q_ahead and sum(dt.values()) > chosen + 1.0:
-                        # §6o-QF fallback — the governed remainder can't carry the quality session's
-                        # fixed TRIMP floor (late week / tiny budget): keep the honest easy-only lay
-                        # rather than over-prescribing past the charge (§6o-B's contract wins).
-                        rem_s, dt = _distribute_week(wk, wk_start_d, chosen, easy_pace_sec, None,
-                                                     days_override=rem, av_blocked=av_off,
-                                                     long_km_cap=long_km_cap, long_km_aim=long_km_aim,
-                                                     free_from=today_off,   # §PRO24 — no ladder (remainder)
-                                                     fixed_days=elapsed_offs, prev_tail=prev_tail)   # §REST
+                    # §6o-QF fallback — the governed remainder can't carry the quality session's
+                    # fixed TRIMP floor (late week / tiny budget): keep the honest easy-only lay
+                    # rather than over-prescribing past the charge (§6o-B's contract wins).
+                    _easy_only = bool(q_ahead and sum(dt.values()) > chosen + 1.0)
+
+                    def _remainder_lay(t):
+                        if _easy_only:
+                            return _distribute_week(wk, wk_start_d, t, easy_pace_sec, None,
+                                                    days_override=rem, av_blocked=av_off,
+                                                    long_km_cap=long_km_cap, long_km_aim=long_km_aim,
+                                                    free_from=today_off,   # §PRO24 — no ladder (remainder)
+                                                    fixed_days=elapsed_offs, prev_tail=prev_tail)   # §REST
+                        return _distribute_week(wk, wk_start_d, t, easy_pace_sec, use_zones,
+                                                days_override=rem, av_blocked=av_off, q_days=q_ahead,
+                                                long_km_cap=long_km_cap, long_km_aim=long_km_aim,
+                                                free_from=today_off,   # §PRO24 — no ladder (remainder)
+                                                fixed_days=elapsed_offs, prev_tail=prev_tail,   # §REST
+                                                carve=_full_thu is not None, carve_eq_cap=_rem_eq_cap,
+                                                carve_basis=wk_intent_trimp, carve_max_min=_full_thu,
+                                                carve_race_offs=_race_offsets(race, wk_start_d))
+
+                    remainder_judge = dict(
+                        ctl=ctl, atl=atl, wk=wk, start=wk_start, cap=ACWR_SOFT,
+                        roll_from=today.isoformat(), soft_ctl_floor=soft_ctl_floor,
+                        shape_neutral=assertive, session_eq_cap=_session_eq_cap,
+                        week_eq_cap=_rem_eq_cap, long_km_cap=long_km_cap,
+                        actual_floor=act_floor, lived_trimps=lived)
+                    rem_s, dt, chosen, _rem_stepped, _rem_moves = _lay_within_ceiling(
+                        _remainder_lay, chosen,
+                        lambda sess, day_trimps, t: _lay_breaches(
+                            sess=sess, dt=day_trimps, charge=t, **remainder_judge),
+                        swap=dict(judge=remainder_judge, av_blocked=av_off,
+                                  fixed_days=elapsed_offs, prev_tail=prev_tail, free_from=today_off,
+                                  race_offsets=_race_offsets(race, wk_start_d), adjust=adjust))
                 if long_held:
                     # §LRH — the session says so, in a field the card and the dets both read; the note
                     # stays the session's own (a long_mp's structure string is the card's to trim).
@@ -5386,6 +5624,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                      "freq_actual": list(week_actuals) if (freq_met or vol_met) else None}
             if _r_bio_over:                          # §3.1 (SH-75) — as the full-week path publishes it
                 pweek["bio_capped"] = round(_bio_cap, 1)
+            published_moves = [{"from": s["moved_from"], "to": s["date"]}
+                               for s in sessions if s.get("moved_from")]
+            if published_moves:
+                pweek["run_moved"] = published_moves
             pweek["bar"] = _week_bar(intent_km=pweek["intent_km"], sessions=sessions)   # §P2 (0.59.0)
             if long_held:
                 # §LRH — published, so "why is the sheet over the bar?" has an answer in the week itself
@@ -5399,7 +5641,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # search answered less than the remainder asked for. SH-103 — and on caution when
                 # Monday's own lay was clipped (`clipped` there), which the copy of its days inherits.
                 acwr_laid=(_gov_flat if _gov_flat is not None else _gov_eow),
-                clipped=(_rem_clipped or ((not assertive) and _mon_chosen < intent_trimp - 1)),   # §RACE/SH-73 — the pre-race reading the search decided on
+                clipped=(_rem_clipped or _rem_stepped or _full_stepped or _full_moves or _rem_moves or ((not assertive) and _mon_chosen < intent_trimp - 1)),   # §RACE/SH-73 — the pre-race reading the search decided on
                 long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions), long_bound=bool(long_km_cap and any(s.get("long_step_capped") for s in sessions)),
                 eq_week_cap=_bio_cap, eq_week_laid=_week_eq_km(sessions), eq_week_bound=_r_bio_over,   # SH-75
                 eq_sess_cap=_session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
@@ -5549,133 +5791,167 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 if (assertive and last_nondown and eff_cap >= ACWR_SOFT - 1e-9
                     and not is_down and not is_taper
                     and not is_peak and not forced_deload) else None)
-        allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones, ramp_max=ramp,
-                                  soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off,
-                                  prog_floor=prog, shape_neutral=assertive,
-                                  session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
-                                  long_km_cap=long_km_cap, actual_floor=act_floor,   # §PRO20b
-                                  ladder=assertive, prev_tail=prev_tail)   # §PRO24/§REST
-        if assertive and not is_taper:
-            # ride the layered ceiling on building weeks; hold a proportional recovery trough on down
-            # weeks (BUILD_DOWN_FRAC of the last realised non-down load), always governor-capped. The
-            # TAPER is excluded — it is a DELIBERATE pre-race volume drop, so it keeps the shape intent
-            # (the designed taper curve), never the ceiling. A forced deload (§PRO6) recovers like a down.
-            if is_down or forced_deload:
-                # recovery trough off the last realised non-down load; if no anchor yet (a phase that
-                # OPENS on a down week before any building week), fall back to the shape's reduced intent
-                # — NEVER the full ceiling (the trough is a masters/post-illness safety guarantee).
-                target = (BUILD_DOWN_FRAC * last_nondown) if last_nondown else intent_trimp
+        decision_floor = None if (act_floor and today == wk_start_d) else act_floor
+        while True:
+            allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones, ramp_max=ramp,
+                                      soft_ctl_floor=soft_ctl_floor, days_override=av_days, av_blocked=av_off,
+                                      prog_floor=prog, shape_neutral=assertive,
+                                      session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
+                                      long_km_cap=long_km_cap, actual_floor=decision_floor,
+                                      ladder=assertive, prev_tail=prev_tail)   # §PRO24/§REST
+            if assertive and not is_taper:
+                # ride the layered ceiling on building weeks; hold a proportional recovery trough on down
+                # weeks (BUILD_DOWN_FRAC of the last realised non-down load), always governor-capped. The
+                # TAPER is excluded — it is a DELIBERATE pre-race volume drop, so it keeps the shape intent
+                # (the designed taper curve), never the ceiling. A forced deload (§PRO6) recovers like a down.
+                if is_down or forced_deload:
+                    # recovery trough off the last realised non-down load; if no anchor yet (a phase that
+                    # OPENS on a down week before any building week), fall back to the shape's reduced intent
+                    # — NEVER the full ceiling (the trough is a masters/post-illness safety guarantee).
+                    target = (BUILD_DOWN_FRAC * last_nondown) if last_nondown else intent_trimp
+                else:
+                    target = allowed
+                chosen = min(target, allowed)
             else:
-                target = allowed
-            chosen = min(target, allowed)
-        else:
-            chosen = min(intent_trimp, allowed)            # caution (or assertive taper) — designed shape
-        if av_frac < 1.0:
-            chosen *= av_frac    # §AV — shed days take their load with them: a travel week is honestly
-            #                      LIGHTER, never the full budget crammed into the surviving days
-        # §PRO6/E — a forced deload is a genuine recovery week: strip quality (pure easy), so a
-        # tissue-protection deload never prescribes the highest-stress interval session.
-        wk_zones = None if forced_deload else zones
-        # §PRO9 — long-run progression cap (assertive-only; caution passes None ⇒ byte-identical). The
-        # baseline is the longest run of the trailing LONG_RUN_STEP_WINDOW weeks (recent actuals seeded +
-        # this block's earlier weeks). The cap applies to EVERY week (down/taper included): it only ever
-        # REDUCES, so a deliberately-short recovery/taper long sits below the cap and is untouched — but a
-        # week whose long would JUMP past +10% is clipped even on a down week (exempting them let a
-        # recovery week's naturally-larger long leap past the cap and reset the baseline for the rest).
-        # §3.1 — the biomechanical soft ceiling: the week's pace-weighted eq_km may not jump beyond
-        # BIO_EQ_STEP × the MAX eq_km of the trailing BIO_EQ_WINDOW weeks (recent actuals seeded + this
-        # block's earlier weeks). Assertive-only; caution passes no cap ⇒ byte-identical.
-        sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, wk_zones,
-                                        long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off,
-                                        ladder=assertive, prev_tail=prev_tail,   # §PRO24/§REST
-                                        carve_eq_cap=bio_cap,   # §ROT — the run fits the week's eq ceiling
-                                        carve_race_offs=_race_offsets(race, wk_start))   # …and keeps off races
-        sessions = _uncarve_eased(sessions, adjust, wk, easy_pace_sec)   # §ROT — before the check-in eases it
-        adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
-        sessions, dt = adjusted["sessions"], adjusted["dt"]
-        _race_seed = (ctl, atl)   # §RACE — the seed to re-publish from once the race is laid
-        _ctl_start = ctl                                   # §LIMITS — CTL at the start of the week
-        ctl_n, atl_n, eow, peak, eow_flat, m_ctl_n = _project_week(ctl, atl, wk_start, dt,
-                                                                   actual_floor=act_floor)   # §PRO20b
-        # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
-        # the governor cannot shrink; at low CTL that floor's mid-week spike pushes PEAK ACWR past the
-        # hard cap even while end-of-week stays under the soft cap. When it does, drop THIS week's
-        # quality to pure easy (easy load scales toward zero, so the hard cap can always be met) and
-        # re-govern. Quality returns automatically once CTL can afford it — self-heals as fitness
-        # rebuilds. Preserves the deliberate EOW soft bound + normal-transient tolerance; the hard
-        # ceiling only catches this low-CTL floor pathology, never a normal-CTL week.
-        # §H2 (2026-06-29) — the SAME fixed quality floor erodes POLARIZATION the other way: when the
-        # governor clips a week's easy volume hard at low CTL, the immovable HIGH-INTENSITY rep TRIMP
-        # (threshold+interval — HARD_ZONES, MP exempt; see _hard_share) becomes a larger share of a
-        # shrinking total, so the hard share climbs past (1 − POLARIZED_EASY_MIN) even while peak stays
-        # UNDER the hard cap (§H1 never fires). That makes the plan more intense exactly when the athlete's most
-        # fragile — the one safety-negative artifact the corrected EWMA exposed. Remedy = drop the
-        # quality → easy and re-govern, like §H1. (MP share is bounded by the LOAD cap, not this
-        # polarization floor — by design: on a hard-clipped deep week the fixed MP rep can ride large
-        # as a share, but eow ACWR still ≤ soft cap, and MP is moderate specificity I asked to keep.)
-        # CRITICAL DIFFERENCE: §H1 fires on a PEAK
-        # breach when EOW is already near the soft cap, so its refill barely moves total load; §H2 can
-        # fire when EOW is LOW (the quality spike, not volume, was the binding constraint), so a naive
-        # refill to the soft cap would ADD load at low CTL — the exact thing the brake must not allow.
-        # So §H2 CAPS the re-governed all-easy week at its PRE-DROP governed TRIMP. That is a load
-        # BOUND, not load-neutrality: the pure-easy layout concentrates the week on the long run, so
-        # the peak-ACWR cap can bind sooner on the re-govern and the week may carry LESS than
-        # pre-drop (measured on a braked week 2026-07-04: 249 vs 282 TRIMP). The guarantee is
-        # one-sided — total ≤ pre-drop, the mid-week peak falls — so suppressing intensity can never
-        # raise load. Self-heals as CTL rebuilds.
-        # §PRO17 — the rescue's OWN threshold now, not the governor's. See H1_RESCUE_ACWR.
-        breach = bool(zones and peak and peak > H1_RESCUE_ACWR)
-        eroded = bool(zones and not breach
-                      and _hard_share(sessions, sum(dt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
-        # §3.1 — biomechanical spike: the week's pace-weighted eq_km jumped past the soft bio ceiling AND
-        # the excess is from FAST km (its all-easy eq_km = week_km would sit under the cap, so dropping the
-        # quality slice to easy fixes it — otherwise it's a volume issue that ACWR/CTL_RAMP already own).
-        # Reuses the §H2 quality→easy reshape (proven-safe, only ever reduces): remove the high-damage fast
-        # km, keep the aerobic volume. Assertive-only (bio_cap is None otherwise).
-        week_km = sum((s.get("km") or 0.0) for s in sessions)
-        bio_over = bool(zones and bio_cap and not breach and not eroded
-                        and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
-        if (eroded or bio_over) and any(s.get("rot") is not None for s in sessions):
-            # §ROT — the threshold run sits at the floor, so it goes first: back to the easy run it was
-            # carved from, same TRIMP, `dt` untouched. Only a week still over loses the rest.
-            _n = _displaced_strides(wk, sessions)
-            sessions = [_uncarve(s, easy_pace_sec, strides=_n) for s in sessions]
+                chosen = min(intent_trimp, allowed)        # caution (or assertive taper) — designed shape
+            if av_frac < 1.0:
+                chosen *= av_frac    # §AV — shed days take their load with them: a travel week is honestly
+                #                      LIGHTER, never the full budget crammed into the surviving days
+            # §PRO6/E — a forced deload is a genuine recovery week: strip quality (pure easy), so a
+            # tissue-protection deload never prescribes the highest-stress interval session.
+            wk_zones = None if forced_deload else zones
+            # §PRO9 — long-run progression cap (assertive-only; caution passes None ⇒ byte-identical). The
+            # baseline is the longest run of the trailing LONG_RUN_STEP_WINDOW weeks (recent actuals seeded +
+            # this block's earlier weeks). The cap applies to EVERY week (down/taper included): it only ever
+            # REDUCES, so a deliberately-short recovery/taper long sits below the cap and is untouched — but a
+            # week whose long would JUMP past +10% is clipped even on a down week (exempting them let a
+            # recovery week's naturally-larger long leap past the cap and reset the baseline for the rest).
+            # §3.1 — the biomechanical soft ceiling: the week's pace-weighted eq_km may not jump beyond
+            # BIO_EQ_STEP × the MAX eq_km of the trailing BIO_EQ_WINDOW weeks (recent actuals seeded + this
+            # block's earlier weeks). Assertive-only; caution passes no cap ⇒ byte-identical.
+            lay_judge = dict(ctl=ctl, atl=atl, wk=wk, start=wk_start, cap=eff_cap,
+                             ramp_max=ramp, soft_ctl_floor=soft_ctl_floor, prog_floor=prog,
+                             shape_neutral=assertive, session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
+                             long_km_cap=long_km_cap, actual_floor=act_floor)
+            final_judge = lay_judge
+            sessions, dt, chosen, lay_stepped, lay_moves = _lay_within_ceiling(
+                lambda t: _distribute_week(wk, _date(wk_start), t, easy_pace_sec, wk_zones,
+                                           long_km_cap=long_km_cap, days_override=av_days, av_blocked=av_off,
+                                           ladder=assertive, prev_tail=prev_tail,   # §PRO24/§REST
+                                           carve_eq_cap=bio_cap,   # §ROT — the run fits the week's eq ceiling
+                                           carve_race_offs=_race_offsets(race, wk_start)),   # …and keeps off races
+                chosen,
+                lambda sess, day_trimps, t: _lay_breaches(
+                    sess=sess, dt=day_trimps, charge=t, **lay_judge),
+                swap=dict(judge=dict(lay_judge, actual_floor=None), av_blocked=av_off, prev_tail=prev_tail,
+                          race_offsets=_race_offsets(race, wk_start), adjust=adjust))
+            sessions = _uncarve_eased(sessions, adjust, wk, easy_pace_sec)   # §ROT — before the check-in eases it
+            adjusted = _apply_adjustment(sessions, dt, adjust)  # mutates copies; reduces only
+            sessions, dt = adjusted["sessions"], adjusted["dt"]
+            _race_seed = (ctl, atl)   # §RACE — the seed to re-publish from once the race is laid
+            _ctl_start = ctl                               # §LIMITS — CTL at the start of the week
+            ctl_n, atl_n, eow, peak, eow_flat, m_ctl_n = _project_week(ctl, atl, wk_start, dt,
+                                                                       actual_floor=act_floor)   # §PRO20b
+            # §H1 — a structured quality session carries a FIXED TRIMP floor (easy wu/cd + ≥1 work rep)
+            # the governor cannot shrink; at low CTL that floor's mid-week spike pushes PEAK ACWR past the
+            # hard cap even while end-of-week stays under the soft cap. When it does, drop THIS week's
+            # quality to pure easy (easy load scales toward zero, so the hard cap can always be met) and
+            # re-govern. Quality returns automatically once CTL can afford it — self-heals as fitness
+            # rebuilds. Preserves the deliberate EOW soft bound + normal-transient tolerance; the hard
+            # ceiling only catches this low-CTL floor pathology, never a normal-CTL week.
+            # §H2 (2026-06-29) — the SAME fixed quality floor erodes POLARIZATION the other way: when the
+            # governor clips a week's easy volume hard at low CTL, the immovable HIGH-INTENSITY rep TRIMP
+            # (threshold+interval — HARD_ZONES, MP exempt; see _hard_share) becomes a larger share of a
+            # shrinking total, so the hard share climbs past (1 − POLARIZED_EASY_MIN) even while peak stays
+            # UNDER the hard cap (§H1 never fires). That makes the plan more intense exactly when the athlete's most
+            # fragile — the one safety-negative artifact the corrected EWMA exposed. Remedy = drop the
+            # quality → easy and re-govern, like §H1. (MP share is bounded by the LOAD cap, not this
+            # polarization floor — by design: on a hard-clipped deep week the fixed MP rep can ride large
+            # as a share, but eow ACWR still ≤ soft cap, and MP is moderate specificity I asked to keep.)
+            # CRITICAL DIFFERENCE: §H1 fires on a PEAK
+            # breach when EOW is already near the soft cap, so its refill barely moves total load; §H2 can
+            # fire when EOW is LOW (the quality spike, not volume, was the binding constraint), so a naive
+            # refill to the soft cap would ADD load at low CTL — the exact thing the brake must not allow.
+            # So §H2 CAPS the re-governed all-easy week at its PRE-DROP governed TRIMP. That is a load
+            # BOUND, not load-neutrality: the pure-easy layout concentrates the week on the long run, so
+            # the peak-ACWR cap can bind sooner on the re-govern and the week may carry LESS than
+            # pre-drop (measured on a braked week 2026-07-04: 249 vs 282 TRIMP). The guarantee is
+            # one-sided — total ≤ pre-drop, the mid-week peak falls — so suppressing intensity can never
+            # raise load. Self-heals as CTL rebuilds.
+            # §PRO17 — the rescue's OWN threshold now, not the governor's. See H1_RESCUE_ACWR.
+            breach = bool(zones and peak and peak > H1_RESCUE_ACWR)
             eroded = bool(zones and not breach
                           and _hard_share(sessions, sum(dt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
+            # §3.1 — biomechanical spike: the week's pace-weighted eq_km jumped past the soft bio ceiling AND
+            # the excess is from FAST km (its all-easy eq_km = week_km would sit under the cap, so dropping the
+            # quality slice to easy fixes it — otherwise it's a volume issue that ACWR/CTL_RAMP already own).
+            # Reuses the §H2 quality→easy reshape (proven-safe, only ever reduces): remove the high-damage fast
+            # km, keep the aerobic volume. Assertive-only (bio_cap is None otherwise).
             week_km = sum((s.get("km") or 0.0) for s in sessions)
             bio_over = bool(zones and bio_cap and not breach and not eroded
                             and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
-        if breach or eroded or bio_over:
-            pre_total = sum(dt.values())
-            # §FORM1 — the re-govern search runs under the SAME governor contract as the primary call
-            # (soft CTL floor, shape-neutral soft test, bio caps, long cap): it used to omit them — a
-            # pre-§PRO8 fossil, unreachable while assertive required banked weeks (CTL was never low
-            # there) — so a cold-start week that stripped quality was re-governed against RAW CTL≈1
-            # and pinned at ~0 km. Caution passes every added kwarg as None/False ⇒ byte-identical.
-            allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
-                                      ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
-                                      shape_neutral=assertive,
-                                      session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
-                                      long_km_cap=long_km_cap,
-                                      days_override=av_days, av_blocked=av_off,
-                                      actual_floor=act_floor, ladder=assertive,   # §PRO20b/§PRO24
-                                      prev_tail=prev_tail)   # §REST
-            # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
-            chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
-            if av_frac < 1.0:
-                chosen *= av_frac                      # §AV — the shed prorate holds on the re-govern too
-            # SH-105 — nor on a taper or a forced deload: `chosen` above rides the ceiling there, and the
-            # week's volume is reduced on purpose (a down week re-lays at the shape's own down intent).
-            if eroded or bio_over or forced_deload or is_taper:
-                chosen = min(chosen, pre_total)        # never add volume when suppressing intensity
-            sessions, dt = _distribute_week(wk, _date(wk_start), chosen, easy_pace_sec, None,
-                                            long_km_cap=long_km_cap,   # §PRO9 — keep the cap on re-govern
-                                            days_override=av_days, av_blocked=av_off,
-                                            ladder=assertive, prev_tail=prev_tail)   # §PRO24/§REST
-            adjusted = _apply_adjustment(sessions, dt, adjust)
-            sessions, dt = adjusted["sessions"], adjusted["dt"]
-            ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
-                                                                 actual_floor=act_floor)   # §PRO20b
+            if (eroded or bio_over) and any(s.get("rot") is not None for s in sessions):
+                # §ROT — the threshold run sits at the floor, so it goes first: back to the easy run it was
+                # carved from, same TRIMP, `dt` untouched. Only a week still over loses the rest.
+                _n = _displaced_strides(wk, sessions)
+                sessions = [_uncarve(s, easy_pace_sec, strides=_n) for s in sessions]
+                eroded = bool(zones and not breach
+                              and _hard_share(sessions, sum(dt.values())) > 1.0 - POLARIZED_EASY_MIN + 1e-9)
+                week_km = sum((s.get("km") or 0.0) for s in sessions)
+                bio_over = bool(zones and bio_cap and not breach and not eroded
+                                and _week_eq_km(sessions) > bio_cap and week_km <= bio_cap)
+            if breach or eroded or bio_over:
+                pre_total = sum(dt.values())
+                # §FORM1 — the re-govern search runs under the SAME governor contract as the primary call
+                # (soft CTL floor, shape-neutral soft test, bio caps, long cap): it used to omit them — a
+                # pre-§PRO8 fossil, unreachable while assertive required banked weeks (CTL was never low
+                # there) — so a cold-start week that stripped quality was re-governed against RAW CTL≈1
+                # and pinned at ~0 km. Caution passes every added kwarg as None/False ⇒ byte-identical.
+                allowed = _max_week_trimp(ctl, atl, wk, wk_start, easy_pace_sec, eff_cap, zones=None,
+                                          ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                                          shape_neutral=assertive,
+                                          session_eq_cap=session_eq_cap, week_eq_cap=bio_cap,
+                                          long_km_cap=long_km_cap,
+                                          days_override=av_days, av_blocked=av_off,
+                                          actual_floor=decision_floor, ladder=assertive,
+                                          prev_tail=prev_tail)   # §REST
+                # assertive still rides the (now pure-easy) ceiling; caution keeps min(intent, ceiling)
+                chosen = allowed if (assertive and not is_down) else min(intent_trimp, allowed)
+                if av_frac < 1.0:
+                    chosen *= av_frac                  # §AV — the shed prorate holds on the re-govern too
+                # SH-105 — nor on a taper or a forced deload: `chosen` above rides the ceiling there, and the
+                # week's volume is reduced on purpose (a down week re-lays at the shape's own down intent).
+                if eroded or bio_over or forced_deload or is_taper:
+                    chosen = min(chosen, pre_total)    # never add volume when suppressing intensity
+                rescue_judge = dict(ctl=ctl, atl=atl, wk=wk, start=wk_start, cap=eff_cap,
+                                    ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
+                                    shape_neutral=assertive, session_eq_cap=session_eq_cap,
+                                    week_eq_cap=bio_cap, long_km_cap=long_km_cap, actual_floor=act_floor)
+                final_judge = rescue_judge
+                sessions, dt, chosen, rescue_stepped, rescue_moves = _lay_within_ceiling(
+                    lambda t: _distribute_week(wk, _date(wk_start), t, easy_pace_sec, None,
+                                               long_km_cap=long_km_cap,   # §PRO9 — keep the cap on re-govern
+                                               days_override=av_days, av_blocked=av_off,
+                                               ladder=assertive, prev_tail=prev_tail),   # §PRO24/§REST
+                    chosen,
+                    lambda sess, day_trimps, t: _lay_breaches(
+                        sess=sess, dt=day_trimps, charge=t, **rescue_judge),
+                    swap=dict(judge=dict(rescue_judge, actual_floor=None), av_blocked=av_off,
+                              prev_tail=prev_tail, race_offsets=_race_offsets(race, wk_start), adjust=adjust))
+                lay_stepped = lay_stepped or rescue_stepped
+                lay_moves = rescue_moves
+                adjusted = _apply_adjustment(sessions, dt, adjust)
+                sessions, dt = adjusted["sessions"], adjusted["dt"]
+                ctl_n, atl_n, eow, peak, eow_flat, _ = _project_week(ctl, atl, wk_start, dt,
+                                                                     actual_floor=act_floor)   # §PRO20b
+            if lay_moves:
+                sessions.sort(key=lambda s: s["date"])
+            if (decision_floor is not None or not act_floor or today != wk_start_d
+                    or not _lay_breaches(sess=sessions, dt=dt, charge=chosen, **final_judge)):
+                break
+            # SH-120 — Monday's no-floor decision can be unlayable once today's actual load is judged;
+            # decide the week once more with the actual floor, exactly as the pre-swap path did.
+            decision_floor = act_floor
         ctl, atl = ctl_n, atl_n  # carry forward the FINAL distribution, stepped exactly once
         if assertive:
             recovery_wk = is_down or forced_deload or is_taper
@@ -5792,11 +6068,15 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         if bio_over:                                 # §3.1 — the soft bio ceiling reshaped this week to easy
             week["bio_capped"] = round(bio_cap, 1)
         week["bar"] = _week_bar(intent_km=week["intent_km"], sessions=sessions)   # §P2 (0.59.0)
+        published_moves = [{"from": s["moved_from"], "to": s["date"]}
+                           for s in sessions if s.get("moved_from")]
+        if published_moves:
+            week["run_moved"] = published_moves
         week["limits"] = _week_limits(               # §LIMITS (0.58.0) — the limits as one object
             assertive=assertive, eff_cap=eff_cap,
             acwr_laid=(week.get("proj_acwr_soft") if week.get("proj_acwr_soft") is not None
                        else (eow_flat if eow_flat is not None else eow)),
-            clipped=bool(clipped), long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions),
+            clipped=bool(clipped or lay_stepped or lay_moves), long_cap=long_km_cap, long_laid=_week_long_km([s for s in sessions if not s.get("race")]), race_week=any(bool(s.get("race")) for s in sessions),
             long_bound=bool(week.get("long_step_capped")),
             eq_week_cap=bio_cap, eq_week_laid=week["eq_km"], eq_week_bound=bool(bio_over),
             eq_sess_cap=session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),

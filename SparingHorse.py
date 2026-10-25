@@ -8482,6 +8482,7 @@ _PV_SESSION = {"activity_id": True, "actual": {"km": True, "pace": True}, "compo
                "date": True, "done": True, "kind": True, "km": True, "long_step_capped": True,
                "long_max_capped": True,   # §LRMAX — the long-run limit held this run (prescription)
                "long_held": True,   # §LRH — the long run kept its rung on a straddling week
+               "moved_from": True,   # SH-120 — the prescription's former date, same class as `date`
                "minutes": True, "missed": True, "note": True, "optional": True,
                "pace_zone": True, "race": True,   # §RACE — race day, already public via objectives
                # §TT2 — the same reasoning one priority tier down: the plan already publishes
@@ -8513,6 +8514,7 @@ _PV_WEEK = {"adjusted": True, "clipped": True, "deload_forced": True, "deload_pu
             "km_ahead": True, "km_done": True, "long": True, "partial": True, "peak_acwr": True,
             # §LRH — the hold, named: the same class as `long_step_capped` (a governor annotation)
             "long_held": {"km": True, "rung_km": True, "basis": True},
+            "run_moved": {"from": True, "to": True},   # SH-120 — prescription dates, not athlete history
             "day_share": True,   # §DAYSHARE — the days ahead kept their own lay: the same class, a flag
             "pk": True, "prog_ridden": True, "proj_acwr": True, "proj_acwr_flat": True,
             "proj_acwr_soft": True, "proj_ctl": True, "quality": _PV_QUALITY, "runs": True,

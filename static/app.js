@@ -2162,6 +2162,7 @@ function weekHtml(w,p,today){
                // §LRMAX — the long-run limit (35 km or 3 h 30 min, the shorter)
                w.long_max_capped?`<span class="wfz" title="Long-run limit: this week's long run was held to 35 km or 3 h 30 min at its planned pace, whichever comes first. Past 35 km the studies found no further gain. The rest of the week's volume is on the easy runs; weekly load unchanged.">long run at its limit</span>`:'',
                w.long_held?`<span class="wfz" title="Long run kept at its ladder rung (${U.d(w.long_held.rung_km)} ${U.unit}): your easy days ran over this week's sheet, so the sheet runs over the bar and the long run keeps its distance. Only the load ceilings can shorten it.">long run kept</span>`:'',
+               w.run_moved?`<span class="wfz" title="${w.run_moved.length>1?'Runs':'Run'} moved from ${w.run_moved.map(m=>sessDate(m.from).split(' - ').pop()).join(' and ')} to keep that day's load under the ceiling. The distance and session are unchanged.">run moved</span>`:'',
                // §REST — the day-spacing gate: the week wanted another run day but every open day
                // would have chained a run streak, so the spacing held and the week is honestly lighter
                // §REST2 — …and how much it cost, when the engine can measure it. A boolean says the

@@ -448,8 +448,8 @@
       "resilience"
     ],
     "clipped_by_acwr": false,
-    "end_atl": 18.3,
-    "end_ctl": 21.7,
+    "end_atl": 18.4,
+    "end_ctl": 21.8,
     "start": "2026-09-07",
     "weeks": [
       {
@@ -632,22 +632,22 @@
         "limits": {
           "acwr": {
             "basis": "L",
-            "binds": false,
+            "binds": true,
             "ceiling": 1.25,
-            "headroom": 0.4,
-            "laid": 0.85,
+            "headroom": 0.35,
+            "laid": 0.9,
             "unit": "ratio"
           },
           "binding": "acwr",
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.32,
+        "peak_acwr": 1.176,
         "phase": "build",
-        "proj_acwr": 0.851,
-        "proj_acwr_flat": 0.986,
-        "proj_acwr_soft": 0.851,
-        "proj_ctl": 22.5,
+        "proj_acwr": 0.896,
+        "proj_acwr_flat": 0.978,
+        "proj_acwr_soft": 0.896,
+        "proj_ctl": 22.6,
         "quality": [
           {
             "component": "vo2max",
@@ -669,6 +669,12 @@
           }
         ],
         "role": "build",
+        "run_moved": [
+          {
+            "from": "2026-09-15",
+            "to": "2026-09-16"
+          }
+        ],
         "runs": 4,
         "sessions": [
           {
@@ -682,10 +688,11 @@
           },
           {
             "component": "vo2max",
-            "date": "2026-09-15",
+            "date": "2026-09-16",
             "kind": "interval",
             "km": 6.0,
             "minutes": 28,
+            "moved_from": "2026-09-15",
             "note": "VO\u2082 intervals \u2014 10min easy wu + 2\u00d73min @ interval w/ 2min jog + 10min easy cd",
             "pace_zone": "3:44/km interval",
             "reps": [
@@ -810,20 +817,20 @@
             "basis": "L",
             "binds": false,
             "ceiling": 1.25,
-            "headroom": 0.41,
-            "laid": 0.84,
+            "headroom": 0.4,
+            "laid": 0.85,
             "unit": "ratio"
           },
           "binding": "acwr",
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.223,
+        "peak_acwr": 1.243,
         "phase": "build",
-        "proj_acwr": 0.842,
-        "proj_acwr_flat": 0.918,
-        "proj_acwr_soft": 0.842,
-        "proj_ctl": 21.7,
+        "proj_acwr": 0.846,
+        "proj_acwr_flat": 0.932,
+        "proj_acwr_soft": 0.846,
+        "proj_ctl": 21.8,
         "quality": [
           {
             "component": "vo2max",
@@ -1095,11 +1102,11 @@
           "regime": "caution"
         },
         "long": 5,
-        "peak_acwr": 1.149,
+        "peak_acwr": 1.15,
         "phase": "peak",
-        "proj_acwr": 0.911,
+        "proj_acwr": 0.91,
         "proj_acwr_flat": 0.91,
-        "proj_acwr_soft": 0.911,
+        "proj_acwr_soft": 0.91,
         "proj_ctl": 21.2,
         "quality": [
           {
@@ -1818,7 +1825,7 @@
     ],
     "clipped_by_acwr": false,
     "end_atl": 32.6,
-    "end_ctl": 28.8,
+    "end_ctl": 28.9,
     "start": "2026-10-05",
     "weeks": [
       {
@@ -1854,11 +1861,11 @@
           "regime": "caution"
         },
         "long": 4,
-        "peak_acwr": 1.128,
+        "peak_acwr": 1.126,
         "phase": "taper",
-        "proj_acwr": 0.769,
-        "proj_acwr_flat": 0.846,
-        "proj_acwr_soft": 0.769,
+        "proj_acwr": 0.768,
+        "proj_acwr_flat": 0.844,
+        "proj_acwr_soft": 0.768,
         "proj_ctl": 19.5,
         "quality": [
           {
@@ -2010,12 +2017,12 @@
           "regime": "caution"
         },
         "long": 3,
-        "peak_acwr": 0.991,
+        "peak_acwr": 0.99,
         "phase": "taper",
-        "proj_acwr": 0.654,
-        "proj_acwr_flat": 0.731,
-        "proj_acwr_soft": 0.654,
-        "proj_ctl": 17.2,
+        "proj_acwr": 0.653,
+        "proj_acwr_flat": 0.73,
+        "proj_acwr_soft": 0.653,
+        "proj_ctl": 17.3,
         "quality": [
           {
             "component": "ssmax",
@@ -2148,12 +2155,12 @@
           "regime": "caution"
         },
         "long": 2,
-        "peak_acwr": 3.102,
+        "peak_acwr": 3.1,
         "phase": "taper",
-        "proj_acwr": 1.13,
-        "proj_acwr_flat": 1.849,
-        "proj_acwr_soft": 0.663,
-        "proj_ctl": 28.8,
+        "proj_acwr": 1.129,
+        "proj_acwr_flat": 1.848,
+        "proj_acwr_soft": 0.662,
+        "proj_ctl": 28.9,
         "quality": [],
         "role": "race",
         "runs": 2,

@@ -10,6 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.2] - 2026-10-25
+
+### Fixed
+
+- **A run moves to a later day before the week's volume is cut.** When one early day went over the load ceiling,
+  often because of load carried into the week, the only remedy was to cut the week's total in 1 % steps. On some
+  weeks that removed much of the volume and merged the remaining sessions into far fewer run days. The plan now
+  first moves that day's session, with its distance and workout unchanged, to the first later free day that passes.
+  Long runs, threshold runs and races never move, and neither does a race day's placeholder. Run spacing and the
+  limit on consecutive run days still apply, and a run cannot move into or out of a check-in window. Only when no
+  move fits does the 1 % step-down run. A moved week carries a **run moved** badge naming every source day, and the
+  ACWR limit is marked as binding. `det/lay-within-ceiling` covers the move, its guards and the step-down fallback;
+  `det/straddle-monday-lay` and `det/day-share` cover the week in progress.
+
+## [0.85.1] - 2026-10-24
+
+### Fixed
+
+- **The week as laid is checked against the load ceiling.** A week laid below its allowed total could still go
+  over the ceiling on one day: at the lower total, short runs could be merged into fewer runs, raising that day's
+  load ratio. This could affect away weeks, down weeks and caution weeks, both in Monday's plan and in a mid-week
+  rebuild after an over-run. The actual lay is now checked, not just its total. If it goes over the ceiling, its
+  total comes down in 1 % steps until the lay passes, and the ACWR limit is marked as binding. A mid-week rebuild
+  also decides the week's total using Monday's own set of run days, so it starts from the same decision as Monday.
+  `det/lay-within-ceiling` covers the Monday and mid-week paths, the binding flag and the unchanged taper.
+
 ## [0.85.0] - 2026-10-24
 
 ### Added

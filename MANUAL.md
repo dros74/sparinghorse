@@ -394,7 +394,11 @@ Watch for:
   so the sheet runs over the bar; only the load ceilings can shorten it) or **`fast load eased`** (the
   biomechanical brake trimming a fast-load spike to easy). After a long healthy *break*, the plan
   restarts from a small conservative dose and ramps from there by measurement — no gate, just a floor.
-- **`clipped to fit ACWR`** — the safety ceiling trimmed that week's volume. Expected on aggressive weeks.
+- **`clipped to fit ACWR`** — the safety ceiling held that week's plan by moving a run or, when no move fits,
+  trimming its volume. Expected on aggressive weeks.
+- **`run moved`** — a day went over the load ceiling, so its run moved unchanged to a later free day. The badge's
+  explanation names every source day. Long runs, threshold runs and races stay on their days; run spacing,
+  consecutive-day limits and check-in windows still hold.
 - **Component chips + the "builds" line** — every quality session carries a small chip naming which of the
   four fitness components it chiefly builds (**VO₂max**, **SSmax/LT2**, **economy**, **resilience** — hover
   a chip for the science), and the week pane's phase line sums what the phase is *for*, derived from the sessions
