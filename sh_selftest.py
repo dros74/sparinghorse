@@ -7697,12 +7697,31 @@ def _stc_straddle_pull():
                 if s.get("kind") in E.QUALITY_KINDS and s["date"] >= since]
 
     fails, got = [], {}
-    for name, with_down, flag in (("pull", True, "deload_pulled"), ("forced", False, "deload_forced")):
-        full, fb = E.generate_block(_shape(with_down), mon, *seed, easy, **A)
+    # SH-56 — "pull+1": the streak comes in one past the limit, so a hard-coded limit cannot pass for the streak
+    for name, with_down, flag, streak in (("pull", True, "deload_pulled", E.MESO_MAX_HARD),
+                                          ("forced", False, "deload_forced", E.MESO_MAX_HARD),
+                                          ("pull+1", True, "deload_pulled", E.MESO_MAX_HARD + 1)):
+        Ak = {**A, "consec_hard": streak}
+        full, fb = E.generate_block(_shape(with_down), mon, *seed, easy, **Ak)
         w0, road0 = full[0], _road(full)
         if not w0.get(flag):
             fails.append(f"{name}: fixture — the Monday lay's week 1 does not carry {flag} (road {road0})")
             continue
+        def _why(w, label):
+            # SH-56 — the week says what decided it: the streak it came in with, binding, the same on every day
+            t = (w.get("limits") or {}).get("tissue")
+            if not t or t.get("streak") != streak or t.get("binds") is not True:
+                fails.append(f"{name}: {label} — limits.tissue reads {t}, expected streak {streak} binding")
+            if (w.get("limits") or {}).get("binding") != "tissue":
+                fails.append(f"{name}: {label} — limits.binding reads {(w.get('limits') or {}).get('binding')}, expected tissue")
+            if name.startswith("pull") and w.get("intent") != f"Down week — brought forward: {streak} near-ceiling weeks in a row":
+                fails.append(f"{name}: {label} — intent reads {w.get('intent')!r}")
+            if label != "the Monday lay":
+                if t != (w0.get("limits") or {}).get("tissue"):
+                    fails.append(f"{name}: {label} — limits.tissue {t} vs the Monday lay {(w0.get('limits') or {}).get('tissue')}")
+                if w.get("intent") != w0.get("intent"):
+                    fails.append(f"{name}: {label} — intent {w.get('intent')!r} vs the Monday lay {w0.get('intent')!r}")
+        _why(w0, "the Monday lay")
         if _quality(w0, days[0]):
             fails.append(f"{name}: the Monday lay's recovery week carries quality {_quality(w0, days[0])}")
         if not any(s.get("kind") in E.QUALITY_KINDS for s in full[1]["sessions"]):
@@ -7723,9 +7742,10 @@ def _stc_straddle_pull():
                                      week_actuals=(len(done), round(sum(x["km"] for x in done), 1)),
                                      day_series=L, week_actual_long=(max(long_done) if long_done else None),
                                      pinned_past=({x["date"]: x for x in w0["sessions"] if x["date"] < days[i]},
-                                                  set(days[:i])), **A)
+                                                  set(days[:i])), **Ak)
             w, road = ws[0], _road(ws)
             by_day.append(road[0])
+            _why(w, f"regenerated {days[i]}")
             if road != road0:
                 fails.append(f"{name}: regenerated {days[i]} — road {road} vs the Monday lay {road0}")
             if not w.get(flag):
@@ -7741,7 +7761,8 @@ def _stc_straddle_pull():
                 if not m or m.get("kind") != x.get("kind") or abs((m.get("km") or 0.0) - (x.get("km") or 0.0)) > 0.5:
                     fails.append(f"{name}: regenerated {days[i]} — {x['date']} reads {x.get('kind')} {x.get('km')} km, "
                                  f"the Monday lay {m and (m.get('kind'), m.get('km'))}")
-        got[name] = {"monday": road0, "week_1_by_day": by_day, "streak_out": fb["consec_hard"]}
+        got[name] = {"monday": road0, "week_1_by_day": by_day, "streak_out": fb["consec_hard"],
+                     "tissue": (w0.get("limits") or {}).get("tissue"), "intent": w0.get("intent")}
     # caution never re-phases or forces: the same straddling regeneration, the streak at the limit
     cw, _ = E.generate_block(_shape(True), mon, *seed, easy, today=mon + timedelta(days=1),
                              **{**A, "regime": "caution"})
@@ -7753,7 +7774,9 @@ def _stc_straddle_pull():
                "the days ahead as the Monday lay had them; caution untouched",
                passed=not fails, expect="Tue–Sun regenerations: road == the Monday lay; week 1 keeps "
                "deload_pulled / deload_forced; no quality kind from today on; each day ahead within 0.5 km "
-               "of the Monday lay; streak out unchanged",
+               "of the Monday lay; streak out unchanged; SH-56 week 1 carries limits.tissue with the streak it came in "
+               "with (the limit; one past it for pull+1) and binds true, limits.binding tissue, and that tissue and the intent equal the Monday lay's (pull: 'Down week — "
+               "brought forward: <limit> near-ceiling weeks in a row')",
                got={**got, "failures": fails or "none"})
 
 

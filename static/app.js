@@ -2078,6 +2078,12 @@ function limitSentence(k, ax, w, L){
     return w&&w.role==="race"
       ?`The race itself is the heaviest run (${v(ax.laid)} speed-weighted ${limU(ax.unit)}); race week is laid around it.${sized}`
       :`The heaviest single run weighs ${v(ax.laid)} speed-weighted ${limU(ax.unit)}; one run may weigh up to ${v(ax.ceiling)}.${sized}`;
+  if(k==="tissue"){
+    if(ax.binds&&w&&w.deload_pulled)
+      return `${ax.streak} weeks in a row near the load ceiling, where the limit is ${ax.limit}: the block's down week was brought forward to this week.${sized}`;
+    if(ax.binds&&w&&w.deload_forced)
+      return `${ax.streak} weeks in a row near the load ceiling, where the limit is ${ax.limit}: this week is a forced deload.${sized}`;
+  }
   if(k==="tissue")
     return ax.exempt
       ?`${ax.streak} weeks in a row near the ceiling. The peak is exempt: the taper that follows is its recovery.`

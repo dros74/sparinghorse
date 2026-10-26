@@ -1865,7 +1865,7 @@
         "elapsed": false,
         "eq_km": 58.8,
         "frozen": false,
-        "intent": "Down week \u2014 absorb the block",
+        "intent": "Down week \u2014 brought forward: 4 near-ceiling weeks in a row",
         "intent_km": 58.6,
         "intent_runs": 5,
         "km": 58.8,
@@ -1879,7 +1879,7 @@
             "laid": 1.02,
             "unit": "ratio"
           },
-          "binding": "long_step",
+          "binding": "tissue",
           "chronic": {
             "basis": "L",
             "binds": false,
@@ -1932,10 +1932,10 @@
           },
           "tissue": {
             "basis": "L",
-            "binds": false,
-            "headroom": 4,
+            "binds": true,
+            "headroom": 0,
             "limit": 4,
-            "streak": 0,
+            "streak": 4,
             "unit": "weeks"
           }
         },

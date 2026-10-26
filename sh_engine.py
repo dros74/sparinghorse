@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.85.2"
+ENGINE_VERSION = "0.85.3"
 
 
 def _zones_asof(db, date_iso=None):
@@ -4878,6 +4878,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # the shape had it (live, plans 281 → 282, 28 → 29 Sep 2026: Monday's 54.3 km easy week read
         # 68.5 km with 10×3 min VO₂ on the Tuesday and a 24.3 km MP long run on the Sunday, the
         # streak standing at 4 of 4 and no input changed).
+        streak_in = consec_hard                    # SH-56 — the streak the week came in with, before the deload resets it
         forced_deload = bool(assertive and not is_down and not is_taper and not is_peak
                              and last_nondown and consec_hard >= MESO_MAX_HARD)
         # §PRO11 — re-phase, don't stack: §PRO10 makes every riding week near-ceiling by construction,
@@ -5635,7 +5636,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 pweek["long_held"] = {"km": (_held[0].get("km") if _held else None),
                                       "rung_km": _full_long["km"], "basis": "full-week lay"}
             pweek["limits"] = _week_limits(          # §LIMITS (0.58.0) — the straddling week's read; the
-                assertive=assertive, eff_cap=eff_cap,   # ramp IS reproduced here (§WKMEAN2); the streak is not (§PRO13)
+                assertive=assertive, eff_cap=eff_cap,   # ramp IS reproduced here (§WKMEAN2); the streak only when it fired (SH-56)
                 # §LRH — `clipped` used to be a constant False here, so the ACWR axis could never read
                 # "binds" on the one week the remainder search actually governs. It binds when the
                 # search answered less than the remainder asked for. SH-103 — and on caution when
@@ -5648,7 +5649,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §WKMEAN2 — `ctl` is the week's projected end-of-week CTL (`_project_week(... roll_from=today
                 # ...)` just above); `ws_ctl` is the week-start state, so this reads the week's CTL gain
                 # against the +5 ceiling exactly as the full-week path does (`ctl_gain=(ctl - _ctl_start)`).
-                streak=None, streak_bound=False, ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None),
+                streak=(streak_in if (forced_deload or deload_pulled) else None), streak_bound=bool(forced_deload or deload_pulled), ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None),
                 long_max=(_long_max_read(sessions, fresh=[x for x in sessions if x["date"] not in from_history])
                           if long_km_cap else None))
             # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to
@@ -5738,6 +5739,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 pweek["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
             elif deload_pulled:
                 pweek["deload_pulled"] = True
+                pweek["intent"] = f"Down week — brought forward: {streak_in} near-ceiling weeks in a row"   # SH-56
             _rot_intent(pweek)                             # §ROT — the sentence names only a run that is laid
             # §PRO6 (0.26.1) — fold the straddling week into the near-ceiling streak + trough
             # anchor, judged exactly as the frozen fold will judge this same week next Monday
@@ -6059,6 +6061,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             week["intent"] = "Down week — forced deload (consecutive near-ceiling weeks)"
         elif deload_pulled:                        # §PRO11 — the shape's own down week, arrived early
             week["deload_pulled"] = True
+            week["intent"] = f"Down week — brought forward: {streak_in} near-ceiling weeks in a row"   # SH-56
         _rot_intent(week)                          # §ROT — the sentence names only a run that is laid
         if long_km_cap and any(s.get("long_step_capped") for s in sessions):
             week["long_step_capped"] = long_km_cap   # §PRO9 — the +10% ceiling that bound this week's long
@@ -6080,7 +6083,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             long_bound=bool(week.get("long_step_capped")),
             eq_week_cap=bio_cap, eq_week_laid=week["eq_km"], eq_week_bound=bool(bio_over),
             eq_sess_cap=session_eq_cap, eq_sess_laid=max((_bout_eq_km(x) for x in sessions), default=0.0),
-            streak=consec_hard, streak_bound=bool(forced_deload),
+            streak=(streak_in if (forced_deload or deload_pulled) else consec_hard),   # SH-56 — the streak that decided
+            streak_bound=bool(forced_deload or deload_pulled),
             streak_exempt=("peak" if is_peak else None),     # §MESO4 — say why a streak past its limit stands
             ramp_cap=ramp, ctl_gain=(ctl - _ctl_start),
             long_max=_long_max_read(sessions) if long_km_cap else None)

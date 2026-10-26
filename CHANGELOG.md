@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.3] - 2026-10-26
+
+### Fixed
+
+- **A down week brought forward now says why.** When four weeks in a row end near the load ceiling, the plan pulls
+  the block's down week forward, or forces an all-easy deload when the block has none left. The card for that week
+  kept the template's "Down week — absorb the block" and did not say the week had arrived early. The tissue limit
+  showed the streak after the deload had reset it (0 of 4, not binding), and a forced deload showed 0 of 4 as
+  binding. A regeneration on any day but Monday showed no tissue limit for that week. The week's intent now reads "Down
+  week — brought forward: 4 near-ceiling weeks in a row", and both the Monday lay and every later regeneration
+  publish the tissue limit with the streak the week came in with, marked binding, so the limit sentence names it. The
+  forced-deload intent is unchanged. No session, distance or load moves; only the wording and the published limit
+  values change. `det/straddle-pull` covers the pulled and the forced week on the Monday lay and on each
+  Tuesday-to-Sunday regeneration.
+
 ## [0.85.2] - 2026-10-25
 
 ### Fixed
