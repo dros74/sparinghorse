@@ -6188,6 +6188,216 @@ def _stc_straddle_regen_day():
                     sun["limits"].get("binding")), "days_left": (o_sat, o_sun), "failures": fails or "none"})
 
 
+def _stc_monday_load_same_plan():
+    """SH-68 — LOAD ON THE WEEK'S FIRST DAY: THE MONDAY-NIGHT AND TUESDAY-MORNING PLANS ARE ONE PLAN.
+    A run logged on a Monday rest day sent the Monday-night regeneration down the full-week path, which
+    re-laid the whole week with the day's actual floored in and stepped it down to the chronic ceiling,
+    while the next morning's regeneration (no new input) took the straddle branch and copied Monday's
+    days ahead back. Both now take the straddle branch. Fixture: a 4-run assertive build week (Monday a
+    rest day) whose Monday lay rides the chronic ceiling; an unplanned run, then cross-training alone,
+    then the same run on caution. Each limb: the night's days ahead equal the Tuesday's (kind, km,
+    TRIMP, reps, moves), with the same binding axis and intent; on the assertive run limb they are also
+    Monday morning's own days ahead (§DAYSHARE — the ceiling did not refuse them). Three more limbs
+    guard the parts of the fix the first three cannot see: `_split_freeze` hands the Monday-night week
+    the same lived truth (week caps, §PAST pins) Tuesday gets; a night after an unplanned mid-week run
+    lays no new session on the day just run (`_free_from`); and cross-training alone on a Monday rest
+    day does not grow a Monday run that Tuesday would read back as history. Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 11, 2)
+    tue = mon + timedelta(days=1)
+    easy = 390
+    zones = {"easy_top": easy, "easy": 420, "marathon": 350, "threshold": 330, "interval": 310}
+    vo2 = {"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+           "rep_min": 3, "rec_min": 2, "label": "VO₂"}
+    shape = {"wk": 1, "km": 80, "runs": 4, "long": 26, "strides": 0, "quality": [vo2],
+             "intent": "Build — general", "phase": "build"}
+    seed, load = (100.0, 100.0), 92.0
+    fails, got = [], {}
+
+    def _gen(regime, today, c, a, **kw):
+        A = (dict(last_nondown=900.0, recent_longs=[33.8] * 4, recent_eq=[128.0] * 4,
+                  recent_session_eq=[41.6] * 4) if regime == "assertive" else {})
+        return E.generate_block([dict(shape, quality=[dict(vo2)])], mon, c, a, easy, zones=zones,
+                                today=today, regime=regime, **kw, **A)[0][0]
+
+    def _ahead(w):
+        return [(s["date"], s.get("kind"), s.get("km"), round(float(s.get("trimp") or 0.0), 1),
+                 len(s.get("reps") or []), s.get("moved_from"))
+                for s in w["sessions"] if s["date"] > mon.isoformat() and s.get("kind") != "rest"]
+
+    for tag, regime, run_today in (("run", "assertive", True), ("cross_training", "assertive", False),
+                                   ("caution_run", "caution", True)):
+        actuals = (1, 10.1) if run_today else (0, 0.0)
+        morning = _gen(regime, mon, *seed, day_series={mon.isoformat(): 0.0}, week_actuals=(0, 0.0))
+        night = _gen(regime, mon, *seed, day_series={mon.isoformat(): load}, week_actuals=actuals,
+                     today_trimp=load, today_run=run_today)
+        c, a = E._ewma_step(seed[0], load, E.TAU_CTL), E._ewma_step(seed[1], load, E.TAU_ATL)
+        tuesday = _gen(regime, tue, c, a, day_series={mon.isoformat(): load}, week_actuals=actuals)
+        if _ahead(night) != _ahead(tuesday):
+            fails.append(f"({tag}) Monday night and Tuesday morning lay different days ahead: "
+                         f"{_ahead(night)} vs {_ahead(tuesday)}")
+        for fld in ("intent_km",):
+            if night.get(fld) != tuesday.get(fld):
+                fails.append(f"({tag}) {fld} differs: night {night.get(fld)}, Tuesday {tuesday.get(fld)}")
+        bn, bt = night["limits"].get("binding"), tuesday["limits"].get("binding")
+        if bn != bt:
+            fails.append(f"({tag}) the binding axis differs: night {bn}, Tuesday {bt}")
+        # anti-vacuity — the night was laid as a lived week and charged the day's load
+        if not night.get("partial"):
+            fails.append(f"({tag}) the Monday-night week was not laid on the straddle branch")
+        if not (night.get("proj_ctl") or 0.0) > (morning.get("proj_ctl") or 0.0):
+            fails.append(f"({tag}) the Monday load never reached the night's projection "
+                         f"({morning.get('proj_ctl')} → {night.get('proj_ctl')})")
+        if tag == "run":
+            if morning["limits"].get("binding") != "chronic":
+                fails.append(f"(run) fixture — Monday's lay is bound by {morning['limits'].get('binding')}, "
+                             "not the chronic ceiling the full-week path stepped the night down to")
+            if _ahead(night) != _ahead(morning):
+                fails.append(f"(run) the days ahead did not keep Monday's lay: {_ahead(morning)} vs "
+                             f"{_ahead(night)}")
+        got[tag] = {"km_ahead": [round(sum(x[2] for x in _ahead(w)), 1) for w in (morning, night, tuesday)],
+                    "binding": [w["limits"].get("binding") for w in (morning, night, tuesday)]}
+
+    def _days_after(w, after):
+        return [(s["date"], s.get("kind"), s.get("km"), round(float(s.get("trimp") or 0.0), 1),
+                 len(s.get("reps") or []), s.get("moved_from"))
+                for s in w["sessions"] if s["date"] > after and s.get("kind") != "rest"]
+
+    def _laid_on(w, d):
+        return [(s.get("kind"), s.get("km")) for s in w["sessions"]
+                if s["date"] == d and (s.get("km") or 0) > 0 and s.get("kind") != "rest"]
+
+    # (split_freeze) — the caller reads the week's lived truth on the same predicate: the Monday-night
+    # week gets the logged run's caps and the §PAST pins, as the Tuesday week does.
+    import sqlite3 as _sq
+    mem = _sq.connect(":memory:"); mem.row_factory = _sq.Row
+    mem.executescript(S.SCHEMA)
+    mem.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,trimp) VALUES(?,?,?,?,?,?,?)",
+                (990001, mon.isoformat(), mon.isoformat() + "T19:00", S.RUNNING_SPORT, 10.1, 3300, load))
+    mem.commit()
+    seen, real_gb = [], E.generate_block
+
+    def _spy(*a, **kw):
+        seen.append({k: kw.get(k) for k in ("week_actual_long", "week_actual_eq", "week_actual_seq",
+                                            "pinned_past")})
+        return real_gb(*a, **kw)
+    E.generate_block = _spy
+    try:
+        E._split_freeze([dict(shape, quality=[dict(vo2)])], mon, seed, easy, None, zones, {}, mon,
+                        week_actuals=(1, 10.1), regime="assertive", db=mem, pace_zones=zones,
+                        today_trimp=load, today_run=True, day_series={mon.isoformat(): load})
+        c, a = E._ewma_step(seed[0], load, E.TAU_CTL), E._ewma_step(seed[1], load, E.TAU_ATL)
+        E._split_freeze([dict(shape, quality=[dict(vo2)])], mon, (c, a), easy, None, zones, {}, tue,
+                        week_actuals=(1, 10.1), regime="assertive", db=mem, pace_zones=zones,
+                        today_trimp=None, today_run=False, day_series={mon.isoformat(): load})
+    finally:
+        E.generate_block = real_gb
+        mem.close()
+    if len(seen) != 2:
+        fails.append(f"(split_freeze) fixture — expected two generate_block calls, saw {len(seen)}")
+    else:
+        sn, st = seen
+        if sn["week_actual_long"] is None or sn["week_actual_eq"] is None or sn["pinned_past"] is None:
+            fails.append(f"(split_freeze) the Monday-night week got no lived truth: {sn}")
+        for k in ("week_actual_long", "week_actual_eq", "week_actual_seq"):
+            if sn[k] != st[k]:
+                fails.append(f"(split_freeze) {k}: night {sn[k]}, Tuesday {st[k]}")
+        got["split_freeze"] = {k: sn[k] for k in ("week_actual_long", "week_actual_eq")}
+
+    # (free_from) — an unplanned run on a mid-week rest day of a 3-run week whose remainder wants the
+    # §REST spread: the night lays no new session on the day just run, and the next morning agrees.
+    q_mp = {"kind": "long_mp", "zone": "marathon", "frac": 0.25, "structure": "mp_finish", "label": "MP"}
+    ff_shape = {"wk": 1, "km": 85.2, "runs": 3, "long": 24.3, "strides": 0, "quality": [vo2, q_mp],
+                "intent": "Build — general", "phase": "base"}
+    ff_A = dict(regime="assertive", prev_tail=3, last_nondown=478.155, consec_hard=0, ride_cap=E.ACWR_SOFT,
+                recent_longs=[12.7, 14.0, 11.2, 12.5], recent_eq=[42.3, 40.7, 46.8, 45.6],
+                recent_session_eq=[17.8, 17.8, 15.3, 17.0])
+    ff_race = {"date": (mon + timedelta(days=6)).isoformat(), "km": 10.0, "pace_sec": 330,
+               "zone": "threshold", "label": "tune-up", "tune_up": True}
+    saved_pref = E._DAY_PREF
+    E.set_day_preferences("sun", "thu")
+    try:
+        def _ff(today, c, a, **kw):
+            return E.generate_block([dict(ff_shape, quality=[dict(q) for q in ff_shape["quality"]])], mon,
+                                    c, a, easy, zones=zones, today=today, race=ff_race, **kw, **ff_A)[0][0]
+        c, a = 50.0, 40.555
+        ff_mon = _ff(mon, c, a, day_series={mon.isoformat(): 0.0}, week_actuals=(0, 0.0))
+        wed, thu = mon + timedelta(days=2), mon + timedelta(days=3)
+        series, n_run, km_run, pins = {}, 0, 0.0, {}
+        for o in range(2):
+            d = (mon + timedelta(days=o)).isoformat()
+            rs = [x for x in ff_mon["sessions"] if x["date"] == d and (x.get("km") or 0) > 0
+                  and x.get("kind") != "rest"]
+            series[d] = sum(float(x["trimp"]) for x in rs)
+            if rs:
+                n_run, km_run, pins[d] = n_run + 1, km_run + sum(float(x["km"]) for x in rs), rs[0]
+            c, a = E._ewma_step(c, series[d], E.TAU_CTL), E._ewma_step(a, series[d], E.TAU_ATL)
+        ff_load, ff_km = 207.3, 17.2
+        acts = (n_run + 1, round(km_run + ff_km, 1))
+        caps = dict(week_actual_long=ff_km, week_actual_eq=round(km_run + ff_km, 2), week_actual_seq=ff_km)
+        cov = {(mon + timedelta(days=o)).isoformat() for o in range(3)}
+        ff_night = _ff(wed, c, a, day_series={**series, wed.isoformat(): ff_load}, week_actuals=acts,
+                       today_trimp=ff_load, today_run=True, pinned_past=(dict(pins), set(cov)), **caps)
+        npins = dict(pins)
+        npins.update({x["date"]: x for x in ff_night["sessions"]
+                      if x["date"] == wed.isoformat() and (x.get("km") or 0) > 0})
+        c1, a1 = E._ewma_step(c, ff_load, E.TAU_CTL), E._ewma_step(a, ff_load, E.TAU_ATL)
+        ff_next = _ff(thu, c1, a1, day_series={**series, wed.isoformat(): ff_load, thu.isoformat(): 0.0},
+                      week_actuals=acts, pinned_past=(npins, set(cov)), **caps)
+    finally:
+        E._DAY_PREF = saved_pref
+    if _laid_on(ff_night, wed.isoformat()):
+        fails.append(f"(free_from) the night laid {_laid_on(ff_night, wed.isoformat())} on the day just run")
+    if _days_after(ff_night, wed.isoformat()) != _days_after(ff_next, wed.isoformat()):
+        fails.append(f"(free_from) night and next morning differ: {_days_after(ff_night, wed.isoformat())} vs "
+                     f"{_days_after(ff_next, wed.isoformat())}")
+    got["free_from"] = {"night_on_day_run": _laid_on(ff_night, wed.isoformat())}
+
+    # (cross_training_rest) — cross-training alone on a Monday rest day of a down week (Saturday long
+    # run, Monday the ranked rest day): the night lays no Monday run for Tuesday to read back.
+    xt_shape = {"wk": 1, "km": 20.1, "runs": 3, "long": 5.7, "strides": 0,
+                "quality": [{"kind": "threshold", "zone": "threshold", "frac": 0.10, "structure": "cruise",
+                             "rep_min": 8, "rec_min": 2, "label": "Cruise"}],
+                "intent": "Down week — absorb", "phase": "build"}
+    xt_A = dict(regime="assertive", prev_tail=0, last_nondown=252.02, consec_hard=4, ride_cap=1.15,
+                recent_longs=[8.2, 6.4, 8.5, 9.4], recent_eq=[28.9, 31.9, 25.4, 31.7],
+                recent_session_eq=[9.3, 11.2, 11.4, 8.2])
+    xt_caps = dict(week_actual_long=0.0, week_actual_eq=0.0, week_actual_seq=0.0)
+    saved_pref = E._DAY_PREF
+    E.set_day_preferences("sat", "mon")
+    try:
+        def _xt(today, c, a, **kw):
+            return E.generate_block([dict(xt_shape, quality=[dict(q) for q in xt_shape["quality"]])], mon,
+                                    c, a, easy, zones=zones, today=today, week_actuals=(0, 0.0), **kw,
+                                    **xt_caps, **xt_A)[0][0]
+        c, a, xt_load = 26.297, 28.915, 124.5
+        xt_night = _xt(mon, c, a, day_series={mon.isoformat(): xt_load}, today_trimp=xt_load,
+                       today_run=False, pinned_past=({}, set()))
+        mpins = {x["date"]: x for x in xt_night["sessions"]
+                 if x["date"] == mon.isoformat() and (x.get("km") or 0) > 0}
+        c1, a1 = E._ewma_step(c, xt_load, E.TAU_CTL), E._ewma_step(a, xt_load, E.TAU_ATL)
+        xt_tue = _xt(tue, c1, a1, day_series={mon.isoformat(): xt_load, tue.isoformat(): 0.0},
+                     pinned_past=(mpins, {mon.isoformat()}))
+    finally:
+        E._DAY_PREF = saved_pref
+    if _laid_on(xt_night, mon.isoformat()):
+        fails.append(f"(cross_training_rest) the night laid {_laid_on(xt_night, mon.isoformat())} on the "
+                     "cross-trained rest day")
+    if _days_after(xt_night, mon.isoformat()) != _days_after(xt_tue, mon.isoformat()):
+        fails.append(f"(cross_training_rest) night and Tuesday differ: {_days_after(xt_night, mon.isoformat())} "
+                     f"vs {_days_after(xt_tue, mon.isoformat())}")
+    got["cross_training_rest"] = {"night_on_monday": _laid_on(xt_night, mon.isoformat())}
+    return _st("det", "monday-load-same-plan",
+               "SH-68 a run or cross-training logged on a Monday rest day: the Monday-night regeneration "
+               "lays the days ahead the Tuesday-morning one lays (no new input between them), with the same "
+               "binding axis and intent; on the assertive run limb they keep Monday's own lay; the caller hands "
+               "the Monday-night week its lived truth; no night lays a new session on a day with load",
+               passed=not fails,
+               expect="night == Tuesday on every limb; the run limb also == Monday morning; binding chronic; "
+               "Monday-night week caps == Tuesday's; nothing laid on the day run or cross-trained",
+               got={**got, "failures": fails or "none"})
+
+
 def _stc_straddle_race():
     """§RACE (SH-73) — THE STRADDLING WEEK LAYS ITS RACE. The straddle branch of `generate_block`
     `continue`s past the full-week §RACE block, so from the Tuesday of race week a regeneration
@@ -14611,9 +14821,10 @@ def _stc_today_actual():
     moot once I have already run (2026-07-30: prescribed rest, ran 93 TRIMP; the projected in-week peak
     read 1.132 against Runalyze's measured 1.466). A FLOOR, so it can only ever RAISE projected load
     and therefore only ever TIGHTEN the governor, and it goes into the PROJECTION only — never into
-    what is laid. Covers BOTH paths: the §6o straddle AND the full-week path, which is what a Monday
-    regeneration takes (`wk_start_d < today` is false when the week starts today) and where scoping
-    this to the straddle branch would have left the defect one day in seven. Pure/in-memory."""
+    what is laid. Covers BOTH weeks a regeneration can stand in: one that straddles today and one that
+    STARTS today (`wk_start_d < today` is false there). The second took the full-week path until SH-68;
+    since then a week starting today with load recorded is laid on the straddle branch at `today_off`
+    0, and the floor must still reach it. Pure/in-memory."""
     from datetime import date
     today, mon = date(2026, 7, 30), date(2026, 7, 27)   # Thursday, and its Monday
     shape = [{"wk": 1, "km": 40, "runs": 5, "long": 12, "strides": 0, "intent": "Base — aerobic volume"}]
@@ -14629,7 +14840,7 @@ def _stc_today_actual():
         return [s.get("trimp") for s in w["sessions"] if s["date"] == today.isoformat()]
 
     fail = []
-    for label, bs in (("straddle", mon), ("full-week/Monday", today)):
+    for label, bs in (("straddle", mon), ("week-starts-today", today)):
         off, small, big = gen(bs, None), gen(bs, SMALL), gen(bs, BIG)
         # ANTI-VACUITY — BIG must genuinely exceed what the plan prescribed for today, or the floor is
         # a no-op and every assertion below passes for the wrong reason.
@@ -14658,7 +14869,7 @@ def _stc_today_actual():
     return _st("det", "today-actual",
                "§PRO20b today's actual load floors today's PROJECTED load (never the lay): a floor "
                "below the prescription is inert, above it raises the projected peak and tightens the "
-               "week, and it applies on the full-week/Monday path as well as the §6o straddle",
+               "week, and it applies on a week that starts today as well as on one that straddles it",
                passed=not fail, expect="below⇒inert; above⇒peak up + lay tighter; never in the lay",
                got={"failures": fail or "none"})
 
@@ -23536,7 +23747,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_target_lift(), lambda: _stc_music_rotation(), lambda: _stc_music_press_retired(), lambda: _stc_zoned_instant(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_lay_within_ceiling(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_monday_load_same_plan(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_lay_within_ceiling(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),

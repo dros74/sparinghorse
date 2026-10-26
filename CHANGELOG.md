@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.4] - 2026-10-26
+
+### Fixed
+
+- **The Monday-night and Tuesday-morning plans are one plan.** When a run was recorded on the first day of the week
+  (an unplanned run on a Monday rest day, with the week riding the chronic ceiling), the regeneration that night
+  re-laid the whole week with that run counted against every ceiling, including the chronic ramp. The regeneration
+  the next morning, with no new input, copied Monday's days ahead and laid the week heavier. The two plans differed
+  on several days, and the later one disagreed with the earlier one on the binding limit. A week that starts today
+  with load recorded is now laid as a week underway, like every later day, so the night and the morning give the
+  same days ahead, binding limit and intent. When Monday is a rest day, the days ahead the athlete runs do not
+  change: the next morning already laid them. A day with cross-training or a run recorded no longer gains a new
+  session from a night regeneration.
+- **Behaviour change.** When Monday is a planned run day, the week's threshold run is no longer dropped after a
+  Monday-night regeneration; the night now keeps the morning's prescription for Monday. The Monday-night
+  re-decision added in 0.85.2 is removed, because the floor no longer falls inside the week being laid.
+  `det/monday-load-same-plan` covers an assertive run on a Monday rest day riding the chronic ceiling,
+  cross-training alone and a caution run, plus the caps and pins the split freeze reads, a session placed on the
+  day just run, and cross-training on a rest day.
+
 ## [0.85.3] - 2026-10-26
 
 ### Fixed
