@@ -6398,6 +6398,113 @@ def _stc_monday_load_same_plan():
                got={**got, "failures": fails or "none"})
 
 
+def _stc_chronic_ran_over():
+    """SH-125 — A WEEK OVER THE CHRONIC CEILING THROUGH LOAD ALREADY DONE DOES NOT READ AS HELD BY IT.
+    After a run past the plan early in a week, the straddling week's CTL gain is above the +5/week limit
+    and the axis read `binds: true` with negative headroom, so the week was tagged as held by a ceiling
+    that cut nothing: the remainder search has no ramp bound and the days ahead are Monday's own lay,
+    judged against the ceiling from the week-start state. `_week_limits` now takes the gain of Monday's
+    own lay: over the ceiling while that lay was inside it ⇒ the axis is exceeded, not binding, and it
+    does not win the fallback. The gain is judged before a race laid in the week (the race's own load is
+    not load done). A week as planned (Monday's rest kept) still binds. Pure/in-memory."""
+    from datetime import date, timedelta
+    mon = date(2026, 11, 2)
+    tue = mon + timedelta(days=1)
+    easy = 390
+    zones = {"easy_top": easy, "easy": 420, "marathon": 350, "threshold": 330, "interval": 310}
+    vo2 = {"kind": "interval", "zone": "interval", "frac": 0.12, "structure": "intervals",
+           "rep_min": 3, "rec_min": 2, "label": "VO₂"}
+    shape = {"wk": 1, "km": 80, "runs": 4, "long": 26, "strides": 0, "quality": [vo2],
+             "intent": "Build — general", "phase": "build"}
+    seed, load = (100.0, 100.0), 92.0
+    fails, got = [], {}
+
+    def _gen(today, c, a, **kw):
+        A = dict(last_nondown=900.0, recent_longs=[33.8] * 4, recent_eq=[128.0] * 4,
+                 recent_session_eq=[41.6] * 4)
+        return E.generate_block([dict(shape, quality=[dict(vo2)])], mon, c, a, easy, zones=zones,
+                                today=today, regime="assertive", **kw, **A)[0][0]
+
+    def _ch(w):
+        return (w.get("limits") or {}).get("chronic") or {}
+
+    def _read(w):
+        ch = _ch(w)
+        return {"ceiling": ch.get("ceiling"), "laid": ch.get("laid"), "headroom": ch.get("headroom"),
+                "binds": ch.get("binds"), "binding": (w.get("limits") or {}).get("binding")}
+
+    def _step(n):
+        return (E._ewma_step(seed[0], n, E.TAU_CTL), E._ewma_step(seed[1], n, E.TAU_ATL))
+
+    morning = _gen(mon, *seed, day_series={mon.isoformat(): 0.0}, week_actuals=(0, 0.0))
+    night = _gen(mon, *seed, day_series={mon.isoformat(): load}, week_actuals=(1, 10.1),
+                 today_trimp=load, today_run=True)
+    tuesday = _gen(tue, *_step(load), day_series={mon.isoformat(): load}, week_actuals=(1, 10.1))
+    aslaid = _gen(tue, *_step(0.0), day_series={mon.isoformat(): 0.0}, week_actuals=(0, 0.0))
+    got.update(morning=_read(morning), night=_read(night), tuesday=_read(tuesday), as_laid=_read(aslaid))
+    num = lambda x: isinstance(x, (int, float))
+
+    # (a) fixture — Monday's lay rides the ceiling; the run takes the week over it
+    mc = _ch(morning)
+    if not (morning["limits"].get("binding") == "chronic" and mc.get("binds")
+            and num(mc.get("laid")) and abs(mc["laid"] - mc["ceiling"]) <= 0.05):
+        fails.append(f"(a) fixture — Monday morning does not ride the chronic ceiling: {_read(morning)}")
+    for tag, w in (("night", night), ("tuesday", tuesday)):
+        ch = _ch(w)
+        if not w.get("partial") or not (num(ch.get("laid")) and ch["laid"] > ch["ceiling"] + 0.05):
+            fails.append(f"(a) fixture — the {tag} week is not a straddle week over the chronic ceiling, "
+                         f"so it does not exercise the defect: {_read(w)}")
+    # (b) over the ceiling through load already done ⇒ not binding
+    for tag, w in (("night", night), ("tuesday", tuesday)):
+        ch = _ch(w)
+        if ch.get("binds") is not False:
+            fails.append(f"(b) {tag}: the chronic axis binds on a week it did not cut: {_read(w)}")
+        if (w.get("limits") or {}).get("binding") == "chronic":
+            fails.append(f"(b) {tag}: the week is named as held by the chronic ceiling")
+        if not (num(ch.get("headroom")) and ch["headroom"] < 0 and num(ch.get("ceiling")) and num(ch.get("laid"))):
+            fails.append(f"(b) {tag}: headroom is not a negative number beside ceiling and laid: {_read(w)}")
+    # (c) following the plan, the ceiling Monday's lay rode still holds the week
+    if not (aslaid.get("partial") and _ch(aslaid).get("binds") is True
+            and aslaid["limits"].get("binding") == "chronic"):
+        fails.append(f"(c) as laid: a Tuesday with Monday's rest kept no longer reads held by the chronic ceiling: "
+                     f"{_read(aslaid)}")
+
+    # (d) the axis on its own
+    _kw = dict(assertive=True, eff_cap=None, acwr_laid=None, clipped=False, long_cap=None,
+               long_laid=None, long_bound=False, eq_week_cap=None, eq_week_laid=None,
+               eq_week_bound=False, eq_sess_cap=None, eq_sess_laid=None, streak=None,
+               streak_bound=False, ramp_cap=5.0, ctl_gain=8.0)
+
+    def _lim(laid_gain):
+        return E._week_limits(**_kw, ctl_gain_laid=laid_gain)
+    u_in, u_none, u_over = _lim(5.0), _lim(None), _lim(6.0)
+    u_race = E._week_limits(**{**_kw, "ctl_gain": 9.0, "ctl_gain_pre_race": 5.0, "ctl_gain_laid": 5.0})
+    u_race_over = E._week_limits(**{**_kw, "ctl_gain": 12.0, "ctl_gain_pre_race": 8.0, "ctl_gain_laid": 5.0})
+    if not u_race["chronic"]["binds"] or u_race.get("binding") != "chronic":
+        fails.append(f"(d) a race carried the gain past the ceiling (pre-race 5.0) and it no longer binds: "
+                     f"{u_race['chronic']}, {u_race.get('binding')}")
+    if u_race_over["chronic"]["binds"] or u_race_over.get("binding") == "chronic":
+        fails.append(f"(d) pre-race gain 8.0 over 5.0 still binds: {u_race_over['chronic']}, {u_race_over.get('binding')}")
+    if u_in["chronic"]["binds"] or u_in.get("binding") == "chronic":
+        fails.append(f"(d) gain 8.0 over 5.0 with Monday's lay at 5.0 still binds: {u_in['chronic']}, {u_in.get('binding')}")
+    if not u_none["chronic"]["binds"] or u_none.get("binding") != "chronic":
+        fails.append(f"(d) no Monday-lay gain no longer reads binding: {u_none['chronic']}, {u_none.get('binding')}")
+    if not u_over["chronic"]["binds"]:
+        fails.append(f"(d) Monday's own lay over the ceiling (6.0) no longer binds: {u_over['chronic']}")
+    got["unit"] = {"laid_5": (u_in["chronic"]["binds"], u_in.get("binding")),
+                   "none": (u_none["chronic"]["binds"], u_none.get("binding")),
+                   "laid_6": (u_over["chronic"]["binds"], u_over.get("binding"))}
+    return _st("det", "chronic-ran-over",
+               "SH-125 a week over the chronic (+5 CTL/week) ceiling through load already done, with Monday's "
+               "own lay inside it, reads as exceeded and not as binding (it does not name the week); a week "
+               "as planned still binds; Monday's own lay over the ceiling still binds",
+               passed=not fails,
+               expect="night/Tuesday: laid > ceiling, binds False, headroom < 0, binding != chronic; "
+               "as laid: binds True, binding chronic; unit: gain_laid <= ceiling => not binding, "
+               "None or over => binding",
+               got={**got, "failures": fails or "none"})
+
+
 def _stc_straddle_race():
     """§RACE (SH-73) — THE STRADDLING WEEK LAYS ITS RACE. The straddle branch of `generate_block`
     `continue`s past the full-week §RACE block, so from the Tuesday of race week a regeneration
@@ -7710,8 +7817,14 @@ def _stc_straddle_intent_anchor():
                 else:
                     if chr_ax.get("ceiling") != E.CTL_RAMP_MAX:
                         fails.append(f"{tag} regen: chronic ceiling {chr_ax.get('ceiling')} != CTL_RAMP_MAX {E.CTL_RAMP_MAX}")
-                    if not chr_ax.get("binds"):
+                    # SH-125 — Tuesday rides the ceiling; Wednesday follows an over-run past it, which the ceiling did not cut
+                    if tag == "Tue" and not chr_ax.get("binds"):
                         fails.append(f"{tag} regen: chronic axis does not bind ({chr_ax})")
+                    if tag == "Wed":
+                        if not chr_ax.get("laid", 0) > chr_ax.get("ceiling", 0) + 0.05:
+                            fails.append(f"Wed regen: fixture — the over-run did not take the week past the ceiling ({chr_ax})")
+                        if chr_ax.get("binds") or w["limits"].get("binding") == "chronic":
+                            fails.append(f"Wed regen: chronic axis binds on an over-run it did not cut ({chr_ax}, {w['limits'].get('binding')})")
 
             # (e) the intent is the plan on Wednesday too
             if abs(w_wed["intent_km"] - w_mon["intent_km"]) > 0.3:
@@ -23747,7 +23860,7 @@ def _run_server_selftest(db, categories=None):
     scenarios = [lambda: _stc_clamp(), lambda: _stc_plan_header_escaped(), lambda: _stc_battery_hermetic(), lambda: _stc_map_privacy(db), lambda: _stc_pwa(), lambda: _stc_mobile_nav(), lambda: _stc_readiness_contrast(), lambda: _stc_module_split(), lambda: _stc_music_graduated(), lambda: _stc_ci_cache(), lambda: _stc_image_completeness(), lambda: _stc_footer_chrome(), lambda: _stc_checkin_type_scale(), lambda: _stc_golden_plans(), lambda: _stc_clock_purity(), lambda: _stc_client_probe(), lambda: _stc_ui_dialogs(), lambda: _stc_axis_legibility(), lambda: _stc_keyboard_reach(), lambda: _stc_touch_targets(), lambda: _stc_pwa_polish(), lambda: _stc_acwr_agreement(), lambda: _stc_runs_browser(), lambda: _stc_music_curve(), lambda: _stc_music_segments(), lambda: _stc_music_pick(), lambda: _stc_music_climb(), lambda: _stc_music_lock_band(), lambda: _stc_music_sensor_bias(), lambda: _stc_music_list_choice(), lambda: _stc_music_page(), lambda: _stc_music_readback(), lambda: _stc_music_verdict(), lambda: _stc_fit_parse(), lambda: _stc_music_short_run_laps(), lambda: _stc_music_guide_laps(), lambda: _stc_music_gap_infer(), lambda: _stc_music_reps_read(), lambda: _stc_music_ramp(), lambda: _stc_music_ramp_land(), lambda: _stc_music_follow(), lambda: _stc_music_target_lift(), lambda: _stc_music_rotation(), lambda: _stc_music_press_retired(), lambda: _stc_zoned_instant(), lambda: _stc_music_disco(), lambda: _stc_day_spacing(), lambda: _stc_rest_streaks(),
                  lambda: _stc_rebase_anchor(), lambda: _stc_unplanned_log(), lambda: _stc_prescribed_restore(), lambda: _stc_log_phases(),
                  lambda: _stc_within_week(), lambda: _stc_lived_days_pinned(db), lambda: _stc_rd_double_count(), lambda: _stc_straddle_intent(), lambda: _stc_intent_bar(), lambda: _stc_week_role(), lambda: _stc_long_run_phase_cap(), lambda: _stc_forecast_decomposition(), lambda: _stc_readiness_session_aware(), lambda: _stc_efficiency(), lambda: _stc_readiness_provenance(),
-                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_monday_load_same_plan(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_lay_within_ceiling(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
+                 lambda: _stc_straddle_long(), lambda: _stc_long_run_held(), lambda: _stc_week_mean_roll_invariant(), lambda: _stc_straddle_regen_day(), lambda: _stc_monday_load_same_plan(), lambda: _stc_chronic_ran_over(), lambda: _stc_straddle_race(), lambda: _stc_straddle_monday_lay(), lambda: _stc_lay_within_ceiling(), lambda: _stc_straddle_intent_anchor(), lambda: _stc_straddle_deload_invariant(), lambda: _stc_straddle_pull(), lambda: _stc_pulled_deload_replay(), lambda: _stc_seed_own_state(), lambda: _stc_chain_precision(), lambda: _stc_regen_follow_rounding(), lambda: _stc_phase_handover_windows(), lambda: _stc_day_share(), lambda: _stc_long_share_base(), lambda: _stc_session_step(),
                  lambda: _stc_rescue_not_governor(),
                  lambda: _stc_engine_version(), lambda: _stc_log_visible(), lambda: _stc_one_clock(), lambda: _stc_compose_clock(),
                  lambda: _stc_seed_stale(),

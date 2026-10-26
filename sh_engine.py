@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.85.4"
+ENGINE_VERSION = "0.85.5"
 
 
 def _zones_asof(db, date_iso=None):
@@ -4660,7 +4660,7 @@ def _week_bar(*, intent_km, sessions, frozen=False, ran_km=None, lived_km=None):
 def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid, long_bound,
                  eq_week_cap, eq_week_laid, eq_week_bound, eq_sess_cap, eq_sess_laid,
                  streak, streak_bound, ramp_cap, ctl_gain, race_week=False, streak_exempt=None,
-                 long_max=None):
+                 long_max=None, ctl_gain_laid=None, ctl_gain_pre_race=None):
     def axis(name, ceiling, laid, bound, unit):
         if ceiling is None or laid is None:
             return None
@@ -4668,6 +4668,7 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
         return {"ceiling": round(ceiling, 2), "laid": round(laid, 2), "headroom": head,
                 "binds": bool(bound), "basis": LIMITS_BASIS[name], "unit": unit}
     out = {"regime": "assertive" if assertive else "caution"}
+    ran_over = False
     a = axis("acwr", eff_cap, acwr_laid, clipped, "ratio")
     if a:
         out["acwr"] = a
@@ -4696,9 +4697,15 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
                 out["tissue"]["note"] = ("the peak phase is exempt from the forced deload: the taper is its "
                                          "recovery; the per-week ceilings still bind")
         if ramp_cap is not None and ctl_gain is not None:
+            # SH-125 — over the ceiling through load already done, with Monday's own lay inside it: the
+            # ceiling cut nothing from the days ahead, so the axis reads as exceeded, not as binding.
+            # A race laid in the week carries its own load: ran-over is judged on the gain before it.
+            _g = ctl_gain if ctl_gain_pre_race is None else ctl_gain_pre_race
+            ran_over = (ctl_gain_laid is not None and _g > ramp_cap + 0.05
+                        and ctl_gain_laid <= ramp_cap + 0.05)
             out["chronic"] = {"ceiling": round(ramp_cap, 2), "laid": round(ctl_gain, 2),
                               "headroom": round(ramp_cap - ctl_gain, 2),
-                              "binds": ctl_gain >= ramp_cap - 0.05, "basis": LIMITS_BASIS["chronic"], "unit": "CTL/wk"}
+                              "binds": (ctl_gain >= ramp_cap - 0.05) and not ran_over, "basis": LIMITS_BASIS["chronic"], "unit": "CTL/wk"}
     # the binding axis: the one that held this week, else the one with the least relative headroom
     # §LRMAX is never the week's `binding`: it holds one run and moves its km to the easy days, so the
     # week's size is still set by whichever governor names it here (the card reads `binding` as "the
@@ -4712,6 +4719,8 @@ def _week_limits(*, assertive, eff_cap, acwr_laid, clipped, long_cap, long_laid,
         for k in ("acwr", "long_step", "eq_week", "eq_session", "chronic"):
             if k == "long_step" and _lm_held:
                 continue                      # §LRMAX held the run; the step's headroom is not the story
+            if k == "chronic" and ran_over:
+                continue                      # SH-125 — it did not size the week; its headroom is load already done
             ax = out.get(k)
             if ax and ax["ceiling"]:
                 rel[k] = ax["headroom"] / abs(ax["ceiling"])
@@ -5219,6 +5228,12 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                         wk_intent_trimp = _r_chosen
                         wk_intent_km = wk_intent_trimp / TRIMP_PER_KM
                         long_km_aim = _lw * wk_intent_km      # §PRO15 — the aim follows the re-laid intent
+            # SH-125 — the CTL gain of Monday's own lay (its final form, after the rescue above): the
+            # chronic axis reads it to tell a week the ceiling held from one that ran over through load done.
+            _mon_gain = None
+            if ramp is not None and full:
+                _fm = _apply_adjustment([dict(x) for x in full], dict(_full_dt), adjust)
+                _mon_gain = _project_week(ws_ctl, ws_atl, wk_start, _fm["dt"], actual_floor=None)[0] - ws_ctl
             # §LRH (0.60.5) — THE LONG RUN'S RUNG IS THE DISTANCE THE FULL WEEK JUST LAID FOR IT. §PRO15
             # defined the aim as "the distance the full-week path would lay at this intent" and then
             # approximated it with the skeleton's share × intent, which sits under the ladder whenever
@@ -5572,6 +5587,7 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                                              actual_floor=act_floor,
                                                              lived_trimps=lived)   # §WKMEAN — the published
             #                                             `acwr.laid` is the value the search decided on
+            _gov_ctl = ctl   # SH-125 — the pre-race end-of-week CTL, same reasoning as the ACWR pair
             _gov_eow, _gov_flat = eow, eow_flat   # §RACE/SH-73 — the governor's pre-race reading: the
             #                                             search decided before the race existed, so
             #                                             `acwr.laid` keeps this pair (the full-week
@@ -5667,7 +5683,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 # §WKMEAN2 — `ctl` is the week's projected end-of-week CTL (`_project_week(... roll_from=today
                 # ...)` just above); `ws_ctl` is the week-start state, so this reads the week's CTL gain
                 # against the +5 ceiling exactly as the full-week path does (`ctl_gain=(ctl - _ctl_start)`).
-                streak=(streak_in if (forced_deload or deload_pulled) else None), streak_bound=bool(forced_deload or deload_pulled), ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None),
+                streak=(streak_in if (forced_deload or deload_pulled) else None), streak_bound=bool(forced_deload or deload_pulled), ramp_cap=ramp, ctl_gain=((ctl - ws_ctl) if ramp is not None else None), ctl_gain_laid=_mon_gain,
+                ctl_gain_pre_race=((_gov_ctl - ws_ctl) if ramp is not None else None),
                 long_max=(_long_max_read(sessions, fresh=[x for x in sessions if x["date"] not in from_history])
                           if long_km_cap else None))
             # §CARD3 — the as-laid prescription count, stamped BEFORE §CARD2 rewrites `runs` to

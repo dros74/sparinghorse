@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.5] - 2026-10-26
+
+### Fixed
+
+- **After a run over the plan, the fitness-gain limit reads "ran over", not "holds the week".** When training
+  already done this week took the projected fitness gain past the +5 CTL/week limit, the limits panel showed that
+  limit as the one that held the week, with negative headroom. It had cut nothing: from the second day of a week the
+  days ahead keep the lay the Monday regeneration gave them, and the remainder is not cut against that limit. The
+  chronic axis now publishes `binds: false` in that case (ceiling, laid and headroom unchanged). The week names the
+  limit that sized it, and the row is tagged "ran over" with a sentence saying the training already done carried
+  more load than it was laid with and the limit does not take it back from the days ahead. The test applies only
+  when Monday's own lay was inside the limit, and it reads the gain before a race laid in the week is added (a
+  race's own load is not load already done). A week that follows the plan still reads the limit as binding. The
+  plan itself does not change: only what the limits panel says.
+
 ## [0.85.4] - 2026-10-26
 
 ### Fixed

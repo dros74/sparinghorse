@@ -2053,7 +2053,9 @@ function limitSentence(k, ax, w, L){
       return `Fitness eases by ${v(-ax.laid)} this week (${why}), well inside the limit.`;
     }
     if(ax.laid>ax.ceiling+0.05)
-      return `Fitness rose ${laid}, above the ${ceiling} limit: the week as run carried more than it was laid with.`;
+      return w&&w.partial&&!ax.binds
+        ? `Fitness rises ${laid} this week, above the ${ceiling} limit: the training already done carried more load than it was laid with, and this limit does not take it back from the days ahead.`
+        : `Fitness rose ${laid}, above the ${ceiling} limit: the week as run carried more than it was laid with.`;
     return L.binding===k ? `Fitness rises ${laid} this week, the most allowed.${sized}`
                          : `Fitness rises ${laid} of the ${ceiling} allowed.`;
   }

@@ -440,7 +440,7 @@ sharpening is in the freshness. Shorter races sharpen with a short tempo at thre
 week first. A row has the limit's name, a tag ("holds the week", "ran over" or "exempt in the peak"), a bar
 of what the week laid against the ceiling, a plain sentence with that week's own numbers, and a basis
 badge. The limits are the load ratio, the long-run step, the long-run limit, impact load for the week, impact load for a single
-run, weeks near the ceiling, and fitness gain per week. If none binds, the card says no limit binds this
+run, weeks near the ceiling, and fitness gain per week. When training already done takes a week past the fitness-gain limit, the row reads "ran over": that limit does not cut the days ahead to take the extra back. If none binds, the card says no limit binds this
 week. The badge says where the ceiling comes from: **Literature** (published science or an established
 coaching convention), **Fitted to one runner** (measured on the calibration athlete's history; a starting
 point for anyone else) or **Structural** (a definition or a window, not a safety threshold).
