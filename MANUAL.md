@@ -742,7 +742,10 @@ cruise and grind — and each segment gets a target cadence read off your own sp
 recent one, and the trained one (the fittest third of your past runs), stepped up a little over the
 recent line. The step defaults to 1.5 % on easy segments and 3 % on work efforts, never past your
 comfort ceiling and never past what you have already done at that speed — the target is never a fixed
-number like 180. Entirely optional — the app is complete without it — and **private container only**;
+number like 180. A race list is one line: one target across the whole race, one list picked whole and played in rising
+tempo, then split into settle, cruise and grind by distance. When the library is thin around the target,
+settle runs a little under it and grind a little over it, and the music page shows the bpm range each phase
+plays. Entirely optional — the app is complete without it — and **private container only**;
 the public box and the demo have no music page.
 
 **Setup.** The keys go into **Settings → Connections & keys**, beside the Suunto ones: the Spotify

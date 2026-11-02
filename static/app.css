@@ -1062,6 +1062,7 @@
     display:flex;flex-direction:column;align-items:center;gap:13px}
   /* Runalyze attribution — the wordmark inherits currentColor (var(--text)) so it adapts per theme;
      the brand icon keeps its colours. Subtle by default, full-strength on hover. */
+  .footlinks{display:flex;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px 22px}
   .ralink{display:inline-flex;align-items:center;gap:8px;color:var(--text);text-decoration:none;
     opacity:.65;transition:opacity .15s}
   .ralink:hover{opacity:1}

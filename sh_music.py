@@ -51,11 +51,11 @@ MUSIC_WORK_STEP_PCT = 3.0      # §BEAT5 (0.65.0) — WORK segments take the who
 #                                pace on the 2024 race), asked for a higher cadence, and had been handed
 #                                the plain 1.5 % step (172.8 for legs that showed 169.5). The easy step
 #                                stays the setting's: the fast end of the curve is where the gap costs.
-MUSIC_WORK_EFFORTS = ("work", "race_settle", "race_cruise", "race_grind")   # the efforts that take it…
+MUSIC_WORK_EFFORTS = ("work", "race", "race_settle", "race_cruise", "race_grind")   # the efforts that take it…
 MUSIC_WORK_ZONES = ("marathon", "threshold", "interval")                    # …and the table rows that show it
-MUSIC_CLIMB_EFFORTS = ("long_3", "race_grind")   # §BEAT10 (0.68.6) — the segments that climb to the line: they
-                                                 # pick FIRST, take songs at or above the target first, and play
-                                                 # them in rising tempo
+MUSIC_CLIMB_EFFORTS = ("long_3",)   # §BEAT10 (0.68.6) — the segment that climbs to the line: it picks FIRST, takes
+                                    # songs at or above the target first, and plays them in rising tempo
+MUSIC_RACE_EFFORTS = ("race_settle", "race_cruise", "race_grind")   # one list picked whole, one rising line
 MUSIC_TAIL_MIN = 15.0          # §BEAT5 — a run-home tail after the session's last segment, at the session's
 #                                easiest pace: the 09-08 tempo ran 42 min on a 35-min list and the
 #                                phone's autoplay filled the last seven with tempos the legs then fought
@@ -154,7 +154,7 @@ MUSIC_LB_PER_USER = 100            # …and each one's top recordings of the yea
 MUSIC_LB_CF = 200                  # collaborative-filtering picks read per refresh
 MUSIC_LB_WEEKLY_LISTS = 4          # the newest weekly-exploration lists read
 MUSIC_LB_RADIO_SEEDS = 6           # LB radio seeded on the listener's top artists of the year (needs the token)
-MUSIC_LB_LOOKUPS = 120             # candidate → Spotify searches per refresh (the rest wait for the next)
+MUSIC_LB_LOOKUPS = 600             # candidate → Spotify searches per refresh (the rest wait for the next)
 MUSIC_LB_NAMES_BATCH = 50          # recordings named per metadata call
 MUSIC_RECENT_LISTS = 2             # SH-61 — songs on this many newest lists rank after every other song inside a tempo window
 MUSIC_FRESH_QUOTA = 8              # §DISCO — rotation inside the ±1 % window (24 Oct 2026) needs more fresh songs:
@@ -767,6 +767,32 @@ def _closeness(tempo, target, window, hit):
     return max(0.0, 1.0 - abs(t - target) / (window * target)) if window * target else 0.0
 
 
+def _lay_race_line(segments, targets, picks):
+    """The race list as one line: the whole list in rising tempo, songs at the same whole bpm calm to
+    loud (so the loud ones of each tempo play later), cut into the phases by minutes. The song that crosses a seam runs past it; a list too short for the race shortens every phase alike, so
+    the finish is not the one left without songs."""
+    def tempo(p):
+        return p["tempo"] * 2 if p.get("hit") == "half" else p["tempo"]
+    line = sorted(picks, key=lambda p: (round(tempo(p)), p.get("energy") or 0, tempo(p)))
+    need_all = sum(s["minutes"] for s in segments) * 60_000
+    scale = min(1.0, sum(p["duration_ms"] for p in line) / need_all) if need_all else 1.0
+    out, k, played, due = [], 0, 0, 0.0
+    for i, seg in enumerate(segments):
+        tracks, have = [], 0
+        due += seg["minutes"] * 60_000 * scale          # a running total, so one seam's overrun does not carry on
+        while k < len(line) and (i == len(segments) - 1 or played < due):
+            tracks.append(line[k])
+            have += line[k]["duration_ms"]
+            played += line[k]["duration_ms"]
+            k += 1
+        out.append({**seg, "target_spm": targets[i], "tracks": tracks,
+                    "fresh": sum(1 for p in tracks if not p["served"]),
+                    "never_run": sum(1 for p in tracks if p.get("never_run")),
+                    "filled_min": round(have / 60000.0, 1),
+                    "line": [round(tempo(tracks[0])), round(tempo(tracks[-1]))] if tracks else None})
+    return out
+
+
 def pick_for_segments(segments, pool, targets, half_time=False, discover=None, set_aside=None,
                       follow=None, served=None, fresh=None, fresh_quota=0):
     """Fill each segment with tracks. `pool` rows: {id, title, artist, duration_ms, tempo, energy,
@@ -774,8 +800,12 @@ def pick_for_segments(segments, pool, targets, half_time=False, discover=None, s
     return extra rows when a window runs dry. A track is used once per playlist. Returns (segments
     with their picks, notes), the segments always in running order. Order inside a segment: settle
     and warm-up calmest first, everything else by score.
-    §BEAT10 (0.68.6) — `race_grind` and the long run's last third (`long_3`, `MUSIC_CLIMB_EFFORTS`)
-    pick FIRST, before the segments that run earlier, so the earlier thirds do not spend the window's
+    The race (`MUSIC_RACE_EFFORTS`) is picked as ONE list against its one target, then laid out by
+    `_lay_race_line`: its phases share a pace and so a target, and picking them in turn left the phase
+    picked last with the leftovers of a thin window, in score order, so the middle of the race swung
+    above the target and then below it.
+    §BEAT10 (0.68.6) — the long run's last third (`long_3`, `MUSIC_CLIMB_EFFORTS`)
+    picks FIRST, before the segments that run earlier, so the earlier thirds do not spend the window's
     upper half before the finish gets a turn; inside a climbing segment, candidates at or above the
     target are taken before the rest of the window, and the picks then play in rising tempo. The
     13 Sep long run list is the case this closed: picking in running order, the finish third picked
@@ -804,6 +834,13 @@ def pick_for_segments(segments, pool, targets, half_time=False, discover=None, s
     segments (the tail carries none), taken first inside each window in score order and never past
     the window — a fresh song that does not fit the cadence is not on the list. What the window
     holds no more of stays owed, and the notes say so."""
+    if segments and all(s.get("effort") in MUSIC_RACE_EFFORTS for s in segments):
+        whole = {"label": "The race", "effort": "race", "minutes": sum(s["minutes"] for s in segments),
+                 "pace_sec": segments[0].get("pace_sec"), "floor": min(s.get("floor") or 0.0 for s in segments)}
+        picked, notes = pick_for_segments([whole], pool, [targets[0]], half_time=half_time, discover=discover,
+                                          set_aside=set_aside, follow=follow, served=served, fresh=fresh,
+                                          fresh_quota=fresh_quota)
+        return _lay_race_line(segments, targets, picked[0]["tracks"]), notes
     used, used_names, notes, out = set(), set(), [], {}
     recent = getattr(served, "recent", None) or set()
     follow, served, fresh = follow or {}, served or {}, fresh or set()
@@ -913,7 +950,7 @@ def pick_for_segments(segments, pool, targets, half_time=False, discover=None, s
             notes.append(f"{seg['label']}: {n_new} of {len(picks)} track{'s' if len(picks) > 1 else ''} new to the "
                          f"last {MUSIC_ROTATION_DAYS} days")
         ef = seg["effort"]
-        if ef in ("warmup", "race_settle", "long_1", "cooldown"):
+        if ef in ("warmup", "long_1", "cooldown"):
             picks.sort(key=lambda p: p.get("energy") or 0)
         elif climbing:
             picks.sort(key=lambda p: (eff(p, p.get("hit")), p.get("energy") or 0))   # §BEAT10 — rising to the line
@@ -1075,8 +1112,10 @@ def playlist_name(session, target):
 
 
 def playlist_description(segments, notes=None):
-    parts = [f"{s['label'].split(' — ')[0]} {s['minutes']:.0f} min @ {s['target_spm']:.0f} bpm"
-             for s in segments]
+    def bpm(s):
+        line = s.get("line")
+        return f"{line[0]}–{line[1]}" if line and line[0] != line[1] else f"{line[0] if line else s['target_spm']:.0f}"
+    parts = [f"{s['label'].split(' — ')[0]} {s['minutes']:.0f} min @ {bpm(s)} bpm" for s in segments]
     txt = "Cadence-matched by Sparing Horse · " + " · ".join(parts)
     return txt[:MUSIC_DESC_MAX]
 
@@ -1245,14 +1284,20 @@ def _norm(s):
     return re.sub(r"[^a-z0-9]+", " ", s).strip()
 
 
+class SpotifySearchRefused(RuntimeError):
+    """Spotify answered a search with something other than 200: the song was not looked up, so it
+    must not be stamped as not found, which would keep it out for MUSIC_SEARCH_MISS_TTL_DAYS."""
+
+
 def sp_search_track(token, title, artist, strict=False):
     """The Spotify track for a scrobble: the first result whose artist matches, else the first.
     `strict` (§DISCO) returns None instead of the first: a song from another listener's history
-    must not enter the pool under a stranger's name."""
+    must not enter the pool under a stranger's name. None means searched and not found; a refused
+    search raises SpotifySearchRefused."""
     q = f"track:{title} artist:{artist}"
     r = _sp_call("GET", "/search", token, params={"q": q, "type": "track", "limit": 5})
     if r.status_code != 200:
-        return None
+        raise SpotifySearchRefused(f"Spotify search answered {r.status_code}")
     items = ((r.json().get("tracks") or {}).get("items")) or []
     want = _norm(artist)
     for t in items:
@@ -2418,7 +2463,13 @@ def discover_lb(conn, sp_token, user, lb_token=None, lookups=MUSIC_LB_LOOKUPS):
             continue
         budget -= 1
         _job_set(step=f"ListenBrainz → Spotify ({lookups - budget}/{lookups})")
-        found = sp_search_track(sp_token, c["title"], c["artist"], strict=True)
+        try:
+            found = sp_search_track(sp_token, c["title"], c["artist"], strict=True)
+        except SpotifySearchRefused as e:
+            summary["lb_errors"].append(f"{e}: the searches stopped here and the rest wait for the next refresh")
+            summary["lb_unresolved"] += 1
+            budget = 0                                # the ledger still takes the remaining candidates
+            continue
         conn.execute("UPDATE disco SET searched_at=?, spotify_id=? WHERE mbid=?", (now, found["id"] if found else None, mbid))
         if not found:
             summary["lb_unresolved"] += 1
@@ -2584,7 +2635,12 @@ def refresh_library(lookups=MUSIC_LOOKUPS_PER_REFRESH):
                     elif token and budget > 0:
                         budget -= 1
                         _job_set(step=f"resolving scrobbles ({lookups - budget}/{lookups})")
-                        row = sp_search_track(token, t["title"], t["artist"])
+                        try:
+                            row = sp_search_track(token, t["title"], t["artist"])
+                        except SpotifySearchRefused:          # not looked up: no stamp, the next refresh asks again
+                            budget = 0
+                            summary["unresolved"] += 1
+                            continue
                         conn.execute("INSERT INTO lfm_map(artist, title, spotify_id, searched_at) VALUES(?,?,?,?) "
                                      "ON CONFLICT(artist, title) DO UPDATE SET spotify_id=excluded.spotify_id, searched_at=excluded.searched_at",
                                      (k[0], k[1], row["id"] if row else None, _now_iso()))

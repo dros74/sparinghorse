@@ -224,7 +224,7 @@
     if(!d.ok){ host.innerHTML = `<h3>Playlist</h3><div class="merr">${esc(d.error||"could not build")}</div>`; return; }
     const s = d.session || {};
     const segs = (d.segments||[]).map(sg => `<div class="mseg">
-        <div class="mhead"><b>${esc(sg.label)}</b><span class="mprog">${sg.minutes} min · target <b>${Math.round(sg.target_spm)}</b> spm (${esc(sg.target.why)}) · ${sg.filled_min} min filled${sg.fresh != null && sg.tracks.length ? ` · ${sg.fresh} of ${sg.tracks.length} new to the last ${d.rotation_days} days` : ""}</span></div>
+        <div class="mhead"><b>${esc(sg.label)}</b><span class="mprog">${sg.minutes} min · target <b>${Math.round(sg.target_spm)}</b> spm (${esc(sg.target.why)})${sg.line ? ` · songs <b>${sg.line[0] === sg.line[1] ? sg.line[0] : `${sg.line[0]}–${sg.line[1]}`}</b> bpm` : ""} · ${sg.filled_min} min filled${sg.fresh != null && sg.tracks.length ? ` · ${sg.fresh} of ${sg.tracks.length} new to the last ${d.rotation_days} days` : ""}</span></div>
         ${sg.tracks.length ? `<ol>${sg.tracks.map(t => `<li>${esc(t.title)} — ${esc(t.artist)}<span class="meta">${Math.round(t.tempo)} bpm${t.hit==="half"?" ×2":""} · ${Math.round(t.duration_ms/60000)}′${t.weight ? ` · taste ${t.weight.toFixed(2)}` : ""}${t.follow != null ? ` · legs ${t.follow > 0 ? "+" : ""}${t.follow.toFixed(1)}` : ""}${t.served ? ` · on ${t.served} recent list${t.served > 1 ? "s" : ""}` : ""}</span>${t.never_run ? `<span class="new">never run to${t.source ? " · " + esc(String(t.source).split(",").map(k => SRC[k]||k).join(", ")) : ""}</span>` : t.discovered ? `<span class="new">new</span>` : ""}</li>`).join("")}</ol>` : `<div class="mnote">no track in the window</div>`}
       </div>`).join("");
     host.innerHTML = `<h3>${esc(d.name)}</h3>

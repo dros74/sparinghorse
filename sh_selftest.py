@@ -24558,17 +24558,46 @@ def _stc_music_climb():
         fails.append(f"fixture: the 42.2 km / 240 min race did not yield settle/cruise/grind: "
                      f"{[s['effort'] for s in race]}")
     else:
-        out_r, notes_r = M.pick_for_segments(race, pool_of(80), [169.0] * len(race))
-        grind = next(s for s in out_r if s["effort"] == "race_grind")
-        g_eff = [t["tempo"] * 2 if t.get("hit") == "half" else t["tempo"] for t in grind["tracks"]]
-        if any(e < 169.0 + B - 1e-9 for e in g_eff):
-            fails.append(f"(f) race_grind holds a track under the 169 + B target: {g_eff}")
-        if g_eff != sorted(g_eff):
-            fails.append(f"(f) race_grind is not in rising tempo: {g_eff}")
+        # The race is one list and one line. The pool is thin like a real library: a little at the target, the
+        # bulk just under it, then songs only the ±3 % rung reaches on either side, the fast ones best loved.
+        # Picking the phases in turn plays this at the target, then far above it, then far below it, mid-race.
+        T = 182.0
+        thin = ([mk(f"at{i}", T + B, 0.6, 0.5) for i in range(9)]
+                + [mk(f"un{i}", T - 2.0 + B, 0.45 + i * 0.012, 0.5) for i in range(38)]
+                + [mk(f"fa{i}", T + 4.4 + B, 0.6, 0.9) for i in range(8)]
+                + [mk(f"sl{i}", T - 5.0 + B, 0.45 + i * 0.05, 0.1) for i in range(10)])
+        out_r, notes_r = M.pick_for_segments(race, thin, [T] * len(race))
+        if [s["effort"] for s in out_r] != ["race_settle", "race_cruise", "race_grind"]:
+            fails.append(f"(f) the race phases are not in running order: {[s['effort'] for s in out_r]}")
+        line = [t for s in out_r for t in s["tracks"]]
+        whole = [round(t["tempo"]) for t in line]
+        if whole != sorted(whole):
+            fails.append(f"(f) the race list does not rise from start to finish: {whole}")
+        for bpm in set(whole):
+            en = [t["energy"] for t in line if round(t["tempo"]) == bpm]
+            if en != sorted(en):
+                fails.append(f"(g) songs at {bpm} bpm do not run calm to loud: {en}")
+        if len({t["id"] for t in line}) != len(line):
+            fails.append("(h) a track is used twice on the race list")
+        late = [s["effort"] for s in out_r if abs(s["filled_min"] - s["minutes"]) > 4.0]
+        if late:
+            fails.append(f"(h) a phase is more than one song off its minutes: "
+                         f"{[(s['effort'], s['filled_min'], s['minutes']) for s in out_r]}")
+        for s in out_r:
+            if s.get("line") != [round(s["tracks"][0]["tempo"]), round(s["tracks"][-1]["tempo"])]:
+                fails.append(f"(i) {s['effort']} does not name the bpm it plays: {s.get('line')}")
+        desc = M.playlist_description(out_r)
+        first = out_r[0].get("line") or [0, 0]
+        if f"{first[0]}–{first[1]} bpm" not in desc:
+            fails.append(f"(i) the playlist description does not name the phase's bpm: {desc}")
+        short, notes_s = M.pick_for_segments(race, [mk(f"sh{i}", T + B, 0.7, 0.5) for i in range(30)], [T] * len(race))
+        shares = [s["filled_min"] / s["minutes"] for s in short]
+        if max(shares) - min(shares) > 0.2:
+            fails.append(f"(j) a short list must shorten every phase alike: {[round(x, 2) for x in shares]}")
     return _st("det", "music-climb",
-               "§BEAT10 (0.68.6) — the climbing segments (long_3, race_grind) pick first, take songs "
+               "§BEAT10 (0.68.6) — long_3 picks first and climbs; the race is one list on one rising line, taking songs "
                "at or above the target before the rest of the window, and play in rising tempo",
-               passed=not fails, expect="long_3/race_grind >= target and rising; running order kept; "
+               passed=not fails, expect="long_3 >= target and rising; the race rises from start to finish; running order kept; "
                "every segment filled once with no notes beyond the sensor-bias one (none at B = 0)",
                got={"violations": fails or "none"})
 
@@ -26586,6 +26615,39 @@ def _stc_music_disco():
                 fails.append(f"(f) two strict searches on the first pass, none on the second: {calls['search']}")
             if sm2["lb_resolved"] != 0 or sm2["lb_unresolved"] != 1:
                 fails.append(f"(f) second pass: {sm2}")
+            # (g) a refused search is not a miss: nothing stamped, the searches stop, the next refresh asks again
+            answers = {"status": 429, "calls": 0}
+            class _R:
+                def __init__(self, code):
+                    self.status_code = code
+                def json(self):
+                    return {"tracks": {"items": []}}
+            def _call(method, path, token, **kw):
+                answers["calls"] += 1
+                return _R(answers["status"])
+            saved = (M.lb_sources, M.lb_names, M._sp_call)
+            M.lb_sources = lambda user, token=None: ([("radio", [{"mbid": "r1", "artist": "Rate", "title": "One"},
+                                                                  {"mbid": "r2", "artist": "Rate", "title": "Two"}])],
+                                                     {"radio": 2}, [])
+            M.lb_names = lambda mbids: {}
+            M._sp_call = _call
+            try:
+                refused = M.discover_lb(conn, "tok", "someone", None)
+                calls_refused = answers["calls"]
+                stamped = conn.execute("SELECT COUNT(*) FROM disco WHERE mbid IN ('r1','r2') AND searched_at IS NOT NULL").fetchone()[0]
+                answers["status"] = 200
+                M.discover_lb(conn, "tok", "someone", None)
+                stamped_after = conn.execute("SELECT COUNT(*) FROM disco WHERE mbid IN ('r1','r2') AND searched_at IS NOT NULL").fetchone()[0]
+            finally:
+                M.lb_sources, M.lb_names, M._sp_call = saved
+            if calls_refused != 1:
+                fails.append(f"(g) the searches must stop at the first refusal: {calls_refused} calls")
+            if stamped != 0:
+                fails.append(f"(g) a refused search stamped {stamped} songs as not found")
+            if not any("429" in e for e in refused.get("lb_errors") or []):
+                fails.append(f"(g) the refusal must reach the refresh summary: {refused.get('lb_errors')}")
+            if stamped_after != 2:
+                fails.append(f"(g) the next refresh must ask again: {stamped_after} of 2 searched")
         finally:
             conn.close()
     finally:

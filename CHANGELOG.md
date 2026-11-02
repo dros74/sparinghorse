@@ -10,6 +10,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.7] - 2026-11-02
+
+### Fixed
+
+- **A race playlist plays as one line of rising tempo.** The list was picked phase by phase (settle,
+  cruise, grind). At an even race pace all three phases share one target, so the phase picked last got
+  the leftovers of a thin tempo window in score order, and the middle of the race could swing above the
+  target and then below it. The race is now picked as one list and played from start to finish in rising
+  tempo; songs at the same whole bpm play calm to loud. A list too short for the race shortens every
+  phase alike. The page and the Spotify description now name the bpm range each phase actually plays.
+- **A refused Spotify search no longer counts as "not found".** A rate limit or any non-200 answer used
+  to keep the song out of the picker for 30 days. The searches now stop for that refresh, the summary
+  says so, and the next refresh asks again. This covers both the ListenBrainz and the last.fm paths.
+- **ListenBrainz candidates are searched faster.** The ListenBrainz to Spotify searches per refresh
+  rise from 120 to 600. New candidates arrived faster than the old limit could search them, so the queue
+  only grew and the radio candidates at the end of it were never searched.
+
+### Changed
+
+- The footer links to GetSongBPM beside the Runalyze link, and the README credits it as on trial as a
+  second tempo source.
+
 ## [0.85.6] - 2026-10-27
 
 ### Fixed
