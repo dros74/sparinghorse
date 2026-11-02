@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.86.0] - 2026-11-02
+
+### Added
+
+- **Songs with no tempo are looked up by name.** ReccoBeats often has no features for a song under its
+  Spotify id but does under another edition's. Each library refresh now searches ReccoBeats' new track
+  search for up to 200 of your own songs without a tempo, and takes the features of the closest edition
+  with the same title, an artist in common and a length within 5 seconds. The song keeps its own id, so
+  the list plays the edition you have. ListenBrainz songs are not looked up. A refused call stops the
+  pass for that refresh and the summary says so.
+
 ## [0.85.8] - 2026-11-02
 
 ### Changed

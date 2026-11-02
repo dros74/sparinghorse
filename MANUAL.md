@@ -784,7 +784,9 @@ no longer read as votes: on a COROS structured workout the Lap key starts the ne
 votes an earlier read stored. Older runs keep the votes they have. The next list is picked from these grades, so the ladder climbs from what you ran, not from
 what was asked — and on a reps day a song is read over the reps only.
 
-**Limits.** ReccoBeats does not cover every song — one without a tempo is never picked. Spotify keeps
+**Limits.** ReccoBeats does not cover every song. When it has nothing for one of your own songs, each
+library refresh looks it up by name and takes the tempo of another edition with the same title, an artist
+in common and a length within 5 seconds, up to 200 songs a refresh. A song still without a tempo is never picked. Spotify keeps
 only your last 50 plays, so your play history is pulled when the Music page opens and again every
 night. A cadence curve needs a few synced runs with cadence before it can set a target.
 

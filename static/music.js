@@ -102,7 +102,7 @@
     if(!j) return "";
     if(j.running) return `refreshing — ${esc(j.step)}${j.total ? ` ${j.done}/${j.total}` : ""}`;
     if(j.error) return `last refresh failed: ${esc(j.error)}`;
-    if(j.summary){ const s = j.summary; return `last refresh: ${s.spotify_saved} saved · ${s.spotify_top} top · ${s.spotify_playlisted} in ${s.playlists} playlists · ${s.lfm_tracks} scrobbled · ${s.resolved} matched · ${s.unresolved} unmatched${s.lb_candidates ? ` · ListenBrainz ${s.lb_candidates} read, ${s.lb_new} new, ${s.lb_resolved} matched now, ${s.lb_unresolved} waiting` : ""}${(s.lb_errors||[]).length ? ` · ListenBrainz: ${esc(s.lb_errors.join("; "))}` : ""} · ${s.features} features (${s.feature_misses} without)`; }
+    if(j.summary){ const s = j.summary; return `last refresh: ${s.spotify_saved} saved · ${s.spotify_top} top · ${s.spotify_playlisted} in ${s.playlists} playlists · ${s.lfm_tracks} scrobbled · ${s.resolved} matched · ${s.unresolved} unmatched${s.lb_candidates ? ` · ListenBrainz ${s.lb_candidates} read, ${s.lb_new} new, ${s.lb_resolved} matched now, ${s.lb_unresolved} waiting` : ""}${(s.lb_errors||[]).length ? ` · ListenBrainz: ${esc(s.lb_errors.join("; "))}` : ""}${s.tempo_searched ? ` · ${s.tempo_found} of ${s.tempo_searched} missing tempos found by name` : ""}${s.tempo_search_error ? ` · ${esc(s.tempo_search_error)}` : ""} · ${s.features} features (${s.feature_misses} without)`; }
     return "";
   }
   function pollJob(){

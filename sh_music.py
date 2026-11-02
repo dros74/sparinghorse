@@ -140,6 +140,9 @@ MUSIC_PLAYLISTS_MAX = 40           # of the athlete's own playlists walked per r
 MUSIC_PLAYLIST_ITEMS_MAX = 300     # …and items read from each (the ones built here are skipped)
 MUSIC_LOOKUPS_PER_REFRESH = 120    # last.fm → Spotify searches per refresh (the rest wait a click)
 MUSIC_FEATURE_MISS_TTL_DAYS = 60   # a track ReccoBeats had no features for is asked again after this
+MUSIC_RB_SEARCH_PER_REFRESH = 200  # own-library songs without a tempo looked up by name per refresh (the rest wait)
+MUSIC_RB_SEARCH_SIZE = 25          # search results read per song
+MUSIC_RB_SEARCH_DURATION_MS = 5000 # another edition counts as the same recording only inside this length difference
 MUSIC_SEARCH_MISS_TTL_DAYS = 30    # a last.fm track Spotify could not find is searched again after this
 MUSIC_HTTP_TIMEOUT = 20
 MUSIC_FIT_MAX_BYTES = 20 * 1024 * 1024   # fetch_fit streams and abandons past this — no cap meant a 200 response of any size was buffered whole
@@ -213,6 +216,12 @@ def _mdb():
     if "source" not in {r[1] for r in conn.execute("PRAGMA table_info(track)")}:
         conn.execute("ALTER TABLE track ADD COLUMN source TEXT")
         conn.commit()
+    # 0.86.0 — a tempo found by name: when the song was looked up, and which edition's features it took
+    track_cols = {r[1] for r in conn.execute("PRAGMA table_info(track)")}
+    for col in ("tempo_search_at", "features_via"):
+        if col not in track_cols:
+            conn.execute(f"ALTER TABLE track ADD COLUMN {col} TEXT")
+            conn.commit()
     # 0.63.0 — a rating carries where it came from: 'couch' (rated at rest) or 'run' (a lap press)
     if "source" not in {r[1] for r in conn.execute("PRAGMA table_info(rating)")}:
         conn.execute("ALTER TABLE rating ADD COLUMN source TEXT DEFAULT 'couch'")
@@ -2507,6 +2516,89 @@ def rb_features(ids):
     return out
 
 
+class ReccoBeatsRefused(RuntimeError):
+    """ReccoBeats answered a search with something other than 200: the song was not looked up."""
+
+
+def rb_search(title, size=MUSIC_RB_SEARCH_SIZE):
+    """Tracks whose title matches, as {id, title, artists, duration_ms}. A 429 is waited out once. The
+    API takes 3 to 1000 characters and answers 400 to anything else: one odd title is that song's
+    problem and must not stop the pass, so it reads as no hits."""
+    if not 3 <= len(title or "") <= 1000:
+        return []
+    url, params = f"{RB_BASE}/track/search", {"searchText": title, "size": size}
+    headers = {"User-Agent": S.USER_AGENT}
+    r = requests.get(url, params=params, headers=headers, timeout=MUSIC_HTTP_TIMEOUT)
+    if r.status_code == 429:
+        time.sleep(min(float(r.headers.get("Retry-After", "2") or 2), 15.0))
+        r = requests.get(url, params=params, headers=headers, timeout=MUSIC_HTTP_TIMEOUT)
+    if r.status_code == 400:
+        return []
+    if r.status_code != 200:
+        raise ReccoBeatsRefused(f"ReccoBeats search answered {r.status_code}")
+    out = []
+    for t in (r.json().get("content") or []):
+        sid = (t.get("href") or "").rsplit("/", 1)[-1]
+        if sid:
+            out.append({"id": sid, "title": t.get("trackTitle"), "duration_ms": t.get("durationMs"),
+                        "artists": [a.get("name") for a in t.get("artists") or []]})
+    return out
+
+
+def _title_key(title):
+    """A title without its edition: `Song - Radio Edit` and `Song (Remastered)` both read `song`."""
+    return _norm(re.sub(r"\s+-\s+.*$", "", title or ""))
+
+
+def same_recording(track, hit):
+    """Is this search hit another edition of the track? The title, an artist and the length must all
+    agree: a live take or a remix keeps the name and changes the tempo, and its length gives it away."""
+    key = _title_key(track["title"])
+    if not key or key != _title_key(hit.get("title")):
+        return False
+    names = {_norm(a) for a in re.split(r",\s*", track["artist"] or "")} - {""}
+    if not names & {_norm(a) for a in hit.get("artists") or []}:
+        return False
+    return abs((hit.get("duration_ms") or 0) - (track["duration_ms"] or 0)) <= MUSIC_RB_SEARCH_DURATION_MS
+
+
+def fill_missing_tempos(conn, budget=MUSIC_RB_SEARCH_PER_REFRESH):
+    """Own-library songs ReccoBeats has no features for under their Spotify id often have them under
+    another edition's. Look each one up by name, take the features of the closest same recording and
+    keep the song's own id, so the list still plays the edition the runner has. ListenBrainz songs are
+    left out: this is for songs already known to suit. A song found or not is asked again only after
+    MUSIC_FEATURE_MISS_TTL_DAYS; a refused call stops the pass and stamps nothing."""
+    out = {"tempo_searched": 0, "tempo_found": 0, "tempo_search_error": None}
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=MUSIC_FEATURE_MISS_TTL_DAYS)).isoformat()
+    rows = conn.execute(
+        "SELECT spotify_id, artist, title, duration_ms FROM track WHERE discovered=0 AND features_at IS NULL "
+        "AND feature_miss_at IS NOT NULL AND (tempo_search_at IS NULL OR tempo_search_at < ?) LIMIT ?",
+        (cutoff, budget)).fetchall()
+    for n, r in enumerate(rows, 1):
+        _job_set(step=f"tempos by name ({n}/{len(rows)})")
+        track = dict(r)
+        try:
+            hits = [h for h in rb_search(_title_key(track["title"]) or track["title"]) if same_recording(track, h)]
+            hits.sort(key=lambda h: abs((h.get("duration_ms") or 0) - (track["duration_ms"] or 0)))
+            feats = rb_features([h["id"] for h in hits[:5]]) if hits else {}
+        except (RuntimeError, requests.RequestException) as e:
+            out["tempo_search_error"] = f"{e}: the lookups stopped here and the rest wait for the next refresh"[:200]
+            break
+        out["tempo_searched"] += 1
+        conn.execute("UPDATE track SET tempo_search_at=? WHERE spotify_id=?", (_now_iso(), track["spotify_id"]))
+        for h in hits[:5]:
+            f = feats.get(h["id"])
+            if f and f.get("tempo"):
+                conn.execute("UPDATE track SET tempo=?, energy=?, danceability=?, valence=?, loudness=?, features_at=?, "
+                             "feature_miss_at=NULL, features_via=? WHERE spotify_id=?",
+                             (f["tempo"], f["energy"], f["danceability"], f["valence"], f["loudness"], _now_iso(),
+                              h["id"], track["spotify_id"]))
+                out["tempo_found"] += 1
+                break
+        conn.commit()
+    return out
+
+
 def rb_recommend(seeds, lo, hi, min_energy, size=MUSIC_DISCOVERY_SIZE):
     """Tracks near the tempo window, seeded by the athlete's own favourites. Rows carry a Spotify id
     (from the href), a title, artists and duration; features are fetched separately."""
@@ -2685,6 +2777,7 @@ def refresh_library(lookups=MUSIC_LOOKUPS_PER_REFRESH):
                     summary["feature_misses"] += 1
             conn.commit()
             _job_set(done=min(len(need), i + RB_BATCH))
+        summary.update(fill_missing_tempos(conn))
         _job_set(step="weights")
         reweigh(conn)
     finally:

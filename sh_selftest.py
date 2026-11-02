@@ -12199,6 +12199,8 @@ def _stc_calibration_inventory():
                 # 0.67.0 — §DISCO plumbing: how many ListenBrainz rows are read per call, per refresh
                 "MUSIC_LB_NEIGHBOURS", "MUSIC_LB_PER_USER", "MUSIC_LB_CF", "MUSIC_LB_WEEKLY_LISTS",
                 "MUSIC_LB_RADIO_SEEDS", "MUSIC_LB_LOOKUPS", "MUSIC_LB_NAMES_BATCH",
+                # 0.86.0 — how many songs are looked up by name per refresh, and the results read per song
+                "MUSIC_RB_SEARCH_PER_REFRESH", "MUSIC_RB_SEARCH_SIZE",
                 # §BEAT15 (0.70.x) — lap-matching tolerances of the same plumbing shape as
                 # MUSIC_LAP_END_GRACE_S above (a boundary a lap is matched against, not a magnitude a
                 # plan is computed from): MUSIC_AUTOLAP_UNIT_TOL keeps the unit-relative fraction
@@ -26648,6 +26650,89 @@ def _stc_music_disco():
                 fails.append(f"(g) the refusal must reach the refresh summary: {refused.get('lb_errors')}")
             if stamped_after != 2:
                 fails.append(f"(g) the next refresh must ask again: {stamped_after} of 2 searched")
+            # (h) a tempo found by name: the same recording only, own library only, the song keeps its own id
+            miss = "2026-01-01T00:00:00+00:00"
+            for sid, title, artist, dur, disc, tempo in (
+                    ("A", "Song One - Radio Edit", "Band", 200000, 0, None), ("B", "Other Artist", "Band", 200000, 0, None),
+                    ("C", "Other Title", "Band", 200000, 0, None), ("D", "Live Take", "Band", 200000, 0, None),
+                    ("E", "Has Tempo", "Band", 200000, 0, 170.0), ("F", "From Neighbours", "Band", 200000, 2, None)):
+                conn.execute("INSERT INTO track(spotify_id, title, artist, duration_ms, discovered, tempo, features_at, "
+                             "feature_miss_at) VALUES(?,?,?,?,?,?,?,?)",
+                             (sid, title, artist, dur, disc, tempo, miss if tempo else None, None if tempo else miss))
+            hit = lambda i, t, a, d: {"id": i, "title": t, "artists": [a], "duration_ms": d}
+            answers = {"song one": [hit("far", "Song One", "Band", 230000), hit("near", "Song One (Remastered)", "Band", 201000)],
+                       "other artist": [hit("x1", "Other Artist", "A Stranger", 200000)],
+                       "other title": [hit("x2", "A Different Song", "Band", 200000)],
+                       "live take": [hit("x3", "Live Take", "Band", 260000)]}
+            asked = []
+            def _rb_search(title, size=25):
+                asked.append(title)
+                return answers.get(title, [])
+            feats = lambda ids: {i: {"tempo": 181.0, "energy": 0.7, "danceability": 0.5, "valence": 0.5, "loudness": -5}
+                                 for i in ids if i in ("near", "far", "x1", "x2", "x3")}
+            saved = (M.rb_search, M.rb_features)
+            M.rb_search, M.rb_features = _rb_search, feats
+            try:
+                first = M.fill_missing_tempos(conn)
+                asked_first = list(asked)
+                second = M.fill_missing_tempos(conn)
+            finally:
+                M.rb_search, M.rb_features = saved
+            got = {r["spotify_id"]: dict(r) for r in conn.execute(
+                "SELECT spotify_id, tempo, features_via FROM track WHERE spotify_id IN ('A','B','C','D','E','F')")}
+            if got["A"]["tempo"] != 181.0 or got["A"]["features_via"] != "near":
+                fails.append(f"(h) the closest same recording must fill the song and keep its id: {got['A']}")
+            for sid in "BCD":
+                if got[sid]["tempo"] is not None:
+                    fails.append(f"(h) {sid} is not the same recording and took a tempo: {got[sid]}")
+            if got["E"]["tempo"] != 170.0 or "has tempo" in asked_first:
+                fails.append(f"(h) a song with a tempo must be left alone: {got['E']}")
+            if got["F"]["tempo"] is not None or "from neighbours" in asked_first:
+                fails.append(f"(h) a ListenBrainz song must not be looked up: {got['F']}")
+            if first["tempo_searched"] != 4 or first["tempo_found"] != 1 or second["tempo_searched"] != 0:
+                fails.append(f"(h) one pass per song inside the wait: {first} then {second}")
+            conn.execute("UPDATE track SET tempo_search_at=NULL, tempo=NULL, features_at=NULL, features_via=NULL, "
+                         "feature_miss_at=? WHERE spotify_id IN ('A','B')", (miss,))
+            def _refused(title, size=25):
+                raise M.ReccoBeatsRefused("ReccoBeats search answered 429")
+            saved = M.rb_search
+            M.rb_search = _refused
+            try:
+                stopped = M.fill_missing_tempos(conn)
+            finally:
+                M.rb_search = saved
+            still = conn.execute("SELECT COUNT(*) FROM track WHERE spotify_id IN ('A','B') AND tempo_search_at IS NOT NULL").fetchone()[0]
+            if still or stopped["tempo_searched"] != 0 or "429" not in (stopped["tempo_search_error"] or ""):
+                fails.append(f"(h) a refused search must stop the pass and stamp nothing: {stopped}, {still} stamped")
+            # a title the API cannot take is that one song's problem: no call for a short one, no stop on a 400
+            class _Req:
+                calls = 0
+                code = 400
+                RequestException = M.requests.RequestException
+                @classmethod
+                def get(cls, url, **kw):
+                    cls.calls += 1
+                    return type("R", (), {"status_code": cls.code, "headers": {}, "json": lambda self: {"content": []}})()
+            saved = M.requests
+            M.requests = _Req
+            try:
+                short = M.rb_search("ab")
+                calls_short = _Req.calls
+                bad = M.rb_search("a fine title")
+                _Req.code = 503
+                try:
+                    M.rb_search("a fine title")
+                    raised = False
+                except M.ReccoBeatsRefused:
+                    raised = True
+            finally:
+                M.requests = saved
+            if short != [] or calls_short != 0:
+                fails.append(f"(h) a title under 3 characters must not reach the API: {short}, {calls_short} calls")
+            if bad != []:
+                fails.append(f"(h) a 400 must read as no hits: {bad}")
+            if not raised:
+                fails.append("(h) any other refusal must raise, so the pass stops without stamping")
         finally:
             conn.close()
     finally:
