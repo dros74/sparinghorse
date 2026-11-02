@@ -13487,6 +13487,236 @@ def _coros_fx_rep_shape(reps):
     return [(S._COROS_SECTION_TYPE.get(r["effort"], 2), round(r["minutes"] * 60)) for r in reps]
 
 
+def _stc_finish_hr():
+    """SH-130 — a long run's finish runs by heart rate when a MANUAL threshold anchors one: the watch
+    holds the first minutes to no faster than the marathon pace, then follows a heart-rate cap with the
+    pace left free. Locks: the COROS course and the Suunto guide split the finish in two (same total
+    time, the guard's lap alone on the guide, `guide_lap_offsets` unchanged, labels fit the Race S);
+    a derived threshold, a short finish and every other kind keep today's single pace step; the
+    session note changes its words with it; `hr_zones` carries its source; the card payload and the
+    grading band exist only with a manual anchor."""
+    import sqlite3 as _sq
+    from datetime import date, timedelta as _td
+    fails = []
+    manual = {**_COROS_HRZ, "source": "manual"}
+    derived = {**_COROS_HRZ, "source": "derived"}
+    zones = S.pace_zones(50.0)
+    base_min, mp_min = 136, 40
+    sess = E._build_long_mp("2031-03-02", base_min * E.EASY_TRIMP_PER_MIN,
+                            mp_min * E.trimp_per_min("marathon"),
+                            {"zone": "marathon", "label": "long run"}, zones, zones["easy"])
+    reps = sess["reps"]
+    mp = _COROS_PACE_ZONES["marathon"]                       # "5:34/km"
+    mp_sec = 5 * 60 + 34
+    cap, floor = round(172 * S.FINISH_HR_CAP_FRAC), 155
+    guard = S.FINISH_GUARD_MIN
+    work_min = next(r["minutes"] for r in reps if r["effort"] == "work")
+
+    # the helper
+    if S.finish_hr_band(manual) != (floor, cap):
+        fails.append(f"finish_hr_band(manual) = {S.finish_hr_band(manual)}, want {(floor, cap)}")
+    for label, h in (("derived", derived), ("no source", _COROS_HRZ), ("none", None),
+                     ("hrmax anchor", {**manual, "anchor": "hrmax"}), ("no grid", {"anchor": None})):
+        if S.finish_hr_band(h) is not None:
+            fails.append(f"finish_hr_band({label}) must be None, got {S.finish_hr_band(h)}")
+    wrep = next(r for r in reps if r["effort"] == "work")
+    if S.finish_split(sess, wrep, manual) != (guard, work_min - guard, floor, cap):
+        fails.append(f"finish_split wrong: {S.finish_split(sess, wrep, manual)}")
+    if S.finish_split(sess, wrep, derived) is not None or S.finish_split(sess, reps[0], manual) is not None:
+        fails.append("finish_split must be None on a derived grid and on a non-work rep")
+    if S.finish_split({**sess, "kind": "tempo"}, wrep, manual) is not None:
+        fails.append("finish_split must be None for a kind other than long_mp")
+    short = {**sess, "reps": [reps[0], {**wrep, "minutes": 2 * guard - 1}]}
+    if S.finish_split(short, short["reps"][1], manual) is not None:
+        fails.append("a finish under twice the guard must stay one section")
+    if S.finish_split({**sess, "reps": reps + [wrep]}, wrep, manual) is not None:
+        fails.append("a session with two work reps is not a finish")
+
+    # the words: the engine's own note carries the phrase the swap replaces
+    if "@ MP finish" not in sess["note"]:
+        fails.append(f"the engine's long_mp note no longer says '@ MP finish': {sess['note']!r} "
+                     f"— update _finish_note")
+    if "finish by heart rate" not in S._finish_note(sess) or "@ MP finish" in S._finish_note(sess):
+        fails.append(f"_finish_note did not change the words: {S._finish_note(sess)!r}")
+
+    # COROS
+    cm = S.session_to_coros_course(sess, manual, _COROS_PACE_ZONES)
+    cd = S.session_to_coros_course(sess, derived, _COROS_PACE_ZONES)
+    sm, sd = cm["sections"], cd["sections"]
+    tot = lambda secs: sum(x["targetValue"] for x in _coros_fx_flat(secs))
+    if len(sm) != len(sd) + 1:
+        fails.append(f"manual course should have one more section than derived: {len(sm)} vs {len(sd)}")
+    else:
+        g_, r_ = sm[-2], sm[-1]
+        slow = S._coros_pace_band(mp_sec)[1]
+        if g_ != {"sectionType": 2, "targetType": 2, "targetValue": guard * 60, "intensityType": 2,
+                  "intensityValueStart": mp_sec, "intensityValueEnd": slow}:
+            fails.append(f"COROS guard section wrong: {g_}")
+        if r_ != {"sectionType": 2, "targetType": 2, "targetValue": (work_min - guard) * 60,
+                  "intensityType": 1, "intensityValueStart": floor, "intensityValueEnd": cap}:
+            fails.append(f"COROS heart-rate section wrong: {r_}")
+        if not all(isinstance(g_[k], int) for k in ("intensityValueStart", "intensityValueEnd")):
+            fails.append("COROS guard pace must be ints")
+        if tot(sm) != tot(sd):
+            fails.append(f"COROS total seconds changed: {tot(sm)} vs {tot(sd)}")
+        if sd[-1].get("intensityType") != 2 or sd[-1]["targetValue"] != work_min * 60:
+            fails.append(f"derived grid must keep today's single pace section: {sd[-1]}")
+    want_ph = (f"the finish opens for {guard} minutes no faster than {mp}, then follows heart rate "
+               f"up to {cap} bpm")
+    if want_ph not in cm["courseDescription"] or "finish by heart rate" not in cm["courseDescription"] \
+            or "@ MP finish" in cm["courseDescription"]:
+        fails.append(f"COROS description wording: {cm['courseDescription']!r}")
+    if "@ MP finish" not in cd["courseDescription"] or "heart rate up to" in cd["courseDescription"]:
+        fails.append(f"derived COROS description must keep today's words: {cd['courseDescription']!r}")
+    cs = S.session_to_coros_course(short, manual, _COROS_PACE_ZONES)
+    if len(cs["sections"]) != len(S.session_to_coros_course(short, derived, _COROS_PACE_ZONES)["sections"]):
+        fails.append("a short finish must stay a single COROS section")
+    if any(x.get("intervalGroup") for x in sm):
+        fails.append("the guard and heart-rate sections must stay plain, not an interval group")
+
+    # Suunto guide
+    gm, _b = S.session_to_guide(sess, manual, pace_zones=_COROS_PACE_ZONES)
+    gd, _b = S.session_to_guide(sess, derived, pace_zones=_COROS_PACE_ZONES)
+    stm, std = gm["steps"], gd["steps"]
+    if len(stm) != len(std) + 1:
+        fails.append(f"manual guide should have one more step than derived: {len(stm)} vs {len(std)}")
+    else:
+        gs, hs = stm[-2], stm[-1]
+        tp = next(f for f in gs["fields"] if f["type"] == "targetPace")
+        if tp["max"] != round(1000.0 / mp_sec, 3) or tp["value"] != tp["max"]:
+            fails.append(f"guard targetPace.max must be 1000/MP: {tp}")
+        if tp["min"] != round(1000.0 / S._coros_pace_band(mp_sec)[1], 3):
+            fails.append(f"guard targetPace.min must be the slow end: {tp}")
+        if gs.get("createManualLap") is not True or hs.get("createManualLap"):
+            fails.append("only the guard lays the lap")
+        if [f["type"] for f in gs["fields"]] != ["stepDurationCountdown", "targetPace", "heartRate", "text"]:
+            fails.append(f"guard fields: {[f['type'] for f in gs['fields']]}")
+        types = [f["type"] for f in hs["fields"]]
+        if types != ["heartRate", "pace", "stepDurationCountdown", "targetHeartRate", "text"]:
+            fails.append(f"HR step fields (live HR, live pace, countdown, band, text): {types}")
+        band = next((f for f in hs["fields"] if f["type"] == "targetHeartRate"), {})
+        if band.get("title") != f"HR max {cap}" or band.get("value") != cap:
+            fails.append(f"HR step band must read 'HR max {cap}' with value {cap}: {band}")
+        for st_ in (gs, hs):
+            for f in st_["fields"]:
+                if f["type"] != "text" and len(f.get("title", "")) > 10:
+                    fails.append(f"field title over 10 characters: {f}")
+            if len(st_["title"]) > 13:
+                fails.append(f"step title over 13 characters: {st_['title']!r}")
+        if ":" not in gs["title"]:
+            fails.append(f"the guard title lost its pace colon: {gs['title']!r}")
+        dur = lambda st_: next(t["condition"]["value"] for t in st_["transitions"])
+        if dur(gs) + dur(hs) != work_min * 60:
+            fails.append("guide guard + heart-rate steps must total the finish")
+        laid, t = [], 0.0
+        for st_ in stm:
+            if st_.get("createManualLap"):
+                laid.append(t)
+            t += dur(st_)
+        if laid != S.guide_lap_offsets(sess):
+            fails.append(f"builder laps {laid} != guide_lap_offsets {S.guide_lap_offsets(sess)}")
+    if "finish by heart rate" not in gm["description"] or "MP finish" in gm["description"] \
+            or "MP finish" not in gd["description"] or "heart rate" in gd["description"]:
+        fails.append(f"guide description wording: {gm['description']!r} / {gd['description']!r}")
+    sg, _b = S.session_to_guide(short, manual, pace_zones=_COROS_PACE_ZONES)
+    if len(sg["steps"]) != len(S.session_to_guide(short, derived, pace_zones=_COROS_PACE_ZONES)[0]["steps"]):
+        fails.append("a short finish must stay a single guide step")
+    # a plain caller of _guide_step is untouched by the two new arguments
+    if S._guide_step("Run", "x", minutes=10, pace_sec=330, hr=S._hr_target("easy", manual)) != \
+            S._guide_step("Run", "x", minutes=10, pace_sec=330, hr=S._hr_target("easy", manual),
+                          pace_band=None, hr_cap=None):
+        fails.append("_guide_step defaults changed behaviour")
+
+    # the grading band and the card payload
+    cuts = manual["cutoffs"]
+    if S._work_hr_band("long_mp", "marathon", cuts, manual) != (floor, cap):
+        fails.append(f"long_mp + manual must grade against the finish band: "
+                     f"{S._work_hr_band('long_mp', 'marathon', cuts, manual)}")
+    if S._work_hr_band("long_mp", "marathon", cuts, derived) != S._seg_band(cuts, "marathon") \
+            or S._work_hr_band("long_mp", "marathon", cuts, None) != S._seg_band(cuts, "marathon"):
+        fails.append("long_mp without a manual anchor must keep the marathon row")
+    if S._work_hr_band("tempo", "threshold", cuts, manual) != S._seg_band(cuts, "threshold") \
+            or S._work_hr_band("race_pace", "marathon", cuts, manual) != S._seg_band(cuts, "marathon"):
+        fails.append("other kinds must keep their zone's row even with a manual anchor")
+    tdy = date.today()
+    def mkdb(manual_lthr=None):
+        m = _sq.connect(":memory:"); m.row_factory = _sq.Row
+        m.executescript(S.SCHEMA)
+        for i in range(6):
+            m.execute("INSERT INTO activities(id,date,sport,hr_avg,hr_max,duration) VALUES(?,?,?,?,?,?)",
+                      (i + 1, (tdy - _td(days=i * 5 + 1)).isoformat(), "Running", 166, 189, 1800))
+        m.execute("INSERT INTO shape_snapshots(snapshot_date,effective_vo2max) VALUES(?,?)",
+                  (tdy.isoformat(), 50.0))
+        if manual_lthr:
+            m.execute("INSERT INTO meta(key,value) VALUES('set:manual_lthr',?)", (str(manual_lthr),))
+            m.execute("INSERT INTO meta(key,value) VALUES('manual_lthr_set_on',?)", (tdy.isoformat(),))
+        return m
+    hz_d, hz_m = S.hr_zones(mkdb(), today=tdy), S.hr_zones(mkdb(172), today=tdy)
+    if hz_d.get("source") != "derived" or hz_m.get("source") != "manual":
+        fails.append(f"hr_zones must carry its source: {hz_d.get('source')} / {hz_m.get('source')}")
+    empty = _sq.connect(":memory:"); empty.row_factory = _sq.Row
+    empty.executescript(S.SCHEMA)
+    if "source" not in S.hr_zones(empty, today=tdy):
+        fails.append("hr_zones must carry a `source` key on the no-anchor path too")
+    if S.training_zones(mkdb(), today=tdy).get("finish") is not None:
+        fails.append("training_zones.finish must be None without a manual threshold")
+    tf = S.training_zones(mkdb(172), today=tdy).get("finish")
+    if not tf or tf.get("guard_min") != guard or tf.get("hr_lo") != hz_m["cutoffs"][1] \
+            or tf.get("hr_cap") != round(172 * S.FINISH_HR_CAP_FRAC) or not tf.get("pace_fmt"):
+        fails.append(f"training_zones.finish with a manual threshold: {tf}")
+
+    # The grading call itself, on a cached decode: a finish is judged against the band of the threshold
+    # in force on the run's own day, read with a real date (a string silently reads as undated).
+    run_day = (tdy - _td(days=3)).isoformat()
+
+    def graded(manual, work_hr, set_days_ago=None):
+        m = mkdb(manual)
+        if set_days_ago is not None:
+            m.execute("UPDATE meta SET value=? WHERE key='manual_lthr_set_on'",
+                      ((tdy - _td(days=set_days_ago)).isoformat(),))
+        m.execute("INSERT INTO activities(id,date,date_time,sport,distance,duration,elapsed_time,hr_avg,hr_max,raw) "
+                  "VALUES(99,?,?,'Running',30.0,10800,10800,150,172,'{}')", (run_day, run_day + "T16:00:00"))
+        st = {"v": S.STRUCT_VERSION, "ok": True, "kind": "long_mp", "n_work": 1, "summary": "x",
+              "kind_label": "Long run + MP finish", "strides": 0, "stride_sets": [], "stride_reps": [],
+              "stride_pace": None, "confidence": "good", "streams_final": True,
+              "segments": [{"sec": 8000, "km": 21.0, "pace": 380, "hr": 140, "zone": "easy", "role": "easy_base"},
+                           {"sec": 2800, "km": 8.2, "pace": 341, "hr": work_hr, "zone": "marathon", "role": "work"}]}
+        m.execute("INSERT INTO structcache(activity_id,structure,cached_at) VALUES(99,?,?)",
+                  (S.json.dumps(st), run_day))
+        road = {"weeks": [{"start": run_day, "sessions": [{"date": run_day, "kind": "long_mp", "km": 30.0}]}]}
+        m.execute("INSERT INTO plans(created_at,for_date,inputs,plan) VALUES(?,?,'{}',?)",
+                  (run_day, run_day, S.json.dumps({"ok": True, "base": road, "phases": [road]})))
+        rows = [r for r in S.effort_discipline(m)["runs"] if r["date"] == run_day]
+        return rows[0] if rows else {}, m
+    cap_m = round(172 * S.FINISH_HR_CAP_FRAC)
+    r_on, _m = graded(172, cap_m)
+    if r_on.get("verdict") != "on" or (r_on.get("seg") or {}).get("finish_cap") != cap_m:
+        fails.append(f"a finish at the cap must grade on, with its cap: {r_on.get('verdict')} {r_on.get('seg')}")
+    r_over, _m = graded(172, cap_m + S.EFFORT_SEG_TOL + 2)
+    if r_over.get("verdict") != "too_hard":
+        fails.append(f"a finish over the cap must grade too hard: {r_over.get('verdict')} {r_over.get('seg')}")
+    r_der, _m = graded(None, cap_m)
+    if (r_der.get("seg") or {}).get("finish_cap") is not None:
+        fails.append(f"no manual threshold must mean no finish band: {r_der.get('seg')}")
+    # The threshold ages out AFTER the run: today's grid no longer reads manual, the run's day still does.
+    r_aged, m_aged = graded(172, cap_m, set_days_ago=S.MANUAL_LTHR_FRESH_DAYS + 2)
+    if S.derive_lthr(m_aged, today=tdy).get("source") != "derived":
+        fails.append("fixture: the aged manual threshold should have handed today's grid to the derived one")
+    if (r_aged.get("seg") or {}).get("finish_cap") != cap_m or r_aged.get("verdict") != "on":
+        fails.append(f"a run is graded by the threshold of its own day: {r_aged.get('verdict')} {r_aged.get('seg')}")
+    # Long out of date on the run's own day: no finish band. A string date reads as undated and keeps it.
+    r_old, _m = graded(172, cap_m, set_days_ago=S.MANUAL_LTHR_OK_DAYS + 10)
+    if (r_old.get("seg") or {}).get("finish_cap") is not None:
+        fails.append(f"a threshold out of date on the run's day must not anchor a finish: {r_old.get('seg')}")
+    return _st("det", "finish-hr",
+               "SH-130: a long run's finish by heart rate — COROS and Suunto split it into a pace guard "
+               "and a heart-rate cap only on a MANUAL threshold (derived, short and other kinds keep "
+               "one pace step), totals and laps unchanged, labels fit the watch, the session note "
+               "changes its words, hr_zones carries its source, grading band and card payload follow",
+               passed=not fails, expect="manual → guard + HR cap; otherwise today's single step",
+               got={"violations": fails or "none"})
+
+
 def _stc_coros_course():
     """§CG course-converter det-lock — PURE (no DB, no network): the live plan's four session
     shapes must convert to COROS courses holding every catalog rule: effort → sectionType
@@ -22635,6 +22865,36 @@ def _stc_structure():
     # 1-min surge) stays an easy long run, and so does a marathon-zone stretch in the MIDDLE
     expect("long-mp-tail-drift", synth([(5400, 352), (60, 300), (600, 342)]), "long", 0)
     expect("long-mid-mp", synth([(3000, 362), (900, 337), (3000, 362)]), "long", 0)
+    # v12 a finish that CLEARS the 10 % bar must not read as intervals or a tempo. (1) A surge in the
+    # warm-up plus the finish: two blocks over the bar. The surge is short of a session, the finish is
+    # the long_mp's work, the base (surge included) is the run.
+    sg = expect("long-mp-opening-surge", synth([(1500, 385), (135, 330), (2400, 385), (300, 380),
+                                                (2520, 335)], with_hr=True), "long_mp", 1)
+    if sg and [s["role"] for s in sg["segments"]][-1] != "work":
+        fails.append(f"long-mp-opening-surge: the finish is not the last work block — "
+                     f"roles {[s['role'] for s in sg['segments']]}")
+    # (2) A finish broken by threshold surges and slow stumbles (blocks of a real broken finish, with
+    # surges in the warm-up so the old reading is intervals): one finish, the last 210 s a cool-down.
+    brk = [(2400, 375), (140, 330), (1800, 372), (300, 370), (90, 341), (75, 314), (510, 338),
+           (120, 331), (45, 370), (195, 311), (285, 343), (60, 314), (45, 407), (720, 338),
+           (60, 318), (210, 380)]
+    bf = expect("long-mp-broken-finish", synth(brk, with_hr=True), "long_mp", 1)
+    if bf:
+        roles = [s["role"] for s in bf["segments"]]
+        if roles[-1] != "cooldown" or sum(1 for r in roles if r == "work") != 1 \
+                or "cooldown" in roles[:-1] or bf["segments"][-1]["sec"] > 260:
+            fails.append(f"long-mp-broken-finish: roles {roles}")
+    # …and what must NOT become a finish: two real MP blocks with a jog between them are intervals,
+    # a threshold set with short floats is intervals, and a tempo with a run home is a tempo.
+    expect("two-mp-blocks-jog", synth([(2400, 380), (600, 335), (300, 395), (600, 335), (600, 385)]),
+           "interval", 2)
+    expect("threshold-3x10", synth([(2100, 380), (600, 308), (60, 385), (600, 308), (60, 385),
+                                    (600, 308), (600, 380)]), "interval", 3)
+    expect("threshold-10x3-short-floats", synth([(1800, 380)] + [(180, 308), (45, 385)] * 9
+                                                + [(180, 308), (600, 380)]), "interval", 10)
+    # (3) a long easy run, a short MP opening and a long finish only ~5 % under the baseline
+    sm = expect("long-mp-smooth-finish", synth([(8760, 372), (540, 330), (3120, 341)]), "long_mp", 1)
+    expect("tempo-with-run-home", synth([(2400, 380), (1200, 308), (900, 372)]), "tempo", 1)
     expect("hilly-const-effort", synth([(3000, 380)], hilly=True), "easy", 0)  # GAP flattens hills
     # in-run strides at REALISTIC contrast (~35% over easy, cadence up ~11% — the RD_STRIDE_PEAK
     # bar exists exactly so that 10–20% easy-run texture does NOT count, and the RD_STRIDE_CAD
@@ -23918,7 +24178,7 @@ def _run_server_selftest(db, categories=None):
                  lambda: _stc_guides(), lambda: _stc_guide_cleanup(),
                  lambda: _stc_guide_recreate(), lambda: _stc_guide_notify(),
                  lambda: _stc_guide_reps_text(), lambda: _stc_guide_screen_layout(),
-                 lambda: _stc_coros_course(), lambda: _stc_coros_plan_days(),
+                 lambda: _stc_coros_course(), lambda: _stc_finish_hr(), lambda: _stc_coros_plan_days(),
                  lambda: _stc_coros_push_diff(),
                  lambda: _stc_stream_optin(),
                  lambda: _stc_profile_belt_dynamics(), lambda: _stc_activity_belt_fields(db), lambda: _stc_cadence_unit_by_magnitude(db),

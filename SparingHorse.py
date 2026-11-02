@@ -496,7 +496,14 @@ def activity_profile(activity_id, n=120):
 # intervals); HR rides along per segment for the private effort monitor but is never a structure
 # input (HR lags short reps). Versioned in structcache; classified at sync for new runs, lazily on
 # first view for old ones.
-STRUCT_VERSION = 11  # v11 (2026-10-19): THE MP FINISH UNDER THE WORK BAR. My 18 Oct long_mp
+STRUCT_VERSION = 12  # v12: THE FINISH THAT CLEARS THE BAR. A long run with a finish by heart rate
+#                      read as intervals (an opening surge plus the finish: two blocks over the 10 %
+#                      bar) or as a tempo (a finish broken by short surges). `_mp_finish` now reads
+#                      the unfused blocks, carries across short stumbles, and is taken beside the
+#                      10 % pass when the blocks outside the finish are too short to be a session.
+#                      Known limit: a smooth finish under about 5 % contrast opens no block and reads
+#                      as a plain long run.
+#                      v11 (2026-10-19): THE MP FINISH UNDER THE WORK BAR. My 18 Oct long_mp
 #                      (46 min @5:41 after 2 h @6:10) read back as "Long run": the finish was 8.4%
 #                      faster than the baseline and work needs 10%. A trailing marathon-zone stretch
 #                      after a real easy base is now an MP finish at ≥ RD_FINISH_CONTRAST (5%),
@@ -623,6 +630,8 @@ RD_FINISH_CONTRAST = 0.05  # §RD v11 — a trailing MARATHON-ZONE stretch (≥ 
 #                            zone name already rule out easy-day drift. A run with a 5–10% finish and
 #                            no other work was "Long run" (18 Oct: 8.4%); a 2–3% marathon-zone tail
 #                            (13 Sep, 6:15 after 6:24) stays an easy long run.
+RD_FINISH_GAP_S = 45       # §RD v12 — a block this short or shorter does not break a finish that
+#                            runs on either side of it (a gel, a crossing, a hill)
 RD_TAIL_REST_MIN_S = 480   # a trailing "rep" is cooldown drift once the gap since the previous rep
 #                            is ≥8min AND ≥ the factor × the session's own longest inter-rep rest —
 #                            nobody floats 8 minutes between VO₂ reps (2026-07-22 live: the flat last
@@ -1096,24 +1105,42 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
         return _segs, _span, fast_ix
 
     def _mp_finish(segs):
-        # v11 — the trailing marathon-zone stretch of a run with a real easy base before it: the
-        # last contiguous blocks named marathon and ≥ RD_FINISH_CONTRAST faster than the baseline,
-        # together ≥ RD_MIN_TEMPO_S, with ≥ RD_MP_BASE_MIN of running before and at most the
-        # long_mp branch's cool-down allowance after. [] when the run has no such finish.
-        q = [i for i, s in enumerate(segs) if s["zone"] == "marathon"
-             and math.log(baseline / s["pace"]) >= math.log1p(RD_FINISH_CONTRAST)]
-        if not q:
+        # v12 — the finish of a long run, read over the UNFUSED blocks. A finish is the last strong
+        # block (a work-zone name and ≥ RD_FINISH_CONTRAST faster than the baseline) and what runs
+        # back from it while the pace stays clearly faster than the baseline (half the finish
+        # contrast) or the block is a short stumble (≤ RD_FINISH_GAP_S: a gel, a crossing, a hill).
+        # The stretch must read as marathon pace overall (time over distance), sum to
+        # ≥ RD_MIN_TEMPO_S, follow ≥ RD_MP_BASE_MIN of
+        # running and be followed by at most the long_mp branch's cool-down allowance. A finish
+        # broken by a threshold surge or a slow stumble is still one finish. [] when there is none.
+        bar = math.log1p(RD_FINISH_CONTRAST)
+        strong = [i for i, s in enumerate(segs) if s["zone"] in RD_WORK_ZONES
+                  and math.log(baseline / s["pace"]) >= bar]
+        if not strong:
             return []
-        lo = hi = q[-1]
-        while lo - 1 in q:
-            lo -= 1
-        if sum(s["sec"] for s in segs[lo:hi + 1]) >= RD_MIN_TEMPO_S \
+        hi = lo = strong[-1]
+        k = hi - 1
+        carry = bar / 2                  # "faster than the baseline" by a margin: an easy block a
+        #                                  percent under the baseline's mean is jitter, not the finish
+        while k >= 0 and (math.log(baseline / segs[k]["pace"]) >= carry
+                          or segs[k]["sec"] <= RD_FINISH_GAP_S):
+            if k in strong:
+                lo = k
+            k -= 1
+        part = segs[lo:hi + 1]
+        sec = sum(s["sec"] for s in part)
+        km = sum(s["km"] for s in part)
+        pace = sec / km if km else None
+        if pace and _rd_zone(pace, zones) == "marathon" \
+                and math.log(baseline / pace) >= bar \
+                and sec >= RD_MIN_TEMPO_S \
                 and sum(s["sec"] for s in segs[:lo]) >= RD_MP_BASE_MIN * 60 \
                 and sum(s["sec"] for s in segs[hi + 1:]) <= max(900, 0.2 * total_sec):
             return list(range(lo, hi + 1))
         return []
 
     segs0, span0 = segs, span
+    fast0 = list(fast_ix)                                    # the raw 10 % blocks, before fusion
     segs, span, fast_ix = _fuse_fast(segs, span, fast_ix)
     work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
     # (fast blocks too short to be reps — e.g. strides that segmented out on their own — are
@@ -1126,11 +1153,23 @@ def classify_structure(streams, zones, min_s=RD_MIN_RUN_S):
     # days whose drift crosses easy_top; a sustained marathon-zone stretch at the END of a run, after
     # a real easy base, is not drift. Taken only when the 10% pass found no work, so every session
     # with reps reads exactly as before.
-    if not work_ix:
-        fin = _mp_finish(segs0)
-        if fin:
-            segs, span, fast_ix = _fuse_fast(segs0, span0, fin)
-            work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
+    # v12 — …and a finish that clears the 10 % bar must not turn the run into intervals. The athlete's
+    # newest finishes did: an opening surge in the warm-up plus the finish read as "2× reps", and a
+    # finish broken by a few short surges read as a tempo with the rest of the finish as cool-down.
+    # The finish is taken when (a) there is no work, (b) the 10 % blocks OUTSIDE it are too short to
+    # be a session of their own (a warm-up surge), or (c) the one work block is the finish itself.
+    fin = _mp_finish(segs0)
+    use_fin = False
+    if fin:
+        outside = sum(segs0[i]["sec"] for i in fast0 if i not in fin)
+        if not work_ix or (len(work_ix) >= 2 and outside < RD_MIN_TEMPO_S):
+            use_fin = True
+        elif len(work_ix) == 1 and segs[work_ix[0]]["zone"] == "marathon":
+            w_i0, w_i1 = span[work_ix[0]]
+            use_fin = span0[fin[0]][0] <= w_i0 and w_i1 <= span0[fin[-1]][1]
+    if use_fin:
+        segs, span, fast_ix = _fuse_fast(segs0, span0, fin)
+        work_ix = [i for i in fast_ix if segs[i]["sec"] >= RD_MIN_WORK_S]
     # v8 — the workout ENDS: a trailing rep whose rest gap dwarfs the session's own observed rest
     # scale is cooldown drift (terrain letting go, legs rolling home), not a session element. Needs
     # ≥3 candidates: with only one real gap there is no scale to judge against, so a plain 2-rep
@@ -2534,7 +2573,7 @@ def _pace_zone_sec(pace_zones, zone):
 
 
 def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=False, layout="easy",
-                 cd_title="left"):
+                 cd_title="left", pace_band=None, hr_cap=None):
     """One fields step: countdown + optional pace/HR targets + a detail text line + the boundary
     popup (§SG3), advancing on its own duration (or distance, for the distance-framed simple runs).
     `text` arrives already composed (the rep counter and the "next" hand-over on a reps day are
@@ -2571,7 +2610,15 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
     does draw each value field's own small `title` label, up to ~10 characters before an ellipsis
     eats the middle. So the counter now rides the countdown field's `title` too — `cd_title`, passed
     in by `session_to_guide` on a multi-rep reps day ("3/9 left" on a work rep, "next 4/9" on the
-    recovery before one) — while field order and everything else here is unchanged."""
+    recovery before one) — while field order and everything else here is unchanged.
+
+    A long run's finish that runs by heart rate (`finish_split`) is two steps, and each needs one thing
+    the plain step cannot say. `pace_band=(fast_sec, slow_sec)` makes the `targetPace` window
+    asymmetric — the opening minutes are held to "no faster than the marathon pace", and the
+    symmetric ±5 % window of `_pace_target` would let the athlete run 5 % faster and stay in the
+    gauge: `max` = 1000/fast, `min` = 1000/slow, the printed `value` the pace not to beat.
+    `hr_cap` is the heart-rate step: the band field reads "HR max CAP" (the Race S draws a field's own
+    title) with the cap as its value, and the live pace metric stays on screen with no pace target."""
     fields, cond, dur, cd = [], None, None, None
     if minutes:
         cd = {"type": "stepDurationCountdown", "title": cd_title, "value": round(minutes * 60.0, 1)}
@@ -2582,6 +2629,9 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
         cond = {"type": "stepDistance", "value": round(km * 1000.0, 1)}
         dur = f"{km:g}km"
     pt = _pace_target(pace_sec)
+    if pt and pace_band:
+        pt = {**pt, "value": round(1000.0 / pace_band[0], 3), "max": round(1000.0 / pace_band[0], 3),
+              "min": round(1000.0 / pace_band[1], 3)}
     live_hr = {"type": "heartRate", "title": "HR"}
     if layout == "work" or not hr:
         # the countdown leads, then the pace target (the gauge, and a number worth the big slot),
@@ -2592,8 +2642,9 @@ def _guide_step(title, text, minutes=None, km=None, pace_sec=None, hr=None, lap=
         # countdown and the HR band's static midpoint go to the two small ones. The band field stays
         # in the array because it is what draws the gauge; its printed value is the least useful
         # number on the screen (the middle of a band whose only real edge is the top).
-        fields = [live_hr] + ([{"type": "pace", "title": "pace"}] if pt else []) \
-            + ([cd] if cd else []) + [{**hr, "title": "HR band"}]
+        band_f = {**hr, "title": f"HR max {hr_cap}", "value": hr_cap} if hr_cap else {**hr, "title": "HR band"}
+        fields = [live_hr] + ([{"type": "pace", "title": "pace"}] if (pt or hr_cap) else []) \
+            + ([cd] if cd else []) + [band_f]
     txt = _guide_txt(text, 54)
     if txt:
         fields.append({"type": "text", "value": txt})
@@ -2671,6 +2722,7 @@ def session_to_guide(session, hrz=None, pace_zones=None):
         raise ValueError("session has no distance")
     steps = []
     reps = session.get("reps")
+    finish_hr = False
     if reps:
         n_work = sum(1 for r in reps if r["effort"] == "work")
         wi = 0
@@ -2700,6 +2752,24 @@ def session_to_guide(session, hrz=None, pace_zones=None):
                 cd_title = f"next {wi + 1}/{n_work}"
             else:
                 cd_title = "left"
+            fs = finish_split(session, r, hrz) if (work and pace_sec) else None
+            if fs:
+                pace_sec = int(round(pace_sec))
+            fband = _coros_pace_band(pace_sec) if fs else None
+            if fs and fband:
+                # the finish by heart rate: the opening minutes no faster than the marathon pace, the
+                # rest to a heart-rate cap with the pace left free
+                steps.append(_guide_step(
+                    f"Max {_pace_label(pace_sec)[:-3]}", f"First {fs[0]} min, no faster than "
+                    f"{_pace_label(pace_sec)[:-3]}", minutes=fs[0], pace_sec=pace_sec,
+                    pace_band=(pace_sec, fband[1]), hr=_hr_target(r["zone"], hrz), lap=True,
+                    layout="work", cd_title="left"))
+                steps.append(_guide_step(
+                    "By HR", f"HR up to {fs[3]}, pace free", minutes=fs[1], pace_sec=None,
+                    hr={"type": "targetHeartRate", "title": "HR", "value": fs[3], "min": fs[2],
+                        "max": fs[3]}, hr_cap=fs[3], lap=False, layout="easy", cd_title="left"))
+                finish_hr = True
+                continue
             steps.append(_guide_step(
                 title, text, minutes=r["minutes"], pace_sec=pace_sec, hr=_hr_target(r["zone"], hrz),
                 lap=work, layout="work" if work else "easy", cd_title=cd_title))
@@ -2712,7 +2782,8 @@ def session_to_guide(session, hrz=None, pace_zones=None):
     guide = {"type": "sequence",
              "name": _guide_txt(f"{label} {km}km - {session['date']}", 60),
              "shortDescription": _guide_txt(f"{label} {km}km", 23),
-             "description": _guide_txt(session.get("note") or f"{label}, {km}km", 256) or label,
+             "description": _guide_txt((_finish_note(session) if finish_hr else session.get("note"))
+                                       or f"{label}, {km}km", 256) or label,
              "owner": "Sparing Horse", "url": SUUNTO_GUIDE_URL, "usage": "workout",
              "activities": [SUUNTO_ACTIVITY_RUNNING], "localDate": session["date"],
              "externalId": session_guide_external_id(session), "steps": steps}
@@ -3250,6 +3321,7 @@ def session_to_coros_course(session, hrz=None, pace_zones=None):
         if p not in phrases:
             phrases.append(p)
 
+    finish_hr = False
     if reps:
         plain = []
         for r in reps:
@@ -3260,6 +3332,21 @@ def session_to_coros_course(session, hrz=None, pace_zones=None):
                 pace_sec = _rep_pace_sec(r)
             if r["effort"] == "work":
                 band = _coros_pace_band(pace_sec)
+                fs = finish_split(session, r, hrz) if pace_sec else None
+                pi = int(round(pace_sec)) if fs else None
+                fband = _coros_pace_band(pi) if fs else None
+                lo_hr, hi_hr = COROS_HR_RANGE
+                if fs and fband and lo_hr <= fs[2] <= hi_hr and lo_hr <= fs[3] <= hi_hr:
+                    # the finish runs by heart rate: the opening minutes held to the marathon pace
+                    # (no faster than it), the rest to a heart-rate band with no pace at all
+                    finish_hr = True
+                    plain.append(("work", _coros_section(2, minutes=fs[0], pace=(pi, fband[1]))))
+                    plain.append(("work", _coros_section(2, minutes=fs[1], hr=(fs[2], fs[3]))))
+                    p = (f"the finish opens for {fs[0]:g} minutes no faster than "
+                         f"{_pace_label(pi)}, then follows heart rate up to {fs[3]} bpm")
+                    if p not in phrases:
+                        phrases.append(p)
+                    continue
                 if band:
                     note_band("pace", r["zone"], band[0], band[1])
                 sec = _coros_section(2, minutes=r["minutes"], pace=band)
@@ -3297,7 +3384,7 @@ def session_to_coros_course(session, hrz=None, pace_zones=None):
             sections = [_coros_section(2, km=km, pace=pband)]
     label = {"easy": "Easy run", "long": "Long run", "long_mp": "Long run + MP"}.get(kind) \
         or _guide_txt(kind, 20).title()
-    note = (session.get("note") or "").strip().rstrip(".")
+    note = ((_finish_note(session) if finish_hr else session.get("note")) or "").strip().rstrip(".")
     desc = (note[:1].upper() + note[1:]) if note else f"{label}, {km:g} km"
     if phrases:
         tail = "; ".join(phrases)
@@ -4351,12 +4438,52 @@ def hr_zones(db, today=None):
         anchor, ref, fracs = "hrmax", info["hrmax"], HRMAX_ZONE_FRACS
     else:
         return {"anchor": None, "ref": None, "cutoffs": None, "zones": None,
-                "lthr_confidence": info.get("confidence")}
+                "lthr_confidence": info.get("confidence"), "source": info.get("source")}
     cutoffs = [round(ref * f) for f in fracs]
     bounds = [None] + cutoffs + [None]
     zones = [(labels[i], bounds[i], bounds[i + 1]) for i in range(5)]
     return {"anchor": anchor, "ref": ref, "cutoffs": cutoffs, "zones": zones,
-            "lthr_confidence": info.get("confidence")}
+            "lthr_confidence": info.get("confidence"), "source": info.get("source")}
+
+
+FINISH_HR_CAP_FRAC = 0.98  # top of a long-run finish, as a share of a MANUAL threshold heart rate (app convention)
+FINISH_GUARD_MIN = 5       # opening minutes of the finish held to the marathon pace (heart rate lags at the start)
+
+
+def finish_hr_band(hrz):
+    """(floor, cap) bpm for a long run's finish, or None. Only a MANUAL threshold heart rate anchors
+    it: a derived one reads several bpm low (SH-54), and a cap taken from it would hold the finish
+    back. The floor is the marathon band's floor on the same grid; the cap sits just under the
+    threshold. Pure, from a `hr_zones()` payload."""
+    if not hrz or hrz.get("anchor") != "lthr" or hrz.get("source") != "manual":
+        return None
+    ref, cuts = hrz.get("ref"), hrz.get("cutoffs")
+    if not ref or not cuts:
+        return None
+    return (cuts[1], round(ref * FINISH_HR_CAP_FRAC))
+
+
+def finish_split(session, rep, hrz):
+    """(guard_min, rest_min, floor, cap) when this rep is a long_mp's finish that runs by heart rate,
+    else None: kind long_mp, rep effort work, the session has exactly one work rep, a band exists, and
+    the rep is at least twice the guard long. The guard holds the opening minutes to the marathon
+    pace; the rest follows heart rate up to the cap."""
+    if (session or {}).get("kind") != "long_mp" or (rep or {}).get("effort") != "work":
+        return None
+    if sum(1 for r in session.get("reps") or [] if r.get("effort") == "work") != 1:
+        return None
+    band = finish_hr_band(hrz)
+    minutes = (rep or {}).get("minutes") or 0
+    if not band or minutes < 2 * FINISH_GUARD_MIN:
+        return None
+    return (FINISH_GUARD_MIN, minutes - FINISH_GUARD_MIN, band[0], band[1])
+
+
+def _finish_note(session):
+    """The session note with its "@ MP finish" wording replaced by "finish by heart rate", for a
+    finish that runs by heart rate (a watch guide or course must not promise a pace it does not hold)."""
+    note = (session or {}).get("note") or ""
+    return note.replace("@ MP finish", "finish by heart rate")
 
 
 def training_zones(db, today=None):
@@ -4392,7 +4519,11 @@ def training_zones(db, today=None):
         {"key": "interval", "label": "Interval / VO₂max", "zone_idx": 4,
          "pace_target": pace("interval"), "hr": hr_band(3, None)},          # Z5 (HR lags short reps)
     ]
-    return {"ok": bool(pz or cut), "rows": rows,
+    fband = finish_hr_band(hz)
+    mp_fmt = pace("marathon")["fmt"]
+    finish = ({"guard_min": FINISH_GUARD_MIN, "hr_lo": fband[0], "hr_cap": fband[1], "pace_fmt": mp_fmt}
+              if (fband and mp_fmt) else None)     # a long run's finish by heart rate (manual LTHR only)
+    return {"ok": bool(pz or cut), "rows": rows, "finish": finish,
             "pace_anchor": {"vo2max": snap["effective_vo2max"] if snap else None,
                             "p5k": pz.get("p5k"), "p5k_fmt": fmt_pace(pz.get("p5k")),
                             "lt1_5k_frac": LT1_5K_FRAC},
@@ -4487,6 +4618,17 @@ def _seg_band(cutoffs, zone):
     i, j = {"marathon": (1, 2), "threshold": (2, 3), "interval": (3, None)}[zone]
     return (cutoffs[i] if i is not None else None,
             cutoffs[j] if j is not None else None)
+
+
+def _work_hr_band(kind, zone, cutoffs, hz_at_run):
+    """The bpm band a run's work reps are graded against. A long_mp's finish runs by heart rate when a
+    manual threshold anchors one (`finish_hr_band` of the grid in force on the run's day): the band is
+    that floor to that cap, not the marathon row. Every other case is the zone's row of the grid."""
+    if kind == "long_mp":
+        fb = finish_hr_band(hz_at_run)
+        if fb:
+            return fb
+    return _seg_band(cutoffs, zone)
 
 
 def _effort_verdict(kind, hrf, te, easy_frac=EASY_HR_FRAC, hard_frac=HARD_HR_FRAC):
@@ -4709,7 +4851,8 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
     lthr_info = None if public else derive_lthr(db)
     use_lthr = bool(lthr_info and lthr_info.get("source") in LTHR_TRUSTED
                     and lthr_info.get("confidence") in LTHR_MIN_CONFIDENCE)
-    hz_cut = None if public else (hr_zones(db) or {}).get("cutoffs")   # §RD — rep-band grid
+    hz_full = None if public else hr_zones(db)
+    hz_cut = (hz_full or {}).get("cutoffs")           # §RD — rep-band grid
     snap = latest_snapshot(db)
     zones = pace_zones(snap["effective_vo2max"]) if snap else {}
     since = (datetime.now().date() - timedelta(days=window_days)).isoformat()
@@ -4821,8 +4964,13 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                     # HR judges only reps long enough for HR to be IN PHASE: a short rep starts
                     # rested and its HR peak lands in the recovery, so the within-rep average
                     # under-reads — short reps are judged on pace (EFFORT_SEG_HR_MIN_S).
+                    finish_cap = None
                     if whr and hz_cut and wsec / len(works) >= EFFORT_SEG_HR_MIN_S:
-                        lo, hi = _seg_band(hz_cut, zone)
+                        hz_run = None
+                        if kind == "long_mp":             # judged by the threshold in force that day
+                            hz_run = hr_zones(db, today=datetime.fromisoformat(g[0]["date"][:10]).date())
+                        lo, hi = _work_hr_band(kind, zone, hz_cut, hz_run)
+                        finish_cap = hi if (kind == "long_mp" and finish_hr_band(hz_run)) else None
                         v2 = ("too_easy" if (lo and whr < lo - EFFORT_SEG_TOL) else
                               "too_hard" if (hi and whr > hi + EFFORT_SEG_TOL) else "on")
                     elif zones.get(zone):
@@ -4833,6 +4981,8 @@ def effort_discipline(db, window_days=EFFORT_WINDOW_DAYS, public=False):
                         verdict, conf = v2, "moderate"
                         seg = {"n_work": len(works), "work_hr": round(whr) if whr else None,
                                "work_pace": fmt_pace(wpace), "zone": zone}
+                        if finish_cap:
+                            seg["finish_cap"] = finish_cap
             row_out = {"date": g[0]["date"], "km": round(km_total, 1), "kind": kind,
                        "hr_avg": hr_avg,
                        "hr_pct": round(hr_avg / hrmax * 100) if hrmax else None,

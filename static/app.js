@@ -858,8 +858,9 @@ function plannedSession(s, easyPace){
     : "";
   // a structured session carries its own per-segment paces in the card — the single easy pace
   // metric would misprescribe the day, so it only renders for plain easy/long runs.
-  const noteParts=(s.note||"").split(" — ");
-  const noteTxt=U.t((q&&noteParts.length>1)?noteParts.slice(0,-1).join(" — "):s.note);   // card replaces the cramped structure string
+  const noteSrc=finishByHR(s)?String(s.note||"").replace("@ MP finish","finish by heart rate"):s.note;   // private + manual LTHR only
+  const noteParts=(noteSrc||"").split(" — ");
+  const noteTxt=U.t((q&&noteParts.length>1)?noteParts.slice(0,-1).join(" — "):noteSrc);   // card replaces the cramped structure string
   // 0.60.2 — a note that only restates the title ("easy run" under "Easy run") is not a line
   const ttlTxt=String(KINDT[s.kind]||s.kind+" run").replace(/<[^>]+>/g,"");
   const noteLine=(noteTxt&&String(noteTxt).trim().toLowerCase()!==ttlTxt.toLowerCase()) ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(noteTxt)}</div>` : "";
@@ -1846,6 +1847,15 @@ function segHR(zone){
   if(h.lo!=null) return `≥ ${h.lo} bpm`;
   return "";
 }
+// A long_mp whose finish runs by heart rate: the zones payload carries `finish` only for a private
+// reader with a manual threshold HR, and the finish must be long enough to hold the pace guard twice
+// over (the same bar the watch guide and course use). Returns that `finish` block, else null.
+function finishByHR(s){
+  const f=ZONESD&&ZONESD.finish;
+  if(!f||s.kind!=="long_mp") return null;
+  const work=(s.reps||[]).filter(r=>r.effort==="work");
+  return (work.length===1&&work[0].minutes>=2*f.guard_min)?f:null;
+}
 function workoutCard(s, open){
   const reps=s.reps||[]; if(!reps.length) return "";
   const sum=(a,k)=>a.reduce((t,r)=>t+(r[k]||0),0);
@@ -1853,9 +1863,10 @@ function workoutCard(s, open){
   const wu=grp("warmup"), cd=grp("cooldown"), base=grp("easy_base"),
         work=grp("work"), rec=grp("recovery");
   const rows=[], cue=[];
-  const row=(what,zone,min,km,rep)=>rows.push(
-    `<tr><td>${esc(what)}</td><td>${min}′</td><td>${km?`~${U.d(km).toFixed(1)}${U.k}`:"—"}</td>`+
-    `<td>${esc(segPace(zone,rep))}</td><td>${esc(segHR(zone))||"—"}</td></tr>`);
+  // `cells` ({dist,pace,hr}) overrides the three zone-derived cells for a row that is not a zone's row
+  const row=(what,zone,min,km,rep,cells)=>rows.push(
+    `<tr><td>${esc(what)}</td><td>${min}′</td><td>${cells?esc(cells.dist):(km?`~${U.d(km).toFixed(1)}${U.k}`:"—")}</td>`+
+    `<td>${esc(cells?cells.pace:segPace(zone,rep))}</td><td>${cells?esc(cells.hr):(esc(segHR(zone))||"—")}</td></tr>`);
   if(wu.length){ row("Warm-up · easy","easy",sum(wu,"minutes"),sum(wu,"km"),wu[0]); cue.push(`${sum(wu,"minutes")}′ easy`); }
   if(base.length){ row("Easy aerobic base","easy",sum(base,"minutes"),sum(base,"km"),base[0]); cue.push(`${sum(base,"minutes")}′ easy base`); }
   // 0.63.3 — "N × M′ @ zone" is the shape of an INTERVAL session: every work rep the same length at
@@ -1873,10 +1884,17 @@ function workoutCard(s, open){
     if(rec.length) row(`${rec.length} × ${rcm}′ jog between reps`,"easy",sum(rec,"minutes"),sum(rec,"km"),rec[0]);
     cue.push(`${work.length} × ${rm}′ @ ${rz} pace${rcm?` (${rcm}′ easy jog between)`:""}`);
   }else if(work.length===1){
-    const w0=work[0];
-    row(s.kind==="long_mp"?`${w0.minutes}′ @ marathon pace to finish`:`${w0.minutes}′ steady @ ${w0.zone}`,
-        w0.zone,w0.minutes,w0.km,w0);
-    cue.push(s.kind==="long_mp"?`finish with ${w0.minutes}′ @ marathon pace`:`${w0.minutes}′ steady @ ${w0.zone} pace`);
+    const w0=work[0], fin=finishByHR(s);
+    if(fin){                       // a manual threshold HR anchors the finish: a pace guard, then HR
+      const g=fin.guard_min, mp=`${U.p(fin.pace_fmt)}/${U.unit}`;
+      row(`First ${g}′ of the finish`,w0.zone,g,0,w0,{dist:"—",pace:`no faster than ${mp}`,hr:"—"});
+      row("Then by heart rate",w0.zone,w0.minutes-g,0,w0,{dist:"—",pace:"free",hr:`≤ ${fin.hr_cap} bpm`});
+      cue.push(`finish with ${w0.minutes}′: first ${g}′ no faster than ${mp}, then HR ≤ ${fin.hr_cap}`);
+    }else{
+      row(s.kind==="long_mp"?`${w0.minutes}′ @ marathon pace to finish`:`${w0.minutes}′ steady @ ${w0.zone}`,
+          w0.zone,w0.minutes,w0.km,w0);
+      cue.push(s.kind==="long_mp"?`finish with ${w0.minutes}′ @ marathon pace`:`${w0.minutes}′ steady @ ${w0.zone} pace`);
+    }
   }
   if(cd.length){ row("Cool-down · easy","easy",sum(cd,"minutes"),sum(cd,"km"),cd[0]); cue.push(`${sum(cd,"minutes")}′ easy`); }
   return `<div class="wcard${open?" open":""}"><div class="wcue">${esc(cue.join("  →  "))}</div>
@@ -1896,7 +1914,7 @@ function sessSummary(s){
     const work=s.reps.filter(r=>r.effort==='work');
     if(s.kind==='interval'&&work.length) return `${work.length}×${work[0].minutes}′ ${work[0].zone}`;
     if(s.kind==='progression'&&work.length) return `${U.d(s.km)}${U.k} · progression to ${work[work.length-1].zone}`;   // 0.63.3
-    if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${U.d(s.km)}${U.k} +${mp?mp.minutes:0}′ MP`; }
+    if(s.kind==='long_mp'){ const mp=work.find(r=>r.zone==='marathon'); return `long ${U.d(s.km)}${U.k} +${mp?mp.minutes:0}′ ${finishByHR(s)?"finish":"MP"}`; }
     if((s.kind==='tempo'||s.kind==='race_pace')&&work.length) return `${U.d(s.km)}${U.k} · ${work.reduce((a,r)=>a+r.minutes,0)}′ ${work[0].zone}`;
   }
   // strides ride a specific run (the week's first short easy one) — say so on THAT line, where
@@ -3170,7 +3188,7 @@ async function loadEffort(){
       // "low" confidence is the VERDICT's own trust level (a structured session's whole-run avg HR
       // blends reps with recovery), NOT the runner's compliance — say so, don't abbreviate to ambiguity
       const tag = r.seg_read
-        ? ` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Graded on the DETECTED work reps only (§RD) — warm-up, floats and cool-down excluded${r.seg?`: ${r.seg.n_work} rep${r.seg.n_work>1?"s":""}${r.seg.work_hr?` @ ~${r.seg.work_hr} bpm`:` @ ${r.seg.work_pace}/km`} vs the ${r.seg.zone} band`:""}.">·reps read</span>`
+        ? ` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Graded on the DETECTED work reps only (§RD) — warm-up, floats and cool-down excluded${r.seg?`: ${r.seg.n_work} rep${r.seg.n_work>1?"s":""}${r.seg.work_hr?` @ ~${r.seg.work_hr} bpm`:` @ ${r.seg.work_pace}/km`} vs ${r.seg.finish_cap?`the finish band, up to ${r.seg.finish_cap} bpm, not the marathon band`:`the ${r.seg.zone} band`}`:""}.">·reps read</span>`
         : (r.confidence==="low"?` <span class="muted" style="font-weight:400;border-bottom:1px dotted var(--muted);cursor:help" title="Low confidence in this VERDICT — not in your effort: a structured session's whole-run average heart rate blends work reps with warm-up, recovery jogs and cool-down, so the 'did you hit it' read is approximate (once this run's structure is detected, the verdict upgrades to a per-rep read). Quality sessions never count toward the easy-run discipline score.">·rough read</span>`:"");
       return `<tr><td class="mono">${esc(r.date.slice(5))}</td><td>${esc(r.kind)}</td>`+
         `<td class="mono">${U.d(r.km)}${U.k}</td><td class="mono col-sec">${EFFP(r.gap_pace)}</td>`+

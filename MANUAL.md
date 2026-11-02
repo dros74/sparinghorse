@@ -413,6 +413,10 @@ Watch for:
   the polarized floor of easy running allows (about 25 minutes on a 75 km week). The last quality week
   before the taper does not carry it. Meanwhile the marathon-pace long-run segment **grows week over week at
   constant speed** (longer, not faster) and Peak pivots to resilience: the long fast run is the workout.
+  With a Manual LTHR set, this finish runs by heart rate: the first 5 minutes no faster than marathon
+  pace, then up to 98 % of your LTHR, with the pace free. The plan's distance for the finish is still
+  worked out at marathon pace, so you may finish a little short of the card's kilometres while running
+  every minute.
   The conservative regime keeps its gentler classic mix; only the tags show. An eased or fatigue-capped
   session loses its chip: a session that no longer happens builds nothing.
 
@@ -688,7 +692,9 @@ have just re-planned and don't want to wait for the nightly run.
 **Rebuild.** A plain push *updates* a guide, and a watch that has already synced will not re-download
 an updated record — so if you deleted a guide off the wrist, updating it never brings it back.
 **Rebuild** re-creates the window under fresh ids, which is the only thing that does. Use it when
-guides are missing from the watch but the app says they were pushed.
+guides are missing from the watch but the app says they were pushed. The same holds for a guide whose
+content changed, such as a long run's finish moving to a heart-rate cap: it reaches the wrist only after
+**Rebuild on watch**.
 
 ⚠ **Where the instructions appear.** A guide's countdown, pace and HR targets live on the
 SuuntoPlus display, which is *a screen of its own* — on a Race S you reach it by pressing the crown
@@ -955,7 +961,8 @@ library) and **Console** (access, system, links, backup and export). The blocks:
   band, the LT1 cross-check). It **ages out**: a fresh entry (≤6 weeks) outranks the derived read, then
   decays — LTHR moves with fitness, so an old number from a fitter or less-fit you would mis-anchor your
   easy ceiling. Re-test rather than re-typing the same value (re-saving the same number does not refresh
-  it). Empty = derive from your runs (the default).
+  it). Empty = derive from your runs (the default). It also sets the cap on a long run's finish; the cap
+  lapses once the value is too old to be trusted, and the finish goes back to a pace target.
 - **Distance units** — `km` or `mi`. The engine plans in kilometres whatever you choose and the
   API stays metric; this changes how every distance and pace is *shown*, on every page and every box
   (the public box follows it too). Reload after saving.

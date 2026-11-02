@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.87.0] - 2026-11-02
+
+### Added
+
+- **A long run's marathon-pace finish runs by heart rate.** With a manual threshold heart rate set, the
+  finish no longer asks for a pace worked out from today's fitness. The first 5 minutes are held to no
+  faster than the marathon pace, because heart rate lags at the start. After that the heart rate has a cap
+  at 98 % of the manual threshold and the pace is free. COROS workouts and Suunto guides get two steps for
+  the finish, and the plan card, the session summary and the grading follow. Without a manual threshold
+  nothing changes. Planned minutes, distance and load do not change.
+
+### Fixed
+
+- **A long run's finish could read back as intervals.** A short surge in the warm-up or inside the finish
+  could clear the work bar and split the finish into pieces. The finish now reads as one block (run decoder
+  version 12). Old decodes refresh when a run is opened.
+
 ## [0.86.0] - 2026-11-02
 
 ### Added
