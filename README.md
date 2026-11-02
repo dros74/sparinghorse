@@ -454,5 +454,6 @@ Features and fixes are recorded in [`CHANGELOG.md`](CHANGELOG.md)
 
 ## License and authorship
 AGPL-3.0-or-later; see `LICENSE`. Self-host freely; if you run a modified version as a network service,
-share your changes. Built on, and requires, Runalyze. Copyright © 2026 Duarte Rosado. The code was
+share your changes. Built on, and requires, Runalyze. The GetSongBPM logo in `static/getsongbpm.png`
+belongs to GetSongBPM and is not covered by the AGPL. Copyright © 2026 Duarte Rosado. The code was
 written with substantial AI assistance under my direction; `AUTHORS.md` records how.

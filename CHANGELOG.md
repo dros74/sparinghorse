@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.8] - 2026-11-02
+
+### Changed
+
+- The footer link to GetSongBPM shows its logo. The logo is white on transparent, so the light theme
+  gives it a dark plate.
+
 ## [0.85.7] - 2026-11-02
 
 ### Fixed

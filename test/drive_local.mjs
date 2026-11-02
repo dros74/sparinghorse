@@ -77,10 +77,14 @@ async function runFull() {
   // 0.76.0 (§GUN) — the bar carries a live countdown to the shown race; the seeded objective has no
   // gun time, so the midnight fallback is what must tick.
   const cd1 = await page.evaluate(() => document.querySelector('#objbar #objcount')?.textContent ?? null);
-  await page.waitForTimeout(1200);
+  // Up to 5 s, not a fixed 1.2 s: a busy CI runner can hold the page's timers past a short wait. A countdown
+  // that has stopped still fails, because the text never changes.
+  const ticked = await page.waitForFunction(
+    prev => (document.querySelector('#objbar #objcount')?.textContent ?? null) !== prev, cd1, { timeout: 5000 })
+    .then(() => true, () => false);
   const cd2 = await page.evaluate(() => document.querySelector('#objbar #objcount')?.textContent ?? null);
   ok(`objective bar countdown present and ticking ("${cd1}" → "${cd2}")`,
-     cd1 !== null && /· in /.test(cd1) && cd2 !== null && cd2 !== cd1);
+     cd1 !== null && /· in /.test(cd1) && ticked && cd2 !== null && cd2 !== cd1);
   ok('the road renders (phase band + week bars)', await page.locator('#plan .road .phaseseg').count() >= 1 && await page.locator('#plan .road .weekseg').count() >= 1);
   // 0.60.1 — the limits block must keep its share of the week card, not fall into its 30px number
   // gutter (a real defect the owner saw first: every word on its own line). SH-86c: the block is a

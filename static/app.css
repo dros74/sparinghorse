@@ -1067,6 +1067,11 @@
     opacity:.65;transition:opacity .15s}
   .ralink:hover{opacity:1}
   .ralink svg{height:15px;width:auto;display:block}
+  /* the GetSongBPM logo is white on transparent: Daylight gives it a dark plate, Charcoal needs none */
+  .ralink:has(.gsblogo){opacity:.85}
+  .ralink:has(.gsblogo):hover{opacity:1}
+  .gsblogo{height:18px;width:auto;display:block;box-sizing:content-box;background:#2b2b2b;padding:3px 7px;border-radius:4px}
+  [data-theme="dark"] .gsblogo{background:none;padding:0}
   /* The release that served this page, carrying the same string as the CSS/JS cache-buster — so a
      screenshot and the code the browser actually loaded can never disagree about which version is
      on screen. Quieter than the sync line above it: this is provenance, not news. */
