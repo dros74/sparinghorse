@@ -6900,7 +6900,7 @@ def _stc_lay_within_ceiling():
         binds = week["limits"]["acwr"]["binds"]
         if bad or peak > E.ACWR_HARD:
             fails.append(f"({tag}) remainder breaches={bad}, peak {peak:.3f}; total {total:.1f} TRIMP")
-        _assert_total(tag, total, expected, calls, True)
+        _assert_total(tag, total, expected, calls, False)
         if not binds:
             fails.append(f"({tag}) remainder acwr.binds is false at total {total:.1f}")
         got[tag] = {"expected": expected, "total": round(total, 3), "peak": peak, "binds": binds,
@@ -7157,10 +7157,15 @@ def _stc_lay_within_ceiling():
         load, km = float(laid["trimp"]) * 1.3, round(laid["km"] * 1.3, 2)
         c, a = E._ewma_step(seed[0], load, E.TAU_CTL), E._ewma_step(seed[1], load, E.TAU_ATL)
         week = _generate(shape, (c, a), "caution", set(), 1, {mon.isoformat(): load}, (1, km))
-        expected = [{"from": tue.isoformat(), "to": "2026-11-06"}]
-        if week.get("run_moved") != expected:
-            fails.append(f"(remainder_site_natural) moves {week.get('run_moved')}, expected {expected}")
-        got["remainder_site_natural"] = week.get("run_moved")
+        mon_days = [s["date"] for s in monday["sessions"] if s["date"] >= tue.isoformat()]
+        week_days = [s["date"] for s in week["sessions"] if s["date"] >= tue.isoformat()]
+        if week_days != mon_days:
+            fails.append(f"(remainder_site_natural) Tuesday changed Monday's days: "
+                         f"{week_days} vs {mon_days}")
+        if (week.get("peak_acwr") or 9.0) > E.ACWR_HARD:
+            fails.append(f"(remainder_site_natural) peak {week.get('peak_acwr')} over the hard cap")
+        got["remainder_site_natural"] = {"days": week_days, "moves": week.get("run_moved"),
+                                         "peak": week.get("peak_acwr")}
 
     def _checkin_and_preferences():
         shape = [{"wk": 1, "km": 15, "runs": 6, "long": 5.3, "strides": 2,
@@ -7298,8 +7303,8 @@ def _stc_lay_within_ceiling():
         _case("caution_easy", 35, 5, 11.2, False, (22.0, 27.5), (5, 6), "caution", 113.4, False)
         _case("caution_vo2", 35, 6, 11.2, True, (22.0, 27.5), (1, 4), "caution", 146.4, True)
         _case("assertive", 20, 6, 6.4, False, (22.0, 27.5), (5, 6), "assertive", 111.7, False)
-        _remainder_case("remainder_build", None, 105.9)
-        _remainder_case("remainder_down", "down", 105.9)
+        _remainder_case("remainder_build", None, 108.0)
+        _remainder_case("remainder_down", "down", 108.0)
         _swap_c01()
         E.set_day_preferences(None, None)
         _monday_night()
@@ -7369,9 +7374,10 @@ def _stc_straddle_monday_lay():
     end state, same inputs, and compares every day Tue–Sun, the week's intent_km and every later week.
     SH-103 adds caution and taper clipping, caution's copied quality days and shed prorate, while its
     over-run charge remains covered by det/long-run-held; SH-105 caps a rescued taper or forced-deload
-    week at the pre-rescue total instead of refilling to the ceiling. The §3.1 bio rescue has no limb:
-    Monday's search takes `week_eq_cap` as a bound, so its lay sits at the cap at most and `bio_over`
-    cannot fire on it. Pure/in-memory."""
+    week at the pre-rescue total instead of refilling to the ceiling. SH-104 keeps Monday's final
+    frequency re-lay and run days, including on down weeks, and runs the same rescue on assertive
+    tapers. The §3.1 bio rescue has no limb: Monday's search takes `week_eq_cap` as a bound, so its
+    lay sits at the cap at most and `bio_over` cannot fire on it. Pure/in-memory."""
     from datetime import date, timedelta
     mon = date(2026, 11, 2)
     tue = (mon + timedelta(days=1)).isoformat()
@@ -7408,7 +7414,8 @@ def _stc_straddle_monday_lay():
                                 day_series={mon.isoformat(): 0.0}, **A, **kw)[0]
 
     def _keys(w, lo):
-        return [(s["date"], s.get("kind"), round(s.get("km") or 0.0, 1))
+        return [(s["date"], s.get("kind"), round(s.get("km") or 0.0, 1),
+                 round(s.get("trimp") or 0.0, 1), s.get("moved_from"))
                 for s in w["sessions"] if s["date"] >= lo]
 
     def _disarmed(shape, seed, A, **kw):
@@ -7541,23 +7548,32 @@ def _stc_straddle_monday_lay():
         if not w_k.get("av_shed"):
             fails.append("(k) fixture — Monday's caution week sheds no run (av_shed unset)")
 
-        # (l) SH-105 — an assertive taper whose rescue fires is re-laid at the PRE-RESCUE total, not
-        #     refilled to the ceiling: the week's volume is reduced on purpose (the un-capped refill
-        #     laid 22.1 km here). Monday's lay only: Tuesday's match waits on SH-104 — the straddle
-        #     rescue is off the assertive taper (sh_engine.py ~4826).
+        # (l) SH-105/SH-104 — an assertive taper whose rescue fires is re-laid at the PRE-RESCUE
+        #     total, not refilled to the ceiling. Tuesday runs the same rescue on Monday's own lay.
         sh_l = _shape(35, 4, 10, [mp])
         sh_l[0].update(role="taper", intent="Taper — race week")
         raw_l, _ = _disarmed(sh_l, (20.0, 24.0), _A(35), zones=zones)
         if not (raw_l["peak_acwr"] or 0.0) > E.H1_RESCUE_ACWR:
             fails.append(f"(l) fixture — the disarmed taper lay peaks at {raw_l['peak_acwr']}, "
                          f"not over H1_RESCUE_ACWR {E.H1_RESCUE_ACWR}")
-        w_l = _gen(sh_l, (20.0, 24.0), _A(35), 0, zones=zones)[0]
-        if any((s.get("kind") or "") not in ("easy", "long", "rest") for s in w_l["sessions"]):
-            fails.append("(l) fixture — Monday's taper week kept its quality: the rescue did not fire")
-        if w_l["km"] > 18.7 + 0.05:
-            fails.append(f"(l) the rescued taper week lays {w_l['km']} km, over the pre-rescue total "
-                         "of 18.7")
-        got["l"] = {"mon_km": w_l["km"]}
+        w_l = _cmp("l", sh_l, (20.0, 24.0), _A(35), tue_actuals=(0, 0.0), zones=zones)
+        for w in [w_l] + tues["l"]:
+            if any((s.get("kind") or "") not in ("easy", "long", "rest") for s in w["sessions"]):
+                fails.append("(l) a taper week kept its quality: the rescue did not fire on every lay")
+            if w["km"] > 18.7 + 0.05:
+                fails.append(f"(l) a rescued taper week lays {w['km']} km, over the pre-rescue total "
+                             "of 18.7")
+
+        # (lc) SH-104 control — a four-run MP taper whose rescue does NOT fire keeps Monday's MP
+        #      session and long run on Tuesday, even though Monday's cap spreads it to five runs.
+        sh_lc = _shape(20, 4, 6.4, [mp])
+        sh_lc[0].update(role="taper", intent="Taper — race week")
+        w_lc = _cmp("lc", sh_lc, (20.0, 24.0), _A(20), tue_actuals=(0, 0.0), zones=zones)
+        if not any(s.get("kind") == "long_mp" for s in w_lc["sessions"]):
+            fails.append("(lc) fixture — Monday's control taper lost its MP session")
+        for w in tues["lc"]:
+            if not any(s.get("kind") == "long_mp" for s in w["sessions"]):
+                fails.append("(lc) Tuesday's control taper lost Monday's MP session")
 
         # (m) SH-105 — the same cap on a FORCED DELOAD: the streak at MESO_MAX_HARD with no down week
         #     ahead forces the trough; at this fitness even its pure-easy lay peaks over
@@ -7591,9 +7607,9 @@ def _stc_straddle_monday_lay():
                          f"{E.ACWR_SOFT}")
         got["n_laid"] = laid_n
 
-        # (o) SH-103/SH-120 — a REFUSED copy on caution re-lays off the uniform share, charged:
-        #     the interval run at 1.5× its lay spends the §6o-B charge. The template remainder
-        #     keeps its run days when the over-run leaves room for them.
+        # (o) SH-103/SH-120/SH-104 — a REFUSED copy on caution re-lays off the uniform share,
+        #     charged: the interval run at 1.5× its lay spends the §6o-B charge. The remainder keeps
+        #     Monday's actual days, even where Monday's own short-run rule left only the Sunday long.
         sh_o = _shape(20, 4, 6, [vo2])
         w_om = _gen(sh_o, (20.0, 24.0), dict(regime="caution"), 0, zones=zones)[0]
         wed = (mon + timedelta(days=2)).isoformat()
@@ -7611,13 +7627,14 @@ def _stc_straddle_monday_lay():
                                day_series={mon.isoformat(): 0.0, tue: tr_o},
                                week_actuals=(1, round((iv_o["km"] if iv_o else 0.0) * 1.5, 1)),
                                regime="caution", zones=zones)[0][0]
-        runs_o = [s for s in w_o["sessions"] if s["date"] >= wed and (s.get("km") or 0) > 0
-                  and (s.get("kind") or "") != "rest"]
         if (w_o.get("proj_acwr") or 9.0) > E.ACWR_SOFT + 1e-3:
             fails.append(f"(o) the straddling week reads proj_acwr {w_o.get('proj_acwr')}, over "
                          f"ACWR_SOFT {E.ACWR_SOFT}")
-        if len(runs_o) < 2:
-            fails.append(f"(o) the refused copy's re-lay collapsed to {len(runs_o)} run(s) ahead")
+        days_o = [x[0] for x in _keys(w_o, wed)]
+        mon_days_o = [x[0] for x in _keys(w_om, wed)]
+        if days_o != mon_days_o:
+            fails.append(f"(o) the refused copy's re-lay changed Monday's run days: "
+                         f"{days_o} vs {mon_days_o}")
         got["o_proj_acwr"] = w_o.get("proj_acwr")
         got["o_sessions"] = [(s["date"], s.get("kind"), s.get("km"), s.get("moved_from"))
                              for s in w_o["sessions"]]
@@ -7651,8 +7668,25 @@ def _stc_straddle_monday_lay():
         if not any(s["date"] == tue and s.get("kind") == "threshold" for s in w_q["sessions"]):
             fails.append("(q) fixture — Monday's caution week has no Tuesday threshold session")
 
-        # (r) SH-120 — with no Monday move, the straddle remainder keeps the template's days. §JR
-        #     sheds them all here, exactly as 0.85.1 does; rebuilding `rem` from `full` re-added Tuesday.
+        # (t) SH-104 — the binding 11.0 km long-run cap makes Monday re-lay five runs as six. Tuesday
+        #     must keep that actual day set and every session's load, not redistribute onto the template.
+        sh_t = _shape(54, 5, 13, n=1)
+        A_t = dict(regime="assertive", recent_longs=[10.0] * 4, last_nondown=1000.0)
+        w_t = _cmp("t", sh_t, (60.0, 60.0), A_t, tue_actuals=(0, 0.0))
+        if w_t["runs"] != sh_t[0]["runs"] + 1:
+            fails.append(f"(t) fixture — Monday lays {w_t['runs']} runs, not frequency+1")
+        if not any(s.get("long_step_capped") for s in w_t["sessions"]):
+            fails.append("(t) fixture — Monday's long-run cap did not bind")
+
+        # (u) SH-104 — the same parity on an assertive down week, with an explicit no-heavier guard.
+        sh_u = [dict(sh_t[0], role="down", intent="Down week")]
+        w_u = _cmp("u", sh_u, (60.0, 60.0), A_t, tue_actuals=(0, 0.0))
+        for w in tues["u"]:
+            if w["km"] > w_u["km"] + 0.05:
+                fails.append(f"(u) Tuesday's down week is heavier: Mon {w_u['km']} vs Tue {w['km']} km")
+
+        # (r) SH-120/SH-104 — with no Monday move, the straddle remainder still keeps Monday's
+        #     actual days. The old template redistribution shed them all; Monday laid three.
         sh_r = _shape(20, 3, 6.4, [vo2], n=1)
         sh_r[0].update(role="taper", intent="Taper — race week")
         away_r = {(mon + timedelta(days=5)).isoformat()}
@@ -7664,13 +7698,15 @@ def _stc_straddle_monday_lay():
                   and (s.get("km") or 0) > 0 and s.get("kind") != "rest"]
         if w_rm.get("run_moved"):
             fails.append(f"(r) fixture — Monday unexpectedly moved a run: {w_rm['run_moved']}")
-        if days_r != []:
-            fails.append(f"(r) template remainder differs from 0.85.1: {days_r}, expected []")
-        got["r_template_days"] = days_r
+        if _keys(w_rt, tue) != _keys(w_rm, tue):
+            fails.append(f"(r) Tuesday differs from Monday: {_keys(w_rt, tue)} vs {_keys(w_rm, tue)}")
+        if (w_rt.get("proj_acwr") or 9.0) > E.ACWR_SOFT + 1e-3:
+            fails.append(f"(r) Tuesday reads proj_acwr {w_rt.get('proj_acwr')}, over the soft cap")
+        got["r_monday_days"] = days_r
 
-        # (s) SH-120 — Monday's frequency+1 lay has Wednesday and moves it to Thursday; the fixed
-        #     five-day straddle lay has no Wednesday. The carry-over skips it instead of crashing,
-        #     while `rem` still follows Monday's move. Direct guards cover an occupied target too.
+        # (s) SH-120/SH-104 — Monday's frequency+1 lay has Wednesday and moves it to Thursday.
+        #     The straddle keeps the actual final lay, carries the move over without crashing or
+        #     moving it twice, and `rem` follows Monday's target. Direct guards cover an occupied target.
         guard_source, guard_target = "2026-11-04", "2026-11-05"
         guard_sessions = [{"date": guard_source, "kind": "easy", "km": 3.0, "trimp": 30.0},
                           {"date": guard_target, "kind": "easy", "km": 4.0, "trimp": 40.0}]
@@ -7721,22 +7757,18 @@ def _stc_straddle_monday_lay():
         E._DAY_PREF = saved
 
     return _st("det", "straddle-monday-lay",
-               "§AV/§H1/§H2 (SH-74/75/103/105) a mid-week regeneration rebuilds Monday's lay with "
-               "Monday's decisions: an away week that sheds a run keeps the shed prorate (building, "
-               "caution and taper weeks), a rescued week stays pure easy at the pre-rescue total "
-               "(the checked-in lay when a check-in eased the week), clipped caution/taper weeks "
-               "keep Monday's days and say binds, and every copy of the days ahead is judged by the "
-               "remainder's ceiling, a refused one re-laid off the charged uniform share — Monday "
-               "and Tuesday lay the same days, intent_km and later weeks",
+               "§AV/§H1/§H2 (SH-74/75/103/104/105) a mid-week regeneration rebuilds Monday's final "
+               "lay and actual run days: an away week keeps its shed prorate, a rescued week stays "
+               "pure easy at the pre-rescue total, clipped caution/taper weeks keep Monday's days, "
+               "and every copied day is judged by the remainder's ceiling, a refused one re-laid off "
+               "the charged uniform share",
                passed=not fails,
                expect="Mon == Tue (days Tue–Sun, intent_km ±0.1, every later week) on the _cmp limbs "
-               "(a–k, m, q); preconditions: av_shed on a/d/k, disarmed peak > H1_RESCUE_ACWR on "
-               "b1/l/p, disarmed hard share over 1 − POLARIZED_EASY_MIN without a breach on b2, "
-               "quality kept on c, clipped on h and o's Monday, Tuesday threshold kept on i, "
-               "deload_forced on m, day_share on n, unclipped on q; acwr.binds on h Mon and Tue; "
-               "rescued taper/forced-deload km ≤ pre-rescue total + 0.05 on l/m; acwr laid ≤ "
-               "ACWR_SOFT + 1e-3 on n; proj_acwr ≤ ACWR_SOFT + 1e-3 and ≥2 runs ahead on o; rescued "
-               "checked-in TRIMP ≤ pre-rescue total + 0.1 on p",
+               "(a–m, q, t, u); binding-cap Monday frequency+1 on t; no heavier Tuesday down week on "
+               "u; assertive taper rescue on every lay on l and MP kept on lc; av_shed, disarmed "
+               "rescue, clipped, deload and rounding preconditions on the earlier limbs; Monday run "
+               "days and ACWR caps preserved on the refused-copy and no-move limbs o/r; moved target "
+               "preserved without a duplicate move on s",
                got={**got, "failures": fails or "none"})
 
 

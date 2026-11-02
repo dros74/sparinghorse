@@ -98,7 +98,8 @@ everything.
   and last.fm listening (a ListenBrainz account also mixes in songs you have never run to). After the
   run, the read-back grades every song by the cadence your legs held and feeds the next list. Needs
   Spotify Premium and a Spotify developer app of your own; last.fm and ListenBrainz are optional.
-  Private container only.
+  Song tempos come from ReccoBeats; [GetSongBPM.com](https://getsongbpm.com) is on trial as a second
+  source. Private container only.
 
 **AI layer** *(optional: set `ANTHROPIC_API_KEY`; blank means dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), advice on closely spaced A-races, plain-language

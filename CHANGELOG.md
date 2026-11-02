@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.85.6] - 2026-10-27
+
+### Fixed
+
+- **A mid-week rebuild keeps Monday's actual run days.** When the long-run progression cap made Monday
+  spread a week over one more run day, the rebuild from Tuesday on redistributed the week onto the
+  template's days instead. The days ahead could change with no new input, a rebuild on the same days
+  could be lighter, and an assertive down week could be heavier. The rebuild now keeps Monday's final
+  lay, including a frequency re-lay, volume step, moved run or quality rescue, and takes the remaining
+  days from those actual sessions. The assertive taper's quality rescue runs on the rebuild too: a week
+  Monday made pure easy stays pure easy at no more than its pre-rescue volume, while a taper Monday kept
+  with marathon-pace work keeps that session and its long run.
+
 ## [0.85.5] - 2026-10-26
 
 ### Fixed

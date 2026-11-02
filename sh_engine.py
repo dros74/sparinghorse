@@ -52,7 +52,7 @@ RUN_FAMILY_SQL = "LOWER(sport) LIKE '%run%'"
 # releases and train the athlete to ignore the marker, which is the failure it exists to prevent.
 # Drift is prevented instead by `det/engine-version`, which fails the suite whenever this constant
 # and the newest CHANGELOG heading disagree — so cutting a release without bumping it cannot pass.
-ENGINE_VERSION = "0.85.5"
+ENGINE_VERSION = "0.85.6"
 
 
 def _zones_asof(db, date_iso=None):
@@ -4920,7 +4920,6 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
         # Monday's own lay, on the full-week path.
         if today and (wk_start_d < today <= wk_start_d + timedelta(days=6)
                       or (today == wk_start_d and (act_floor or today_run))):
-            offsets = av_days if av_days is not None else _run_days(wk["runs"])
             today_off = (today - wk_start_d).days
             # §WKMEAN (0.68.2) — the week's LIVED days, for the shape-neutral reading (the mechanism
             # is in `_project_week`). Whole-body TRIMP per calendar day, rest days at 0, today excluded:
@@ -4967,7 +4966,6 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # "a run is logged today" is a fact about the sheet. Callers that pass none (dets,
             # goldens) keep the old lay ⇒ byte-identical; the app passes what the activities say.
             _today_run = bool(today_run)
-            rem = [o for o in offsets if o > today_off or (o == today_off and not _today_run)]
             # SH-68 — the earliest day the remainder may PLACE a session (the §REST spread, a moved
             # run). A day with load already recorded is lived like yesterday, so the night's lay may
             # not hand it a NEW session the next morning's lay could not: without this the evening
@@ -5087,16 +5085,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                 _lw = min((wk["long"] / wk["km"]) if wk["km"] else 0.0,
                           _long_share_cap(wk, zones))      # §PRO26
                 long_km_aim = _lw * wk_intent_km
-            # §REST2 — the day set is passed EXPLICITLY, never left to the default. This lay exists
-            # to produce the elapsed display days, and `rem` below is taken from the template — so
-            # if this call re-laid to a higher frequency and `rem` did not, the week would show its
-            # lived days sized for a six-day week and its remaining days for a five-day one, with
-            # the borrowed day never laid (measured on golden/assertive: Mon 14.7 → 10.5 against a
-            # remainder still at 14.7). The straddle week is the one week whose days are already
-            # fixed by history; it does not re-lay, exactly as `free_from`/`fixed_days` keep the
-            # remainder itself from re-laying.
-            # SH-112 — the stepped total is Monday's decision, so it is judged on Monday's own lay
-            # (`av_days`, which §REST2 may re-lay); `full` is then laid at it on the fixed day set below.
+            # SH-112 — the stepped total is Monday's decision, judged on Monday's own lay (`av_days`,
+            # which §REST2 may re-lay). SH-104 — keep that final lay: re-distributing it on the template's
+            # days can discard a frequency re-lay or lighten the week. The remainder takes the actual days.
             full_judge = dict(ctl=ws_ctl, atl=ws_atl, wk=wk, start=wk_start, cap=eff_cap,
                               ramp_max=ramp, soft_ctl_floor=soft_ctl_floor,
                               prog_floor=(_prog if assertive and not _is_taper(wk) else None),
@@ -5115,15 +5106,9 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                     sess=sess, dt=day_trimps, charge=t, **full_judge),
                 swap=dict(judge=full_judge, av_blocked=av_off, prev_tail=prev_tail,
                           race_offsets=_race_offsets(race, wk_start_d), adjust=adjust))
-            full, _full_dt = _distribute_week(wk, wk_start_d, _full_trimp, easy_pace_sec,
-                                              (None if forced_deload else zones),   # §PULL — §PRO6/E
-                                              days_override=(av_days if av_days is not None
-                                                             else _run_days(wk["runs"])),
-                                              av_blocked=av_off,
-                                              long_km_cap=long_km_cap, ladder=assertive,   # §PRO24
-                                              prev_tail=prev_tail,   # §REST
-                                              carve_eq_cap=_bio_cap,   # §ROT — the ceiling Monday's lay had
-                                              carve_race_offs=_race_offsets(race, wk_start_d))
+            offsets = sorted((_date(s["date"]) - wk_start_d).days for s in full
+                             if (s.get("kind") or "") != "rest" and (s.get("km") or 0) > 0)
+            rem = [o for o in offsets if o > today_off or (o == today_off and not _today_run)]
             for _move in _full_moves:
                 full, _full_dt = _move_lay_session(full, _full_dt, _move["from"], _move["to"])
                 _source_off = (_date(_move["from"]) - wk_start_d).days
@@ -5153,13 +5138,10 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
             # polarization or spikes the bio ceiling is re-laid pure easy, same tests and same
             # re-govern as the full-week path. Without it a week Monday stripped to easy showed its
             # quality again from the second day on. The projection reads Monday's lay as planned
-            # (`actual_floor=None`), the rule `_full_allowed` follows since §WKMEAN2. Caution too since
-            # SH-103 (`full` is governed as Monday's lay is). Not the assertive taper yet: `full` is laid
-            # on the template's run days, and where Monday's lay moves a run (SH-104) the rescue fires on
-            # a week Monday never laid — a 4-run MP taper lost its MP session and grew its long run
-            # 6.8 → 10.8 km from Tuesday on, Monday's own lay peaking at 1.345.
+            # (`actual_floor=None`), the rule `_full_allowed` follows since §WKMEAN2. Caution and the
+            # assertive taper included: `full` is Monday's final lay on its actual day set (SH-103/104).
             _r_bio_over = False
-            if zones and full and not (assertive and _is_taper(wk)):
+            if zones and full:
                 _fa = _apply_adjustment([dict(x) for x in full], dict(_full_dt), adjust)
                 _fs, _fdt = _fa["sessions"], _fa["dt"]
                 _r_peak = _project_week(ws_ctl, ws_atl, wk_start, _fdt, actual_floor=None)[3]
@@ -5208,11 +5190,8 @@ def generate_block(shape, block_start, ctl0, atl0, easy_pace_sec, adjust=None, z
                                   race_offsets=_race_offsets(race, wk_start_d), adjust=adjust))
                     _full_stepped = _full_stepped or _r_stepped
                     _full_moves = _r_moves
-                    full, _full_dt = _distribute_week(wk, wk_start_d, _r_chosen, easy_pace_sec, None,
-                                                      days_override=(av_days if av_days is not None
-                                                                     else _run_days(wk["runs"])),   # §REST2
-                                                      av_blocked=av_off, long_km_cap=long_km_cap,
-                                                      ladder=assertive, prev_tail=prev_tail)
+                    offsets = sorted((_date(s["date"]) - wk_start_d).days for s in full
+                                     if (s.get("kind") or "") != "rest" and (s.get("km") or 0) > 0)
                     rem = [o for o in offsets if o > today_off or (o == today_off and not _today_run)]
                     for _move in _full_moves:
                         full, _full_dt = _move_lay_session(full, _full_dt, _move["from"], _move["to"])
