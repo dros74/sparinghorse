@@ -4235,6 +4235,81 @@ function shPush(patch, url){
     try{ history.replaceState({sh:1, tab:null, act:null, settings:false, y:0}, ""); }catch(e){}
   }
 })();
+// §TAPFX — iOS Safari only applies :active once a touch listener exists on the document
+document.addEventListener("touchstart", ()=>{}, {passive:true});
+
+// ── §PTR — pull-to-refresh on the phone layout. The phone CSS turns off the browser's own pull
+// (overscroll-behavior-y:none), so this one draws an indicator, then syncs (private pages) and reloads. ──
+async function shRefresh(){
+  if(!SH_READONLY && !SH_DEMO && (SH_PAGE==="dash" || SH_PAGE==="today" || SH_PAGE==="runs")){
+    try{ await Promise.race([postSync("/api/sync"), new Promise(r=>setTimeout(r, 20000))]); }catch(e){}
+  }
+  location.reload();   // the tab survives: the history module seeds from the URL hash
+}
+(function(){
+  const PTR_AT = 64, PTR_MAX = 90;
+  let el = null, startY = 0, active = false, busy = false, pull = 0;
+  function build(){
+    if(el) return el;
+    el = document.createElement("div");
+    el.className = "ptr"; el.setAttribute("role","status"); el.setAttribute("aria-live","polite");
+    el.innerHTML = '<div class="ptr-c"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v15M5 12l7 7 7-7"/></svg>'+
+      '<span class="ptr-spin" aria-hidden="true"></span></div><span class="ptr-t"></span>';
+    document.body.appendChild(el);
+    return el;
+  }
+  const say = t => { const s = el.querySelector(".ptr-t"); if(s.textContent !== t) s.textContent = t; };
+  function place(p){
+    el.style.transform = `translate(-50%, calc(-100% + ${p}px))`;
+    el.style.opacity = String(Math.min(1, p/PTR_AT*1.4));
+    el.style.setProperty("--ptr-rot", (p/PTR_AT*180)+"deg");
+  }
+  function reset(){
+    active = false; pull = 0;
+    if(!el) return;
+    el.classList.add("anim"); el.classList.remove("ready");
+    el.style.transform = ""; el.style.opacity = ""; el.style.removeProperty("--ptr-rot");
+  }
+  function scrollsSideways(t){
+    for(let n = t; n && n !== document.body; n = n.parentElement){
+      const ox = getComputedStyle(n).overflowX;
+      if((ox==="auto" || ox==="scroll") && n.scrollWidth > n.clientWidth) return true;
+    }
+    return false;
+  }
+  document.addEventListener("touchstart", e=>{
+    if(busy || active) return;
+    if(!matchMedia("(max-width:760px)").matches || !matchMedia("(pointer:coarse)").matches) return;
+    if(e.touches.length !== 1 || window.scrollY > 0 || document.querySelector("dialog[open]")) return;
+    const t = e.target;
+    if(!(t instanceof Element)) return;
+    if(t.closest(".leaflet-container, input, textarea, select, [contenteditable]") || scrollsSideways(t)) return;
+    build(); startY = e.touches[0].clientY; active = true; pull = 0;
+    el.classList.remove("anim");
+  }, {passive:true});
+  document.addEventListener("touchmove", e=>{
+    if(!active) return;
+    const dy = e.touches[0].clientY - startY;
+    if(e.touches.length !== 1 || dy < 0 || window.scrollY > 0){ reset(); return; }
+    pull = Math.min(PTR_MAX, dy * 0.5);
+    place(pull);
+    const rdy = pull >= PTR_AT;
+    el.classList.toggle("ready", rdy);
+    say(rdy ? "Release to refresh" : "Pull to refresh");
+  }, {passive:true});
+  function end(){
+    if(!active) return;
+    if(pull >= PTR_AT){
+      active = false; busy = true;
+      el.classList.add("anim", "busy"); el.classList.remove("ready");
+      el.style.transform = `translate(-50%, calc(-100% + ${PTR_AT}px))`; el.style.opacity = "1";
+      say("Refreshing");
+      shRefresh();
+    }else reset();
+  }
+  document.addEventListener("touchend", end, {passive:true});
+  document.addEventListener("touchcancel", ()=>{ if(active) reset(); }, {passive:true});
+})();
 let shGoTab = null;   // set by the mobile-nav IIFE below
 window.addEventListener("popstate", e=>{
   if(SH_PAGE==="music") return;

@@ -1074,6 +1074,43 @@
   }
   /* §TAP — no 300ms double-tap-zoom wait on controls; the tap highlight stays */
   a,button,input,select,textarea,label,summary,[role=tab],.mnav-btn,.sclick,.rcal-day{touch-action:manipulation}
+  /* §TAPFX — press feedback the instant a finger lands (touch devices only; desktop hover is unchanged).
+     Buttons shrink a touch; tappable rows take the hover tint; both snap on press and ease back on release. */
+  @media (hover:none){
+    button:not(:disabled):not(.limhd),a.primary,.mnav-btn{transition:transform .15s ease-out,border-color .15s;-webkit-tap-highlight-color:transparent}
+    button:not(:disabled):not(.limhd):active,a.primary:active,.mnav-btn:active{transform:scale(.96);transition:none}
+    .sline.sclick,.rcal-day,.limhd,details.section > summary,.brkrun,.plansrc[data-open],.limgo,.chainrace,.weekseg{
+      transition:background .15s ease-out;-webkit-tap-highlight-color:transparent}
+    .sline.sclick:active,.rcal-day:active,.limhd:active,details.section > summary:active,.brkrun:active,
+    .plansrc[data-open]:active,.limgo:active,.chainrace:active,.weekseg:active{
+      background:color-mix(in oklab,var(--accent),transparent 88%);transition:none}
+    .mnav-btn:active{color:color-mix(in oklab,var(--muted),var(--accent) 70%)}
+    .mnav-btn[aria-current="page"]:active{color:var(--accent)}
+  }
+  @media (hover:none) and (prefers-reduced-motion:reduce){
+    button:not(:disabled):not(.limhd):active,a.primary:active,.mnav-btn:active{transform:none}
+  }
+  /* §PTR — pull-to-refresh indicator (phone layout; built in app.js) */
+  .ptr{position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 6px);z-index:90;pointer-events:none;
+    opacity:0;transform:translate(-50%,-100%)}
+  .ptr.anim{transition:transform .2s ease-out,opacity .2s ease-out}
+  .ptr-c{width:32px;height:32px;border-radius:50%;background:var(--surface);border:1px solid var(--line);
+    color:var(--muted);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+  .ptr-c svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;
+    transform:rotate(var(--ptr-rot,0deg))}
+  .ptr.ready .ptr-c{border-color:var(--accent);color:var(--accent)}
+  .ptr.ready .ptr-c svg{transform:rotate(180deg)}
+  .ptr-spin{display:none;width:16px;height:16px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);
+    animation:sh-spin .8s linear infinite}
+  .ptr.busy .ptr-c{border-color:var(--accent)}
+  .ptr.busy .ptr-c svg{display:none}
+  .ptr.busy .ptr-spin{display:block}
+  .ptr-t{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+  @keyframes sh-spin{to{transform:rotate(360deg)}}
+  @media(prefers-reduced-motion:reduce){
+    .ptr-c svg{transform:none!important}
+    .ptr-spin{animation:none}
+  }
   .tilefail{font-style:normal}
   .tilefail .tf-retry{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);font-style:normal}
   button.primary.err{background:var(--danger);border-color:var(--danger)}

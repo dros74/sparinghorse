@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.89.0] - 2026-11-11
+
+### Added
+
+- **Taps answer on touch screens.** Buttons and the bottom tab bar shrink a little the instant a finger lands
+  and ease back on release. Tappable rows (a done session on the plan, a calendar day, a limit card, a section
+  header, a race leg, a week segment, a run link) take the accent tint while pressed, in place of the grey tap
+  box. Desktop hover is unchanged. With Reduce Motion on, the tint stays and the shrink goes. There is no
+  vibration, because web pages on iOS cannot trigger it.
+- **Pull down to refresh on the phone layout.** Pull down at the top of the page: a circle drops in with an
+  arrow that points down and turns up once the pull is far enough ("Release to refresh"). On release it spins,
+  the private site first syncs with Runalyze (waiting at most 20 s), then the page reloads on the same tab. It
+  does not start while the page is scrolled down, with a dialog open, or from a map, a form field or a
+  sideways-scrolling strip. The phone layout's no-bounce rule had turned off the browser's own pull-to-refresh,
+  and a home-screen app never had one. With Reduce Motion on, the arrow does not turn and the ring does not
+  spin; the screen-reader text still reads the state.
+
 ## [0.88.0] - 2026-11-11
 
 ### Added

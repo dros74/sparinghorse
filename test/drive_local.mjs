@@ -1190,6 +1190,61 @@ async function runBack() {
   await page.setViewportSize({ width: 1280, height: 1700 });
 }
 
+async function runPtr() {
+  // §PTR — a real touch context (hasTouch + isMobile gives pointer:coarse), phone size, own page
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, bypassCSP: true,
+    storageState: await page.context().storageState() });   // keeps the sign-in of the main page
+  const pg = await ctx.newPage();
+  pg.on('pageerror', e => errors.push(String(e)));
+  const drag = (dy) => pg.evaluate(async (dy) => {
+    const mk = (y) => new Touch({ identifier: 1, target: document.body, clientX: 195, clientY: y });
+    const fire = (type, y) => document.body.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true,
+      touches: type === 'touchend' ? [] : [mk(y)], targetTouches: type === 'touchend' ? [] : [mk(y)], changedTouches: [mk(y)] }));
+    fire('touchstart', 300);
+    for (let i = 1; i <= 10; i++) fire('touchmove', 300 + dy * i / 10);
+    await new Promise(r => setTimeout(r, 100));
+  }, dy);
+  const release = () => pg.evaluate(() => document.body.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], changedTouches: [] })));
+  const ptr = () => pg.evaluate(() => { const e = document.querySelector('.ptr'); return e ? { ready: e.classList.contains('ready'), op: +getComputedStyle(e).opacity } : null; });
+  const load = async (path) => { await pg.goto(BASE + path, { waitUntil: 'networkidle' }); await pg.waitForTimeout(500); };
+  try {
+    await load('/');
+    ok('§PTR the test context is a coarse pointer', await pg.evaluate(() => matchMedia('(pointer:coarse)').matches));
+    // (a) a short pull shows the indicator, not ready; release does not reload
+    await pg.evaluate(() => { window.__ptrMark = 1; });
+    await drag(60);
+    const a = await ptr();
+    ok('§PTR a short pull shows the indicator without ready', !!a && !a.ready && a.op > 0);
+    await release(); await pg.waitForTimeout(1000);
+    ok('§PTR releasing a short pull does not reload', await pg.evaluate(() => window.__ptrMark === 1));
+    // (b) a long pull is ready; release reloads and the tab survives
+    await pg.evaluate(() => { document.querySelector('.mnav-btn[data-goto="plan"]').click(); });
+    await pg.waitForTimeout(300);
+    await pg.evaluate(() => { window.__ptrMark = 1; });
+    await drag(200);
+    const b = await ptr();
+    ok('§PTR a long pull reads ready', !!b && b.ready);
+    await Promise.all([pg.waitForNavigation({ waitUntil: 'load', timeout: 30000 }), release()]);
+    await pg.waitForLoadState('networkidle'); await pg.waitForTimeout(500);
+    ok('§PTR releasing a long pull reloads the page', await pg.evaluate(() => window.__ptrMark === undefined));
+    ok('§PTR the tab survives the reload', await pg.evaluate(() => document.body.dataset.mtab) === 'plan');
+    // (c) with Settings open, no pull
+    await pg.evaluate(() => document.querySelector('#settingsBtn').click()); await pg.waitForTimeout(400);
+    await drag(200);
+    const c = await ptr();
+    ok('§PTR no pull while the Settings dialog is open', !c || !c.ready);
+    await release(); await pg.evaluate(() => document.querySelector('#settingsDialog').close()); await pg.waitForTimeout(400);
+    // (d) scrolled down, no pull
+    await pg.evaluate(() => window.scrollTo(0, 400)); await pg.waitForTimeout(300);
+    const sy = await pg.evaluate(() => window.scrollY);
+    await drag(200);
+    const d = await ptr();
+    ok(`§PTR no pull while scrolled down (scrollY ${sy})`, sy > 0 && (!d || !d.ready));
+  } finally {
+    await ctx.close();
+  }
+}
+
 async function runSettled() {
   // §6s — a race ran 5 days ago: the drift scorecard should RECKON it (not project). The drift section
   // is a collapsed <details>, so open it first (its content is hidden from innerText while collapsed).
@@ -1476,7 +1531,7 @@ try {
   else if (MODE === 'publicfull') await runPublicFull();
   else if (MODE === 'map') await runMap();
   else if (MODE === 'units') await runUnits();
-  else { await runFull(); await runBack(); }
+  else { await runFull(); await runBack(); await runPtr(); }
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));
 } catch (e) {

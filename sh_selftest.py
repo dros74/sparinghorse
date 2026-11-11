@@ -259,6 +259,12 @@ def _stc_mobile_nav():
             fail.append("app.css: touch-action:manipulation missing (§TAP)")
         if ".empty.loading" not in css:
             fail.append("app.css: .empty.loading skeleton rule missing (§SKEL)")
+        if "function shRefresh" not in S.APP_JS or 'addEventListener("touchstart"' not in S.APP_JS:
+            fail.append("app.js: §PTR pull-to-refresh wiring missing (function shRefresh + touchstart listener)")
+        if ".ptr{" not in css:
+            fail.append("app.css: .ptr indicator rule missing (§PTR)")
+        if "@media(hover:none){" not in css or ":active{transform:scale(" not in css.split("@media(hover:none){",1)[1]:
+            fail.append("app.css: :active press rule inside @media(hover:none) missing (§TAPFX)")
     finally:
         S.READONLY = saved
     return _st("det", "mobile-nav",
