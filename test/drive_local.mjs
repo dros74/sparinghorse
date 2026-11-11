@@ -1151,6 +1151,45 @@ async function runFull() {
   await page.screenshot({ path: `${SHOTS}/11-runs.png`, fullPage: true });
 }
 
+// §BACK: swipe-back / Back steps through the app before it leaves. Last in the full run: it reloads
+// the page, which the earlier flows' open sections and plan edits must not depend on.
+async function runBack() {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mtab = () => page.evaluate(() => document.body.dataset.mtab);
+  const tapTab = async t => { await page.evaluate(x => document.querySelector(`.mnav-btn[data-goto="${x}"]`).click(), t); await page.waitForTimeout(250); };
+  await page.goto(BASE + '/?tab=plan', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
+  ok(`§BACK /?tab=plan opens the Plan tab on a phone (SH-91; got ${await mtab()})`, (await mtab()) === 'plan');
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
+  await tapTab('plan'); await tapTab('fitness');
+  await page.goBack(); await page.waitForTimeout(400);
+  ok(`§BACK Back from Fitness (via Plan) returns to the landing tab (got ${await mtab()})`, (await mtab()) === 'today');
+  ok('§BACK the page is still the app after that Back', new URL(page.url()).pathname === '/');
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
+  await tapTab('plan');
+  const lenPlan = await page.evaluate(() => history.length);
+  await tapTab('today'); await page.waitForTimeout(300);
+  const st = await page.evaluate(() => ({ len: history.length, pushed: !!(history.state && history.state.tabPushed), tab: document.body.dataset.mtab }));
+  ok(`§BACK tapping the landing tab pops rather than pushes (tab ${st.tab}, tabPushed ${st.pushed}, length ${lenPlan}->${st.len})`,
+     st.tab === 'today' && !st.pushed && st.len <= lenPlan);
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
+  await page.click('#settingsBtn'); await page.waitForTimeout(500);
+  ok('§BACK Settings opens as a history entry', await page.evaluate(() => document.querySelector('#settingsDialog').open && !!history.state.settings));
+  await page.goBack(); await page.waitForTimeout(500);
+  ok('§BACK Back closes Settings and stays in the app', await page.evaluate(() => !document.querySelector('#settingsDialog').open) && new URL(page.url()).pathname === '/');
+  // a run picked on the Plan tab, then the Today tab: Today shows (the pick's entry is not a tab entry)
+  await page.goto(BASE + '/', { waitUntil: 'networkidle' }); await page.waitForTimeout(500);
+  await tapTab('plan');
+  const picked = await page.evaluate(() => { const l = document.querySelector('.sline.sclick'); if (!l) return false; l.click(); return true; });
+  await page.waitForTimeout(400);
+  ok('§BACK the seed has a done session to pick on the Plan tab', picked);
+  ok('§BACK the pick is a history entry', await page.evaluate(() => !!(history.state && history.state.act)));
+  await tapTab('today');
+  ok(`§BACK Today after a run pick shows Today (got ${await mtab()})`, (await mtab()) === 'today');
+  await page.goBack(); await page.waitForTimeout(400);
+  ok(`§BACK Back from there returns to the pick on Plan (got ${await mtab()})`, await page.evaluate(() => document.body.dataset.mtab === 'plan' && !!(history.state && history.state.act)));
+  await page.setViewportSize({ width: 1280, height: 1700 });
+}
+
 async function runSettled() {
   // §6s — a race ran 5 days ago: the drift scorecard should RECKON it (not project). The drift section
   // is a collapsed <details>, so open it first (its content is hidden from innerText while collapsed).
@@ -1437,7 +1476,7 @@ try {
   else if (MODE === 'publicfull') await runPublicFull();
   else if (MODE === 'map') await runMap();
   else if (MODE === 'units') await runUnits();
-  else await runFull();
+  else { await runFull(); await runBack(); }
   ok('no uncaught page errors', errors.length === 0);
   if (errors.length) errors.forEach(e => console.log('    pageerror: ' + e));
 } catch (e) {

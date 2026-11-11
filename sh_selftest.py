@@ -247,8 +247,18 @@ def _stc_mobile_nav():
             # check: a page that never loads the script has no wiring either, however good the file.)
             if "history.replaceState" not in S.APP_JS:
                 fail.append(f"{tg}: deep-link/tab-restore wiring missing from app.js")
+            for needle in ("pushState", 'addEventListener("popstate"'):   # §BACK — in-app history
+                if needle not in S.APP_JS:
+                    fail.append(f"{tg}: in-app history wiring ({needle}) missing from app.js")
+            if "viewport-fit=cover" not in doc:
+                fail.append(f"{tg}: the served dash document lacks viewport-fit=cover (safe-area insets read 0)")
             if '/static/app.js' not in doc:
                 fail.append(f"{tg}: the served page does not load /static/app.js")
+        css = "".join(S.APP_CSS.split())
+        if "touch-action:manipulation" not in css:
+            fail.append("app.css: touch-action:manipulation missing (§TAP)")
+        if ".empty.loading" not in css:
+            fail.append("app.css: .empty.loading skeleton rule missing (§SKEL)")
     finally:
         S.READONLY = saved
     return _st("det", "mobile-nav",

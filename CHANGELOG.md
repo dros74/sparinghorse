@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.88.0] - 2026-11-11
+
+### Added
+
+- **The phone app moves like an app.** Swipe-back and the Back button now step back inside the app instead of
+  leaving it. Back from any tab returns once to the tab the page opened on. Tabs add at most one step, so
+  switching tabs does not pile up history. Back closes Settings. Back after picking a run, from the run
+  calendar, a done session on the plan or a run link in a week's breakdown, returns to the run shown before,
+  at the same scroll position. The "back to latest" link takes the same step.
+- **The page extends under the notch and the home indicator.** The bottom tab bar now clears the home
+  indicator by its real height, and the top controls, the side padding and the desktop section rail clear
+  the notch in landscape.
+- **Loading placeholders are shimmering blocks** instead of the word "Loading…". The text stays for screen
+  readers. Loaded content and a newly shown tab fade in over 180 ms. With Reduce Motion on, nothing animates.
+
+### Fixed
+
+- **A link to `/?tab=plan` now opens that tab on a phone.** The page restored the last tab on load and
+  overrode the link, so only `/#plan` worked. The same holds for the other tabs.
+- **Taps on buttons, links and form controls no longer wait for a double-tap zoom.** Pinch zoom still works.
+
 ## [0.87.0] - 2026-11-02
 
 ### Added

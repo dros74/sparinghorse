@@ -63,7 +63,7 @@ function tileFail(host, name, retry, err){
       ? `Offline — ${esc(name)} loads when you're back${when}.`
       : `${esc(name)} unavailable — the server didn't answer.`} <a href="#" class="tf-retry">Retry</a></div>`;
   host.querySelector(".tf-retry").addEventListener("click", ev => { ev.preventDefault();
-    host.innerHTML = `<div class="empty">Loading…</div>`; retry(); });
+    host.innerHTML = `<div class="empty loading">Loading…</div>`; retry(); });
 }
 // UX-9 — one place decides how the page jumps, so "reduce motion" is honoured by every scroll
 // rather than the ones we remembered. Read per call, not cached: the OS setting can change while the
@@ -645,7 +645,8 @@ async function loadActivity(aid){
     await Promise.all([loadShape(), loadActivity(), loadProjector()]);
   });
   const bl=$("#backlatest");
-  if(bl) bl.addEventListener("click", ev=>{ ev.preventDefault(); loadActivity(); });
+  if(bl) bl.addEventListener("click", ev=>{ ev.preventDefault();
+    if(history.state && history.state.act) history.back(); else loadActivity(); });   // §BACK — undo the pick that brought us here
   if(!SH_READONLY && a.id) showActivityMap(a.id);
 }
 // ── §RB Run browser (the /runs page, private only) ──────────────────────────
@@ -659,6 +660,7 @@ function rcalPick(id, date, cell){
   RCAL.sel=date;
   document.querySelectorAll(".rcal-day.sel").forEach(c=>c.classList.remove("sel"));
   if(cell) cell.classList.add("sel");
+  shPush({act:id});
   loadActivity(id);
   scrollToEl($("#sec-recent"));
 }
@@ -1421,7 +1423,7 @@ function refreshFirstRun(){
   }).join("");
   host.innerHTML=`<div class="firstrun"><div class="fr-head"><b>Welcome to Sparing Horse.</b> `+
     `Three steps to your first plan.</div><ol class="fr-steps">${li}</ol></div>`;
-  const kb=$("#fr_keys"); if(kb) kb.addEventListener("click", ()=>{ const dlg=$("#settingsDialog"); if(dlg){ if(!$("#setform")) loadSettings(); loadSecrets(true); dlg.showModal(); } });
+  const kb=$("#fr_keys"); if(kb) kb.addEventListener("click", ()=>{ openSettings(); });
   const sb=$("#fr_sync"); if(sb) sb.addEventListener("click", ()=>$("#syncBtn")&&$("#syncBtn").click());
   const rb=$("#fr_race"); if(rb) rb.addEventListener("click", async ()=>{
     scrollToEl(document.getElementById("plan"));
@@ -2802,6 +2804,7 @@ function renderPlan(p){
   }));
   // a completed session → load that day's run into the activity tile + its route map
   host.querySelectorAll(".sline.sclick").forEach(el=>el.addEventListener("click",()=>{
+    shPush({act:+el.dataset.actId});
     loadActivity(+el.dataset.actId);
     scrollToEl(document.getElementById("recent"));
   }));
@@ -2818,6 +2821,7 @@ function renderPlan(p){
   }));
   host.querySelectorAll(".brkrun[data-act-id]").forEach(el=>el.addEventListener("click",ev=>{
     ev.stopPropagation();
+    shPush({act:+el.dataset.actId});
     loadActivity(+el.dataset.actId);
     scrollToEl(document.getElementById("recent"));
   }));
@@ -4116,17 +4120,19 @@ function openSettings(tab){
   let last=null; try{ last=localStorage.getItem("sh.settings.tab"); }catch(e){}
   showSettingsTab(tab||last||"athlete");
   if(!_setDlg.open) _setDlg.showModal();
+  if(!(history.state && history.state.settings)) shPush({settings:true});   // §BACK — Back closes the dialog
 }
 window.SHSettings={open:openSettings, show:showSettingsTab, saveSecret, reloadSecrets:()=>loadSecrets(true)};
 if(_setDlg){
   settingsTabs();
   if(_setBtn) _setBtn.addEventListener("click", ()=>openSettings());
+  _setDlg.addEventListener("close", ()=>{ if(history.state && history.state.settings) history.back(); });   // §BACK — a state guard, so a popstate-driven close does not step back twice
   const _x=$("#settingsClose"); if(_x) _x.addEventListener("click", ()=>_setDlg.close());
   _setDlg.addEventListener("click", e=>{ if(e.target===_setDlg) _setDlg.close(); });  // backdrop click
   // §SG — landing back from the Suunto OAuth bounce (/?suunto=connected|denied|…): reopen Settings
   // on Connections so the fresh status (or the failure) is right there; scrub the flag from the URL.
   const _su=new URLSearchParams(location.search).get("suunto");
-  if(_su){ history.replaceState(null,"",location.pathname); openSettings("connections"); }
+  if(_su){ history.replaceState(history.state,"",location.pathname); openSettings("connections"); }
 }
 // 0.57.0 (§5.2) — the analytics sections are <details>, closed on a fresh device and remembered per
 // device; the plan, the readiness card and the latest run stay open. The showcase (public and demo)
@@ -4137,14 +4143,7 @@ if(_setDlg){
     try{ const v=localStorage.getItem(k); if(v==="1") d.open=true; else if(v==="0") d.open=false; }catch(e){}
     d.addEventListener("toggle", ()=>{ try{ localStorage.setItem(k, d.open?"1":"0"); }catch(e){} });
   });
-  if(SH_PAGE==="dash"){
-    const tab=new URLSearchParams(location.search).get("tab");
-    if(tab && ["today","plan","fitness","body"].includes(tab)){
-      document.body.dataset.mtab=tab; history.replaceState(null,"",location.pathname);
-      document.querySelectorAll(".mnav-btn[data-goto]").forEach(b=>b.setAttribute("aria-current", b.dataset.goto===tab?"page":"false"));
-    }
-    buildRail();
-  }
+  if(SH_PAGE==="dash") buildRail();   // §BACK — the ?tab= handling moved into the history module below
 })();
 // 0.57.0 (§5.2, review U6) — a section rail on wide screens: the same list the phone's tab bar
 // implies, one link per section, opening a closed section on the way. Desktop only (CSS ≥1100px).
@@ -4213,6 +4212,47 @@ if(SH_PAGE==="today"){
   touchSync();   // pull today's run if it's already on Runalyze, then refresh "done ✓"
 }
 
+// ── §BACK — in-app history. Swipe-back / the Back button steps through what the user did inside the page
+// (tab, picked run, open Settings) before it leaves. history.state = {sh:1, tab, act, settings, y, tabPushed}.
+// Tabs push at most one entry: Back from any tab returns once to the tab the page landed on. ──────────
+if(SH_PAGE!=="music"){ try{ history.scrollRestoration = "manual"; }catch(e){} }   // music keeps the browser's anchor scroll
+const SH_TABS = ["today","plan","fitness","body"];
+let SH_LANDING = null;   // the tab the dash page loaded on (null off the dash)
+function shPush(patch, url){
+  const cur = history.state || {sh:1};
+  try{
+    history.replaceState({...cur, y:window.scrollY}, "");
+    history.pushState({...cur, tabPushed:0, ...patch, y:0}, "", url || location.pathname + location.search + location.hash);
+  }catch(e){}
+}
+(function(){
+  if(SH_PAGE==="dash"){
+    const q = new URLSearchParams(location.search).get("tab");
+    const h = (location.hash || "").replace("#","");
+    SH_LANDING = SH_TABS.includes(q) ? q : SH_TABS.includes(h) ? h : "today";
+    try{ history.replaceState({sh:1, tab:SH_LANDING, act:null, settings:false, y:0, tabPushed:0}, "", location.pathname + "#" + SH_LANDING); }catch(e){}
+  }else{
+    try{ history.replaceState({sh:1, tab:null, act:null, settings:false, y:0}, ""); }catch(e){}
+  }
+})();
+let shGoTab = null;   // set by the mobile-nav IIFE below
+window.addEventListener("popstate", e=>{
+  if(SH_PAGE==="music") return;
+  const s = e.state || {};
+  if(SH_PAGE==="dash" && shGoTab) shGoTab(s.tab || (location.hash||"").replace("#","") || "today", false);
+  if(SH_PAGE!=="music"){
+    if(_setDlg){
+      if(!s.settings && _setDlg.open) _setDlg.close();
+      else if(s.settings && !_setDlg.open) openSettings();
+    }
+    if((s.act||null) !== CURACT){
+      if(!s.act) document.querySelectorAll(".rcal-day.sel").forEach(c=>c.classList.remove("sel"));
+      loadActivity(s.act || undefined);
+    }
+  }
+  requestAnimationFrame(()=>window.scrollTo(0, s.y || 0));
+});
+
 // ── Mobile bottom-nav wiring. The CSS shows .mobnav and the per-tab view only ≤760px; this just keeps
 // <body data-mtab> and the buttons' aria-current in sync, and snaps to the top on a tab change. A no-op
 // shell on desktop (the nav is display:none, clicks never happen). ──────────────────────────────────
@@ -4223,18 +4263,26 @@ if(SH_PAGE==="today"){
   const TABS = [].slice.call(btns).map(b => b.dataset.goto);   // whatever the server emitted (public drops Body)
   function go(tab, push){
     if(!TABS.includes(tab)) tab = "today";
+    const s = history.state || {sh:1};
+    if(push && document.body.dataset.mtab !== tab){
+      if(s.tabPushed && tab === SH_LANDING){ history.back(); return; }   // §BACK — the landing tab pops, never pushes
+      try{
+        if(s.tabPushed) history.replaceState({...s, tab}, "", "#"+tab);
+        else { history.replaceState({...s, y:window.scrollY}, ""); history.pushState({...s, tab, tabPushed:1, y:0}, "", "#"+tab); }
+      }catch(e){}
+    }
     document.body.dataset.mtab = tab;
     btns.forEach(b => b.setAttribute("aria-current", b.dataset.goto===tab ? "page" : "false"));
-    if(push) history.replaceState(null, "", "#"+tab);   // deep-link/refresh keeps the tab; no history spam
-    window.scrollTo(0, 0);
+    if(push) window.scrollTo(0, 0);
   }
+  shGoTab = go;
   nav.addEventListener("click", e => {
     const b = e.target.closest(".mnav-btn");
     if(b && b.dataset.goto && SH_PAGE!=="dash"){ location.href = "/?tab="+b.dataset.goto; return; }   // 0.57.0: /today and /runs hand the tab to the dashboard
     if(!b || !b.dataset.goto) return;                   // the Runs tab is a real <a> — let it navigate
     go(b.dataset.goto, true);
   });
-  if(SH_PAGE!=="runs") go((location.hash || "").replace("#",""), false);   // restore tab from the URL (defaults to today)
+  if(SH_PAGE!=="runs") go(SH_LANDING || (location.hash || "").replace("#",""), false);   // §BACK — the landing tab (?tab=, then #hash, else today)
 })();
 
 

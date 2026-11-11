@@ -53,7 +53,7 @@
     transition:background .25s ease,color .25s ease}
   body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
     background:radial-gradient(60% 45% at 50% 0%, color-mix(in oklab,var(--terra),transparent 88%), transparent 70%);}
-  .wrap{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:34px 26px 90px}
+  .wrap{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:34px max(26px,env(safe-area-inset-right)) 90px max(26px,env(safe-area-inset-left))}
 
   header{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--line);
     padding-bottom:18px;margin-bottom:26px}
@@ -107,8 +107,8 @@
   /* shared house chrome: a fixed top-right control cluster (login + swatches) and a
      top-left hub link. Swatches mirror bookworm's component (30px + accent underline);
      the login pill sits to their left (the sparinghorse arrangement). */
-  .topctl{position:fixed;top:calc(8px + var(--demobar-h,0px));right:16px;z-index:50;display:inline-flex;align-items:center;gap:10px}   /* 0.60.2 — --demobar-h: the demo banner's measured height (app.js), 0 elsewhere */
-  .hublink{position:fixed;top:calc(8px + var(--demobar-h,0px));left:16px;z-index:50;font-family:var(--mono);font-size:11px;
+  .topctl{position:fixed;top:calc(8px + var(--demobar-h,0px) + env(safe-area-inset-top));right:calc(16px + env(safe-area-inset-right));z-index:50;display:inline-flex;align-items:center;gap:10px}   /* 0.60.2 — --demobar-h: the demo banner's measured height (app.js), 0 elsewhere */
+  .hublink{position:fixed;top:calc(8px + var(--demobar-h,0px) + env(safe-area-inset-top));left:calc(16px + env(safe-area-inset-left));z-index:50;font-family:var(--mono);font-size:11px;
     letter-spacing:.14em;text-transform:uppercase;color:var(--muted);text-decoration:none}
   .hublink:hover{color:var(--accent)}
   /* 0.60.2 — the swatch rule's orphaned tail lived here since the SPA split (f5e7e1b); a stray
@@ -1054,6 +1054,26 @@
      `.muted{color:…}` with it: every muted label rendered at full text contrast for a day. */
   .muted{color:var(--muted)} .mono{font-family:var(--mono)}
   .empty{color:var(--muted);font-style:italic;padding:8px 0}
+  /* §SKEL — a placeholder still waiting for data shimmers; the text stays for screen readers */
+  .empty.loading{min-height:64px;border-radius:10px;color:transparent;font-style:normal;
+    background:linear-gradient(90deg,var(--surface2) 0%,var(--line) 50%,var(--surface2) 100%);
+    background-size:200% 100%;animation:sh-shimmer 1.2s linear infinite}
+  @keyframes sh-shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
+  /* §SKEL — loaded content fades in rather than popping */
+  @keyframes sh-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+  .panel>:not(.loading),#readiness>:not(.loading),#tiles>:not(.loading){animation:sh-in 180ms ease-out}
+  @media(max-width:760px){
+    body[data-mtab="today"]   [data-mtab~="today"],
+    body[data-mtab="plan"]    [data-mtab~="plan"],
+    body[data-mtab="fitness"] [data-mtab~="fitness"],
+    body[data-mtab="body"]    [data-mtab~="body"]{animation:sh-in 180ms ease-out}
+  }
+  @media(prefers-reduced-motion:reduce){
+    .empty.loading{animation:none;background:var(--surface2)}
+    .panel>:not(.loading),#readiness>:not(.loading),#tiles>:not(.loading),[data-mtab]{animation:none!important}
+  }
+  /* §TAP — no 300ms double-tap-zoom wait on controls; the tap highlight stays */
+  a,button,input,select,textarea,label,summary,[role=tab],.mnav-btn,.sclick,.rcal-day{touch-action:manipulation}
   .tilefail{font-style:normal}
   .tilefail .tf-retry{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);font-style:normal}
   button.primary.err{background:var(--danger);border-color:var(--danger)}
@@ -1087,10 +1107,10 @@
     body{overscroll-behavior-y:none}                 /* no rubber-band that exposes "this is a webpage" */
     /* top strip: hub link (left) + theme swatches / read-only / login (right) — one in-flow row so the
        fixed-overlay versions stop colliding with the brand eyebrow on a narrow screen */
-    .topbar{position:static;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 15px 2px}
+    .topbar{position:static;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:calc(8px + env(safe-area-inset-top)) max(15px,env(safe-area-inset-right)) 2px max(15px,env(safe-area-inset-left))}
     .hublink,.topctl{position:static;top:auto;left:auto;right:auto}
     .topctl{margin-left:auto}
-    .wrap{padding:8px 15px calc(82px + max(env(safe-area-inset-bottom),22px))}   /* top tight (topbar owns it); bottom clears the fixed nav + a home-indicator buffer */
+    .wrap{padding:8px max(15px,env(safe-area-inset-right)) calc(82px + max(env(safe-area-inset-bottom),22px)) max(15px,env(safe-area-inset-left))}   /* top tight (topbar owns it); bottom clears the fixed nav + a home-indicator buffer */
     /* compact app-bar */
     header{flex-wrap:wrap;gap:10px;margin-bottom:16px;padding-bottom:12px}
     h1{font-size:22px}
@@ -1115,6 +1135,7 @@
     .efftbl-rot{margin-top:7px;font-family:var(--mono);font-size:11px;letter-spacing:.06em;color:var(--muted)}
     /* bottom tab bar */
     .mobnav{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;position:fixed;left:0;right:0;bottom:0;z-index:50;
+      padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right);
       background:color-mix(in oklab,var(--surface),transparent 6%);border-top:1px solid var(--line);
       backdrop-filter:saturate(1.4) blur(12px);-webkit-backdrop-filter:saturate(1.4) blur(12px);
       padding-bottom:max(env(safe-area-inset-bottom),22px);user-select:none;-webkit-user-select:none}
@@ -1261,7 +1282,7 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 /* 0.57.0 — the desktop section rail (review U6): fixed at the left on wide screens, absent elsewhere */
 .rail{display:none}
 @media (min-width:1180px){
-  .rail{display:flex;flex-direction:column;gap:2px;position:fixed;left:16px;top:96px;width:150px;z-index:40}
+  .rail{display:flex;flex-direction:column;gap:2px;position:fixed;left:calc(16px + env(safe-area-inset-left));top:calc(96px + env(safe-area-inset-top));width:150px;z-index:40}
   .rail a{font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-decoration:none;
     padding:5px 8px;border-left:2px solid transparent;border-radius:0 4px 4px 0;line-height:1.3}
   .rail a:hover,.rail a.on{color:var(--text);border-left-color:var(--accent);background:var(--surface)}
