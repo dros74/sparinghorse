@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.89.1] - 2026-11-16
+
+### Removed
+
+- **The GetSongBPM credit.** The footer link to GetSongBPM and its logo are gone, and so are the two README
+  mentions. GetSongBPM never answered, so the trial as a second tempo source is dropped. Song tempos still come
+  from ReccoBeats only.
+
 ## [0.89.0] - 2026-11-11
 
 ### Added

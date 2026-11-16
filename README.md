@@ -98,8 +98,7 @@ everything.
   and last.fm listening (a ListenBrainz account also mixes in songs you have never run to). After the
   run, the read-back grades every song by the cadence your legs held and feeds the next list. Needs
   Spotify Premium and a Spotify developer app of your own; last.fm and ListenBrainz are optional.
-  Song tempos come from ReccoBeats; [GetSongBPM.com](https://getsongbpm.com) is on trial as a second
-  source. Private container only.
+  Song tempos come from ReccoBeats. Private container only.
 
 **AI layer** *(optional: set `ANTHROPIC_API_KEY`; blank means dormant, the engine is unaffected)*
 - Natural-language objectives ("sub-45 10k in October"), advice on closely spaced A-races, plain-language
@@ -454,6 +453,5 @@ Features and fixes are recorded in [`CHANGELOG.md`](CHANGELOG.md)
 
 ## License and authorship
 AGPL-3.0-or-later; see `LICENSE`. Self-host freely; if you run a modified version as a network service,
-share your changes. Built on, and requires, Runalyze. The GetSongBPM logo in `static/getsongbpm.png`
-belongs to GetSongBPM and is not covered by the AGPL. Copyright © 2026 Duarte Rosado. The code was
+share your changes. Built on, and requires, Runalyze. Copyright © 2026 Duarte Rosado. The code was
 written with substantial AI assistance under my direction; `AUTHORS.md` records how.
