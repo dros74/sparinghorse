@@ -3091,7 +3091,7 @@ def render_bits(page, readonly):
     if readonly:
         return {"link": "", "mobnav": "", "css": "", "page": "", "js": "", "settings": ""}
     link = ('<a class="ghost" id="musicLink" href="/music" title="Music — cadence-matched playlists '
-            'for the plan\'s sessions">♫ Music</a>')
+            'for the plan\'s sessions">Music</a>')
     mobnav = ('<a class="mnav-btn" id="mnavmusic" href="/music" aria-current="false" aria-label="Music">'
               '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l11-2v12"/>'
               '<circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg><span>Music</span></a>')

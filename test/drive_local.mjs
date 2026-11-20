@@ -20,7 +20,8 @@ let pass = 0, fail = 0;
 const ok = (name, cond) => { cond ? (pass++, console.log('  ✓ ' + name))
                                   : (fail++, console.log('  ✗ ' + name)); };
 
-const browser = await chromium.launch();
+// SH_CHROMIUM — a system Chromium where Playwright's own build isn't installed (e.g. an ARM laptop)
+const browser = await chromium.launch(process.env.SH_CHROMIUM ? { executablePath: process.env.SH_CHROMIUM } : {});
 // bypassCSP: axe-core is injected as an inline script (0.56.1); the CSP itself is pinned by det/csp-worker
 const page = await browser.newPage({ viewport: { width: 1280, height: 1700 }, bypassCSP: true });
 // 0.57.0 — the analytics sections are <details>, closed on a fresh device. The flows below read and
@@ -95,6 +96,25 @@ async function runFull() {
   const wkBox = await page.locator('#plan .weekpane .wk').first().boundingBox().catch(() => null);
   ok(`the limits block spans the week card (${limBox ? Math.round(limBox.width) : '—'} of ${wkBox ? Math.round(wkBox.width) : '—'} px)`,
      !!(limBox && wkBox && limBox.width > wkBox.width * 0.8));
+  // the pane opens on the limit that holds the week (the plan tile already lists them all as bars);
+  // the other cards sit one click away behind .limall, which must open and close them
+  const limCollapsed = await page.evaluate(() => {
+    const L = document.querySelector('#plan .weekpane .limits');
+    return { cards: L ? L.querySelectorAll('.limhd').length : -1,
+             hold: L ? L.querySelectorAll('.limhd .limtag.hold').length : -1,
+             toggle: !!(L && L.querySelector('.limall[aria-expanded="false"]')) };
+  });
+  ok(`the week pane opens on the binding limit only (${limCollapsed.cards} card, ${limCollapsed.hold} holding, toggle ${limCollapsed.toggle})`,
+     limCollapsed.cards <= 1 && limCollapsed.cards === limCollapsed.hold && limCollapsed.toggle);
+  if (limCollapsed.toggle) {
+    await page.locator('#plan .weekpane .limall').click();
+    await page.waitForTimeout(250);
+  }
+  const limExpanded = await page.evaluate(() => ({
+    cards: document.querySelectorAll('#plan .weekpane .limits .limhd').length,
+    exp: document.querySelector('#plan .weekpane .limall')?.getAttribute('aria-expanded') }));
+  ok(`the limits toggle shows every limit (${limExpanded.cards} cards, expanded ${limExpanded.exp})`,
+     limExpanded.cards >= 2 && limExpanded.exp === 'true');
   const firstLim = page.locator('#plan .weekpane .limrow').first();
   // SH-86c (c) — the other cards' closed heights, captured before the panel opens under the row
   const limClosedHs = await page.evaluate(() =>

@@ -10,6 +10,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.89.3] - 2026-11-20
+
+### Changed
+
+- **Each limit is shown once.** The week pane's "Why this week looks like this" block used to open with six limit
+  cards directly under the plan tile, which already lists every limit as a one-line bar. It now opens on the card of
+  the limit that holds the week, with a "The other N limits for this week" toggle that shows the rest. A limit
+  button on the plan tile opens all of them with that limit's source panel open; changing week collapses them
+  again. Limit cards put their "Why, and the source" link on its own line, so a card keeps its height when its
+  source opens.
+- **Plain words in the week and phase lines.** The week card line reads `km · runs · X done · Y to go` for a week
+  that straddles today. The bar and sheet figures and the speed-weighted km moved from that line into one `?` hint
+  written as sentences. The phase line says "ends at fitness N, fatigue M" instead of `ends CTL/ATL`, drops the `Σ`
+  (the Re-base line printed it twice), and shows short dates. The week pane's date line no longer repeats the km
+  and run count from the card's first line.
+- **One name for the load ratio.** Labels on the console say "load ratio" instead of "ACWR": the week badge, the
+  load card title, the clipped and capped chips, the posture line and the shape tooltip. ACWR stays in tooltips as
+  the technical name.
+- **Readiness card copy.** The green rest-day line was a 45-word headline with "BONUS" in capitals. It now reads
+  "Rest day. An easy run fits if you want one: load ratio X, under the weekly ceiling. Resting is just as good."
+  The plain rest-day line is "Rest day. Take the recovery." The footer without a check-in reads "Nothing checked
+  in today and no HRV reading, so this follows the plan rather than a readiness read". The verdict logic is
+  unchanged.
+- **Header.** Sync is the only filled button and Settings is a ghost button. The header links and buttons are
+  text-only (the emoji on Today, Runs, Settings and Music are gone). "Backfill all" moved from the header to
+  Settings, Connections, under "Full history" as "Backfill all history", with the same confirmation and behaviour.
+
+### Fixed
+
+- **Contrast on the readiness card.** The card's small text (eyebrow, footer, sync stamp) is solid white instead of
+  translucent, and the top stop of the green gradient is deeper (Daylight `#4d8a5c` to `#3f7a4e`, Charcoal
+  `#2f9760` to `#26804f`), so small white text reaches 4.5:1 (5.1 and 4.9). Small text that used paint hues now uses
+  the text-safe tokens (`--ok-ink`, `--accent-ink`): chips such as "long run kept", pace-zone values, strides, the
+  gauge scale and you-pill, and the latest-run kicker. Input placeholders use the muted colour, and the run-tile
+  hint lost its extra opacity. The planned-day mark was drawn in the hairline colour (under 3:1) and now uses the
+  muted colour.
+- **Dimming by opacity.** The legacy week-strip segments and the implicit Rest rows no longer use opacity; state
+  shows by fill or italic, per the 0.56.1 rule.
+- **Day-row marks.** The marks (done, missed, extra, planned and the like) carry screen-reader labels and hover
+  titles, and a week card with logged days prints a one-line legend.
+- **Type below 11 px.** Chart legends, band ticks, the road axis and today label, limit tags, evidence badges, the
+  mini week's day letters, a phone-only tile caption and the motto's small text (9 px) are now 11 px. Explainer
+  paragraphs stop at 80 characters wide.
+- **Mini week chart.** Today's letter is underlined in the text colour; the accent colour there means a quality day.
+- **Latest-run metrics.** The row gap is tighter, so the last metric no longer wraps at 1440 px.
+
+### Tests
+
+- `test/drive_local.mjs` checks that the week pane opens on the binding limit only and that the toggle shows every
+  limit; the accordion and source checks now run after expanding. `SH_CHROMIUM` lets the driver launch a system
+  Chromium where Playwright's own build is not installed.
+- `det/acwr-agreement` now looks for "load ratio" with the gauge's value in the readiness line instead of "ACWR".
+  The intent is the same: the card quotes the ratio the gauge paints.
+
+No engine change: `ENGINE_VERSION` moved with the changelog.
+
+## [0.89.2] - 2026-11-18
+
+### Fixed
+
+- **Drift on older long runs read about a hundred times too small.** Runalyze has sent the aerobic decoupling
+  (drift) figure in two units: percent ×100 for activities created before its 31 Jul 2025 change, plain percent
+  after. Runalyze now sends the older activities in plain percent as well, so after a full re-sync ("Backfill
+  all") the app divided correct values by 100 and the durability card showed almost no drift for every older
+  long run. `decoupling_pct()` keeps the cutoff for newer activities and, for older ones (or without a creation
+  time), reads the unit from the value: 50 or more, or a whole multiple of 10 below 50, is ×100; anything else is
+  plain percent. A ×100 value is always a whole ten, so a database that has not re-synced keeps reading right.
+  The one case the value cannot settle is a plain whole 10, 20, 30 or 40 % on an old activity, which reads as
+  0.1 to 0.4 %. The durability caveat text no longer names the cutoff date as the only split. Only the drift
+  figure changes (the durability card and the drift note on a run); the plan engine never reads drift. The
+  `det/decoupling-units` battery check now covers plain values on old activities, small ×100 values, and an
+  end-to-end durability read with both units side by side.
+
 ## [0.89.1] - 2026-11-16
 
 ### Removed

@@ -43,12 +43,11 @@ __SH_DEMOBAR__
         </div>
       </div>
       <div class="bar">
-        <a class="ghost" id="todayLink" href="/today" title="Today — the readiness verdict, the session, the check-in; the page the installed app opens on">☀ Today</a>
-        <a class="ghost" id="runsLink" href="/runs" title="Run browser — a calendar of your whole training history; open any past run on the activity tile">🗓 Runs</a>
+        <a class="ghost" id="todayLink" href="/today" title="Today — the readiness verdict, the session, the check-in; the page the installed app opens on">Today</a>
+        <a class="ghost" id="runsLink" href="/runs" title="Run browser — a calendar of your whole training history; open any past run on the activity tile">Runs</a>
         __SH_MUSIC_LINK__
         <button class="primary" id="syncBtn">Sync now</button>
-        <button class="primary" id="settingsBtn" title="Settings — athlete, connections, music, console">⚙ Settings</button>
-        <button class="ghost" id="backfillBtn" title="One-time full-history pull — walks every page back to your first activity. Use on a fresh machine or if old history is missing.">Backfill all</button>
+        <button class="ghost" id="settingsBtn" title="Settings — athlete, connections, music, console">Settings</button>
       </div>
     </header>
 
@@ -84,7 +83,7 @@ __SH_DEMOBAR__
       <h2 id="h-load">Training load <span class="muted mono" style="font-size:12px">— this week's load against your base, and how your running is holding up</span></h2>
       <div class="rgrid">
         <div class="panel acwrcard">
-          <div class="acwr-title">Acute : chronic load <span class="muted mono" style="font-size:11px;font-weight:400">— this week's load against your base</span></div>
+          <div class="acwr-title">Load ratio <span class="muted mono" style="font-size:11px;font-weight:400">— acute : chronic (ACWR), this week's load against your base</span></div>
           <div class="gauge" id="gauge"><div class="band" id="gband"></div><div class="mark" id="gmark"></div><div class="gyou" id="gyou"></div></div>
           <div class="gauge-scale"><span>0.0</span><span><b>0.8</b></span><span><b>1.3</b></span><span>2.0</span></div>
           <p class="explain">Acute ÷ chronic load (ATL ÷ CTL): this week's training load against what your body is used to. The shaded band (0.8–1.3) is where a steady training week usually sits; taper, down and rest weeks sit below it by design. The engine sizes every planned week against 1.25 — but on a shape-neutral reading of the ratio, not the raw sample shown here, which reads higher and may print above 1.30 with nothing breached; the governed number is published beside it. Race week is the deliberate outlier: it carries the race itself, which is fixed. It is a load ratio, not an injury predictor — the long-run-jump and fast-load brakes watch that axis.</p>
@@ -180,6 +179,10 @@ __SH_DEMOBAR__
         <section class="settab" data-tab="connections" data-label="Connections" role="tabpanel" id="settab-connections" hidden>
           <div id="secretsBox"></div>
           <div id="aiBox"></div>
+          <div class="secblock" id="backfillBox"><div class="sectitle">Full history</div>
+            <p class="muted backfillnote">A one-time pull that walks every page back to your first activity. Use it on a fresh machine, or when old history is missing.</p>
+            <button type="button" class="ghost" id="backfillBtn">Backfill all history</button>
+          </div>
         </section>
         __SH_MUSIC_SETTINGS__
         <section class="settab" data-tab="console" data-label="Console" role="tabpanel" id="settab-console" hidden>

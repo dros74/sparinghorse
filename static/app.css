@@ -9,7 +9,7 @@
     --text:#2a2620; --muted:#5f5848; --accent:#b9542c;   /* 0.56.1: muted darkened 6f6857→5f5848 — 4.49:1 on surface2 was under the 4.5 line */
     --accent-ink:#a3441f; --warn-ink:#7f5a12; --ok-ink:#3a6b49;   /* 0.56.1: the accent/warn/ok hues used as SMALL TEXT — the paint hues stay for fills and gradients */
     --ok:#4f8c5f; --warn:#a9781f; --danger:#b5563f;
-    --readybg:#4d8a5c; --readybg2:#3c6a48;   /* spec greens (DESIGN.md §2.3) — deep enough for white */
+    --readybg:#3f7a4e; --readybg2:#3c6a48;   /* spec greens (DESIGN.md §2.3), top stop deepened from #4d8a5c so the card's small white text clears 4.5:1 (5.1) */
     --readyamber:var(--warn); --readyamber2:color-mix(in oklab,var(--warn),#000 30%);   /* amber/red ride the theme signals (mockup mapping) */
     --readyred:var(--danger); --readyred2:color-mix(in oklab,var(--danger),#000 32%);
     --onready:#fff;   /* ink on the readiness gradient (det/readiness-contrast pins ≥3:1 verdict, ≥4.5:1 footer) */
@@ -25,7 +25,7 @@
     --text:#edeef1; --muted:#9b9da5; --accent:#fa7d42;
     --accent-ink:#fa7d42; --warn-ink:#f7b32b; --ok-ink:#33d98a;   /* 0.56.1: already ≥5:1 on every dark surface */
     --ok:#33d98a; --warn:#f7b32b; --danger:#fc6a55;
-    --readybg:#2f9760; --readybg2:#1d6240;   /* green already passes vs white — unchanged */
+    --readybg:#26804f; --readybg2:#1d6240;   /* top stop deepened from #2f9760: white small text 3.7 → 4.9:1 */
     --readyamber:color-mix(in oklab,var(--warn),#000 22%); --readyamber2:color-mix(in oklab,var(--warn),#000 46%);   /* neon amber darkened to white-legible */
     --readyred:color-mix(in oklab,var(--danger),#000 10%); --readyred2:color-mix(in oklab,var(--danger),#000 40%);
     --onready:#fff;
@@ -65,7 +65,7 @@
     color:var(--muted);margin:0 0 3px;grid-area:eyebrow}
   .titlerow{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;grid-area:title}
   .motto{font-family:var(--mono);font-size:11px;color:var(--accent-ink)}   /* 0.56.1: no opacity — it was the contrast that was decorative */
-  .motto small{color:var(--muted)}
+  .motto small{font-size:inherit;color:var(--muted)}   /* <small> shrank it to 9 px, under the 11 px floor */
   .bar{display:flex;align-items:center;gap:12px;margin-left:auto}
   .ro-badge{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
     color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:3px 9px}
@@ -125,7 +125,7 @@
     .tile .v{font-size:26px;white-space:nowrap}
     .tile .v small{font-size:11px}
     .tile .sub{font-size:11px}
-    .tilecap{font-size:10px;right:10px;bottom:8px;max-width:calc(100% - 20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .tilecap{font-size:11px;right:10px;bottom:8px;max-width:calc(100% - 20px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .modal-head h2 .muted{display:none}   /* the Settings subtitle wrapped to three lines beside the close button */
   }
   .tile{background:linear-gradient(180deg,var(--surface),var(--surface-2));
@@ -186,14 +186,14 @@
     padding:1px 5px;border-radius:4px;color:var(--text)}
   .fr-act{font-size:12px;padding:6px 12px}
   /* recent activity + planned session metric rows */
-  .mrow{display:flex;flex-wrap:wrap;gap:8px 26px;align-items:baseline}
+  .mrow{display:flex;flex-wrap:wrap;gap:8px 20px;align-items:baseline}
   .mrow .ttl{font-family:var(--serif);font-weight:600;font-size:17px;margin-right:6px}
   .metric{display:flex;flex-direction:column;gap:1px}
   .metric .ml{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
   .metric .mv{font-size:16px;font-weight:600}
   .metric .mv small{font-size:12px;color:var(--muted);font-weight:400}
   .rkick{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
-    color:var(--accent);margin-bottom:8px}
+    color:var(--accent-ink);margin-bottom:8px}
   .planned{margin-top:16px}
   /* latest-activity hover profile background */
   #recent{position:relative;overflow:hidden}
@@ -244,8 +244,9 @@
   .metric.hovx.locked .ml::after{content:" 🔒";font-size:11px}
   .proflbl{font-family:var(--mono);font-size:11px;color:var(--muted);text-transform:none;
     letter-spacing:0;margin-left:8px}
-  .profhint{font-size:12px;opacity:.75;padding-right:320px}
+  .profhint{font-size:12px;padding-right:320px}   /* muted already; the extra opacity took it to 3.6:1 */
   .profhint b{color:var(--accent)}
+  input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}   /* browser default grey ran 3.7:1 */
   /* top row: the LATEST ACTIVITY kicker (left) + data-quality utilities (right corner). The two
      actions are muted at rest, hover reveals intent (ignore→accent, delete→danger). */
   .rtop{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
@@ -305,13 +306,13 @@
   .gyou{position:absolute;top:-24px;left:clamp(40px,var(--gx,50%),calc(100% - 40px));
     transform:translateX(-50%);white-space:nowrap}
   .gyou span{font-family:var(--mono);font-size:12px;font-weight:500;padding:2px 7px;border-radius:6px}
-  .gyou .inb{color:var(--ok);border:1px solid color-mix(in oklab,var(--ok),transparent 55%)}
+  .gyou .inb{color:var(--ok-ink);border:1px solid color-mix(in oklab,var(--ok),transparent 55%)}
   .gyou .out{color:var(--danger);border:1px solid color-mix(in oklab,var(--danger),transparent 50%)}
   .gyou .mid{color:var(--warn);border:1px solid color-mix(in oklab,var(--warn),transparent 50%)}
   .gyou .low{color:var(--muted);border:1px solid color-mix(in oklab,var(--muted),transparent 50%)}
   .gauge-scale{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;
     color:var(--muted);margin-top:6px}
-  .gauge-scale b{color:var(--ok)}
+  .gauge-scale b{color:var(--ok-ink)}
 
   /* weekly bars */
   .chart{cursor:grab}
@@ -350,18 +351,18 @@
     box-shadow:0 8px 22px color-mix(in oklab,var(--readyred),transparent 55%)}
   .statuscard .sc-orb{position:absolute;border-radius:50%;background:color-mix(in oklab,var(--onready),transparent 91%);pointer-events:none}
   .statuscard .sc-top{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative}
-  .statuscard .sc-eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:color-mix(in oklab,var(--onready),transparent 22%)}
+  .statuscard .sc-eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--onready)}
   .statuscard .sc-pill{display:inline-flex;align-items:center;gap:7px;background:color-mix(in oklab,var(--onready),transparent 84%);
     border:1px solid color-mix(in oklab,var(--onready),transparent 72%);border-radius:999px;padding:4px 11px;
     font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--onready)}
   .statuscard .sc-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--onready);box-shadow:0 0 8px color-mix(in oklab,var(--onready),transparent 10%)}
   .statuscard .sc-verdict{font-family:var(--serif);font-weight:600;font-size:23px;margin-top:14px;line-height:1.18;position:relative}
   .statuscard .halt{font-weight:600;margin-top:10px;position:relative}
-  .statuscard .sc-foot{font-family:var(--mono);font-size:12px;color:color-mix(in oklab,var(--onready),transparent 18%);
+  .statuscard .sc-foot{font-family:var(--mono);font-size:12px;color:var(--onready);
     margin-top:14px;padding-top:12px;border-top:1px solid color-mix(in oklab,var(--onready),transparent 80%);position:relative;line-height:1.6;
     display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px}
   .statuscard .sc-fresh{font-family:var(--mono);font-size:11px;letter-spacing:.06em;
-    color:color-mix(in oklab,var(--onready),transparent 35%)}
+    color:var(--onready)}
   .statuscard .sc-fresh:empty{display:none}
   /* Past the nightly's own staleness window the chip stops being a footnote and says so. */
   .statuscard .sc-fresh.stale{color:var(--onready);font-weight:600}
@@ -382,7 +383,7 @@
   .acwr-title{font-family:var(--serif);font-weight:600;font-size:17px}   /* 0.60.2 — ONE card-title rule: the efficiency card's was falling through to body sans, and 15px sat under the session title's 17px */
   .acwrcard .acwr-title{margin-bottom:34px}
   .effcard .acwr-title{margin-bottom:6px}
-  .explain{font-size:12px;color:var(--muted);margin:10px 0 0;line-height:1.5}   /* 0.60.2 — the trackers' explainer paragraphs: one size (they ran 11 / 11 / 12) */
+  .explain{font-size:12px;color:var(--muted);margin:10px 0 0;line-height:1.5;max-width:80ch}   /* measure: they ran ~170 characters a line on a laptop */   /* 0.60.2 — the trackers' explainer paragraphs: one size (they ran 11 / 11 / 12) */
   /* CTL ramp readout — the divider sits just under the ACWR explanation, then the ramp FILLS the
      rest of the tile (flex:1) and vertically centres its readout in that lower half (so it isn't
      crammed against the divider on a stretched tile) */
@@ -571,10 +572,10 @@
   .weekstrip{display:flex;gap:3px;margin:10px 0 8px;border-radius:8px;overflow:hidden}
   .weekseg{flex:1;display:flex;align-items:center;justify-content:center;gap:3px;min-width:30px;
     font-family:var(--mono);font-size:11px;line-height:1;padding:6px 3px;cursor:pointer;
-    color:var(--text);background:color-mix(in oklab,var(--accent),var(--surface-2) 30%);
-    opacity:.5;transition:opacity .15s,box-shadow .15s}
-  .weekseg:hover{opacity:.8}
-  .weekseg.active{opacity:1;box-shadow:inset 0 0 0 2px var(--accent)}
+    color:var(--text);background:color-mix(in oklab,var(--accent),var(--surface-2) 75%);
+    transition:background-color .15s,box-shadow .15s}   /* state by fill, not opacity (0.56.1 rule) */
+  .weekseg:hover{background:color-mix(in oklab,var(--accent),var(--surface-2) 55%)}
+  .weekseg.active{background:color-mix(in oklab,var(--accent),var(--surface-2) 30%);box-shadow:inset 0 0 0 2px var(--accent)}
   .weekseg.wsdown{background:color-mix(in oklab,var(--muted),var(--surface-2) 35%)}  /* recovery (down) week */
   .weekseg .wlock{font-size:11px;opacity:.8}
   .weekdetail{display:none}
@@ -582,7 +583,7 @@
   .zones{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
   .zone{font-family:var(--mono);font-size:12px;border:1px solid var(--line);border-radius:8px;
     padding:5px 10px;color:var(--muted)}
-  .zone b{color:var(--accent);font-weight:500}
+  .zone b{color:var(--accent-ink);font-weight:500}
   .zone.hl{border-color:var(--accent)}
   /* §6q/#2 — multi-A race-chain strip: one row per A-race, projected CTL + per-race verdict */
   .chainstrip{margin:10px 0 2px}
@@ -615,7 +616,9 @@
     align-items:baseline;gap:5px;flex-wrap:wrap}
   .sline.stoday{color:var(--text)}
   /* §REST — an implicit rest day fills a week-row gap (rendered, never prescribed in the JSON) */
-  .sline.srest{opacity:.5;font-style:italic}
+  .sline.srest{font-style:italic}   /* the word "Rest" and the italic carry it; no opacity dimming (0.56.1 rule) */
+  .smklegend{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .smklegend .smk{font-weight:400}
   /* a completed session is clickable → opens that run's tile + route map */
   .sline.sclick{cursor:pointer;border-radius:5px;padding:1px 4px;margin:0 -4px}
   .sline.sclick:hover{background:color-mix(in oklab,var(--accent),transparent 88%);color:var(--text)}
@@ -623,7 +626,7 @@
   .sline.sclick:hover::after{opacity:.7}
   /* §W1 — structured-workout instruction card (Today tile: always open; week rows: click the
      session label to expand). Rides inside the flex .sline, wrapping onto its own full row. */
-  .strid{color:var(--accent);border-bottom:1px dotted var(--muted);cursor:help}
+  .strid{color:var(--accent-ink);border-bottom:1px dotted var(--muted);cursor:help}
   /* §RACE — race day earns the accent on its own line. Same affordance as .strid (dotted underline
      = there is more in the tooltip), heavier weight because this row is the point of the block. */
   .racemk{color:var(--accent);font-weight:600;border-bottom:1px dotted var(--muted);cursor:help}
@@ -701,13 +704,13 @@
   .rcal-chip:hover{border-color:var(--accent)}
   .backlatest{font-family:var(--sans);text-transform:none;letter-spacing:0;font-size:12px;
     margin-left:4px;color:var(--accent)}
-  .smk{width:1em;display:inline-block;text-align:center;color:var(--line)}
+  .smk{width:1em;display:inline-block;text-align:center;color:var(--muted)}   /* the planned ○ was drawn in the hairline colour, below 3:1 */
   .smk.done{color:var(--ok)} .smk.missed{color:var(--danger)} .smk.today{color:var(--accent)}
   .smk.extra{color:var(--accent)}
   .sline .splan.exu{font-style:italic;opacity:.8}
   .sline .splan{color:var(--muted)} .sline.stoday .splan{color:var(--text)}
   .sline .sact{color:var(--accent)}
-  .sline .sdate{color:var(--muted);opacity:.85;min-width:104px;display:inline-block}
+  .sline .sdate{color:var(--muted);min-width:104px;display:inline-block}
   /* §T2 — component chip: which of the four fitness components a session chiefly builds */
   .scomp{font-family:var(--sans);font-size:11px;letter-spacing:.02em;color:var(--muted);
     border:1px solid var(--line);border-radius:8px;padding:0 5px;line-height:14px;
@@ -740,7 +743,7 @@
   .wk.wcur .wn{color:var(--accent)}
   .wk .wlock{font-size:12px;margin-left:1px;opacity:.8}
   .wsi.qs{color:var(--accent)}
-  .wfz{color:var(--ok);font-size:12px}
+  .wfz{color:var(--ok-ink);font-size:12px}   /* the -ink tokens are the text-safe hues (0.56.1) */
   .phasehdr{font-family:var(--serif);font-weight:600;font-size:16px;margin:22px 0 2px;
     display:flex;justify-content:space-between;align-items:baseline;gap:12px}
   /* objectives manager + re-plan diff */
@@ -1014,6 +1017,8 @@
   /* Settings — keys block (write-only secrets: status shown, value never echoed) */
   .secblock{display:flex;flex-direction:column;gap:16px;margin:6px 0 18px;padding-bottom:18px;border-bottom:1px solid var(--line)}
   .sectitle{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  #backfillBox{gap:10px;align-items:flex-start}
+  .backfillnote{font-size:13px;margin:0;max-width:65ch}
   .setrow .src.ok{color:var(--ok-ink)}
   .setrow .src.warn{color:var(--warn-ink)}   /* 0.56.1: text-safe inks — the paint hues were 3.7:1 and 3.8:1 on the surface */
   .setrow .src.bad{color:var(--danger)}
@@ -1336,6 +1341,7 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 @media(min-width:980px){.limits{grid-template-columns:1fr 1fr 1fr}}
 .limitslbl{grid-column:1 / -1;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 2px 4px}
 .limrow{display:contents}
+.limits .limall{grid-column:1 / -1;justify-self:start;margin:0 2px}   /* the pane opens on the binding limit; the rest are one click away */
 .limhd{display:flex;flex-direction:column;justify-content:flex-start;width:100%;font:inherit;color:inherit;text-align:left;border:1px solid var(--line);
   border-radius:12px;background:var(--surface);padding:12px 14px;min-height:44px;cursor:pointer}
 .limhd[aria-expanded="true"]{border-color:var(--accent);background:color-mix(in oklab,var(--accent),var(--surface) 92%)}
@@ -1343,19 +1349,19 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 .limtop{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 8px}
 .limname{font-weight:600}
 .limval{margin-left:auto;font-variant-numeric:tabular-nums;font-size:12px;color:var(--muted)}
-.limtag{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:1px 6px;background:var(--surface2);color:var(--muted)}
+.limtag{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:1px 6px;background:var(--surface2);color:var(--muted)}
 .limtag.hold{background:color-mix(in oklab,var(--accent),transparent 82%);color:var(--accent-ink)}
 .limtag.over{background:color-mix(in oklab,var(--danger),transparent 84%);color:var(--danger)}
 .limbar{display:block;height:8px;border-radius:4px;background:var(--surface2);margin:6px 0;overflow:hidden}
 .limbar i{display:block;height:100%;border-radius:4px;background:var(--muted)}
 .limbar.hold i{background:var(--accent)} .limbar.over i{background:var(--danger)}
 .limsent{display:block;font-size:13px;line-height:1.5}
-.limmeta{display:flex;align-items:center;gap:8px;margin-top:auto;padding-top:6px}   /* a card in a taller row keeps its badge and link on the bottom line */
-.basis{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:1px 6px}
+.limmeta{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;margin-top:auto;padding-top:6px}   /* a card in a taller row keeps its badge and link on the bottom line */
+.basis{font-family:var(--mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:1px 6px}
 .basis.L{background:color-mix(in oklab,var(--ok),transparent 84%);color:var(--ok-ink)}
 .basis.A{background:color-mix(in oklab,var(--accent),transparent 82%);color:var(--accent-ink)}
 .basis.S{background:var(--surface2);color:var(--muted)}
-.limcta{margin-left:auto;font-size:12px;color:var(--accent-ink)}
+.limcta{flex-basis:100%;font-size:12px;color:var(--accent-ink);white-space:nowrap}   /* its own line: at the 11 px badge size the link wrapped in one state and not the other, so a card changed height when it opened */
 .limsrc{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:16px;margin:2px 0 12px;font-size:13px;line-height:1.55}
 .limsrc p{margin:0 0 10px}
 .limits .limsrc{grid-column:1 / -1;margin:0}   /* an open source panel spans the limits grid's full width */
@@ -1389,14 +1395,14 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 .wkdays{display:flex;align-items:flex-end;gap:6px;margin:10px 0 4px;height:56px}
 .wkd{display:flex;flex-direction:column;align-items:center;gap:3px;flex:1}
 .wkd i{display:block;width:100%;border-radius:3px}
-.wkd b{font-family:var(--mono);font-size:10px;font-weight:400;color:var(--muted)}
-.wkd.today b{color:var(--accent-ink);font-weight:600}
+.wkd b{font-family:var(--mono);font-size:11px;font-weight:400;color:var(--muted)}
+.wkd.today b{color:var(--text);font-weight:700;text-decoration:underline;text-underline-offset:3px}   /* not the accent: in this chart the accent means a quality day */
 .wkd.easy i{background:color-mix(in oklab,var(--ok),transparent 45%)}
 .wkd.qual i{background:var(--accent)}
 .wkd.long i{background:var(--ok)}
 .wkd.race i{background:var(--danger)}
 .wkd.rest i{background:var(--surface2)}
-.wklegend{display:flex;gap:12px;font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:6px}
+.wklegend{display:flex;gap:12px;font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:6px}
 .wklegend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
 .wklegend .easy{background:color-mix(in oklab,var(--ok),transparent 45%)}
 .wklegend .qual{background:var(--accent)}
@@ -1414,18 +1420,18 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 .racerow:first-of-type{border-top:0}
 .racename{font-family:var(--serif);font-weight:600;font-size:15px}
 .racetile .chainrace{border-top:0;padding:4px 8px;margin:0 -8px;border-radius:8px}   /* the pressed ring sits clear of the text */
-.bandbar{position:relative;height:16px;margin:8px 0 16px;border-bottom:1px solid var(--line)}
+.bandbar{position:relative;height:16px;margin:8px 0 19px;border-bottom:1px solid var(--line)}
 .bandrange{position:absolute;top:4px;height:8px;border-radius:4px;background:color-mix(in oklab,var(--accent),transparent 72%)}
 .bandmed{position:absolute;top:1px;width:2px;height:14px;background:var(--accent)}
 .bandgoal{position:absolute;top:1px;height:14px;border-left:2px dashed var(--warn)}
-.bandtick{position:absolute;top:19px;font-family:var(--mono);font-size:9px;color:var(--muted)}
+.bandtick{position:absolute;top:19px;font-family:var(--mono);font-size:11px;color:var(--muted)}
 .bandtick.mid{left:50%;transform:translateX(-50%)}
 .bandtick.end{right:0}
 .racenum{font-size:12px;margin:2px 0}
 /* the road: one bar per week */
 .road{margin:14px 0 6px}
 .roadlbl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
-.roadlegend{display:flex;flex-wrap:wrap;gap:12px;font-family:var(--mono);font-size:10px;color:var(--muted);margin:4px 0 2px}
+.roadlegend{display:flex;flex-wrap:wrap;gap:12px;font-family:var(--mono);font-size:11px;color:var(--muted);margin:4px 0 2px}
 .roadlegend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px}
 .roadlegend .rl-run{background:var(--muted)}
 .roadlegend .rl-plan{background:color-mix(in oklab,var(--muted),var(--surface2) 67%)}
@@ -1458,7 +1464,7 @@ details.section > summary:focus-visible{outline:2px solid var(--focus);outline-o
 .roadband .phaseseg b{max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:clip}   /* a short phase on a phone clips its label rather than widening the band past its bars */
 .roadband .phaseseg:hover{filter:none}
 /* the today marker rides its own line above the axis's date labels, so neither ever overlaps */
-.roadaxis{margin-top:3px;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.roadaxis{margin-top:3px;font-family:var(--mono);font-size:11px;color:var(--muted)}
 .roadmarks{height:13px}
 .roadtodaycell{grid-row:1;position:relative;min-width:0}
 .roadtoday{position:absolute;top:0;width:0;color:var(--accent-ink);white-space:nowrap;line-height:13px}

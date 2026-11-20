@@ -15561,15 +15561,20 @@ def _stc_durability():
 
 
 def _stc_decoupling_units():
-    """Runalyze changed aerobic_decoupling_pace from percent x100 to plain percent on 31 Jul 2025 (keyed on
-    raw.created_at). Locks decoupling_pct (before/after the cutoff, magnitude fallback without created_at,
-    None) and the end-to-end durability read on post-cutoff long runs that carry percent values."""
+    """Runalyze serves aerobic_decoupling_pace in two units: x100 (activities created before 31 Jul 2025, as
+    first synced) and plain percent (every activity created from that day; older ones too once Runalyze
+    switched). Locks decoupling_pct: after the cutoff always percent; before it or without created_at the
+    value decides (>= 50 or a whole ten = x100, else percent); None stays None. And the end-to-end durability
+    read with x100 and plain rows of old activities side by side."""
     import sqlite3 as _sq, json as _j
     fail = []
     cut = S.RUNALYZE_DECOUPLING_PCT_FROM
     if cut != 1753920000:
         fail.append(f"cutoff must be 2025-07-31T00:00:00Z = 1753920000: {cut}")
     cases = [("before cutoff x100", 560.0, cut - 1, 5.6), ("after cutoff percent", 6.3, cut, 6.3),
+             ("before cutoff percent", 11.2, cut - 1, 11.2), ("before cutoff small x100", 30.0, cut - 1, 0.3),
+             ("before cutoff negative x100", -110.0, cut - 1, -1.1), ("before cutoff zero", 0.0, cut - 1, 0.0),
+             ("before cutoff percent 3.0", 3.0, cut - 1, 3.0), ("after cutoff whole ten", 10.0, cut, 10.0),
              ("no created_at x100", 780.0, None, 7.8), ("no created_at percent", 6.3, None, 6.3),
              ("None", None, cut + 5, None), ("None, no created_at", None, None, None)]
     for name, v, ca, want in cases:
@@ -15586,7 +15591,7 @@ def _stc_decoupling_units():
         "CREATE TABLE health_markers(marker TEXT, date TEXT, value REAL, source TEXT, note TEXT, PRIMARY KEY(marker,date));"
         "CREATE TABLE ignored_activities(id INTEGER PRIMARY KEY, reason TEXT, created_at TEXT);")
     post = [(f"2026-06-{12-2*i:02d}", 20.0, 6.0 + i * 0.1, cut + 86400 * (300 + i)) for i in range(6)]   # percent
-    pre = [(f"2025-06-{12-2*i:02d}", 20.0, 600.0, cut - 86400 * (30 + i)) for i in range(6)]              # x100
+    pre = [(f"2025-06-{12-2*i:02d}", 20.0, 600.0 if i % 2 else 6.0, cut - 86400 * (30 + i)) for i in range(6)]  # x100 and plain
     for i, (d, km, dec, ca) in enumerate(post + pre, start=1):
         mem.execute("INSERT INTO activities(id,date_time,date,sport,distance,duration,hr_avg,raw) VALUES(?,?,?,?,?,?,?,?)",
                     (i, d + "T18:00", d, S.RUNNING_SPORT, km, int(km * 360), 150,
@@ -15601,14 +15606,15 @@ def _stc_decoupling_units():
         if d["recent_median_raw"] != 625.0:
             fail.append(f"recent_median_raw={d['recent_median_raw']} want 625.0")
         if d["prior_median_raw"] != 600.0:
-            fail.append(f"prior x100 rows must read 6.0 %: prior_median_raw={d['prior_median_raw']} want 600.0")
+            fail.append(f"prior x100 and plain rows must both read 6.0 %: prior_median_raw={d['prior_median_raw']} want 600.0")
         if d["verdict"] != "moderate fade":
             fail.append(f"verdict={d['verdict']} want 'moderate fade'")
     return _st("det", "decoupling-units",
-               "Runalyze aerobic_decoupling_pace unit change (31 Jul 2025): x100 before, percent after, keyed on "
-               "raw.created_at; magnitude fallback without it; None stays None; durability read in percent end to end",
+               "Runalyze aerobic_decoupling_pace in two units: percent after the 31 Jul 2025 cutoff; before it or "
+               "without created_at the value decides (>= 50 or a whole ten = x100); durability read in percent end to end",
                passed=not fail,
-               expect="560@pre->5.6, 6.3@post->6.3, 780 bare->7.8, 6.3 bare->6.3, None->None; recent_median_pct 6.2",
+               expect="560@pre->5.6, 11.2@pre->11.2, 30@pre->0.3, 6.3@post->6.3, 10@post->10, 780 bare->7.8, "
+                      "6.3 bare->6.3, None->None; recent_median_pct 6.2, prior 600 with mixed units",
                got={"recent_pct": d.get("recent_median_pct"), "failures": fail or "none"})
 
 
@@ -23238,11 +23244,11 @@ def _stc_regime_compare():
     fail = []
     nplans = lambda: mem.execute("SELECT COUNT(*) c FROM plans").fetchone()["c"]
     n0 = nplans()
-    p_nat = S.generate_plan(mem)
+    p_nat = S.generate_plan(mem, today=today)   # CLOCK-PINNED: on the real clock the fixture's race (today+24 wk) went past on 16 Nov 2026
     nat_mode = (p_nat.get("regime") or {}).get("mode")
-    p_cau = S.generate_plan(mem, force_regime="caution")
-    p_asr = S.generate_plan(mem, force_regime="assertive")
-    p_bad = S.generate_plan(mem, force_regime="turbo")
+    p_cau = S.generate_plan(mem, force_regime="caution", today=today)
+    p_asr = S.generate_plan(mem, force_regime="assertive", today=today)
+    p_bad = S.generate_plan(mem, force_regime="turbo", today=today)
     if (p_cau.get("regime") or {}).get("mode") != "caution":
         fail.append("force_regime='caution' did not take")
     if (p_asr.get("regime") or {}).get("mode") != "assertive":
@@ -23950,7 +23956,7 @@ def _stc_acwr_agreement():
     kind = (r.get("session") or {}).get("kind")
     if kind != "rest":
         fails.append(f"(a) the fixture did not produce a rest day (kind={kind!r}) — the probe is vacuous")
-    if "ACWR 0.87" not in act:
+    if "load ratio 0.87" not in act:   # the card names it "load ratio" (one term on the console)
         fails.append(f"(a) green rest day, ratio 0.87 vs field 1.09: the readiness action reads "
                      f"{act!r} — it must quote the ratio the gauge paints")
     if "1.09" in act:

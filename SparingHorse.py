@@ -5363,29 +5363,34 @@ DURABILITY_MIN_KM = 16.0       # a run long enough for economy decay to manifest
 DURABILITY_BUILD_MIN_KM = 18.0  # the build-vs-build read's floor (SH-94) — the 16 km tracker floor stays
 DURABILITY_GOOD_RAW = 500.0    # decoupling below this on a long run ≈ durable (economy held); Runalyze raw units
 DURABILITY_HIGH_RAW = 1000.0   # above this ≈ notable economy decay over the distance
-# Runalyze changed the unit of aerobic_decoupling_pace on 31 Jul 2025: activities created before it carry
-# percent ×100 (560.0 = 5.6 %; the athlete's last marathon ≈1740 ≈17.4 %), activities created from it on carry
-# plain percent (6.3 = 6.3 %). decoupling_pct() normalises both to percent; the "raw" fields of the durability
-# read are the app's OWN ×100 reading of that percent (decoupling_raw = pct × DURABILITY_PCT_SCALE), so the
-# thresholds above and the trend maths (±100) stay as they were.
+# Runalyze has served aerobic_decoupling_pace in two units. Activities created before 31 Jul 2025 used to
+# come as percent ×100 (560.0 = 5.6 %); activities created from that day come as plain percent (6.3 = 6.3 %).
+# Later Runalyze began sending the older activities in plain percent too, so a database holds either unit for
+# an old activity depending on when it was last synced. decoupling_pct() normalises both to percent; the "raw"
+# fields of the durability read are the app's OWN ×100 reading of that percent (decoupling_raw = pct ×
+# DURABILITY_PCT_SCALE), so the thresholds above and the trend maths (±100) stay as they were.
 DURABILITY_PCT_SCALE = 100.0
-# Epoch seconds of 2025-07-31T00:00:00Z (1753920000) — the unit change. Found on the athlete's history: all
-# 1,198 rows with raw.created_at before it are multiples of 10 (×100 values), 0 of the 217 rows from it on has
-# |v| >= 50, and no activity breaks the rule.
+# Epoch seconds of 2025-07-31T00:00:00Z (1753920000). From it on every activity is plain percent. Before it the
+# value itself tells the unit: a ×100 value is always a whole multiple of 10 (one decimal of percent ×100),
+# and plain percent below 50 almost never is, so >= 50 or a whole ten below 50 reads as ×100 (see decoupling_pct).
 import calendar as _calendar
 RUNALYZE_DECOUPLING_PCT_FROM = _calendar.timegm((2025, 7, 31, 0, 0, 0))
 
 
 def decoupling_pct(value, created_at=None):
-    """Runalyze aerobic_decoupling_pace in PERCENT, whichever unit the activity was stored in (None stays None).
-    Keyed on raw.created_at (epoch s); without it (fixtures, the demo seed) on magnitude."""
+    """Runalyze aerobic_decoupling_pace in PERCENT, whichever unit it was stored in (None stays None).
+
+    raw.created_at on or after RUNALYZE_DECOUPLING_PCT_FROM: plain percent. Older or unknown: read by the
+    value. A ×100 value is a whole multiple of 10, so |v| >= 50 or a whole ten (10, 20, 30, 40) reads as ×100
+    and anything else as plain percent. A plain 10.0 or 20.0 % on an old activity reads as 0.1 or 0.2 %, the
+    one case the value cannot settle; it is rare and, in the cases checked, lands on short runs."""
     if value is None:
         return None
-    if created_at is not None:
-        return value / 100.0 if created_at < RUNALYZE_DECOUPLING_PCT_FROM else value
-    # No created_at: a real long-run decoupling in percent stays well under 50, while a ×100 value of a
-    # >= 0.5 % fade is >= 50, so the magnitude tells the two units apart.
-    return value / 100.0 if abs(value) >= 50 else value
+    if created_at is not None and created_at >= RUNALYZE_DECOUPLING_PCT_FROM:
+        return value
+    if abs(value) >= 50 or (value != 0 and abs(value - round(value / 10.0) * 10.0) < 1e-6):
+        return value / 100.0
+    return value
 
 
 EFFICIENCY_MIN_KM = 4.0        # below this a run is a shakeout — warm-up drag dominates the average HR
@@ -5557,8 +5562,8 @@ def durability_signal(db, recent_n=6):
             "pace:HR drift). Lower = more durable.",
             "Decoupling RISES with distance, so compare like distances; the trend is void when the distance "
             "mix shifts. Exploratory.",
-            "Runalyze stores decoupling as percent ×100 before 31 Jul 2025 and as plain percent after; both are "
-            "normalised to percent, and the raw figure here is that percent ×100.",
+            "Runalyze has sent decoupling as percent ×100 and as plain percent; both are normalised to percent, "
+            "and the raw figure here is that percent ×100.",
             "The 5 % horizon is a straight line through few runs, and it comes from easier or harder long "
             "runs build to build — a sketch to compare, not a prediction.",
         ],
@@ -7201,8 +7206,8 @@ def assess_readiness(db, checkin, session=None):
     if reasons:
         all_clear = None
     elif evidence == 0:
-        all_clear = ("Nothing flagged — but nothing checked in today either, and no HRV reading, "
-                     "so this is the plan speaking, not a readiness read")
+        all_clear = ("Nothing checked in today and no HRV reading, so this follows the plan "
+                     "rather than a readiness read")
     elif evidence < len(signals):
         missing = ", ".join(k for k, v in signals.items() if v == "missing")
         all_clear = f"Nothing flagged in what was reported (no {missing} today)"
@@ -7523,13 +7528,11 @@ def today_readiness(db):
         acwr = (snap["fatigue"] / snap["fitness"]) if (snap and snap["fitness"]) else None
         if _bonus_run_ok("green", "rest", acwr):
             assessment = {**assessment, "bonus": True, "acwr": round(acwr, 2),
-                          "action": (f"Good to go — today's a planned rest day, but your load is light "
-                                     f"(ACWR {acwr:.2f}) and you're green, so an easy run here is BONUS "
-                                     f"aerobic base, not a breach — the weekly ACWR ceiling still caps you. "
-                                     f"Recovery is also fine.")}
+                          "action": (f"Rest day. An easy run fits if you want one: load ratio "
+                                     f"{acwr:.2f}, under the weekly ceiling. Resting is just as good.")}
         else:
             assessment = {**assessment,
-                          "action": "Good to go — and today's a planned rest day. Take the recovery."}
+                          "action": "Rest day. Take the recovery."}
     # Already ran today's session? Acknowledge it instead of still nudging "run today's session".
     # Never overrides a red/halt — a logged run must not suppress a medical stop signal.
     if (session or {}).get("done") and assessment.get("verdict") != "red" and not assessment.get("halt"):
@@ -12101,7 +12104,7 @@ def seed_synthetic_db(db, weeks=24, end=None, seed=42, with_objective=True, past
                 # It RISES with distance and FALLS as the athlete adapts, which is exactly the
                 # confound that card spends three caveats on: the demo's long runs get longer AND
                 # decouple less, so the chart shows the two moving against each other on real axes.
-                # ×100 values with no created_at: decoupling_pct() reads them by magnitude
+                # ×100 values with no created_at: decoupling_pct() reads them by value
                 extra["aerobic_decoupling_pace"] = round(max(
                     120.0, DEMO_DECOUP_BASE - DEMO_DECOUP_GAIN * prog
                     + DEMO_DECOUP_PER_KM * (km - DURABILITY_MIN_KM) + rnd.uniform(-22, 22)), 1)
