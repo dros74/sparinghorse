@@ -138,7 +138,7 @@ async function runFull() {
   const lsRow = page.locator('#plan .weekpane .limhd[data-lim="long_step"]').first();
   if (await lsRow.count()) {
     await lsRow.click();
-    const lsTxt = await lsRow.locator('xpath=following-sibling::div[1]').textContent().catch(() => '');
+    const lsTxt = await lsRow.locator('xpath=ancestor::tbody[1]//div[contains(@class,"limsrc")]').textContent().catch(() => '');
     ok('the long-run step names its study (Frandsen)', (lsTxt || '').includes('Frandsen'));
   }
   // SH-86d — the limit cards are an accordion: opening a second card closes the first; clicking the
@@ -193,6 +193,23 @@ async function runFull() {
        rm.covered === rm.n && rm.maxEdge <= 1);
     ok(`every race flag's line lands inside its week's bar at ${label} (${rm.lines.length} flags)`, rm.lines.length >= 1 && rm.lines.every(Boolean));
     ok(`the today stem lands inside the current week's bar at ${label}`, rm.stem === true && rm.cur);
+    // SH-140 — the course drawn over the road
+    const rc = await page.evaluate(() => {
+      const svg = document.querySelector('#plan .road .roadcourse');
+      if (!svg) return null;
+      const bars = [...document.querySelectorAll('#plan .road .weekseg')].map(b => b.getBoundingClientRect());
+      const ctrl = [...svg.querySelectorAll('.rc-ctrl')].map(c => { const r = c.getBoundingClientRect(); return r.left + r.width / 2; });
+      const nCtrl = ctrl.length, nFin = svg.querySelectorAll('.rc-fo').length;
+      return { starts: svg.querySelectorAll('.rc-start').length, finish: svg.querySelectorAll('.rc-finish').length,
+        legs: svg.querySelectorAll('.rc-leg').length, points: 1 + nCtrl + nFin,
+        inBars: ctrl.every(x => bars.some(b => x >= b.left - 3 && x <= b.right + 3)),
+        pe: getComputedStyle(svg).pointerEvents, hidden: svg.getAttribute('aria-hidden') };
+    });
+    ok(`the course is drawn from today at ${label}`, rc !== null);
+    ok(`the course has one start and a finish at ${label}`, rc && rc.starts === 1 && rc.finish >= 1);
+    ok(`the course has one leg between each pair of points at ${label} (${rc && rc.legs} legs, ${rc && rc.points} points)`, rc && rc.legs === rc.points - 1);
+    ok(`every control sits over a week bar at ${label}`, rc && rc.inBars);
+    ok(`the course never takes a click at ${label}`, rc && rc.pe === 'none' && rc.hidden === 'true');
   }
   await page.setViewportSize({ width: 1280, height: 1700 });
   await page.waitForTimeout(300);
@@ -206,9 +223,9 @@ async function runFull() {
     await page.waitForTimeout(300);
     const opened = await page.evaluate(k => {
       const el = document.querySelector(`#weekpane .limhd[data-lim="${k}"]`);
-      const src = el && el.nextElementSibling;
+      const src = el && el.closest('.limrow') && el.closest('.limrow').querySelector('.limsrc');   // SH-140 — the source sits in the row group
       return { open: el && el.getAttribute('aria-expanded'),
-               shown: !!(src && src.classList.contains('limsrc') && !src.hidden) };
+               shown: !!(src && !src.hidden) };
     }, holdKey);
     ok(`the tile's why-button opens that limit in the week pane (${holdKey}: expanded ${opened.open}, source shown ${opened.shown})`,
        opened.open === 'true' && opened.shown);
@@ -648,9 +665,9 @@ async function runFull() {
     meta: document.querySelector('meta[name="theme-color"]').content,
     man: document.querySelector('link[rel="manifest"]').getAttribute('href') }));
   await page.locator('#themeBtn').click(); await page.locator('#themeBtn').click();   // → light → auto: leave the run in Daylight
-  ok(`theme-color starts on Daylight (${chrome0})`, chrome0 === '#f4f1ea');
+  ok(`theme-color starts on Daylight (${chrome0})`, chrome0 === '#ffffff');
   ok(`theme chrome follows the switch (${chrome1.meta} · ${chrome1.man})`,
-     chrome1.meta === '#191a1d' && (chrome1.man || '').includes('theme=dark'));
+     chrome1.meta === '#121417' && (chrome1.man || '').includes('theme=dark'));
 
   // the ratified category palette (0.30.0): each shape tile takes its hue from its data-m metric
   // identity — measured in the live cascade, since a source check can't see a rule that matches nothing
@@ -795,6 +812,17 @@ async function runFull() {
   ok('the desktop section rail lists the sections (≥8 links)', await page.locator('nav.rail a').count() >= 8);
   await page.locator('nav.rail a[data-sec="sec-track"]').click(); await page.waitForTimeout(400);
   ok('a rail link opens its (closed) section', await page.$eval('#sec-track', d => d.open));
+  // SH-140 — the clicked link keeps the control circle once its scroll settles, even for a closing
+  // section that cannot reach the top; the course strip sits under the objective card
+  await page.waitForTimeout(1400);
+  ok('the clicked rail link holds the current mark (aria-current)',
+     await page.$eval('nav.rail a.on', a => a.dataset.sec === 'sec-track' && a.getAttribute('aria-current') === 'location').catch(() => false));
+  const cs = await page.evaluate(() => { const h = document.querySelector('#coursestrip'), o = document.querySelector('#objbar');
+    return h ? { starts: h.querySelectorAll('.cs-start').length, fins: h.querySelectorAll('.cs-fin').length,
+      ctrls: h.querySelectorAll('.cs-ctrl').length, legs: h.querySelectorAll('.cs-leg').length,
+      under: o ? o.nextElementSibling === h : false } : null; });
+  ok(`the course strip draws today, its controls and a finish under the objective card (${JSON.stringify(cs)})`,
+     cs && cs.starts === 1 && cs.fins >= 1 && cs.legs === cs.ctrls + cs.fins && cs.under);
   ok('a fresh device sees the analytics closed (details, no open by default)',
      await page.evaluate(() => { localStorage.clear(); return [...document.querySelectorAll('details.section')].length; }) >= 8);
   await page.goto(BASE + '/today', { waitUntil: 'networkidle' }); await page.waitForTimeout(800);
@@ -1400,7 +1428,7 @@ async function runPublic() {
   ok('public readiness card carries no sync age (the household routine stays private)', chip === '');
   await page.locator('#themeBtn').click();   // auto → dark (0.57.0: one button cycles the themes)
   const tc = await page.evaluate(() => document.querySelector('meta[name="theme-color"]').content);
-  ok('theme-color follows the switch on the public box too', tc === '#191a1d');
+  ok('theme-color follows the switch on the public box too', tc === '#121417');
   ok('the public box keeps the track record where the private console has it (after the plan drift; the 0.57.0 ledger-first move is retired)', await page.evaluate(() => {
     const t = document.getElementById('sec-track'), d = document.getElementById('sec-drift'), o = document.getElementById('objbar');
     return !!t && !!d && d.nextElementSibling === t && o.nextElementSibling !== t; }));

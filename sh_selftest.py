@@ -415,7 +415,8 @@ def _stcss_gradient_stops(rule_body):
     """(top, bottom) color expressions of the linear-gradient background."""
     m = S.re.search(r"linear-gradient\((.*)\)", rule_body, S.re.S)
     if not m:
-        return None, None
+        flat = rule_body.strip()   # SH-140 — a flat background is its own top and bottom stop
+        return (flat, flat) if flat else (None, None)
     args = _stcss_split_top(m.group(1))
     stops = [a for a in args if not S.re.match(r"^\d+deg$", a)]
     return (stops[0], stops[-1]) if len(stops) >= 2 else (None, None)
@@ -23572,7 +23573,9 @@ def _stc_axis_legibility():
     if stretched != 6:
         fails.append(f"(a) expected the 6 stretched charts, found {stretched}")
     # …and the flat rule, which is what actually closes the accumulator hole
-    for m in S.re.finditer(r"<text[\s>]", live_js):
+    # SH-140 — the road course's control numbers are the one exception: that SVG has no viewBox,
+    # so it is drawn 1:1 in pixels and nothing stretches its glyphs
+    for m in S.re.finditer(r'<text(?![^>]*class="rc-num")[\s>]', live_js):
         fails.append(f"(a) app.js line {live_js.count(chr(10), 0, m.start()) + 1} builds an SVG <text>: "
                      f"every chart here stretches, so its glyphs would be squeezed with the trace")
     for needle, why in (("function axisLayer(", "the HTML label-layer builder"),
@@ -23806,7 +23809,7 @@ def _stc_pwa_polish():
     fails = []
     js, css, shell = S.APP_JS, S.APP_CSS, S.INDEX_HTML
     # (a) theme chrome: the shell map + the two writes at parse time, and the switch-side upkeep
-    for hexv in ("#f4f1ea", "#191a1d"):   # 0.57.0: two themes
+    for hexv in ("#ffffff", "#121417"):   # 0.57.0: two themes
         if hexv not in shell or hexv not in js:
             fails.append(f"(a) theme bg {hexv} missing from {'shell' if hexv not in shell else 'app.js'} "
                          f"— one theme's chrome would fall back to Daylight")
@@ -23823,10 +23826,10 @@ def _stc_pwa_polish():
             plain = S.json.loads(c.get("/manifest.webmanifest").get_data(as_text=True))
             dark = S.json.loads(c.get("/manifest.webmanifest?theme=dark").get_data(as_text=True))
             junk = S.json.loads(c.get("/manifest.webmanifest?theme=evil").get_data(as_text=True))
-            if dark.get("theme_color") != "#191a1d" or dark.get("background_color") != "#191a1d":
+            if dark.get("theme_color") != "#121417" or dark.get("background_color") != "#121417":
                 fails.append(f"(a) ?theme=dark manifest colours {dark.get('theme_color')!r} "
                              f"(READONLY={ro}) — an installed Charcoal window would wear Daylight chrome")
-            if plain.get("theme_color") != "#f4f1ea" or junk.get("theme_color") != "#f4f1ea":
+            if plain.get("theme_color") != "#ffffff" or junk.get("theme_color") != "#ffffff":
                 fails.append(f"(a) default/garbage theme did not fall back to Daylight (READONLY={ro})")
     finally:
         S.READONLY = saved

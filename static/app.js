@@ -45,6 +45,7 @@ const getJSON = (url, opts) => fetch(url, opts).then(r => r.json().catch(()=>nul
 // hook. A transport failure (TypeError / !navigator.onLine) is named as offline and stamped with the
 // last sync we saw; an answered-with-error read gets the plain "unavailable". Never a parked "Loading…".
 let LAST_SYNC = null;
+let ROAD_DRAWN=false;   // SH-140 — the course draws in once per page load, not on every re-render
 // UX-11 — the last sync is also PERSISTED (private only): a service-worker shell opened offline
 // still says how old its data is. tileFail falls back to the stamp; the freshness chip seeds from it.
 const storedSync = () => { if(SH_READONLY) return null; try{ return localStorage.getItem("sh-last-sync"); }catch(e){ return null; } };
@@ -74,14 +75,14 @@ const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"
 
 // theme switcher — 0.57.0: one button cycling auto (follow the system) → dark → light. "auto" stores
 // nothing and re-reads prefers-color-scheme; a saved choice wins until the cycle returns to auto.
-const SH_THEME_BG = window.SH_THEME_BG || {light:"#f4f1ea",dark:"#191a1d"};   // each theme's --bg
+const SH_THEME_BG = window.SH_THEME_BG || {light:"#ffffff",dark:"#121417"};   // each theme's --bg
 const themeBtn = $("#themeBtn");
 const systemTheme = () => (window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
 function themeChoice(){ try{ const s=localStorage.getItem("sh-theme"); return (s==="dark"||s==="light") ? s : "auto"; }catch(e){ return "auto"; } }
 function paintTheme(){
   const choice=themeChoice(), t=choice==="auto" ? systemTheme() : choice;
   document.documentElement.dataset.theme=t;
-  if(themeBtn){ themeBtn.textContent = "Theme · "+(choice==="auto"?"auto":choice==="dark"?"charcoal":"daylight");
+  if(themeBtn){ themeBtn.textContent = "Theme · "+(choice==="auto"?"auto":choice==="dark"?"night":"daylight");
     themeBtn.setAttribute("aria-label", choice==="auto" ? "Theme: follows the system" : `Theme: ${choice==="dark"?"Charcoal":"Daylight"}`); }
   // UX-11 — the browser chrome follows the theme: the tab/PWA title-bar colour, and the manifest
   // link a later install reads (the shell's head script does the same two writes at parse time)
@@ -379,8 +380,8 @@ $("#backfillBtn").addEventListener("click", async ()=>{
 });
 
 // ── Latest activity ─────────────────────────────────────────────────────────
-function metric(label, val, unit){
-  return `<div class="metric"><div class="ml">${label}</div>
+function metric(label, val, unit, cls){
+  return `<div class="metric${cls?" "+cls:""}"><div class="ml">${label}</div>
     <div class="mv">${val}${unit?`<small> ${unit}</small>`:""}</div></div>`;
 }
 function paceStr(minkm){ if(minkm==null) return "—"; minkm=U.pmin(minkm); const m=Math.floor(minkm), s=Math.round((minkm-m)*60);
@@ -799,9 +800,9 @@ async function showActivityMap(aid){
   host.innerHTML="";
   try{ await ensureLeaflet(); }catch(e){ host.innerHTML=`<div class="mapempty">Map unavailable (offline?).</div>`; return; }
   const cs=getComputedStyle(document.documentElement);
-  const accent=cs.getPropertyValue("--accent").trim()||"#b9542c";   // route line follows the theme
-  const okc=cs.getPropertyValue("--ok").trim()||"#4f8c5f";          // start marker = good (semantic)
-  const dangerc=cs.getPropertyValue("--danger").trim()||"#b5563f";  // end marker = stop (semantic)
+  const accent=cs.getPropertyValue("--accent").trim()||"#c8008f";   // route line follows the theme
+  const okc=cs.getPropertyValue("--ok").trim()||"#2e7d32";          // start marker = good (semantic)
+  const dangerc=cs.getPropertyValue("--danger").trim()||"#c62828";  // end marker = stop (semantic)
   ACTMAP=L.map(host,{zoomControl:true, scrollWheelZoom:false});
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     {maxZoom:19, attribution:"© OpenStreetMap"}).addTo(ACTMAP);
@@ -866,10 +867,14 @@ function plannedSession(s, easyPace){
   // 0.60.2 — a note that only restates the title ("easy run" under "Easy run") is not a line
   const ttlTxt=String(KINDT[s.kind]||s.kind+" run").replace(/<[^>]+>/g,"");
   const noteLine=(noteTxt&&String(noteTxt).trim().toLowerCase()!==ttlTxt.toLowerCase()) ? `<div class="muted" style="font-size:12px;margin-top:6px">${esc(noteTxt)}</div>` : "";
-  return `<div class="planned"${s.done?' style="opacity:.85"':''}><div class="rkick">${kick}</div>
+  return `<div class="planned">
     <div class="mrow">
+      <span class="rkick">${kick}</span>
       <span class="ttl">${KINDT[s.kind]||esc(s.kind)+" run"}</span>
-      ${metric("Distance", U.d(s.km), U.unit)}
+    </div>
+    ${/* SH-140 — the session's distance is the hero numeral; the facts row sits under it */""}
+    ${metric("Distance", U.d(s.km), U.unit, "shero")}
+    <div class="mrow sfacts">
       ${metric("Duration", `~${s.minutes}`, "min")}
       ${q?"":paceMetric}
       ${metric("Target load", s.trimp!=null?Math.round(s.trimp):"—", "TRIMP")}
@@ -900,9 +905,7 @@ function paintFreshness(){
 }
 function statusCard(a, foot){
   const v=a.verdict||"green";
-  const orbs=`<span class="sc-orb" style="top:-50px;right:-40px;width:180px;height:180px"></span>`+
-             `<span class="sc-orb" style="bottom:-60px;left:-30px;width:150px;height:150px;background:color-mix(in oklab,var(--onready),transparent 95%)"></span>`;
-  return `<div class="statuscard ${v}">${orbs}
+  return `<div class="statuscard ${v}">
       <div class="sc-top">
         <span class="sc-eyebrow">Today's readiness</span>
         <span class="sc-pill"><span class="dot"></span>${v}${a.halt?" · halted":""}</span>
@@ -931,15 +934,16 @@ function renderReadiness(d){
   const a=d.assessment||{};
   if(SH_READONLY || a.public){   // public view: verdict card + planned session only
     $("#readiness").innerHTML = statusCard(a, "") + plannedSession(d.session)
-      + (SH_PAGE==="today" ? whyLine(d.session) + (TODAY_LINES ? `<div data-today-lines="1">${TODAY_LINES}</div>` : "") : "");   // §TODAY-LINES — the public day reads the limit line too
+      + (SH_PAGE==="today" ? (TODAY_LINES ? `<div data-today-lines="1">${TODAY_LINES}</div>` : "") + whyLine(d.session) : "");   // §TODAY-LINES — the public day reads the limit line too
     return;
   }
   const c=d.checkin||{};
   const hrv=a.hrv||{};
   const hrvTxt = hrv.state==null ? "HRV: no data"
     : `HRV ${hrv.baseline} vs ${hrv.band[0]}–${hrv.band[1]} — ${hrv.state}`;
-  const sel=(name,val,opts)=>`<label for="ci_${name}">${name}</label><select id="ci_${name}">`+
-    opts.map(([v,t])=>`<option value="${v}" ${v===val?"selected":""}>${t}</option>`).join("")+`</select>`;
+  // SH-140 — each label travels with its select, so a narrow row never strands a label at a line end
+  const sel=(name,val,opts)=>`<span class="ckpair"><label for="ci_${name}">${name}</label><select id="ci_${name}">`+
+    opts.map(([v,t])=>`<option value="${v}" ${v===val?"selected":""}>${t}</option>`).join("")+`</select></span>`;
   let aiLine="";
   if(a.source && a.source.startsWith("llm"))
     aiLine=`🩺 AI judgment${a.engine_floor&&a.engine_floor!==a.verdict?` · engine floor was ${a.engine_floor}`:""}`;
@@ -951,6 +955,7 @@ function renderReadiness(d){
   $("#readiness").innerHTML=
     statusCard(a, foot) +
     plannedSession(d.session) +
+    (SH_PAGE==="today" && TODAY_LINES ? `<div data-today-lines="1">${TODAY_LINES}</div>` : "") +   // SH-140 — the binding-limit line sits under the session, before the check-in
     `<div class="checkin">
       ${/* §H7 — an unset dropdown reads "—", never a pre-selected "ok". Showing "Legs: ok" on a day
             with no check-in made the form look answered, and saving it then wrote a declaration the
@@ -962,7 +967,6 @@ function renderReadiness(d){
       <button class="primary" id="ciBtn" style="font-size:13px;padding:7px 12px">Save check-in</button>
     </div>`;
   if(SH_PAGE==="today") $("#readiness").insertAdjacentHTML("beforeend", whyLine(d.session));   // 0.57.0 — the why line, on the Today page only
-  if(SH_PAGE==="today" && TODAY_LINES) $("#readiness").insertAdjacentHTML("beforeend", `<div data-today-lines="1">${TODAY_LINES}</div>`);   // §TODAY-LINES — survive this rewrite even if the plan fetch landed first
   $("#ciBtn").addEventListener("click", async ()=>{
     const btn=$("#ciBtn");
     const body={energy:$("#ci_energy").value, sleep:$("#ci_sleep").value,
@@ -1809,12 +1813,17 @@ function compChip(s){
 // One LOG-enriched session line — planned label + done/missed mark, actual km@pace, reflection,
 // doubles breakdown. Shared by the re-base journal renderer and (via weekHtml) every other phase's
 // elapsed weeks: the assertive regime skips the re-base, so the log overlay must not live only there.
+// SH-140 — the day marks are 12px inline SVG in currentColor; the word rides on aria-label and title
+const SMK_P=(d,f)=>`<svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true" focusable="false" fill="${f||"none"}" stroke="currentColor" stroke-width="1.6" stroke-linecap="square">${d}</svg>`;
+const SMK={done:SMK_P('<path d="M2 6.5l2.8 2.7L10 3"/>'), missed:SMK_P('<path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/>'),
+  extra:SMK_P('<path d="M6 2v8M2 6h8"/>'), today:SMK_P('<circle cx="6" cy="6" r="2.6" stroke="none"/>',"currentColor"),
+  planned:SMK_P('<circle cx="6" cy="6" r="3.4"/>')};
 function logLine(s,today,planLabel){
   // each mark carries its word for a screen reader and on hover; the week card prints the legend once
-  const mark = s.unplanned ? '<span class="smk extra" role="img" aria-label="extra run" title="extra run, not in the plan">+</span>'
-    : s.done ? '<span class="smk done" role="img" aria-label="done" title="done">✓</span>'
-    : s.missed ? '<span class="smk missed" role="img" aria-label="missed" title="missed">✕</span>'
-    : (s.date===today ? '<span class="smk today" role="img" aria-label="today" title="today">•</span>' : '<span class="smk" role="img" aria-label="planned" title="planned">○</span>');
+  const mark = s.unplanned ? `<span class="smk extra" role="img" aria-label="extra run" title="extra run, not in the plan">${SMK.extra}</span>`
+    : s.done ? `<span class="smk done" role="img" aria-label="done" title="done">${SMK.done}</span>`
+    : s.missed ? `<span class="smk missed" role="img" aria-label="missed" title="missed">${SMK.missed}</span>`
+    : (s.date===today ? `<span class="smk today" role="img" aria-label="today" title="today">${SMK.today}</span>` : `<span class="smk" role="img" aria-label="planned" title="planned">${SMK.planned}</span>`);
   const act = s.actual ? `<span class="sact">${U.d(s.actual.km)}${U.k}${s.actual.pace?` @ ${U.p(s.actual.pace)}`:''}</span>` : "";
   const refl = s.reflection ? `<div class="srefl">📓 ${esc(s.reflection)}</div>` : "";
   const clk = !SH_READONLY && (s.done||s.unplanned) && s.activity_id;   // a completed/extra run → view its run + map
@@ -1826,7 +1835,7 @@ function logLine(s,today,planLabel){
           return `<span class="brkrun"${rc?` data-act-id="${r.activity_id}" role="button" tabindex="0" title="View this run on the map"`:''}>${U.d(r.km)}${U.k}${r.pace?` @ ${U.p(r.pace)}`:''}</span>`;
         }).join(" · ")}</div>`
     : "";
-  return `<div class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" role="button" tabindex="0" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</div>`;
+  return `<li class="sline ${s.date===today?'stoday':''}${s.unplanned?' unplanned':''}${clk?' sclick':''}"${clk?` data-act-id="${s.activity_id}" role="button" tabindex="0" title="View this run on the map"`:""}>${mark}<span class="sdate">${sessDate(s.date)}</span>${plan}${act?' → '+act:''}${refl}${brk}</li>`;
 }
 // §W1 — structured-workout instruction card: the execution plan for a quality session, one row per
 // segment (interval reps grouped), each with duration, ~distance, the pace window and the HR band.
@@ -2113,6 +2122,8 @@ function limitSentence(k, ax, w, L){
       :`${ax.streak} of ${ax.limit} weeks in a row near the load ceiling; at ${ax.limit}, a down week is forced.${sized}`;
   return "";
 }
+// SH-140 — a limit's source panel sits in the row group under its button
+const limSrc=el=>{ const g=el&&el.closest(".limrow"); return g?g.querySelector(".limsrc"):null; };
 function limitsHtml(L, w){
   if(!L) return "";
   const order=["chronic","acwr","long_step","long_max","eq_week","eq_session","tissue"].filter(k=>L[k]);
@@ -2124,6 +2135,7 @@ function limitsHtml(L, w){
   const toggle=order.length>1?`<button type="button" class="linkbtn limall" aria-expanded="${all}">${all
       ?(L.binding?"Show only the limit that holds ↑":"Hide the limits ↑")
       :`${L.binding?"The other":"All"} ${L.binding?order.length-1:order.length} limit${(L.binding?order.length-1:order.length)===1?"":"s"} for this week ↓`}</button>`:"";
+  let rows0=1;
   const rows=shown.map(k=>{
     const ax=L[k], sentence=limitSentence(k,ax,w,L);
     const binding=L.binding===k;
@@ -2132,26 +2144,33 @@ function limitsHtml(L, w){
     const tag=binding?`<span class="limtag hold">holds the week</span>`
             :over?`<span class="limtag over">ran over</span>`
             :ax.exempt?`<span class="limtag">exempt in the peak</span>`:"";
-    let right, ratio;
-    if(k==="tissue"){ right=`${ax.streak} of ${ax.limit} weeks`; ratio=ax.limit?ax.streak/ax.limit:0; }
-    else if(k==="chronic"){ right=`${ax.laid>=0?"+":""}${Number(ax.laid).toFixed(1)} of ${ax.ceiling>=0?"+":""}${Number(ax.ceiling).toFixed(1)} CTL`;
-      ratio=ax.ceiling?Math.max(0,ax.laid)/ax.ceiling:0; }
-    else { right=`${limV(ax.laid,ax.unit)} of ${limV(ax.ceiling,ax.unit)} ${esc(limU(ax.unit))}`;
-      ratio=ax.ceiling?Math.max(0,ax.laid)/ax.ceiling:0; }
-    const pct=Math.round(Math.min(1,Math.max(0,ratio))*100);
+    // SH-140 — the control-description sheet: reading, ceiling and headroom in their own columns
+    let rd, ce, hr, hrNeg=false;
+    const sgn=x=>(x>=0?"+":"")+Number(x).toFixed(1);
+    const head=(d,dec)=>{ const n=Math.abs(d)<0.5*Math.pow(10,-dec)?0:d; hrNeg=n<0; return (n<0?"\u2212":"")+Math.abs(n).toFixed(dec); };
+    if(k==="tissue"){ rd=`${ax.streak}`; ce=`${ax.limit}`; hr=`${head(ax.limit-ax.streak,0)}`; rd+=" wk"; ce+=" wk"; hr+=" wk"; }
+    else if(k==="chronic"){ rd=`${sgn(ax.laid)} CTL`; ce=`${sgn(ax.ceiling)} CTL`; hr=`${head(ax.ceiling-ax.laid,1)} CTL`; }
+    else { const km=ax.unit==="km"||ax.unit==="eq-km", u=esc(limU(ax.unit));
+      rd=`${limV(ax.laid,ax.unit)} ${u}`; ce=`${limV(ax.ceiling,ax.unit)} ${u}`;
+      hr=`${head(km?Number(U.d(ax.ceiling-ax.laid)):ax.ceiling-ax.laid, k==="acwr"?2:1)} ${u}`; }
     const name=LIMIT_NAMES[k]||k;
     const bas=BASIS[ax.basis];
-    return `<div class="limrow">
-      <button type="button" class="limhd" aria-expanded="false" data-lim="${k}">
-        <span class="limtop"><span class="limname">${esc(name.charAt(0).toUpperCase()+name.slice(1))}</span>${tag}<span class="limval mono">${right}</span></span>
-        <span class="limbar${binding?" hold":over?" over":""}"><i style="width:${pct}%"></i></span>
+    return `<tbody class="limrow${binding?" limhold":""}"><tr>
+      <td class="lc-n">${rows0++}</td>
+      <td class="lc-lim"><button type="button" class="limhd" aria-expanded="false" data-lim="${k}">
+        <span class="limtop"><span class="limname">${esc(name.charAt(0).toUpperCase()+name.slice(1))}</span>${tag}</span>
         <span class="limsent">${esc(sentence)}</span>
-        <span class="limmeta">${bas?`<span class="basis ${ax.basis}">${esc(bas.label)}</span>`:""}<span class="limcta">Why, and the source →</span></span>
-      </button>
-      <div class="limsrc" hidden>${sourceHtml(k, sentence)}</div>
-    </div>`;
+        <span class="limcta">Why, and the source →</span>
+      </button></td>
+      <td class="lc-num">${rd}</td>
+      <td class="lc-num lc-ceil">${ce}</td>
+      <td class="lc-num lc-head${hrNeg?" neg":""}">${hr}</td>
+      <td class="lc-basis">${bas?`<span class="basis ${ax.basis}">${esc(bas.label)}</span>`:""}</td>
+    </tr><tr class="limsrcrow"><td colspan="6"><div class="limsrc" hidden>${sourceHtml(k, sentence)}</div></td></tr></tbody>`;
   });
-  return `<div class="limits"><div class="limitslbl">Why this week looks like this</div>${rows.join("")}${toggle}</div>`;
+  return `<div class="limits"><table class="limtbl"><caption class="limitslbl">Why this week looks like this</caption>
+    <thead><tr><th scope="col" class="lc-n">№</th><th scope="col">Limit</th><th scope="col" class="lc-num">Reading</th><th scope="col" class="lc-num lc-ceil">Ceiling</th><th scope="col" class="lc-num">Headroom</th><th scope="col" class="lc-basis">Basis</th></tr></thead>
+    ${rows.join("")}</table>${toggle}</div>`;
 }
 function weekHtml(w,p,today){
   const down=isDownWeek(w);
@@ -2165,7 +2184,7 @@ function weekHtml(w,p,today){
     const q=s.reps&&s.reps.length, card=(q&&!s.done)?workoutCard(s):"";
     const label=`<span class="wsi${q?' qs':''}${card?' wsx':''}"${card?' tabindex="0" role="button" title="Show the workout instructions"':''}>${sessSummary(s)}${card?' <span class="wsxc" aria-hidden="true">▸</span>':''}</span>${compChip(s)}${card}`;
     return {d:s.date, html:(('done' in s) ? logLine(s,today,label)
-      : `<div class="sline"><span class="sdate">${sessDate(s.date)}</span>${label}</div>`)};
+      : `<li class="sline${s.date===today?" stoday":""}"><span class="sdate">${sessDate(s.date)}</span>${label}</li>`)};
   });
   // §REST — the engine lists run sessions only; a rest day has no entry, so every week card read
   // as an unbroken wall of runs — the athlete reasonably counted "14 days of consecutive running"
@@ -2176,12 +2195,12 @@ function weekHtml(w,p,today){
     const have=new Set(w.sessions.map(s=>s.date));
     for(const d of weekDates(w.start))
       if(!have.has(d))
-        lines.push({d, html:`<div class="sline srest"><span class="sdate">${sessDate(d)}</span><span class="wsi">Rest</span></div>`});
+        lines.push({d, html:`<li class="sline srest${d===today?" stoday":""}"><span class="sdate">${sessDate(d)}</span><span class="wsi">Rest</span></li>`});
     lines.sort((a,b)=>a.d<b.d?-1:a.d>b.d?1:0);
   }
   const sess=lines.map(l=>l.html).join("");
   const logged=w.sessions.some(s=>'done' in s);
-  const smkLegend=logged?`<div class="smklegend" aria-hidden="true"><span><b class="smk done">✓</b> done</span><span><b class="smk missed">✕</b> missed</span><span><b class="smk extra">+</b> extra run</span><span><b class="smk today">•</b> today</span><span><b class="smk">○</b> planned</span></div>`:"";
+  const smkLegend=logged?`<div class="smklegend" aria-hidden="true"><span><b class="smk done">${SMK.done}</b> done</span><span><b class="smk missed">${SMK.missed}</b> missed</span><span><b class="smk extra">${SMK.extra}</b> extra run</span><span><b class="smk today">${SMK.today}</b> today</span><span><b class="smk">${SMK.planned}</b> planned</span></div>`:"";
   // §C (0.59.0) — the deload governor's read on the judged down week: retired, offered, or kept (and why)
   const dl=w.deload;
   const dlChip = (dl&&dl.judged) ? (dl.retired
@@ -2226,7 +2245,7 @@ function weekHtml(w,p,today){
       <div class="wbody">
         <div><span class="wkm">${U.d(w.km)} ${U.unit}</span>${eqkm} · ${w.runs} runs${kmSplit}${flags?' · '+flags:''}</div>
         <div class="wintent">${w.intent}</div>
-        <div class="wsesslog">${sess}</div>${smkLegend}
+        <ol class="wsesslog wkdays">${sess}</ol>${smkLegend}
       </div>
       <div>${acBadge(w.proj_acwr)}</div>
     ${limitsHtml(w.limits, w)}</div>`;
@@ -2340,10 +2359,52 @@ function armCountdown(dateIso, timeHM, tz){
   };
   tick();
 }
+// SH-140 — the course strip under the objective card: the road ahead as an orienteering course.
+// A triangle at today, a numbered control at each phase change and tune-up still ahead, a double
+// circle at each race; each leg is tinted by the phase it runs through and grows with its days.
+// Built from the plan payload alone, so the console and the Today page draw the same strip. The
+// phone shows the controls on one line; their names stay in the markup for screen readers.
+function renderCourseStrip(p, today){
+  const host=$("#coursestrip"); if(!host) return;
+  if(!p||!Array.isArray(p.phases)){ host.innerHTML=""; return; }
+  const nameOf=k=>k==="rebase"?"Re-base":(((p.phases||[]).find(x=>x.key===k)||{}).phase||k);
+  const groups=[{key:"rebase",weeks:(p.rebase&&p.rebase.weeks)||[]}]
+    .concat(p.phases.filter(x=>x.key&&x.key!=="rebase").map(x=>({key:x.key,weeks:(p[x.key]&&p[x.key].weeks)||[]})))
+    .filter(g=>g.weeks.length&&g.weeks[0].start);
+  const phaseAt=date=>{ let k=null; groups.forEach(g=>{ if(g.weeks[0].start<=date) k=g.key; }); return k; };
+  const pts=[];
+  groups.forEach(g=>{ const st=g.weeks[0].start; if(st>today) pts.push({kind:"ctrl",date:st,label:nameOf(g.key)}); });
+  (p.tune_ups||[]).forEach(t=>{ if(t.date>today) pts.push({kind:"ctrl",small:true,date:t.date,label:t.label}); });
+  const chain=p.chain||[], o=p.objective;
+  const races=chain.length>1 ? chain.map(c=>({label:c.label,date:c.date,ft:c.finish_time}))
+    : (o ? [{label:o.label,date:o.date,ft:p.feasibility&&p.feasibility.finish_time}] : []);
+  races.forEach(r=>{ if(r.date&&r.date>=today) pts.push({kind:"finish",date:r.date,label:r.label,ft:r.ft}); });
+  if(!pts.length){ host.innerHTML=""; return; }
+  pts.sort((a,b)=>a.date<b.date?-1:a.date>b.date?1:0);
+  let n=0; pts.forEach(q=>{ if(q.kind==="ctrl") q.n=++n; });
+  const day=d=>Date.parse(d+"T00:00:00Z");
+  const mk={
+    start:`<svg viewBox="-10 -10 20 20" aria-hidden="true" focusable="false"><path d="M0,-8 L7.5,5 L-7.5,5 Z"/></svg>`,
+    ctrl:q=>`<svg viewBox="-10 -10 20 20" aria-hidden="true" focusable="false"><circle r="${q.small?5.5:7.5}"/></svg>`,
+    finish:`<svg viewBox="-10 -10 20 20" aria-hidden="true" focusable="false"><circle r="8"/><circle r="4.5"/></svg>`};
+  const ctl=(cls,mark,num,label,sub)=>`<div class="cs-c ${cls}" role="listitem">${mark}${num?`<span class="cs-n" aria-hidden="true">${num}</span>`:""}`+
+    `<span class="cs-t"><span class="cs-l">${label}</span><span class="cs-d">${sub}</span></span></div>`;
+  let prev={date:today}, html=ctl("cs-start",mk.start,"","today",esc(sessDate(today)));
+  pts.forEach(q=>{
+    const days=Math.max(1,Math.round((day(q.date)-day(prev.date))/864e5));
+    html+=`<div class="cs-leg" data-pk="${esc(phaseAt(prev.date)||"rebase")}" style="flex-grow:${days}" aria-hidden="true"></div>`;
+    if(q.kind==="finish"){
+      const ft=q.ft&&q.ft.hms?` · median ${esc(q.ft.hms)}`:"";
+      html+=ctl("cs-fin",mk.finish,"",esc(q.label),esc(sessDate(q.date))+ft);
+    }else html+=ctl(q.small?"cs-ctrl cs-tune":"cs-ctrl",mk.ctrl(q),q.n,`<span class="rc-sr">${q.n}. </span>${esc(q.label)}${q.small?" (tune-up)":""}`,esc(sessDate(q.date)));
+    prev=q;
+  });
+  host.innerHTML=`<div class="cs-row" role="list" aria-label="The course from today to the race">${html}</div>`;
+}
 function renderPlan(p){
   const host=$("#plan");
   // the public box removes the Generate button — its empty state must not point at it (UX-11)
-  if(!p){ armCountdown(null); host.innerHTML=`<div class="empty">${SH_READONLY
+  if(!p){ armCountdown(null); renderCourseStrip(null); host.innerHTML=`<div class="empty">${SH_READONLY
       ? "No plan published yet."
       : `No plan yet — hit <b>Generate plan</b>.`}</div>`; return; }
   LAST_PLAN=p;   // §CHAIN3 — the race selector re-renders off this without re-fetching /api/plan
@@ -2375,6 +2436,7 @@ function renderPlan(p){
     : "";
   // arm AFTER the innerHTML above lands the span; no shown race (or no bar) disarms the tick.
   // Works identically on the public box — date + start_time are allowlisted and #objbar exists there.
+  renderCourseStrip(p, today0);   // SH-140 — the course strip sits under the objective card
   if(ob && cdRace) armCountdown(cdRace.date, (cdObj&&cdObj.start_time)||null, (cdObj&&(cdObj.start_tz||cdObj.default_tz))||null);
   else armCountdown(null);
   const totalw=p.phases.reduce((s,x)=>s+x.weeks,0);
@@ -2428,8 +2490,8 @@ function renderPlan(p){
   // LOG-enriched (done/missed/unplanned/doubles via sessHtml).
   const rebaseCard=w=>{
     const hasLog = w.sessions.some(s=>'done' in s);
-    const sess = hasLog ? `<div class="wsesslog">${w.sessions.map(sessHtml).join("")}</div>`
-      : `<div class="wsesslog">${w.sessions.map(s=>`<div class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${sessSummary(s)}</span></div>`).join("")}<div class="muted mono" style="margin-top:3px">@ easy ${p.pace_zones.easy_top}</div></div>`;
+    const sess = hasLog ? `<ol class="wsesslog wkdays">${w.sessions.map(sessHtml).join("")}</ol>`
+      : `<ol class="wsesslog wkdays">${w.sessions.map(s=>`<li class="sline"><span class="sdate">${sessDate(s.date)}</span><span class="splan">${sessSummary(s)}</span></li>`).join("")}</ol><div class="muted mono" style="margin-top:3px">@ easy ${p.pace_zones.easy_top}</div>`;
     return `<div class="wk ${isDownWeek(w)?'wdown':''}">
       <div class="wn">${w.wk}</div>
       <div class="wbody">
@@ -2549,7 +2611,7 @@ function renderPlan(p){
       <div class="tilelbl">This week · ${esc(curIt.phase.split(" ")[0])} week ${w.wk}</div>
       <div class="tilebig">${U.d(w.km)} ${U.unit} <span class="muted">· ${w.runs} runs</span></div>
       <div class="muted mono" style="font-size:12px">${sessDate(w.start)} – ${sessDate(weekEndIso(w.start))}${w.proj_ctl!=null?` · fitness ${Math.round(w.proj_ctl)} at week end`:""}</div>
-      <div class="wkdays">${days}</div>
+      <div class="wkbars">${days}</div>
       <div class="wklegend"><span><i class="easy"></i>easy</span><span><i class="qual"></i>quality</span><span><i class="long"></i>long</span></div>
       <div class="wintent">${w.intent||""}</div>
       <button type="button" class="linkbtn" id="openWeek">Open the week, day by day ↓</button>
@@ -2567,16 +2629,16 @@ function renderPlan(p){
   const limitsTile=!curIt?"":`<div class="plantile">
     <div class="tilelbl">What holds this week</div>
     ${leadKey?(()=>{const ax=LW[leadKey];return `
-      <div class="limname" style="font-family:var(--serif);font-size:17px">${esc((LIMIT_NAMES[leadKey]||leadKey).replace(/^./,c=>c.toUpperCase()))}</div>
-      <span class="limbar${LW.binding===leadKey?" hold":""}" style="height:12px"><i style="width:${limPct(leadKey,ax)}%"></i></span>
-      <div class="mono" style="font-size:12px">${limVal(leadKey,ax)}</div>
+      <div class="limname limlead">${esc((LIMIT_NAMES[leadKey]||leadKey).replace(/^./,c=>c.toUpperCase()))}</div>
+      <span class="limbar${LW.binding===leadKey?" hold":""}"><i style="width:${limPct(leadKey,ax)}%"></i></span>
+      <div class="limleadval">${limVal(leadKey,ax)}</div>
       <div class="limsent" style="margin-top:4px">${esc(limitSentence(leadKey,ax,curIt.w,LW))}</div>
       <div class="muted" style="font-size:12px;margin-top:4px">Source: ${esc(SOURCE_SHORT[leadKey]||"")} ${BASIS[ax.basis]?`<span class="basis ${ax.basis}">${esc(BASIS[ax.basis].label)}</span>`:""}</div>
       <button type="button" class="linkbtn limgo" data-lim="${leadKey}">Why, and where the number comes from ↓</button>`;})():""}
-    ${limOrder.filter(k=>k!==leadKey).length?`<div class="limothers"><div class="muted mono" style="font-size:11px;margin:10px 0 2px;border-top:1px solid var(--line);padding-top:8px">The other limits</div>${limOrder.filter(k=>k!==leadKey).map(k=>`
+    ${limOrder.filter(k=>k!==leadKey).length?`<div class="limothers"><div class="limotherslbl">The other limits</div>${limOrder.filter(k=>k!==leadKey).map(k=>`
       <button type="button" class="limgo limmini" data-lim="${k}">
         <span class="lk2">${esc(LIMIT_NAMES[k]||k)}</span>
-        <span class="limbar" style="height:6px;margin:0"><i style="width:${limPct(k,LW[k])}%"></i></span>
+        <span class="limbar"><i style="width:${limPct(k,LW[k])}%"></i></span>
         <span class="mono lv2">${limVal(k,LW[k])}</span>
       </button>`).join("")}</div>`:""}
     ${!limOrder.length?`<div class="muted" style="font-size:13px">No limit binds this week.</div>`:""}
@@ -2663,12 +2725,14 @@ function renderPlan(p){
   const flagAt=date=>{ const i=allWeeks.findIndex(x=>x.w.start&&x.w.start<=date&&date<=weekEndIso(x.w.start)); return i<0?null:i; };
   // SH-86d — a flag sits in its week's column at the race's own day, with a dashed line down to the axis
   const dayIn=(wkStart,date)=>Math.max(0,Math.min(6,Math.round((new Date(date+"T00:00:00Z")-new Date(wkStart+"T00:00:00Z"))/864e5)));
-  const flagCell=(i,date,cls,title)=>`<span class="roadflagcell${cls}" style="grid-column:${i+1}"><span class="roadflag${cls}" style="left:${((dayIn(allWeeks[i].w.start,date)+0.5)/7*100).toFixed(2)}%" title="${esc(title)} · ${esc(date)}">🏁</span><i class="roadline" style="left:${((dayIn(allWeeks[i].w.start,date)+0.5)/7*100).toFixed(2)}%"></i></span>`;
+  const flagCell=(i,date,cls,title)=>`<span class="roadflagcell${cls}" style="grid-column:${i+1}"><span class="roadflag${cls}" style="left:${((dayIn(allWeeks[i].w.start,date)+0.5)/7*100).toFixed(2)}%" title="${esc(title)} · ${esc(date)}"></span><i class="roadline" style="left:${((dayIn(allWeeks[i].w.start,date)+0.5)/7*100).toFixed(2)}%"></i></span>`;
   const roadFlags=raceRows.map(r=>{ const i=flagAt(r.date); return i==null?"":flagCell(i,r.date,"",r.label); }).join("")
     +(p.tune_ups||[]).map(t=>{ const i=flagAt(t.date); return i==null?"":flagCell(i,t.date," small",t.label+" (tune-up)"); }).join("");
-  const roadBars=allWeeks.map(x=>{
+  // SH-140 — one height per week, shared by the bars and the course drawn over them
+  const barH=allWeeks.map(x=>Math.max(4,Math.round((x.w.km||0)/maxWkm*150)));
+  const roadBars=allWeeks.map((x,i)=>{
     const w=x.w, sel=!!(selIt&&x.pk===selIt.pk&&w.wk===selIt.w.wk);
-    const h=Math.max(4,Math.round((w.km||0)/maxWkm*150));
+    const h=barH[i];
     const cls=["weekseg",w.frozen||(w.start&&weekEndIso(w.start)<today)?"wsdone":"",weekHoldsToday(w,today)?"wscur":"",
       isDownWeek(w)||["taper","recovery","race"].includes(w.role)?"wsdown":"",sel?"on":""].filter(Boolean).join(" ");
     // SH-86c — colour names the phase (--ph), the FILL says run vs planned: the straddling week
@@ -2689,12 +2753,42 @@ function renderPlan(p){
   // that has room (the right in the road's first half, the left after)
   const todayPct=todayIdx<0?0:(dayIn(allWeeks[todayIdx].w.start,today)+0.5)/7*100;
   const todaySide=todayIdx*2>=allWeeks.length?"end":"start";
-  const todayMarker=todayIdx<0?"":`<span class="roadtodaycell" style="grid-column:${todayIdx+1}"><span class="roadtoday ${todaySide}" style="left:${todayPct.toFixed(2)}%"><i class="roadstem"></i><b>▲</b><em>today</em></span></span>`;
+  const todayMarker=todayIdx<0?"":`<span class="roadtodaycell" style="grid-column:${todayIdx+1}"><span class="roadtoday ${todaySide}" style="left:${todayPct.toFixed(2)}%"><i class="roadstem"></i><b aria-hidden="true"></b><em>today</em></span></span>`;
+  // SH-140 — the course: today is the start, each phase change and tune-up ahead is a numbered
+  // control, each race ahead is a finish; drawn over the bars, nothing behind today
+  let roadCourse="", roadCourseSr="";
+  if(todayIdx>=0){
+    const px=(i,date)=>(i+(dayIn(allWeeks[i].w.start,date)+0.5)/7)/allWeeks.length*100;
+    const py=i=>Math.max(12,30+(150-barH[i])-14);
+    const pts=[{kind:"start",i:todayIdx,date:today}];
+    phaseGroups.forEach(g=>{
+      const st=g.weeks[0]&&g.weeks[0].start; if(!st||st<=today) return;
+      const i=allWeeks.findIndex(x=>x.w.start===st); if(i>=0) pts.push({kind:"ctrl",i,date:st});
+    });
+    (p.tune_ups||[]).forEach(t=>{ if(t.date>today){ const i=flagAt(t.date); if(i!=null) pts.push({kind:"ctrl",small:true,i,date:t.date}); } });
+    raceRows.forEach(r=>{ if(r.date>=today){ const i=flagAt(r.date); if(i!=null) pts.push({kind:"finish",i,date:r.date,label:r.label}); } });
+    pts.forEach(q=>{ q.x=px(q.i,q.date); q.y=py(q.i); });
+    pts.sort((a,b)=>a.x-b.x);
+    let n=0; pts.forEach(q=>{ if(q.kind==="ctrl") q.n=++n; });
+    const f=v=>v.toFixed(2);
+    const legs=pts.slice(1).map((q,k)=>{ const a=pts[k];
+      return `<line class="rc-leg" x1="${f(a.x)}%" y1="${a.y}" x2="${f(q.x)}%" y2="${q.y}" pathLength="1" style="--k:${k}"/>`; }).join("");
+    const marks=pts.map((q,k)=>{
+      if(q.kind==="start") return `<svg x="${f(q.x)}%" y="${q.y}" overflow="visible" class="rc-start" style="--k:${k}"><path d="M0,-9 L8,5 L-8,5 Z"/></svg>`;
+      if(q.kind==="ctrl") return `<circle class="rc-ctrl" cx="${f(q.x)}%" cy="${q.y}" r="${q.small?6:8}" style="--k:${k}"/><text class="rc-num" x="${f(q.x)}%" y="${q.y-12}" dx="9" style="--k:${k}">${q.n}</text>`;
+      return `<circle class="rc-finish rc-fo" cx="${f(q.x)}%" cy="${q.y}" r="8" style="--k:${k}"/><circle class="rc-finish rc-fi" cx="${f(q.x)}%" cy="${q.y}" r="5" style="--k:${k}"/>`;
+    }).join("");
+    const firstDraw=!ROAD_DRAWN; ROAD_DRAWN=true;
+    const fin=pts.filter(q=>q.kind==="finish").pop();
+    roadCourse=`<svg class="roadcourse${firstDraw?' draw':''}" aria-hidden="true" focusable="false">${legs}${marks}</svg>`;
+    const nTune=pts.filter(q=>q.small).length, nPh=n-nTune;
+    roadCourseSr=`<span class="rc-sr">Course from today: ${nPh} phase change${nPh===1?"":"s"}${nTune?`, ${nTune} tune-up${nTune===1?"":"s"}`:""}${fin?`, then ${esc(fin.label)} on ${esc(sessDate(fin.date))}`:""}.</span>`;
+  }
   const road=allWeeks.length?`<section class="road" style="--n:${allWeeks.length}">
     <div class="roadlbl">The road · ${allWeeks.length} weeks · ${U.unit} per week</div>
-    <div class="roadlegend"><span>colour = phase (band below)</span><span><i class="rl-run"></i>run</span><span><i class="rl-plan"></i>planned</span><span><i class="rl-on"></i>shown below</span></div>
+    <div class="roadlegend"><span><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M5,1 L9,9 L1,9 Z"/></svg>today</span><span><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4"/></svg>${(p.tune_ups||[]).some(t=>t.date>today)?"phase change or tune-up":"phase change"}</span><span><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5"/><circle cx="6" cy="6" r="2.8"/></svg>race</span><span><i class="rl-plan"></i>planned</span><span><i class="rl-run"></i>run</span><span><i class="rl-on"></i>shown below</span></div>
     <div class="roadflags">${roadFlags}</div>
-    <div class="roadbars">${roadBars}</div>
+    <div class="roadbars">${roadBars}${roadCourse}</div>${roadCourseSr}
     <div class="roadband">${roadBand}</div>
     <div class="roadaxis"><div class="roadmarks">${todayMarker}</div><div class="roaddates"><span>${sessDate(allWeeks[0].w.start)}</span><span>${sessDate(weekEndIso(allWeeks[allWeeks.length-1].w.start))}</span></div></div>
   </section>`:"";
@@ -2763,7 +2857,7 @@ function renderPlan(p){
     const el=host.querySelector(`#weekpane .limhd[data-lim="${LIM_OPEN}"]`);
     if(el){
       el.setAttribute("aria-expanded","true");
-      const src=el.nextElementSibling; if(src&&src.classList.contains("limsrc")) src.hidden=false;
+      const src=limSrc(el); if(src) src.hidden=false;
       const cta=el.querySelector(".limcta"); if(cta) cta.textContent="Hide the source ↑";
       scrollToEl(el);
     }
@@ -2806,7 +2900,7 @@ function renderPlan(p){
   // the others, clicking the open card closes it
   const limSet=(el,open)=>{
     el.setAttribute("aria-expanded", String(open));
-    const src=el.nextElementSibling; if(src&&src.classList.contains("limsrc")) src.hidden=!open;
+    const src=limSrc(el); if(src) src.hidden=!open;
     const cta=el.querySelector(".limcta"); if(cta) cta.textContent=open?"Hide the source ↑":"Why, and the source →";
   };
   host.querySelectorAll("#plan .limall").forEach(el=>el.addEventListener("click",()=>{
@@ -4175,8 +4269,30 @@ function buildRail(){
   nav.addEventListener("click", e=>{ const l=e.target.closest("a[data-sec]"); if(!l) return; e.preventDefault();
     const s=$("#"+l.dataset.sec); if(!s) return; if(s.tagName==="DETAILS") s.open=true;
     const reduce=window.matchMedia&&matchMedia("(prefers-reduced-motion: reduce)").matches;
-    s.scrollIntoView({behavior:reduce?"auto":"smooth", block:"start"});
-    nav.querySelectorAll("a").forEach(x=>x.classList.toggle("on", x===l)); });
+    pinned=l; mark(l); clearTimeout(pinT); pinT=setTimeout(()=>{ pinned=null; }, 1200);   // fallback where scrollend never fires
+    s.scrollIntoView({behavior:reduce?"auto":"smooth", block:"start"}); });
+  // SH-140 — the control circle follows the section in view: the last section, in page order, whose
+  // top has passed a line just under the top bar; at the foot of the page, the last one on screen
+  // (the short closing sections can never scroll up to that line). A click marks its link and holds it
+  // while its own scroll runs; the spy takes over again once that scroll ends or the user scrolls by hand.
+  const links=[...nav.querySelectorAll("a[data-sec]")];
+  let pinned=null, pinT=0;
+  const unpin=()=>{ pinned=null; clearTimeout(pinT); };
+  ["wheel","touchstart","keydown"].forEach(t=>window.addEventListener(t, unpin, {passive:true}));
+  window.addEventListener("scrollend", ()=>{ if(pinned) unpin(); });
+  function mark(l){ links.forEach(x=>{ const on=x===l; x.classList.toggle("on", on);
+    if(on) x.setAttribute("aria-current","location"); else x.removeAttribute("aria-current"); }); }
+  let spyQ=false;
+  function spy(){ spyQ=false; if(pinned) return;
+    const atEnd=window.innerHeight+window.scrollY>=document.documentElement.scrollHeight-2;
+    let cur=null;
+    for(const it of items){ const el=document.getElementById(it.id); if(!el||el.offsetParent===null) continue;
+      const top=el.getBoundingClientRect().top;
+      if(top<=120 || (atEnd && top<window.innerHeight)) cur=it; }
+    if(!cur) cur=items[0];
+    mark(links.find(x=>x.dataset.sec===cur.id)); }
+  window.addEventListener("scroll", ()=>{ if(!spyQ){ spyQ=true; requestAnimationFrame(spy); } }, {passive:true});
+  requestAnimationFrame(spy);
   const main=document.querySelector("main.wrap"); if(main) main.prepend(nav);
 }
 if(SH_READONLY){
@@ -4203,6 +4319,7 @@ if(SH_PAGE==="today"){
   // §LIMITS (0.58.0) — this week's binding limit, from the plan's own limits block
   getJSON("/api/plan").then(p=>{
     const today=new Date().toISOString().slice(0,10);
+    renderCourseStrip(p, today);   // SH-140 — the one-line course above the readiness card
     let cur=null;
     for(const k of Object.keys(p||{})){ const v=p[k]; if(v&&typeof v==="object"&&Array.isArray(v.weeks)) for(const w of v.weeks){ if(w.start&&w.start<=today&&today<=weekEndIso(w.start)) cur=w; } }
     if(!cur||!cur.limits) return;
@@ -4213,7 +4330,11 @@ if(SH_PAGE==="today"){
     const dl=cur.deload;
     if(dl&&dl.judged) lines += `<div class="whyline"><b>Deload:</b> ${dl.retired?"retired — ":dl.offer?"not owed by the numbers — answer on the week card. ":""}${esc(dl.why||"")}</div>`;
     TODAY_LINES = lines;   // §TODAY-LINES — this fetch races renderReadiness's own rewrites; the string outlives either order
-    if($("#readiness .statuscard") && !$("[data-today-lines]")) $("#readiness").insertAdjacentHTML("beforeend", `<div data-today-lines="1">${TODAY_LINES}</div>`);
+    if($("#readiness .statuscard") && !$("[data-today-lines]")){   // SH-140 — land above the check-in (or the why line), not at the end
+      const anchor=$("#readiness .checkin")||$("#readiness > .whyline");
+      if(anchor) anchor.insertAdjacentHTML("beforebegin", `<div data-today-lines="1">${TODAY_LINES}</div>`);
+      else $("#readiness").insertAdjacentHTML("beforeend", `<div data-today-lines="1">${TODAY_LINES}</div>`);
+    }
   }).catch(()=>{});
 }else if(SH_PAGE==="runs"){
   // §RB — explorer chrome: the header link points back home; the mobile Runs tab reads active.

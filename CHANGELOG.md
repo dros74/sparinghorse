@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > outputs may change between releases as the model matures. Versions are checkpoints on a moving
 > target, not a stable API.
 
+## [0.90.0] - 2026-11-21
+
+### Changed
+
+- **A new look across the whole app, "Overprint", taken from orienteering maps.** The page is a white map
+  background with black ink, and one magenta used only for the course line, buttons and the current selection.
+  Phases and load use orienteering-map field tints (open-land yellows, forest greens), with contour brown for
+  hairlines. The dark theme is a night version of the map, and the browser theme colour follows the light/dark
+  switch. One typeface, Hanken Grotesk, with tabular figures, replaces the serif, sans and mono faces. Corners are
+  squared to 3-4 px, gradients, glows and decorative shadows are gone, uppercase labels stay only on table headers
+  and small tags, and no text is smaller than 11 px. Behaviour, wording and plan output are unchanged.
+- **The road chart is drawn as an orienteering course over the week bars.** A triangle marks today, numbered circles
+  mark each phase change and tune-up ahead, and a double circle marks each race. It draws once on load, and with
+  reduced motion it is shown static. It never takes a click, so the week bars still select the week.
+- **The limits in the week pane are a ruled table**, like an orienteer's control-description sheet. The limit that
+  holds the week is tinted and tagged HOLDS.
+- **The week's days are one seven-day row**, with today outlined in magenta. Below 980 px it is one column per day.
+- **Today's session leads with the distance as a large numeral**, with duration, pace and target load in a row under
+  it. The Today page order is readiness, session, the binding-limit line, check-in, "Why this session".
+- **The check-in keeps each label with its dropdown.** On a phone, Legs and Slept sit side by side, and the note,
+  the stop box and Save take full rows.
+- **The desktop section rail marks the section in view** with a magenta control circle and follows the scroll. A
+  clicked link keeps the mark once its scroll ends.
+- **The logo and app icons are redrawn as an orienteering control circle.**
+
+### Added
+
+- **A course strip** joined under the objective card on the console and above the readiness card on the Today page.
+  It shows today, the numbered controls with their names and dates, and the finish with the race's date and median
+  projected finish. Each leg is tinted by its phase and sized by its days. On a phone it is one line of controls
+  with only the finish named; the control names stay available to screen readers.
+
 ## [0.89.3] - 2026-11-20
 
 ### Changed
